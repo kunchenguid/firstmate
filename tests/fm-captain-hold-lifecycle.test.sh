@@ -4630,6 +4630,91 @@ SH
 }
 
 test_hold_reason_round_trips_awkward_characters
+
+# The structured ask a hold records is the only source of a fleet page's real
+# ask. It belongs to one hold lifecycle, invalid asks never reach the backlog,
+# and a refused backend hold leaves the previous ask in place.
+test_hold_ask_follows_its_hold_lifecycle() {
+  local home snap shown bad
+  home=$(make_home hold-ask)
+  cat > "$home/ask.json" <<'EOF'
+{"question":"Ship CSV or JSON first?","options":[{"id":"csv","label":"CSV","recommended":false},{"id":"json","label":"JSON (fast)","recommended":true}],"free_text_allowed":false}
+EOF
+  hold_ask_summary() {  # <home>
+    PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+      FM_DATA_OVERRIDE="$1/data" FM_CONFIG_OVERRIDE="$1/config" \
+      FM_PROJECTS_OVERRIDE="$1/projects" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary
+  }
+  run_captain "$home" hold sample-format --title "Pick the export format" --repo sample \
+    --reason "captain picks the format" --ask-file "$home/ask.json" >/dev/null \
+    || fail "hold refused a valid ask"
+  snap=$(hold_ask_summary "$home") || fail "home summary failed after an ask hold"
+  printf '%s' "$snap" | jq -e '
+    ([.decisions_open[] | select(.id == "sample-format")][0].ask
+      == {question:"Ship CSV or JSON first?",
+          options:[{id:"csv",label:"CSV",recommended:false},{id:"json",label:"JSON (fast)",recommended:true}],
+          free_text_allowed:false,link:null})
+    and .counts.asks == 1
+  ' >/dev/null || fail "the stored ask did not reach the summary normalized: $snap"
+
+  run_captain "$home" hold sample-format --reason "captain still picks the format" >/dev/null \
+    || fail "repeating the active hold failed"
+  shown=$(tasks_in "$home" show sample-format --full)
+  assert_contains "$shown" 'Captain hold ask: ' "repeating an active hold dropped its ask"
+
+  for bad in \
+    '{"question":"Re-check?","options":[{"id":"reconcile","label":"Re-check","recommended":false}],"free_text_allowed":false}' \
+    '{"question":"Two picks?","options":[{"id":"a","label":"A","recommended":true},{"id":"b","label":"B","recommended":true}],"free_text_allowed":false}' \
+    '{"question":"No way to answer?","options":[],"free_text_allowed":false}' \
+    '{"question":"Extra key?","options":[],"free_text_allowed":true,"board":"x"}' \
+    '{"question":"Boolean link?","options":[],"free_text_allowed":true,"link":false}' \
+    '{"question":"First of two?","options":[],"free_text_allowed":true}
+{"question":"Second of two?","options":[],"free_text_allowed":true}' \
+    'not json'; do
+    printf '%s\n' "$bad" > "$home/bad-ask.json"
+    if run_captain "$home" hold sample-bad --title "Bad ask" --repo sample \
+      --reason "bad ask" --ask-file "$home/bad-ask.json" >/dev/null 2>"$home/bad.err"; then
+      fail "hold accepted an invalid ask: $bad"
+    fi
+    assert_grep 'not a valid captain-hold ask' "$home/bad.err" "an invalid ask was not named: $bad"
+    if tasks_in "$home" show sample-bad >/dev/null 2>&1; then
+      fail "an invalid ask still created its task: $bad"
+    fi
+  done
+
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = hold ] && [ -f "$FM_HOME/fail-hold" ]; then
+  exit 9
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  printf '%s\n' '{"question":"Replacement?","options":[],"free_text_allowed":true}' > "$home/new-ask.json"
+  : > "$home/fail-hold"
+  if run_captain "$home" hold sample-format --reason "new question" --ask-file "$home/new-ask.json" \
+    >/dev/null 2>&1; then
+    fail "hold succeeded despite a refused backend hold"
+  fi
+  rm -f "$home/fail-hold"
+  shown=$(tasks_in "$home" show sample-format --full)
+  assert_contains "$shown" 'Ship CSV or JSON first?' "a refused hold lost the previous ask"
+  assert_not_contains "$shown" 'Replacement?' "a refused hold published its new ask"
+
+  printf 'JSON first.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-format --release --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not release the ask hold"
+  run_captain "$home" hold sample-format --reason "a new call without a question" >/dev/null \
+    || fail "could not re-hold the released task"
+  shown=$(tasks_in "$home" show sample-format --full)
+  assert_not_contains "$shown" 'Captain hold ask: ' "a new hold lifecycle kept the answered ask"
+  snap=$(hold_ask_summary "$home") || fail "home summary failed after a re-hold"
+  printf '%s' "$snap" | jq -e '
+    ([.decisions_open[] | select(.id == "sample-format")][0].ask == null) and .counts.asks == 0
+  ' >/dev/null || fail "a re-hold without an ask still surfaced the old ask: $snap"
+  pass "a hold ask is validated, kept within its lifecycle, and restored when the hold is refused"
+}
+
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
@@ -4690,3 +4775,4 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_hold_ask_follows_its_hold_lifecycle

@@ -136,7 +136,7 @@ process-requests
          skipped or failed requests stay queued for a later pass.
 notify   ask every secondmate home whose backlog disagrees with its own task
          metadata to reconcile it, at most once per home per cooldown window.
-         Reads an fm-fleet-snapshot.v1 or fm-bearings.v1 document from
+         Reads an fm-fleet-snapshot.v2 (or v1) or fm-bearings.v1 document from
          --snapshot (or runs fm-fleet-snapshot.sh --json when omitted).
 nudged   print the epoch second of the last reconcile nudge sent to <mate-id>.
 EOF
@@ -278,10 +278,11 @@ cmd_request() {
   fi
   if ! jq -e -s '
     length == 1
-    and (.[0].schema == "fm-bearings.v1" or .[0].schema == "fm-fleet-snapshot.v1")
+    and (.[0].schema == "fm-bearings.v1" or .[0].schema == "fm-fleet-snapshot.v2"
+         or .[0].schema == "fm-fleet-snapshot.v1")
   ' "$tmp" >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    fail "input is not exactly one fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+    fail "input is not exactly one fm-fleet-snapshot.v2 (or v1) or fm-bearings.v1 document"
   fi
   if ! jq -e '
     if .schema == "fm-bearings.v1" then
@@ -425,8 +426,8 @@ cmd_notify() {
     snapshot=$(cat "$snapshot_src")
   fi
   printf '%s' "$snapshot" | jq -e '
-    .schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1"
-  ' >/dev/null 2>&1 || fail "input is not an fm-fleet-snapshot.v1 or fm-bearings.v1 document"
+    .schema == "fm-fleet-snapshot.v2" or .schema == "fm-fleet-snapshot.v1" or .schema == "fm-bearings.v1"
+  ' >/dev/null 2>&1 || fail "input is not an fm-fleet-snapshot.v2 (or v1) or fm-bearings.v1 document"
 
   # Only a real inventory mismatch is a books problem the mate can fix; every
   # other invalidity is either unreadable state or nothing to reconcile.

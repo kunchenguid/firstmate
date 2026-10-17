@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--ask-file <path>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -56,6 +57,13 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# `--ask-file` is how a hold records that its restart condition is the
+# captain's answer: the file holds the ask as JSON (question, options,
+# free_text_allowed, link), which is validated, normalized, and written on a
+# `Captain hold ask:` body line beside the hold-set stamp. bin/fm-hold-ask-lib.sh
+# owns the shape and the storage line. Repeating an active hold without
+# --ask-file keeps its ask; a hold that starts a new lifecycle drops a previous
+# ask unless a new one is given. A refused hold restores the previous line.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -237,6 +245,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-hold-ask-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-hold-ask-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -850,6 +861,61 @@ write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
   rm -f -- "$tmp"
 }
 
+# The ask a hold was recorded with lives on its own body line beside the stamp;
+# bin/fm-hold-ask-lib.sh owns its shape. These helpers move the line verbatim.
+body_hold_ask_line() {  # <decoded-task-body>
+  printf '%s\n' "$1" | grep -m1 '^Captain hold ask: ' || true
+}
+
+# Validate and normalize an --ask-file into the one body line that stores it.
+hold_ask_line_from_file() {  # <path>
+  local file=$1 bytes ask
+  [ -f "$file" ] && [ -r "$file" ] || fail "--ask-file is not a readable file: $file"
+  bytes=$(LC_ALL=C wc -c < "$file" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) fail "cannot size --ask-file: $file" ;; esac
+  [ "$bytes" -le 8192 ] || fail "--ask-file exceeds 8192 bytes: $file"
+  ask=$(jq -c -e -s "$FM_HOLD_ASK_JQ_DEFS"'
+    if length == 1 and (.[0] | hold_ask_valid) then .[0] | hold_ask_normalize
+    else error("invalid") end' "$file" 2>/dev/null) \
+    || fail "--ask-file is not a valid captain-hold ask (see bin/fm-hold-ask-lib.sh): $file"
+  printf 'Captain hold ask: %s' "$ask"
+}
+
+write_hold_ask() {  # <task-id> <shown-body> <ask-line-or-empty>
+  local id=$1 body=$2 ask_line=$3 stamp rest first header new_body tmp
+  body=$(decode_shown_value "$body") \
+    || fail "could not decode the existing body for $id"
+  stamp=$(printf '%s\n' "$body" | sed -n 1p)
+  [ -n "$(body_hold_set_timestamp "$body")" ] \
+    || fail "task $id lost its hold-set stamp before its ask was recorded"
+  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold ask: /' \
+    | awk 'NF || started { started = 1; print }')
+  header=$stamp
+  first=$(printf '%s\n' "$rest" | sed -n 1p)
+  case "$first" in
+    'Captain hold origin: '*)
+      header=$(printf '%s\n%s' "$header" "$first")
+      rest=$(printf '%s\n' "$rest" | sed 1d | awk 'NF || started { started = 1; print }')
+      ;;
+  esac
+  [ -z "$ask_line" ] || header=$(printf '%s\n%s' "$header" "$ask_line")
+  new_body=$header
+  if [ -n "$rest" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-ask.XXXXXX") \
+    || fail "cannot stage the hold ask"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the hold ask for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the hold ask on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
 refuse_self_inventory() {
   local origin=$1 entry=$2 meta="$STATE/$1.meta"
   if list_has_key "$(meta_value "$meta" decision_keys)" "$entry"; then
@@ -903,6 +969,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local ask_file='' ask_line='' previous_ask_line=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -912,6 +979,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --ask-file) shift; ask_file=${1:-}; [ -n "$ask_file" ] || fail "--ask-file needs a path" ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -929,6 +997,7 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
+  [ -z "$ask_file" ] || ask_line=$(hold_ask_line_from_file "$ask_file")
   hold_set=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   case "$hold_set" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) : ;;
@@ -985,6 +1054,17 @@ command_hold() {
     previous_origin=$(body_hold_origin "$(show_field_value "$show" body)")
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
+  # The ask belongs to one hold lifecycle: a repeated active hold keeps its ask
+  # unless a new one is given, and a new lifecycle starts without the old one.
+  if [ -n "$ask_line" ] || [ "$preserve_hold_set" != 1 ]; then
+    task_show_or_fail "$id" "task $id disappeared while recording its hold ask"
+    previous_ask_line=$(body_hold_ask_line "$(show_field_value "$show" body)")
+    if [ "$ask_line" != "$previous_ask_line" ]; then
+      write_hold_ask "$id" "$(show_field "$show" body)" "$ask_line" || exit $?
+    fi
+  else
+    previous_ask_line=$(body_hold_ask_line "$(show_field_value "$show" body)")
+  fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
       || hold_status=$?
@@ -997,6 +1077,10 @@ command_hold() {
     # new origin. Restore the old line verbatim, without resolving it again.
     if [ -n "$origin" ]; then
       write_hold_origin "$id" "$(show_field "$show" body)" "$previous_origin" || exit $?
+    fi
+    task_show_or_fail "$id" "task $id disappeared while restoring its hold ask"
+    if [ "$(body_hold_ask_line "$(show_field_value "$show" body)")" != "$previous_ask_line" ]; then
+      write_hold_ask "$id" "$(show_field "$show" body)" "$previous_ask_line" || exit $?
     fi
     fail "could not hold task $id for the captain"
   fi

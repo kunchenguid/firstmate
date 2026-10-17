@@ -137,7 +137,7 @@ test_empty_fleet_json() {
   home=$(make_home empty)
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
-    .schema == "fm-fleet-snapshot.v1"
+    .schema == "fm-fleet-snapshot.v2"
       and .backlog.present == false
       and (.tasks|length == 0)
       and .main_inventory.valid == true
@@ -1082,7 +1082,7 @@ EOF
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
-    .schema == "fm-secondmate-home-summary.v1"
+    .schema == "fm-secondmate-home-summary.v2"
       and .valid == true
       and .reason == null
       and .invalidity == {kind:null,ids:[]}
@@ -1152,6 +1152,173 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+
+record_claude_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
+test_home_summary_page_fields_come_from_structured_state() {
+  local home fakebin out ask bad_ask
+  home=$(make_home summary-page-fields)
+  mkdir -p "$home/projects/ship-wt" "$home/projects/scout-wt" "$home/projects/local-wt" "$home/projects/paused-wt" \
+    "$home/projects/blocked-wt"
+  ask='{"question":"Which export format ships first?","options":[{"id":"csv","label":"CSV","recommended":false},{"id":"json","label":"JSON","recommended":true}],"free_text_allowed":true,"link":"https://board.example/session/b1"}'
+  bad_ask='{"question":"Reserved answer","options":[{"id":"reconcile","label":"Re-check","recommended":false}],"free_text_allowed":false}'
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] ship-a - feat(api): ship-a Export widget for the dashboard page https://github.com/o/alpha/issues/12 (repo: alpha) (kind: ship) (since 2026-07-07)
+- [ ] scout-b - SCOUT alpha: investigate the flaky upload path (repo: alpha) (kind: scout) (since 2026-07-08)
+- [ ] local-c - fix: Local landing for alpha/beta (repo: alpha) (kind: ship) (since 2026-07-09)
+- [ ] paused-d - Wait for the vendor window (repo: alpha) (kind: ship) (since 2026-07-09)
+- [ ] blocked-e - Wire the widget into the page blocked-by: ship-a (repo: alpha) (kind: ship) (since 2026-07-10)
+
+## Queued
+- [ ] ask-hold - Choose the export format (repo: alpha) (kind: captain) (hold: Options: CSV or JSON?) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+  Captain hold ask: $ask
+- [ ] plain-hold - Which route should we take? (repo: alpha) (kind: captain) (hold: Pick A or B - recommended A) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+  Captain hold ask - prose that is not the stored line
+- [ ] bad-ask-hold - Reserved answer id (repo: alpha) (kind: captain) (hold: choose) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+  Captain hold ask: $bad_ask
+- [ ] dated-ask - Revisit the export later (repo: alpha) (kind: captain) (hold: revisit later) (hold-kind: captain) (hold-until: 2026-12-01)
+  Captain hold set: 2026-07-20T00:00:00Z
+  Captain hold ask: $ask
+- [ ] after-hold - Follow-up after the widget blocked-by: ship-a (repo: alpha) (kind: ship)
+- [ ] vendor-hold - Vendor reply needed (repo: alpha) (kind: ship) (hold: vendor replies) (hold-kind: external)
+- [ ] parked-hold - Parked idea (repo: alpha) (kind: ship) (hold: later maybe) (hold-kind: parked)
+
+## Done
+- [x] done-pr - chore(ci): done-pr Speed up the lint lane https://github.com/o/alpha/pull/7 (repo: alpha) (kind: ship) (merged 2026-07-06)
+- [x] done-issue - Close the audit gap https://github.com/o/alpha/issues/3 (repo: beta) (kind: ship) (done 2026-07-05)
+- [x] done-scout - Scout the cache data/done-scout/report.md (repo: alpha) (kind: scout) (reported 2026-07-04)
+EOF
+  fm_write_meta "$home/state/ship-a.meta" "window=firstmate:fm-ship-a" "worktree=$home/projects/ship-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" "spawn_gen=s1783000000.11.22"
+  record_claude_busy "$home/state" ship-a
+  fm_write_meta "$home/state/scout-b.meta" "window=firstmate:fm-scout-b" "worktree=$home/projects/scout-wt" \
+    "project=alpha" "harness=claude" "kind=scout"
+  record_claude_busy "$home/state" scout-b
+  fm_write_meta "$home/state/local-c.meta" "window=firstmate:fm-local-c" "worktree=$home/projects/local-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "pr=https://github.com/o/alpha/pull/44"
+  record_claude_busy "$home/state" local-c
+  fm_write_meta "$home/state/paused-d.meta" "window=firstmate:fm-paused-d" "worktree=$home/projects/paused-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  record_claude_idle "$home/state" paused-d
+  printf 'paused: waiting for the vendor window\n' > "$home/state/paused-d.status"
+  fm_write_meta "$home/state/blocked-e.meta" "window=firstmate:fm-blocked-e" "worktree=$home/projects/blocked-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  record_claude_idle "$home/state" blocked-e
+  printf 'paused: waiting for ship-a to land\n' > "$home/state/blocked-e.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_QUEUED=4 "$SNAPSHOT" --secondmate-home-summary)
+
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-secondmate-home-summary.v2"
+  ' >/dev/null || fail "home summary did not bump its schema id: $out"
+
+  # Real asks: decisions_open keeps every live hold, and only a valid stored ask
+  # line - never reason or body prose - produces an ask object.
+  printf '%s' "$out" | jq -e '
+    ([.decisions_open[] | select(.source == "backlog") | .id] | sort) == ["ask-hold","bad-ask-hold","plain-hold"]
+    and ([.decisions_open[] | select(.id == "ask-hold")][0].ask
+         == {question:"Which export format ships first?",
+             options:[{id:"csv",label:"CSV",recommended:false},{id:"json",label:"JSON",recommended:true}],
+             free_text_allowed:true,link:"https://board.example/session/b1"})
+    and ([.decisions_open[] | select(.id == "plain-hold")][0].ask == null)
+    and ([.decisions_open[] | select(.id == "bad-ask-hold")][0].ask == null)
+    and .counts.asks == 1
+  ' >/dev/null || fail "asks must come only from the stored structured line, additively on decisions_open: $out"
+
+  # Working: plain title, start time, deliverable, and the one link to open.
+  printf '%s' "$out" | jq -e '
+    (.active_children | map({key:.id,value:.}) | from_entries) as $c
+    | ($c["ship-a"] | .title_plain == "Export widget for the dashboard page"
+        and .since_epoch == 1783000000 and .produces == "pr"
+        and .open_url == "https://github.com/o/alpha/issues/12"
+        and .kind == "ship" and (.doing | type) == "string"
+        and (.name | startswith("feat(api)")))
+    and ($c["scout-b"] | .title_plain == "investigate the flaky upload path"
+        and .since_epoch == 1783468800 and .produces == "report" and .open_url == null)
+    and ($c["local-c"] | .title_plain == "Local landing for alpha/beta"
+        and .produces == "landing" and .open_url == "https://github.com/o/alpha/pull/44")
+  ' >/dev/null || fail "active children did not carry the structured page fields: $out"
+
+  # Landed: project, plain title, and a link only when one is recorded.
+  printf '%s' "$out" | jq -e '
+    (.landed | map({key:.id,value:.}) | from_entries) as $l
+    | ($l["done-pr"] | .project == "alpha" and .title_plain == "Speed up the lint lane"
+        and .open_url == "https://github.com/o/alpha/pull/7")
+    and ($l["done-issue"] | .project == "beta" and .open_url == "https://github.com/o/alpha/issues/3")
+    and ($l["done-scout"] | .open_url == null and .report_path == "data/done-scout/report.md")
+  ' >/dev/null || fail "landed rows did not carry project, plain title, and recorded links: $out"
+
+  # Parked: restart kinds come only from structured fields; the capped list
+  # discloses its real total.
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_QUEUED=20 "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | map({key:.id,value:.}) | from_entries) as $h
+    | ($h["ask-hold"].restart == {kind:"captain_word",text:"Options: CSV or JSON?"})
+    and ($h["plain-hold"].restart.kind == null)
+    and ($h["bad-ask-hold"].restart.kind == null)
+    and ($h["dated-ask"].restart == {kind:"date",until:"2026-12-01",text:"revisit later"})
+    and ($h["after-hold"].restart.kind == "after_work" and $h["after-hold"].restart.blocker_ids == ["ship-a"])
+    and ($h["vendor-hold"].restart.kind == "event")
+    and ($h["parked-hold"].restart.kind == null)
+    and ($h["paused-d"].source == "child-state" and $h["paused-d"].restart.kind == "event"
+         and $h["paused-d"].title_plain == "Wait for the vendor window")
+    and ($h["blocked-e"].source == "child-state"
+         and $h["blocked-e"].restart.kind == "after_work" and $h["blocked-e"].restart.blocker_ids == ["ship-a"]
+         and $h["blocked-e"].unresolved_blocker_ids == ["ship-a"] and $h["blocked-e"].blocked_by == "ship-a"
+         and $h["blocked-e"].title_plain == "Wire the widget into the page")
+    and ($h["ask-hold"].project == "alpha" and $h["ask-hold"].title_plain == "Choose the export format")
+    and all(.holds[]; .restart.kind != "proposals")
+  ' >/dev/null || fail "parked rows did not carry structured restart conditions: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_QUEUED=3 "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | length) == 3 and .counts.holds == 9
+    and any(.omitted[]; . == {surface:"holds",count:6})
+  ' >/dev/null || fail "the capped holds list must disclose its real total: $out"
+  pass "home summary exposes asks, working, landed, and parked page fields from structured state only"
+}
+
+test_plain_title_bounds_at_word_boundary() {
+  local home fakebin out
+  home=$(make_home summary-plain-title)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] long-title - refactor(bin): Rework the supervision wake path so that every queued notification reaches the right home exactly once https://github.com/o/alpha/pull/9 (repo: alpha) (kind: ship) (merged 2026-07-06)
+- [x] cased-status - docs: Done: Finish the docs page (repo: alpha) (kind: ship) (merged 2026-07-06)
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.landed | map(select(.id == "cased-status")) | .[0].title_plain) == "Finish the docs page"
+  ' >/dev/null || fail "a capitalised status word must be stripped from title_plain: $out"
+  printf '%s' "$out" | jq -e '
+    (.landed | map(select(.id == "long-title")) | .[0].title_plain) as $t
+    | ($t | endswith("…")) and ($t | length) <= 91
+      and ("Rework the supervision wake path so that every queued notification reaches the right home exactly once"
+           | startswith($t | rtrimstr("…")))
+      and ($t | rtrimstr("…") | test("[[:space:]]$") | not)
+      and ("Rework the supervision wake path so that every queued notification reaches the right home exactly once"
+           | .[($t | rtrimstr("…") | length):] | test("^[[:space:]]"))
+  ' >/dev/null || fail "a long plain title must be cut at a word boundary: $out"
+  pass "plain titles drop prefixes and status words and are never cut mid-word"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1337,5 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_home_summary_page_fields_come_from_structured_state
+test_plain_title_bounds_at_word_boundary
