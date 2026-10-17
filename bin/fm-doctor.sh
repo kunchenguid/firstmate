@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-doctor.sh - check that this firstmate home is set up and working. Read-only.
 #
-# Usage: fm-doctor.sh [--json] [--area <name>]
+# Usage: fm-doctor.sh [--json] [--area <name>] [--network]
 #
 # WHAT IT IS. An on-demand aggregation and verdict layer over facts other
 # scripts already own. It detects nothing itself: every check is either a line
@@ -16,6 +16,10 @@
 # anything. Bootstrap runs only with FM_BOOTSTRAP_DETECT_ONLY=1 (the inventory
 # validation refuses a bootstrap source without it) and FM_BOOTSTRAP_NETWORK=skip,
 # so no network step runs. Every other source must be a read-only owner verb.
+# Sources the inventory marks "network": true run only under --network: a fresh
+# bootstrap detect-only `only` phase, which is exactly the `gh auth status`
+# probe, and the last bin/fm-startup-network.sh report, whose republished
+# bootstrap lines answer the other network-phase checks without a network call.
 # Every child runs under bin/fm-timeout-lib.sh's hard bound: the inventory's
 # per-source or per-verb timeout, or FM_DOCTOR_TIMEOUT when that is a positive
 # integer. Output carries owner lines only, never auth output or secrets.
@@ -35,8 +39,11 @@
 # Then every inventory check in inventory order:
 #   line/token  status is the entry's severity (or the first matching rule) when
 #               the source printed the prefix, ok when it finished without it,
-#               and skip for a network-phase check or a sweep-phase prefix that
-#               a detect-only run cannot print.
+#               and skip for a sweep-phase prefix that a detect-only run cannot
+#               print, or for a network-phase check without --network. A "scan"
+#               source (the network report) may also print lines the inventory
+#               does not map; its optional "complete" ERE must match one line
+#               before an absent prefix counts as ok.
 #   verb        the first rule that matches decides: exit (exit status), match
 #               (an ERE against any stdout or stderr line), or field+equals (a dotted JSON
 #               path); otherwise the entry's default, or warn. A verb that hits
@@ -48,7 +55,7 @@
 # check with one line of evidence, findings (the fix for each warn or fail), and
 # help. --json prints the full model (schema fm-doctor.v1) with every evidence
 # line per check. --area <name> runs only that area's checks; the built-in
-# checks always run.
+# checks always run. --network adds the network sources above.
 #
 # EXIT. 0 when no check failed (warnings allowed); 1 when a check failed,
 # including a doctor-internal failure; 2 for a usage error, including an
@@ -63,9 +70,10 @@ usage() {
   cat <<'EOF'
 fm-doctor.sh - check that this firstmate home is set up and working. Read-only.
 
-Usage: fm-doctor.sh [--json] [--area <name>]
+Usage: fm-doctor.sh [--json] [--area <name>] [--network]
   --json         full structured output (default is TOON)
   --area <name>  run one area from docs/doctor-checks.json
+  --network      add a fresh GitHub auth probe and the last network report
 Exit:  0 no check failed; 1 a check failed; 2 usage error.
 Full contract: the header of bin/fm-doctor.sh.
 EOF
@@ -80,9 +88,11 @@ esac
 
 FORMAT=toon
 AREA=""
+NETWORK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
+    --network) NETWORK=1 ;;
     --area)
       [ $# -ge 2 ] && [ -n "$2" ] || { echo "fm-doctor.sh: --area needs a name" >&2; usage >&2; exit 2; }
       AREA=$2
@@ -155,7 +165,9 @@ validate_inventory() {  # <inventory> <root> -> errors on stdout, one per line
          | (if (.command | strs | not) then "source \($k): command must be a non-empty string array" else empty end),
            (if ((.env // {}) | type) != "object" or any((.env // {})[]; type != "string") then "source \($k): env must map names to strings" else empty end),
            (if (.timeout | posint | not) then "source \($k): timeout must be a positive integer" else empty end),
-           (if (.command[0]? == "bin/fm-bootstrap.sh") and (.env.FM_BOOTSTRAP_DETECT_ONLY? != "1") then "source \($k): bin/fm-bootstrap.sh must run with FM_BOOTSTRAP_DETECT_ONLY=1" else empty end))
+           (if (.command[0]? == "bin/fm-bootstrap.sh") and (.env.FM_BOOTSTRAP_DETECT_ONLY? != "1") then "source \($k): bin/fm-bootstrap.sh must run with FM_BOOTSTRAP_DETECT_ONLY=1" else empty end),
+           (if any(.network, .scan; . != null and type != "boolean") then "source \($k): network and scan must be booleans" else empty end),
+           (if .complete != null and (.complete | type) != "string" then "source \($k): complete must be a string" else empty end))
        end),
       (if (.checks | type) != "array" or (.checks | length) == 0 then "checks must be a non-empty array"
        else
@@ -172,7 +184,9 @@ validate_inventory() {  # <inventory> <root> -> errors on stdout, one per line
                 (if ([.phase] | inside(["local", "network", "sweep"]) | not) then "check \($id): phase must be local, network, or sweep" else empty end),
                 (if ([.severity] | inside(statuses) | not) then "check \($id): severity must be one of \(statuses | join(", "))" else empty end),
                 (if (.owner | type) != "string" then "check \($id): owner is missing" else empty end),
-                (if .phase == "local" and (.source == null) then "check \($id): a local check needs a source" else empty end),
+                (if .phase != "sweep" and (.source == null) then "check \($id): a local or network check needs a source" else empty end),
+                (if .phase == "sweep" and (.source != null) then "check \($id): a sweep-phase check has no source" else empty end),
+                (if .source != null and $src[.source?] != null and (.phase == "network") != ($src[.source].network == true) then "check \($id): phase must match the network flag of its source" else empty end),
                 (if .source != null and ($src[.source?] == null) then "check \($id): unknown source \(.source)" else empty end),
                 (if .rules != null and ((.rules | type) != "array" or any(.rules[]; (.match | type) != "string" or ([.status] | inside(statuses) | not))) then "check \($id): line rules need match and status" else empty end)
               elif .kind == "verb" then
@@ -246,11 +260,12 @@ run_owner() {
 # --- run the selected sources and verbs --------------------------------------
 mkdir -p "$WORK/sources" "$WORK/verbs"
 if [ -z "$INVENTORY_ERRORS" ]; then
-  jq -r --arg area "$AREA" '
+  jq -r --arg area "$AREA" --argjson network "$NETWORK" '
     .sources as $src
     | [ .checks[] | select($area == "" or $area == "doctor" or .area == $area)
-        | select(.kind != "verb" and .phase == "local") | .source ]
-      + (if $area == "" or $area == "doctor" then ($src | keys | map(select($src[.].network != true))) else [] end)
+        | select(.kind != "verb" and .phase != "sweep") | .source ]
+      + (if $area == "" or $area == "doctor" then ($src | keys) else [] end)
+    | map(select($network == 1 or $src[.].network != true))
     | unique[] | . as $k
     | [$k, ($src[$k].timeout | tostring), ($src[$k].env // {} | tojson), ($src[$k].command | tojson)] | join("\t")
   ' "$INVENTORY" > "$WORK/source-plan"
@@ -297,7 +312,7 @@ MODEL=$(jq -n \
   --slurpfile sources "$WORK/sources.json" \
   --slurpfile verbs "$WORK/verbs.json" \
   --rawfile inverr "$WORK/inventory-errors" \
-  --arg area "$AREA" --arg home "$FM_HOME" '
+  --arg area "$AREA" --arg home "$FM_HOME" --argjson network "$NETWORK" '
   def trunc: if length > 200 then .[0:197] + "..." else . end;
   def lines_of: split("\n") | map(select(length > 0));
   def rank: {"fail": 3, "warn": 2, "info": 1, "ok": 0, "skip": 0}[.];
@@ -310,15 +325,17 @@ MODEL=$(jq -n \
     def line_check($c):
       if $c.phase == "sweep" then
         {status: "skip", evidence: "printed only by the locked session-start sweep; read the session-start digest"}
-      elif $c.phase == "network" then
-        {status: "skip", evidence: "network check; the last session start reported it (bin/fm-startup-network.sh report)"}
+      elif $c.phase == "network" and $network != 1 then
+        {status: "skip", evidence: "network check; run fm-doctor.sh --network"}
       elif $src[$c.source] == null then {status: "skip", evidence: "source \($c.source) did not run"}
-      else $src[$c.source] as $s
+      else $src[$c.source] as $s | $inv.sources[$c.source].complete as $complete
         | ($s.stdout | lines_of | map(select(if $c.kind == "token" then . == $c.prefix else startswith($c.prefix + ":") end))) as $hits
         | if ($hits | length) > 0 then
             {status: ([$hits[] | line_status($c; .)] | worst), evidence: evidence_of($hits), detail: $hits}
-          elif $s.rc == 0 then {status: "ok", evidence: "none reported"}
-          else {status: "skip", evidence: "source \($c.source) did not finish; see doctor/\($c.source)"} end
+          elif $s.rc != 0 then {status: "skip", evidence: "source \($c.source) did not finish; see doctor/\($c.source)"}
+          elif $complete != null and (any($s.stdout | lines_of | .[]; test($complete)) | not) then
+            {status: "skip", evidence: "no finished network report covers this check: " + ($s.stdout | lines_of | .[0] // "empty" | trunc)}
+          else {status: "ok", evidence: "none reported"} end
       end;
     def rule_hit($v; $json):
       if has("exit") then $v.rc == .exit
@@ -353,7 +370,7 @@ MODEL=$(jq -n \
            elif ($s.stderr | lines_of | length) > 0 then {status: "info", evidence: ("stderr: " + ($s.stderr | lines_of | .[0]) | trunc)}
            else {status: "ok", evidence: "finished, exit 0"} end) ]
     + (if ($src | length) > 0 then
-         ([ $src | to_entries[] | .value.stdout | lines_of[]
+         ([ $src | to_entries[] | select($inv.sources[.key].scan != true) | .value.stdout | lines_of[]
             | select((capture("^(?<p>[A-Z][A-Z0-9_]*)(:|$)").p // "") as $p | ($known | index([$p])) == null) ]) as $unmapped
          | [ {id: "doctor/unmapped-line", area: "doctor", owner: "bin/fm-doctor.sh",
               fix: "Map the new prefix in docs/doctor-checks.json and handle it in the bootstrap-diagnostics skill."}
@@ -376,7 +393,7 @@ MODEL=$(jq -n \
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
 else
-  TOON=$(printf '%s\n' "$MODEL" | jq '
+  TOON=$(printf '%s\n' "$MODEL" | jq --argjson network "$NETWORK" '
     . as $m
     | [.checks[] | select(.status == "warn" or .status == "fail")] as $findings
     | {home: .home, verdict: .verdict,
@@ -385,6 +402,7 @@ else
        findings: [$findings[] | {id, fix}],
        help: ((if ($findings | length) == 0 then ["No findings: nothing needs action"]
                else ["Apply each fix through its owner command; never edit captain-owned files to clear a finding"] end)
+              + (if $network == 1 then [] else ["Run fm-doctor.sh --network to add the GitHub auth probe and the last network report"] end)
               + ["Run fm-doctor.sh --json for every evidence line"])}
   ' | fm_toon_render) || { echo "fm-doctor.sh: TOON rendering failed" >&2; exit 1; }
   printf '%s\n' "$TOON"

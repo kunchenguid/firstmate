@@ -28,7 +28,13 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_toolchain() {  # <dir>
   local fakebin
   fakebin=$(fm_fakebin "$1")
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi gh
+  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}:${2:-}" = auth:status ] && [ "${FM_FAKE_GH_AUTH:-ok}" != ok ] && exit 1
+exit 0
+SH
+  chmod +x "$fakebin/gh"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   fm_fake_version_tool "$fakebin" gh-axi FM_FAKE_GH_AXI_VERSION 0.1.29
   fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION 0.1.51
@@ -204,6 +210,48 @@ ROWS
   pass "fixture inventories with duplicate ids, unknown areas, bad owners, or a mutating source fail validation"
 }
 
+# write_network_report <home> <phases> [line...]: a published deferred-network
+# record, as bin/fm-startup-network.sh leaves it after a finished run.
+write_network_report() {
+  local home=$1 phases=$2
+  shift 2
+  printf '%s\n' generation=1 state=done started=100 finished=105 "phases=$phases" \
+    report_published=1 locked=1 > "$home/state/.startup-network.status"
+  : > "$home/state/.startup-network.report"
+  [ $# -eq 0 ] || printf '%s\n' "$@" > "$home/state/.startup-network.report"
+}
+
+test_network_checks() {
+  local dir
+  dir=$(new_case network)
+  write_network_report "$dir/home" probe,sweeps \
+    'FLEET_SYNC: alpha: STUCK: on feature, 3 commits behind main - needs attention'
+  doctor "$dir" --json
+  assert_status "$DOCTOR_OUT" auth/github skip "auth without --network"
+  assert_status "$DOCTOR_OUT" fleet/sync skip "report without --network"
+  doctor "$dir" --json --network
+  assert_status "$DOCTOR_OUT" auth/github ok "fresh auth probe"
+  assert_status "$DOCTOR_OUT" fleet/sync warn "STUCK clone in the last report"
+  assert_status "$DOCTOR_OUT" fleet/secondmate-sync ok "finished report without the prefix"
+  assert_status "$DOCTOR_OUT" doctor/unmapped-line ok "report prose is not an unmapped bootstrap line"
+
+  DOCTOR_RC=0
+  DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_FAKE_GH_AUTH=fail "$DOCTOR" --json --network 2>/dev/null) || DOCTOR_RC=$?
+  assert_status "$DOCTOR_OUT" auth/github fail "failed auth probe"
+  [ "$DOCTOR_RC" -eq 1 ] || fail "failed auth must exit 1, got $DOCTOR_RC"
+
+  write_network_report "$dir/home" probe
+  doctor "$dir" --json --network
+  assert_status "$DOCTOR_OUT" fleet/sync skip "probe-only report cannot clear sweep checks"
+
+  rm -f "$dir/home/state/.startup-network.status" "$dir/home/state/.startup-network.report"
+  doctor "$dir" --json --network
+  assert_status "$DOCTOR_OUT" fleet/secondmate-liveness skip "no report yet"
+  assert_status "$DOCTOR_OUT" supervision/startup-network info "no report yet is informational"
+  pass "--network adds a fresh auth probe and reads the last finished network report"
+}
+
 test_toon_and_json_agree() {
   local dir json toon ids_json ids_toon
   dir=$(new_case parity)
@@ -257,9 +305,10 @@ test_run_is_read_only() {
   local dir before after
   dir=$(new_case readonly)
   printf '%s\n' '[2026-10-01T00:00:00Z] one' > "$dir/home/state/.home-summary-refresh.log"
+  write_network_report "$dir/home" probe,sweeps
   before=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
   doctor "$dir"
-  doctor "$dir" --json
+  doctor "$dir" --json --network
   after=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
   [ "$before" = "$after" ] || fail "a doctor run changed the home"$'\n'"$before"$'\n---\n'"$after"
   pass "a doctor run writes nothing to the home"
@@ -285,6 +334,7 @@ test_provoked_lines_render_their_ids
 test_tangle_is_rendered
 test_unmapped_line_fails
 test_invalid_inventories_fail
+test_network_checks
 test_toon_and_json_agree
 test_area_and_usage
 test_help_contract
