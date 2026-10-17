@@ -122,6 +122,33 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Carried contribution stack (config/fork-stack)
+
+`config/fork-stack` is an optional, gitignored declaration of contribution branches carried across Firstmate stack rebuilds.
+It is opt-in: without a readable regular file at this configuration path, teardown uses its ordinary landed-work checks.
+Symlink declarations are not accepted.
+
+Each nonblank, noncomment line contains exactly two whitespace-separated fields:
+
+```text
+<branch> <full base commit SHA>
+```
+
+Lines whose first nonwhitespace character is `#` are comments.
+Each branch must be a unique, valid local branch name, must exist in this Firstmate repository, and must not be the default branch or start with `archive/`.
+The base must be a full 40- or 64-character hexadecimal commit ID that exists locally and is an ancestor of the branch tip.
+The base-to-tip range must contain no merge commits.
+Every entry must be valid; an invalid or duplicate entry prevents the carried-stack proof from accepting cleanup.
+
+For a clean `local-only` task in this Firstmate repository, `bin/fm-teardown.sh` can accept a declared branch whose original commits are absent from the local default branch after a stack rebuild replayed their content under new IDs.
+It proves that replaying the declared base-to-tip change onto the local default branch is conflict-free and produces exactly that default branch's tree, with no extra content.
+Declaration membership, matching patch IDs, remote content, and same-named branches in other repositories do not establish this proof.
+The checked-out HEAD must equal the declared branch tip; after cleanup detaches HEAD, a retry must identify exactly one declared local branch pointing at that HEAD and pass the same proof again.
+Dirty worktrees still refuse cleanup, and undeclared branches and other repositories retain the ordinary landed-work guard.
+
+Cleanup retains a branch accepted by this proof, because its original base-to-tip range is still needed for later stack rebuilds.
+It does not delete or move that branch when returning the task worktree.
+
 ## Orchestrator behavior (AGENTS.md)
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).
