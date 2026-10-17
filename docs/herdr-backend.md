@@ -200,13 +200,14 @@ It reaches only the Herdr backend, because no other runtime backend has a projec
 
 Projecting each task into its own workspace makes every task cleanup a workspace-emptying removal.
 That is the only removal shape Herdr's pre-0.8.0 focus defect touches.
-The focus-safe removal plan below can only avoid the defect while the closing pane's shell can be proved lone, childless, and idle.
+Projected cleanup closes the exact task tab, so it depends on the 0.8.0 focus fixes.
+Below the floor, that close moves the active workspace for roughly a seventh of a second before the restore backstop pulls it back, once per task cleanup.
+The legacy pane-level plan, kept only for metadata recorded without `herdr_tab_id`, can avoid the defect only while the closing pane's shell can be proved lone, childless, and idle.
 
 A persistent child of that shell - a `gitstatusd`, a `zsh-async` worker, or `direnv` - fails that proof permanently and forces the plain explicit close.
-On those releases, that close moves the active workspace for roughly a seventh of a second before the restore backstop pulls it back, once per task cleanup.
 
 An unconfigured home is therefore projected only on a release at or above the 0.8.0 floor.
-On those releases every workspace-removal primitive preserves focus, and that proof stops being load-bearing.
+On those releases every workspace-removal primitive preserves focus.
 
 Below the floor, an unconfigured home uses the ordinary flat per-home layout instead.
 It warns once per home per detected release, naming the running release and the upgrade that restores the projection.
@@ -263,6 +264,8 @@ Another parent with the same presentation label does not prevent publication or 
 
 A failed fresh creation rolls back what it created.
 When both creates returned complete exact ids, the spawn closes the exact task and seeded tabs, empties the disposable workspace, and removes the attempt journal, so no orphan workspace or version 1 journal survives the abort.
+Herdr 0.9.x create is not focus-authoritative, so the rollback can find its own seeded tab as the persisted active tab under a live client.
+It then restores the exact pre-spawn focus before that close, which keeps the live-viewer guard authoritative instead of bypassing it (see [Cleanup and focus safety](#cleanup-and-focus-safety)).
 An ambiguous create response still leaves the journal quarantined for the session-start sweep, because the adapter cannot safely identify what to roll back.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
@@ -281,7 +284,7 @@ Before and after create, prune, order, abort cleanup, and normal cleanup, Firstm
 An ambiguous response grants no mutation or cleanup authority.
 
 Herdr 0.9.x gives every tab a chrome sidebar pane beside its terminal root pane.
-The adapter's pane operations identify and address only the terminal root pane, so the sidebar is never mistaken for a task pane.
+The adapter's pane operations identify and address only the terminal root pane through one shared root-pane rule, so the sidebar is never mistaken for a task pane.
 The seeded-tab prune and a failed spawn's rollback close the seeded or task tab with `tab close`, because a `pane close` of the terminal pane on 0.9.x leaves the sidebar pane alive and the tab behind.
 A tab close removes its terminal and sidebar panes together on releases that have the sidebar, and is the same single-pane close on releases without it.
 
@@ -308,9 +311,10 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task tab - never `workspace close` - so on Herdr 0.9.x the terminal and sidebar panes are removed together and the disposable workspace empties.
+Cleanup closes only the exact recorded task tab - never `workspace close` - so on Herdr 0.9.x the terminal and sidebar panes are removed together and the disposable workspace empties with its last tab.
+That path runs no move and no idle-shell proof, because a tab close is focus-safe at and above the supported presentation floor.
 
-Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
+Herdr 0.7.5's explicit pane close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
 Both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.
 
@@ -318,23 +322,31 @@ Projected cleanup therefore:
 
 - Runs under the same session lock.
 - Refuses to delete the tab a live foreground client is viewing.
-- Treats a workspace-emptying close as a focus-safe removal.
+- Removes the exact recorded tab, and with it the emptied disposable workspace.
 
-A focus-safe removal takes these steps:
-
-1. Verify the close would empty the workspace.
-2. When needed, reposition the doomed workspace behind the focused one through the verified `workspace.move` transport.
-3. Prove the pane holds one lone idle shell.
-4. End that shell, so Herdr removes the emptied workspace through its focus-preserving pane-death path.
+A failed fresh creation's same-process rollback is the one caller that can find its own seeded tab as the persisted active tab, because Herdr 0.9.x create is not focus-authoritative and its create-time focus restore can fail.
+That rollback never bypasses the live-viewer guard.
+When the recorded pre-spawn focus still resolves, it restores that exact tab first and the guard then admits the close on the fresh focus.
+The scope is strictly the disposable workspace this same process created, proven by the closed tab's own workspace id, so a user workspace's active tab is never closed this way.
 
 The persisted `.focused` pointer is not a live viewer.
 When `herdr terminal title clear` reports `no_foreground_client`, cleanup proceeds on that tab because no human is attached, and skips restoration of the tab it destroys.
 
 Herdr currently has no atomic client-aware mutation.
-So a fresh target-focus and foreground-client checkpoint runs immediately before each move, signal, or explicit close.
+So a fresh target-focus and foreground-client checkpoint runs immediately before each close.
 When a live viewer has switched to another tab, that fresh tab becomes the restore target.
 A client can still attach or switch focus in the residual checkpoint-to-mutation window.
 A durable atomic close is deferred until Herdr exposes that primitive.
+
+### Legacy pane-level removal plan
+
+Task metadata recorded before `herdr_tab_id` existed still closes only its exact recorded pane, so that legacy teardown path keeps the older focus-safe removal plan.
+A focus-safe removal of that kind takes these steps:
+
+1. Verify the close would empty the workspace.
+2. When needed, reposition the doomed workspace behind the focused one through the verified `workspace.move` transport.
+3. Prove the pane holds one lone idle shell.
+4. End that shell, so Herdr removes the emptied workspace through its focus-preserving pane-death path.
 
 The repositioning move-to-last preserves every surviving workspace's relative order.
 Removal is confirmed against the exact moved workspace rather than inferred from pane disappearance.
@@ -353,8 +365,8 @@ So degraded behavior is never worse than the pre-mitigation sub-second restore.
 Ordinary non-projected task removal:
 
 - Serializes through the same session lock.
-- Applies the same focus-safe plan when its close would empty a non-focused workspace.
-- Keeps the legitimate plain close when the target is the active tab.
+- Closes the exact recorded task tab, which takes its disposable workspace with it when that tab was the last one.
+- Skips the exact-focus restore only when the target tab is the active tab, a close that legitimately moves focus.
 - Refuses an unlocked close if the lock cannot be acquired.
 
 Task cleanup acquires that session lock before the task's isolated copy is returned.
@@ -395,7 +407,7 @@ The replacement is allowed only when all of these agree:
 The replacement tab and pane are created and verified before the old pane is rechecked and closed.
 Then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
-A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
+A failed replacement rolls back only the exact response-derived new tab - its terminal and 0.9.x sidebar panes together - when focus-safe verification permits it.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
 

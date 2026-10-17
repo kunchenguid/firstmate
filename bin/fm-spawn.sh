@@ -1404,10 +1404,10 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
-HERDR_PROJECTION_ABORT_TASK_PANE=
-HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PROJECTION_ABORT_TASK_TAB=
 HERDR_PROJECTION_ABORT_SEEDED_TAB=
+HERDR_PROJECTION_ABORT_OWNED_WORKSPACE=
+HERDR_PROJECTION_ABORT_PRIOR_FOCUS=
 HERDR_PROJECTION_ABORT_JOURNAL=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1517,28 +1517,25 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    # A fresh projection rolls back through its exact tab ids (terminal plus
-    # the 0.9.x sidebar pane) so the disposable workspace empties, then removes
-    # its attempt journal because nothing is left to quarantine. The reclaim
-    # path below still uses the pane-level primitive and keeps its journal.
-    if [ -n "${HERDR_PROJECTION_ABORT_TASK_TAB:-}" ]; then
-      fm_backend_herdr_projection_cleanup_tabs_exact \
-        "$HERDR_PROJECTION_ABORT_SESSION" \
-        "$HERDR_PROJECTION_ABORT_TASK_TAB" \
-        "$HERDR_PROJECTION_ABORT_SEEDED_TAB" || true
-      # Remove the attempt journal only on a positive post-rollback read that
-      # the token-bearing disposable workspace is gone, so a silent close
-      # failure can never delete the journal while leaving the workspace.
-      if [ -n "${HERDR_PROJECTION_ABORT_JOURNAL:-}" ] &&
-        fm_backend_herdr_projection_token_workspace_gone \
-          "$HERDR_PROJECTION_ABORT_SESSION" "$HERDR_PROJECTION_ABORT_JOURNAL" "$ID"; then
-        rm -f -- "$HERDR_PROJECTION_ABORT_JOURNAL" 2>/dev/null || true
-      fi
-    else
-      fm_backend_herdr_projection_cleanup_exact \
-        "$HERDR_PROJECTION_ABORT_SESSION" \
-        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    # The rollback closes the exact task and seeded tabs (terminal plus the
+    # 0.9.x sidebar pane) so the disposable workspace empties, then removes its
+    # attempt journal because nothing is left to quarantine. The owned-workspace
+    # and prior-focus scope lets the close of a seeded tab that is itself the
+    # persisted active tab restore the captain's pre-spawn focus first, instead
+    # of bypassing the live-viewer guard.
+    fm_backend_herdr_projection_cleanup_tabs_exact \
+      "$HERDR_PROJECTION_ABORT_SESSION" \
+      "$HERDR_PROJECTION_ABORT_TASK_TAB" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_TAB" \
+      "$HERDR_PROJECTION_ABORT_OWNED_WORKSPACE" \
+      "$HERDR_PROJECTION_ABORT_PRIOR_FOCUS" || true
+    # Remove the attempt journal only on a positive post-rollback read that
+    # the token-bearing disposable workspace is gone, so a silent close
+    # failure can never delete the journal while leaving the workspace.
+    if [ -n "${HERDR_PROJECTION_ABORT_JOURNAL:-}" ] &&
+      fm_backend_herdr_projection_token_workspace_gone \
+        "$HERDR_PROJECTION_ABORT_SESSION" "$HERDR_PROJECTION_ABORT_JOURNAL" "$ID"; then
+      rm -f -- "$HERDR_PROJECTION_ABORT_JOURNAL" 2>/dev/null || true
     fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
@@ -4329,6 +4326,8 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_TAB=$HERDR_TAB_ID
             HERDR_PROJECTION_ABORT_SEEDED_TAB=""
+            HERDR_PROJECTION_ABORT_OWNED_WORKSPACE=$HERDR_WORKSPACE_ID
+            HERDR_PROJECTION_ABORT_PRIOR_FOCUS=$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS
             HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
             ;;
           2)
@@ -4379,6 +4378,8 @@ else
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
                 HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+                HERDR_PROJECTION_ABORT_OWNED_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+                HERDR_PROJECTION_ABORT_PRIOR_FOCUS=$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS
                 HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
               fi
               exit 1
@@ -4393,6 +4394,8 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_TAB=$HERDR_TAB_ID
             HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+            HERDR_PROJECTION_ABORT_OWNED_WORKSPACE=$HERDR_WORKSPACE_ID
+            HERDR_PROJECTION_ABORT_PRIOR_FOCUS=$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS
             HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
             # Opt-in project groups (docs/herdr-backend.md "Project groups"):
             # an empty key keeps the block-end placement. Off costs one file test.

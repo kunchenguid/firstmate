@@ -1122,6 +1122,27 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   [ "$close_status" -eq 0 ]
 }
 
+# fm_backend_herdr_projection_owned_tab_focus_restore: re-establish the exact
+# pre-spawn focus before the same-process rollback closes a tab of the
+# disposable workspace that spawn itself created.
+# Herdr 0.9.x create is not focus-authoritative, so that workspace's own tab can
+# be the persisted active tab under a live foreground client, and its create-time
+# focus restore can fail. The rollback keeps the live-viewer guard authoritative
+# instead of bypassing it: it restores the recorded prior focus first, so the
+# guard admits the close only because the client is no longer viewing the doomed
+# tab. The scope is strictly that response-derived workspace - the tab must still
+# report that exact workspace id, and an empty or unresolvable prior focus fails -
+# so a user workspace's active tab is never closed this way.
+fm_backend_herdr_projection_owned_tab_focus_restore() {  # <session> <tab-id> <owned-workspace> <prior-focus>
+  local session=$1 tab_id=$2 owned_workspace=${3:-} prior_focus=${4:-} info tab_workspace
+  [ -n "$owned_workspace" ] && [ -n "$prior_focus" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
+  tab_workspace=$(printf '%s' "$info" | jq -r --arg tab "$tab_id" \
+    '.result.tab | select(.tab_id == $tab) | .workspace_id // empty' 2>/dev/null)
+  [ "$tab_workspace" = "$owned_workspace" ] || return 1
+  fm_backend_herdr_projection_focus_restore "$session" "$prior_focus" "owned tab close"
+}
+
 # fm_backend_herdr_projection_close_tab_focus_preserving: close one exact
 # projection tab - its terminal root pane AND any 0.9.x sidebar pane - without
 # leaving the captain focused anywhere else. Herdr 0.9.x keeps a tab alive
@@ -1130,10 +1151,17 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # fixes make that close focus-safe. The live-viewer guard is inherited from the
 # pane-level path: a close whose target is the exact active tab of a live
 # foreground client is refused rather than changing focus, and the exact
-# pre-close focus is restored as the backstop. Return codes: 0 closed, 1 the
-# guard refused or the close was not confirmed, 2 focus could not be restored.
-fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id> [pane-id required-agent-state]
-  local session=$1 tab_id=$2 pane_id=${3:-} required_agent_state=${4:-} before active_tab skip_restore=0 presence state
+# pre-close focus is restored as the backstop. The optional owned-workspace and
+# prior-focus arguments are the same-process abort rollback's scope: when the
+# target is the persisted active tab, the recorded pre-spawn focus is restored
+# first and the guard then decides on the fresh focus (see
+# fm_backend_herdr_projection_owned_tab_focus_restore). Return codes: 0 closed,
+# 1 the guard refused or the close was not confirmed, 2 focus could not be
+# restored.
+fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id> [pane-id required-agent-state owned-workspace prior-focus]
+  local session=$1 tab_id=$2 pane_id=${3:-} required_agent_state=${4:-}
+  local owned_workspace=${5:-} prior_focus=${6:-}
+  local before active_tab skip_restore=0 presence state
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$tab_id" ] || return 0
   presence=$(fm_backend_herdr_tab_presence_state "$session" "$tab_id")
@@ -1143,6 +1171,17 @@ fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
     return 1
   }
   active_tab=${before#*$'\t'}
+  if [ "$tab_id" = "$active_tab" ] \
+    && fm_backend_herdr_projection_owned_tab_focus_restore \
+      "$session" "$tab_id" "$owned_workspace" "$prior_focus"; then
+    # The target is the persisted active tab, so the guard below would refuse a
+    # live viewer. The owned rollback restored the recorded pre-spawn focus
+    # instead, which is now the focus this close must preserve; when the scope is
+    # not proven this is skipped and the guard's refusal stands unchanged.
+    before=$prior_focus
+    active_tab=${before#*$'\t'}
+    skip_restore=0
+  fi
   fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab_id" || return 1
   if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
     # The guard re-read focus and admitted the close with a fresh non-target
@@ -2663,7 +2702,11 @@ EOF
 #   FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
 #   FM_BACKEND_HERDR_PROJECTION_TAB_ID
 #   FM_BACKEND_HERDR_PROJECTION_PANE_ID
+#   FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS
 #   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE
+# PRE_CREATE_FOCUS is the exact workspace and tab that were active before this
+# call created anything; the same-process abort rollback restores it before it
+# closes a disposable tab that is itself the persisted active tab.
 # CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
@@ -2675,6 +2718,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=""
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS=""
   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
 
   fm_backend_herdr_version_check || return 1
@@ -2684,6 +2728,8 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation workspace create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
     return 1
   }
+  # shellcheck disable=SC2034  # caller consumes the response-derived global
+  FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS=$focus_before
   if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$workspace_label" --no-focus 2>/dev/null); then
     :
   else
@@ -2777,32 +2823,24 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   return 0
 }
 
-# fm_backend_herdr_projection_cleanup_exact: same-process abort cleanup for a
-# projection whose create calls returned complete exact IDs.
-# It performs no lookup and never calls workspace close.
-fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
-  local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
-  if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
-  fi
-}
-
 # fm_backend_herdr_projection_cleanup_tabs_exact: same-process rollback for a
 # fresh projection whose create calls returned complete exact TAB ids. It
 # closes the exact task and seeded tabs (terminal and 0.9.x sidebar panes
-# together) so the disposable workspace empties, mirroring
-# fm_backend_herdr_projection_cleanup_exact but through the tab-level primitive
-# a pane close no longer provides. Returns 0 only when every close it attempted
-# reported success, so a caller can tell a clean rollback from a quarantined
-# leftover it must leave for the session-start sweep.
-fm_backend_herdr_projection_cleanup_tabs_exact() {  # <session> <task-tab> <seeded-tab>
-  local session=$1 task_tab=$2 seeded_tab=$3 status=0
-  if [ -n "$task_tab" ] && ! fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$task_tab"; then
+# together) so the disposable workspace empties. The optional owned workspace
+# and pre-spawn focus scope the abort rollback to the space this same process
+# created (see fm_backend_herdr_projection_owned_tab_focus_restore). Returns 0
+# only when every close it attempted reported success, so a caller can tell a
+# clean rollback from a quarantined leftover it must leave for the
+# session-start sweep.
+fm_backend_herdr_projection_cleanup_tabs_exact() {  # <session> <task-tab> <seeded-tab> [owned-workspace prior-focus]
+  local session=$1 task_tab=$2 seeded_tab=$3 owned_workspace=${4:-} prior_focus=${5:-} status=0
+  if [ -n "$task_tab" ] && ! fm_backend_herdr_projection_close_tab_focus_preserving \
+    "$session" "$task_tab" "" "" "$owned_workspace" "$prior_focus"; then
     status=1
   fi
   if [ -n "$seeded_tab" ] && [ "$seeded_tab" != "$task_tab" ] \
-     && ! fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$seeded_tab"; then
+     && ! fm_backend_herdr_projection_close_tab_focus_preserving \
+       "$session" "$seeded_tab" "" "" "$owned_workspace" "$prior_focus"; then
     status=1
   fi
   return "$status"
@@ -2908,6 +2946,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
     echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
@@ -2951,6 +2990,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not capture exact focus; spawning flat" >&2
     return 2
   }
+  # shellcheck disable=SC2034  # caller consumes the response-derived global
+  FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS=$focus_before
   active_tab=${focus_before#*$'\t'}
   if [ "$active_tab" = "$meta_tab" ]; then
     echo "warning: herdr presentation reclaim for $id would replace the active tab; spawning flat" >&2
@@ -3861,27 +3902,48 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
   fi
 }
 
+# fm_backend_herdr_root_pane_jq: the single definition of the terminal
+# root-pane rule. Herdr 0.9.x gives every tab a chrome "Sidebar" pane beside its
+# terminal root pane - measured 2026-10-17 on 0.9.1, protocol 22, where
+# `pane list` lists it with label "Sidebar" and the herdr-sidebar-explorer and
+# herdr-sidebar-git tokens - and it is identified structurally by that
+# `herdr-sidebar-*` token namespace with the rendered "Sidebar" label as a
+# second independent signal. On a release without the sidebar neither signal
+# fires and the sole pane is the root pane.
+FM_BACKEND_HERDR_ROOT_PANE_JQ='def is_root_pane:
+  ((.label // "") != "Sidebar")
+  and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0;
+'
+
+# fm_backend_herdr_root_pane_ids: print the root (terminal) pane ids of the
+# `pane list` document read on stdin, optionally limited to one exact workspace
+# and/or tab. Callers that must see a single-task shape require exactly one id.
+fm_backend_herdr_root_pane_ids() {  # [workspace-id] [tab-id]
+  local workspace=${1:-} tab=${2:-}
+  jq -r --arg workspace "$workspace" --arg tab "$tab" "$FM_BACKEND_HERDR_ROOT_PANE_JQ"'
+    .result.panes[]?
+    | select(is_root_pane)
+    | select($workspace == "" or .workspace_id == $workspace)
+    | select($tab == "" or .tab_id == $tab)
+    | .pane_id' 2>/dev/null
+}
+
 # fm_backend_herdr_pane_for_tab: the root pane id for <tab_id> in <workspace_id>
 # of <session>, via one pane list call filtered by tab_id (never assumes a
 # tab-number/pane-number correspondence - herdr numbers them independently).
-# Herdr 0.9.x gives every tab a chrome "Sidebar" pane beside its terminal root
-# pane, and `pane list` sorts the sidebar first, so the filter below excludes
-# it and returns the terminal pane an agent actually runs in. The sidebar is
-# identified structurally by its `herdr-sidebar-*` token namespace with the
-# rendered "Sidebar" label as a second independent signal. On releases without
-# the sidebar neither signal fires and the sole pane is the single root pane.
-# The resolver fails closed: it returns a pane only when the filter collapses
-# to EXACTLY one root pane, so a release whose sidebar shape neither signal
-# recognizes (two panes, no excludable chrome) never yields a loose first-pane
-# match - callers fall back to the flat layout instead of tolerating extra
-# panes as a normal one-tab shape.
+# The resolver fails closed: it returns a pane only when the shared root-pane
+# rule collapses to EXACTLY one pane, so a release whose sidebar shape neither
+# signal recognizes (two panes, no excludable chrome) never yields a loose
+# first-pane match - callers fall back to the flat layout instead of tolerating
+# extra panes as a normal one-tab shape.
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
-  local session=$1 wsid=$2 tab_id=$3 panes
+  local session=$1 wsid=$2 tab_id=$3 panes root_panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -er --arg tab "$tab_id" \
-    '[.result.panes[]? | select(.tab_id == $tab) | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)]
-     | select(length == 1)
-     | .[0].pane_id' 2>/dev/null
+  # The pane list is already workspace-scoped by the call, and a tab id is
+  # workspace-qualified, so only the exact tab id is filtered here.
+  root_panes=$(printf '%s' "$panes" | fm_backend_herdr_root_pane_ids "" "$tab_id") || return 1
+  case "$root_panes" in ''|*$'\n'*) return 1 ;; esac
+  printf '%s' "$root_panes"
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an

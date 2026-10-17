@@ -244,7 +244,7 @@ case "$cmd $sub" in
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
   "pane list")
-    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id}]}}'
     ;;
   "pane close")
     pane=${3:-}
@@ -2061,6 +2061,90 @@ test_projection_cleanup_tabs_exact_closes_both_tabs() {
   assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t1' "rollback did not close the seeded tab"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "rollback should close tabs, never panes"
   pass "herdr presentation cleanup: exact tab rollback closes both tabs via tab close"
+}
+
+# make_owned_rollback_probe: a stateful Herdr CLI stand-in for the abort
+# rollback. The active focus lives in $FOCUS so a restore really moves it, a
+# live foreground client is always attached, and every focus or close appends
+# one ordered event to $ORDER so a test can prove WHEN focus was restored
+# relative to the close. Arguments select the rollback's owned workspace and
+# prior focus. make_owned_rollback_probe <dir> -> echoes the probe path
+make_owned_rollback_probe() {  # <dir>
+  local dir=$1 probe="$1/probe"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$ROOT/bin/backends/herdr.sh"
+fm_backend_herdr_foreground_client_present() { return 0; }
+fm_backend_herdr_projection_focus_snapshot() {
+  local row
+  row=$(cat "$FOCUS" 2>/dev/null) || return 1
+  [ -n "$row" ] || return 1
+  printf '%s' "$row"
+}
+fm_backend_herdr_cli() {
+  shift
+  case "$1 $2" in
+    "tab get")
+      printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s"}}}\n' "$3" "${3%%:*}"
+      ;;
+    "tab focus")
+      printf '%s\t%s\n' "${3%%:*}" "$3" > "$FOCUS"
+      printf 'focus %s\n' "$3" >> "$ORDER"
+      ;;
+    "tab close")
+      printf 'close %s\n' "$3" >> "$ORDER"
+      ;;
+    *) return 1 ;;
+  esac
+}
+fm_backend_herdr_projection_cleanup_tabs_exact fmtest w9:t2 w9:t1 "${1:-}" "${2:-}"
+SH
+  chmod +x "$probe"
+  printf '%s\n' "$probe"
+}
+
+test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab() {
+  local dir probe order focus out status
+  dir="$TMP_ROOT/projection-owned-active-rollback"; mkdir -p "$dir"
+  order="$dir/order"; focus="$dir/focus"; : > "$order"
+  # The seeded tab of the spawn-created workspace is the persisted active tab
+  # and a live client is attached. Herdr 0.9.1 marks a created tab focused
+  # inside a workspace the client has not switched to, so this is the abort
+  # shape a failed create-time focus restore leaves behind.
+  printf 'w9\tw9:t1\n' > "$focus"
+  probe=$(make_owned_rollback_probe "$dir")
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w9 $'w1\tw1:t1' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "owned rollback of a spawn-created active tab should succeed: $out"
+  [ "$(cat "$order")" = "$(printf 'close %s\nfocus %s\nclose %s' w9:t2 w1:t1 w9:t1)" ] \
+    || fail "the rollback did not restore the pre-spawn focus before closing the owned active tab: $(cat "$order")"
+  [ "$(cat "$focus")" = $'w1\tw1:t1' ] \
+    || fail "the rollback did not leave the captain's prior focus active"
+  pass "herdr presentation abort rollback: an owned active tab is closed only after the prior focus is restored"
+}
+
+test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace() {
+  local dir probe order focus out status
+  dir="$TMP_ROOT/projection-owned-active-refusal"; mkdir -p "$dir"
+  order="$dir/order"; focus="$dir/focus"
+  probe=$(make_owned_rollback_probe "$dir")
+  : > "$order"; printf 'w9\tw9:t1\n' > "$focus"
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w7 $'w1\tw1:t1' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a tab outside the rollback's own workspace must stay refused"
+  [ "$(cat "$order")" = "close w9:t2" ] \
+    || fail "a foreign-workspace scope still closed or refocused the active tab: $(cat "$order")"
+  [ "$(cat "$focus")" = $'w9\tw9:t1' ] || fail "a foreign-workspace scope moved the captain's focus"
+  : > "$order"; printf 'w9\tw9:t1\n' > "$focus"
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w9 '' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an owned tab with no recorded prior focus must stay refused"
+  [ "$(cat "$order")" = "close w9:t2" ] \
+    || fail "a missing prior focus still closed the owned active tab: $(cat "$order")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "the refused owned rollback did not report the live-viewer boundary"
+  pass "herdr presentation abort rollback: the live-viewer guard stays authoritative outside the owned scope"
 }
 
 test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
@@ -6050,6 +6134,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_pane_for_tab_prefers_terminal_over_sidebar
 test_projection_cleanup_tabs_exact_closes_both_tabs
+test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab
+test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab

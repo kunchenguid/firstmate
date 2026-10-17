@@ -451,9 +451,9 @@ case "${1:-} ${2:-}" in
     ;;
   "pane list")
     if [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new"}]}}'
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}]}}'
     elif [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-old","tab_id":"t-old"}]}}'
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}]}}'
     else
       printf '%s\n' '{"result":{"panes":[]}}'
     fi

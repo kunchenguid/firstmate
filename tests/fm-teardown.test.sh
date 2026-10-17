@@ -2854,7 +2854,7 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "pane list")
-    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"}]}}'
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}]}}'
     ;;
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
