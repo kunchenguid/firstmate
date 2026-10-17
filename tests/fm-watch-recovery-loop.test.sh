@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pin the Pi/OpenCode recovery-loop fix: one announcement per generation, and a
-# handling successor that keeps supervising instead of going blind.
+# handling successor that keeps supervising instead of going blind, including
+# surfacing queue rows appended after it started.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -222,5 +223,62 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a handling successor must surface a queue row appended after it started,
+# such as a captain inbox note, without re-announcing the rows its predecessor
+# already delivered. Otherwise an idle session is never woken for the note.
+test_handling_successor_surfaces_rows_appended_after_start() {
+  local dir home state fakebin child now out
+  dir=$(make_case appended-row-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:pred.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '%s\t1\tcheck\tpredecessor\tcheck: predecessor delivered wake\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 3
+  if ! kill -0 "$child" 2>/dev/null || grep -q '^check:' "$out" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced its predecessor's rows: $(cat "$out")"
+  fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" note -- appended while idle >/dev/null \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "fm-inbox.sh note could not queue its wake row"; }
+  grep "$(printf '\tcheck\tinbox:')" "$state/.wake-queue" >/dev/null \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "fm-inbox.sh note did not append a queue row"; }
+  now=0
+  while [ "$now" -lt 20 ] && kill -0 "$child" 2>/dev/null; do
+    sleep 0.5
+    now=$((now + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "a handling successor never surfaced an appended inbox row: $(cat "$out")"
+  fi
+  wait "$child" 2>/dev/null || true
+  grep -q '^check:' "$out" \
+    || fail "handling successor closed without an actionable check line: $(cat "$out")"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T3_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
+  fi
+  pass "a handling successor surfaces a row appended after it started, and only that"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_surfaces_rows_appended_after_start
 test_unacknowledged_recovery_is_announced_once_per_generation
