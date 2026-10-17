@@ -85,6 +85,10 @@
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# A direct-PR done line without a PR URL is refused even when its commit is
+# already reachable, so publication remains an explicit phase until review
+# exists. A no-mistakes pass without a PR URL is classified by bin/fm-crew-state.sh
+# as publishing rather than done, preserving the validated commit for retry.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -557,7 +561,10 @@ Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
+Before publication, record the current commit in place of \`<HEAD>\` and append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting ready PR URL\` to the status file.
+Push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
+If PR creation fails, append \`blocked [key=publication-$id] [at=<epoch>]: PR publication failed; preserve branch=$branch commit=<HEAD> and retry\` and do not report done.
+If a publication command's result is ambiguous, inspect the forge by branch and commit and reuse any existing PR instead of creating a duplicate.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
@@ -593,7 +600,10 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
+After /no-mistakes reports a passing result, the validated commit remains in publication until a PR URL exists.
+If the result has no PR URL, record the current commit in place of \`<HEAD>\`, append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting PR publication\`, and retry publication from that same branch and commit; do not append done or discard the copy.
+If publication fails, append \`blocked [key=publication-$id] [at=<epoch>]: PR publication failed; preserve branch=$branch commit=<HEAD> and retry\`.
+Only after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
@@ -870,6 +880,15 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head could not be resolved"
     return 1
   }
+  if [ "$kind" = ship ] && [ "$mode" = direct-PR ] \
+    && ! url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")"); then
+    if ! fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+      printf '%s\n' "publication is still required: a direct-PR ship done report must include the ready PR URL; named head $sha is unreachable outside the worker copy"
+    else
+      printf '%s\n' "publication is still required: a direct-PR ship done report must include the ready PR URL; named head $sha is preserved for retry"
+    fi
+    return 1
+  fi
   gerrit=0
   [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] && gerrit=1
   if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$(status_line_note "$line")"; then

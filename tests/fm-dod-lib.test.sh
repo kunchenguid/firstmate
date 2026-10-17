@@ -141,6 +141,24 @@ test_standalone_local_only_needs_project_ref() {
   pass "standalone local-only done: requires the named head in the project clone"
 }
 
+test_direct_pr_done_requires_pr_url_after_push() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/direct-pr-publication-repo"
+  wt="$TMP_ROOT/direct-pr-publication-wt"
+  fm_git_worktree "$repo" "$wt" fm/direct-pr-publication
+  git -C "$wt" commit -q --allow-empty -m 'validated direct-PR commit'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/direct-pr-publication "$sha"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" 'done: implementation complete')
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "direct-PR done without a PR URL was accepted after push"
+  case "$reason" in
+    *"publication is still required"*|*"ready PR URL"*) ;;
+    *) fail "direct-PR publication refusal was not actionable: $reason" ;;
+  esac
+  pass "direct-PR done requires a PR URL even after the commit is pushed"
+}
+
 test_free_text_sha_is_not_the_named_head() {
   local repo wt old new reason rc
   repo="$TMP_ROOT/hex-repo"
@@ -454,6 +472,7 @@ test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
+test_direct_pr_done_requires_pr_url_after_push
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object

@@ -217,6 +217,9 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    if [ "$mode" != "local-only" ]; then
+      assert_grep 'in place of `<HEAD>`' "$brief" "$id: brief must render the literal commit placeholder"
+    fi
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
@@ -241,6 +244,10 @@ test_forge_selection_renders_correct_cli() {
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
     "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
+  assert_grep 'publishing [key=publication-brief-forge-default]' "$brief" \
+    "a direct-PR brief must record publication before opening the PR"
+  assert_grep 'PR publication failed; preserve branch=fm/brief-forge-default' "$brief" \
+    "a direct-PR brief must preserve the branch after publication failure"
   grep -qx "Delivery contract: mode=direct-PR" "$brief" \
     || fail "a brief with no --forge must keep the bare delivery contract line"
 
@@ -279,6 +286,8 @@ test_forge_selection_renders_correct_cli() {
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi for the draft read-back"
   assert_no_grep 'gh-axi pr ready' "$brief" \
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi to clear a draft"
+  assert_grep 'validated commit remains in publication until a PR URL exists' "$brief" \
+    "a no-mistakes brief must keep a validated commit in publication until a PR exists"
 
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue
