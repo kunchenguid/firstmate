@@ -173,10 +173,25 @@ case "$provider" in
     [ "$status" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
-    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
-    [ "$host" != github.com ] || exit 0
+    # The stored host is a lowercase DNS name for an https URL, or that name
+    # plus a :port for the one plain-http Forgejo form these scripts arm: a
+    # host[:port] the operator pinned in FM_PR_FORGEJO_HTTP_HOSTS. The port is
+    # split off at the last colon so the name keeps the strict shape every
+    # forge's host keeps here, and a port is digits only of at most five, so
+    # one pin has one spelling.
+    name=$host
+    port=
     case "$host" in
+      *:*) name=${host%:*}; port=${host##*:} ;;
+    esac
+    [ "${#name}" -ge 1 ] && [ "${#name}" -le 253 ] || exit 0
+    [ "$name" != github.com ] || exit 0
+    case "$name" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    case "$port" in
+      '') ;;
+      *[!0-9]*|??????*) exit 0 ;;
     esac
     case "$path" in
       */*/*|/*|*/) exit 0 ;;
@@ -190,7 +205,17 @@ case "$provider" in
         .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    if [ "$url" != "https://$host/$owner/$repo/pulls/$number" ]; then
+      # Plain http is reconstructible only for a host[:port] the operator
+      # pinned in FM_PR_FORGEJO_HTTP_HOSTS, read fresh here exactly as the
+      # arming parse read it and matched per entry byte-for-byte; any other
+      # reconstruction mismatch keeps this poll silent.
+      case ",${FM_PR_FORGEJO_HTTP_HOSTS-}," in
+        *",$host,"*) ;;
+        *) exit 0 ;;
+      esac
+      [ "$url" = "http://$host/$owner/$repo/pulls/$number" ] || exit 0
+    fi
     command -v tea >/dev/null 2>&1 || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
     # tea addresses a repo by slug only; the host comes from a named login
@@ -200,18 +225,33 @@ case "$provider" in
     # registered login matches, rather than picking one arbitrarily.
     # The list is parsed as JSON, never split on quotes per line, so a login
     # printed as one compact object still matches; this is the same filter
-    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
+    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies, scheme-paired with the
+    # stored URL: an https URL is served only by an https login, and an http
+    # login serves only the operator-pinned plain-http form this run already
+    # reconstructed above. pr_scheme is captured before the filter because the
+    # filter's own jq sees the login rows' urls, not this poll's url.
+    case "$url" in
+      https:*) pr_scheme=https ;;
+      *)       pr_scheme=http ;;
+    esac
     login=$(
-      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+      tea login list --output json 2>/dev/null | jq -er --arg h "$host" --arg s "$pr_scheme" '
         if type == "array" then
           [ .[]
             | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                      and (.url | type) == "string")
-            | select((.url
-                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                      | sub("[/?#].*$"; "")
-                      | sub("^.*@"; "")
-                      | sub(":[0-9]+$"; "")) == $h)
+            | select(
+                ($s == "https" and (.url | startswith("https://"))
+                  and ((.url
+                        | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                        | sub("[/?#].*$"; "")
+                        | sub("^.*@"; "")
+                        | sub(":[0-9]+$"; "")) == $h))
+                or ($s == "http" and (.url | startswith("http://"))
+                  and ((.url
+                        | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                        | sub("[/?#].*$"; "")
+                        | sub("^.*@"; "")) == $h)))
             | .name ]
           | if length == 1 then .[0] else error("not exactly one matching login") end
         else

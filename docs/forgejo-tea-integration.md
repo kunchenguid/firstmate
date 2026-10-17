@@ -98,7 +98,8 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's bare hostname (stripping scheme, userinfo, port, and path), and refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq` and refuses when zero or more than one login matches, rather than guessing.
+The match is scheme-paired with the parsed URL: an `https` URL is served only by a login whose own URL is `https` on the same bare hostname (userinfo, port, and path stripped), and a plain-`http` URL is served only by a login whose own URL is `http` on exactly the same `host[:port]`.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
@@ -113,6 +114,7 @@ $ tea pulls create --login fm-fixture --repo fixture/fixture-repo --head merged-
 ```
 
 This never collides with GitHub's `.../pull/<n>` (singular), GitLab's `.../-/merge_requests/<n>`, or Gerrit's `.../c/<project>/+/<n>`.
+The plain-`http` form exists only behind the operator's exact pin list `FM_PR_FORGEJO_HTTP_HOSTS` (see [docs/configuration.md](configuration.md#environment-variables)): a comma-separated list of exact `host` or `host:port` entries, read fresh at every parse, arming, poll, and login resolution, and an `http` URL is accepted only when its `host[:port]` equals one entry byte-for-byte, so prefix or suffix look-alikes and empty or malformed entries match nothing.
 
 ## End to end: arming and polling a real pull request
 
@@ -138,7 +140,8 @@ $ state/task-f1.check.sh
 merged
 ```
 
-The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - login matching only ever compares bare hostnames - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
+The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - login matching only ever compares bare hostnames for an `https` URL - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
+The recorded run predates the scheme-paired login match described above: an `https` PR URL on `localhost` now resolves only through an `https` login for that host, and the fixture's `http://localhost:3980` login serves only a plain-`http` URL behind the `FM_PR_FORGEJO_HTTP_HOSTS` pin, so the same arming today would carry an `http://localhost:3980/...` PR URL instead.
 
 ## A missing tea produces no wake, never a false merge
 

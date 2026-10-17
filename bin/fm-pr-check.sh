@@ -6,9 +6,9 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance.
+# A GitHub pull request URL, a GitLab merge request URL, a Forgejo pull request
+# URL, and a Gerrit change URL are all accepted, including a merge request,
+# Forgejo pull request, or change on a self-hosted instance.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -114,7 +114,8 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
     exit 1
   fi
-  fm_pr_forgejo_login "$HOST" >/dev/null || {
+  case "$URL" in http://*) T_SCHEME=http ;; *) T_SCHEME=https ;; esac
+  fm_pr_forgejo_login "$HOST" "$T_SCHEME" >/dev/null || {
     echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
