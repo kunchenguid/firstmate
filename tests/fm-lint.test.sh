@@ -150,6 +150,54 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# Extract the real helper without running the lint command's entry point.
+fm_lint_now_ms_definition() {
+  sed -n '/^fm_lint_now_ms() {$/,/^}$/p' "$LINT"
+}
+
+test_now_ms_accepts_comma_and_dot_decimals() {
+  local definition timestamp output
+  definition=$(fm_lint_now_ms_definition)
+  [ -n "$definition" ] || fail "fm_lint_now_ms definition was not found"
+  for timestamp in 1700000000,008999 1700000000.008999; do
+    output=$(bash -c '
+      eval "$1"
+      unset EPOCHREALTIME
+      EPOCHREALTIME=$2
+      fm_lint_now_ms
+    ' bash "$definition" "$timestamp") \
+      || fail "fm_lint_now_ms failed for $timestamp"
+    [ "$output" = 1700000000008 ] \
+      || fail "fm_lint_now_ms returned $output for $timestamp"
+  done
+  pass "fm_lint_now_ms handles comma and dot decimals with leading fractional zeros"
+}
+
+test_now_ms_under_comma_decimal_locale() {
+  local definition output rc=0
+  definition=$(fm_lint_now_ms_definition)
+  # Clear LC_ALL so it cannot override the locale being exercised.
+  output=$(bash -c '
+    unset LC_ALL
+    export LC_NUMERIC=pt_BR.UTF-8
+    case "${EPOCHREALTIME:-}" in
+      *,*) ;;
+      *) exit 77 ;;
+    esac
+    eval "$1"
+    fm_lint_now_ms
+  ' bash "$definition" 2>/dev/null) || rc=$?
+  if [ "$rc" = 77 ]; then
+    printf 'SKIP: comma-decimal pt_BR.UTF-8 locale or native EPOCHREALTIME unavailable\n'
+    return
+  fi
+  [ "$rc" = 0 ] || fail "fm_lint_now_ms failed under pt_BR.UTF-8"
+  case "$output" in
+    ''|*[!0-9]*) fail "fm_lint_now_ms returned nonnumeric output under pt_BR.UTF-8: $output" ;;
+  esac
+  pass "fm_lint_now_ms works with native comma-decimal EPOCHREALTIME"
+}
+
 test_help_reports_the_complete_interface() {
   local help
   help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
@@ -2026,6 +2074,8 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_now_ms_accepts_comma_and_dot_decimals
+test_now_ms_under_comma_decimal_locale
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_canonical_partitions_preserve_full_lint
