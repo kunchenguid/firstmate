@@ -630,12 +630,7 @@ There is no two-phase journal and no additional tasks-axi release requirement.
 ### Inherited-material transfer
 
 Locked startup convergence and `bin/fm-config-push.sh` transfer only the declared inherited-material allowlist.
-Changed live routes receive a marked instruction to re-read the transferred files.
-The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
-Only a transfer or tracked-file sync that changed the home's inherited files or instruction surface owes the nudge, so a re-stamped generation or an advance outside `AGENTS.md`, `bin/`, and `.agents/skills/` never nudges an unchanged home.
-A convergence whose completion is unknown, or that already applied a change before it failed, keeps the re-read owed ([`bin/fm-secondmate-nudge-lib.sh`](../bin/fm-secondmate-nudge-lib.sh) owns the record).
-Local secondmates retain their generation-specific local pointer contract.
-Remote transfers do not copy those primary-local instruction paths.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
 
 ### Relaunch a live remote second mate
 

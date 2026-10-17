@@ -12,9 +12,9 @@
 # routes receive the generation-specific literal-content pointer from
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
 # through their SSH route when the transfer changed the home, and keep that
-# obligation across a partial or unknown completion. Unchanged config and
-# data/captain-shared.md-only updates send no reread unless a previous reread is
-# still owed.
+# obligation across a partial or unknown completion. Unchanged homes send no
+# reread unless a previous reread is still owed. For local routes only,
+# data/captain-shared.md-only updates send no new reread pointer.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
