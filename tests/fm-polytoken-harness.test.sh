@@ -315,6 +315,7 @@ SH
 in_polytoken_submit_pane() (  # <dir> <command...>
   PATH="$1/bin:$PATH"
   shift
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tmux-lib.sh"
   "$@"
 )
