@@ -8,6 +8,9 @@
 # tier assignment and the source table these pin.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 # Run the whole suite beneath one long-lived fixture harness, matching the real
 # lifecycle in which startup and later clear/compact hooks share one harness
 # ancestor. This also prevents a developer's ambient harness from making the
@@ -22,9 +25,6 @@ if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
   rm -rf "$HARNESS_FIXTURE"
   exit "$HARNESS_STATUS"
 fi
-
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 unset NO_MISTAKES_GATE
 

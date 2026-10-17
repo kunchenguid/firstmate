@@ -2,6 +2,14 @@
 # tests/fm-jev-mem-guard.test.sh - Regression tests for Pattern 46 (Jev Multi-Agent Memory RSS & Swap Thrashing Guard)
 set -euo pipefail
 
+# Isolate from the ambient fleet environment before anything else runs. This
+# suite does not source tests/lib.sh - it owns its own reporting - so it calls
+# the shared owner directly. bin/fm-test-env-lib.sh owns the pointer list; this
+# is a caller, never a second copy of it.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+fm_test_env_isolate || exit 2
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD_SH="$SCRIPT_DIR/../bin/fm-jev-mem-guard.sh"
 GUARD_PY="$SCRIPT_DIR/../bin/fm-jev-mem-guard.py"
