@@ -23,13 +23,14 @@
 # Claude-settings duplicate Cursor also loads.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
+#   ALLOW - exit 0 and no output, except `{}` on stdout for a Cursor payload
+#           under a Pi host (bin/fm-hook-host-lib.sh owns why).
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status.
 #   INERT - not the real primary checkout (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#           non-firstmate repo): exit 0 and output exactly like ALLOW.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
@@ -101,6 +102,8 @@ if [ "$CMD_SET" -eq 0 ]; then
   command -v jq >/dev/null 2>&1 || exit 0
   # shellcheck source=bin/fm-hook-host-lib.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  # A Pi-hosted Cursor SDK needs a JSON reply even on ALLOW; the lib owns why.
+  fm_hook_cursor_sdk_reply_arm "$PAYLOAD"
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
@@ -182,6 +185,7 @@ json_escape() {
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
+  trap - EXIT
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
   exit 0
 fi

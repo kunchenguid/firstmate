@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, supervision-host, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, PreToolUse seatbelt, watcher-continuity, supervision-host, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -505,6 +505,41 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | --- | --- | --- |
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
+
+## PreToolUse seatbelts
+
+### Pi-hosted Cursor SDK pretool replies, 2026-10-10
+
+This supports the `bin/fm-hook-host-lib.sh` header statement that Pi with the Cursor provider blocks a silent allow and accepts a trailing JSON object.
+It was measured with pi 1.1.0, pi-cursor-sdk 0.5.3, and @cursor/sdk 1.0.37 on Linux, in a git-initialized `git archive` copy of firstmate and a scratch probe repository, never in a live home.
+The user's zsh login profile printed a banner (date, uptime, memory, disk) to stdout for every login shell.
+Each run used one non-interactive prompt that asked for a shell call:
+
+```sh
+pi -p --no-skills --no-context-files --model cursor/composer-2.5 "<prompt>"
+```
+
+The SDK ran each hook command as `/bin/zsh -lc <command>`, observed from the hook's own process table.
+A probe repository registered four `preToolUse` hooks matching `Shell` in `.cursor/hooks.json`:
+
+| Hook command | SDK verdict |
+| --- | --- |
+| `true` | `Hook "true" returned invalid JSON. The command was blocked for safety.` |
+| `echo '{}'` | accepted |
+| `echo '{"permission":"allow"}'` | accepted |
+| process-table probe writing to a file, then `true` | rejected as invalid JSON (same message as `true`); its file showed `/bin/zsh -lc <command>` |
+
+In the unmodified copy every tracked entry - the two `--cursor` registrations and the three Claude-settings entries Cursor also loads - exited 0 with empty stdout, and the shell call was rejected:
+
+```text
+Rejected: Hook ""$CURSOR_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --cursor" returned invalid JSON. The command was blocked for safety.
+...
+Hook ""$CLAUDE_PROJECT_DIR"/bin/fm-subagent-pretool-check.sh --claude" returned invalid JSON. The command was blocked for safety.
+```
+
+With the reply shim installed in the copy, the same Pi session ran a shell call (`hello-from-shell`), a file read, and a content search, and the cd guard's `[persistent-cd]` deny still reached the model with its own reason.
+`tests/fm-cursor-primary.test.sh` pins the reply shape portably: `{}` on every allow under a Pi host, an unchanged single deny object, and silent output for native Cursor and Claude payloads with or without an inherited Pi marker.
+Refresh this record by rerunning the probe repository and a firstmate copy with a Pi Cursor model after a Pi, pi-cursor-sdk, or @cursor/sdk upgrade.
 
 ## Watcher continuity
 
