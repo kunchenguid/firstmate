@@ -18,7 +18,10 @@
 # and left byte-identical when it already names that id. A same-session
 # confirmation never rewrites line 1 while the recorded pid is alive, because
 # bin/fm-startup-network.sh compares that pid across its deferred sweeps; a dead
-# recorded pid is reclaimed and rewritten to this session's anchor.
+# recorded pid is reclaimed and rewritten to this session's anchor. A live
+# recorded pid whose session moved its conversation into this trusted Claude
+# session (fm_session_lock_handed_off_to_self) is reclaimed the same way, so
+# the agents-view front-end left behind by a background move keeps no claim.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0.
@@ -195,7 +198,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_harness_pid_alive "$old" && ! fm_session_lock_handed_off_to_self "$STATE"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -222,7 +225,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old" && ! fm_session_lock_handed_off_to_self "$STATE"; then
       refuse_live_owner "$old"
     fi
   fi
