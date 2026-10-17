@@ -41,6 +41,8 @@
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
 #       failed.
+#   (m) FM_CREW_STATE_*_OVERRIDE guard: a mismatched-basename override is
+#       ignored, a matching one is honoured.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -180,6 +182,25 @@ case "${1:-} ${2:-}" in
 esac
 exit 1
 SH
+  # tea answers its login list with one login for git.example.org and a pull
+  # request read through "tea api" with the configured state; a read failure
+  # prints the error body with exit 0, as the real tea api does.
+  cat > "$fb/tea" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 1
+[ -z "${FM_FAKE_TEA_READ_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TEA_READ_LOG"
+if [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ]; then
+  printf '{"message":"not found"}\n'
+  exit 0
+fi
+printf '{"state":"%s","merged":%s,"head":{"sha":"abc"}}\n' \
+  "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}"
+SH
   cat > "$fb/gerrit-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -209,10 +230,11 @@ set -u
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
-    ;;
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || [ "${FM_FAKE_TMUX_WINDOW_GONE:-0}" = 1 ]; then
+      printf 'other-window\n'
+    else
+      sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:?}"/*.meta 2>/dev/null
+    fi ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
@@ -276,7 +298,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/tea" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -326,6 +348,7 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOW_GONE=0
   FM_FAKE_TMUX_UNREADABLE=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
@@ -346,18 +369,23 @@ reset_fakes() {
   FM_FAKE_GLAB_STATE=merged
   FM_FAKE_GLAB_READ_FAIL=0
   FM_FAKE_GLAB_READ_LOG=
+  FM_FAKE_TEA_STATE=closed
+  FM_FAKE_TEA_MERGED=true
+  FM_FAKE_TEA_READ_FAIL=0
+  FM_FAKE_TEA_READ_LOG=
   FM_FAKE_GERRIT_STATUS=MERGED
   FM_FAKE_GERRIT_CHANGE=
   FM_FAKE_GERRIT_URL_JSON=
   FM_FAKE_GERRIT_READ_FAIL=0
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOW_GONE FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
+  export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
   export FM_FAKE_GERRIT_READ_FAIL FM_FAKE_GERRIT_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
@@ -1600,6 +1628,35 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   pass "terminal passed run handles failed GitLab read"
 }
 
+test_terminal_passed_with_forgejo_pull_reports_its_state() {
+  reset_fakes
+  local d read_log out spec state merged fail expected name
+  for spec in "open|open|false|0|run passed: PR open" \
+    "merged|closed|true|0|run passed: PR merged" \
+    "closed|closed|false|0|run passed: PR closed" \
+    "unreadable|open|false|1|run passed: PR state unknown (unreadable)"; do
+    IFS='|' read -r name state merged fail expected <<<"$spec"
+    d=$(new_case "passed-forgejo-$name")
+    make_repo_on_branch "$d/wt" "fm/feat-dforgejo$name"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-dforgejo$name.meta" "window=fm:fm-feat-dforgejo$name" \
+      "worktree=$d/wt" "kind=ship" "pr=https://git.example.org/team/repo/pulls/12"
+    read_log="$d/tea-read.log"
+    : > "$read_log"
+    FM_FAKE_TEA_READ_LOG=$read_log
+    FM_FAKE_TEA_STATE=$state
+    FM_FAKE_TEA_MERGED=$merged
+    FM_FAKE_TEA_READ_FAIL=$fail
+    FM_FAKE_AXI_STATUS="$(run_passed_with_pr "fm/feat-dforgejo$name" https://git.example.org/team/repo/pulls/12)"
+    out=$(run_crew_state "$d" "feat-dforgejo$name")
+    assert_contains "$out" "$expected" "Forgejo pull request reading $name is reported"
+    [ "$name" = merged ] || assert_not_contains "$out" "PR merged" "Forgejo $name pull request must not be reported merged"
+    assert_grep 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/12' "$read_log" \
+      "Forgejo read uses the host's tea login and the parsed project path"
+  done
+  pass "terminal passed run reads Forgejo pull request state through tea api"
+}
+
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
   reset_fakes
   local d url read_log out
@@ -2446,6 +2503,34 @@ test_moved_remote_branch_without_named_head_is_blocked() {
   pass "moved remote branch without the named head is current-state blocked"
 }
 
+# forge=external: a review tool uploads its own snapshot, so the review ready
+# report is current-state done with HEAD only in the worker copy, and a PR
+# report on that project is blocked with the gate's reason.
+test_external_review_done_reads_ready() {
+  reset_fakes
+  local d out
+  d=$(new_case external-review)
+  make_repo_on_branch "$d/wt" fm/ext
+  git -C "$d/wt" commit -q --allow-empty -m 'change only in the copy'
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config"
+  fm_write_meta "$d/state/ext.meta" \
+    "window=fm:fm-ext" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=direct-PR" "forge=external" "harness=claude"
+  printf 'done: review https://review.example.test/r/5 uploaded for review\n' > "$d/state/ext.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" ext
+  out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" ext)
+  assert_contains "$out" "state: done" "an uploaded external review must read as done"
+  printf 'done: PR https://github.com/o/r/pull/9\n' > "$d/state/ext.status"
+  out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" ext)
+  assert_contains "$out" "state: blocked" "a PR report on an external project must read as blocked"
+  assert_contains "$out" "never a PR" "the blocked read must carry the gate's reason"
+  pass "forge=external: an uploaded review reads done, and a PR report reads blocked with the gate's reason"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -3029,6 +3114,24 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+test_gone_window_in_live_session_ignores_stale_status_log() {
+  reset_fakes
+  local d; d=$(new_case gone-window-live-session)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship"
+  printf 'working: implementing the widget\n' > "$d/state/feat-gone.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_WINDOW_GONE=1
+  local out; out=$(run_crew_state "$d" feat-gone)
+  assert_contains "$out" "state: unknown" "gone window in a live session -> unknown"
+  assert_contains "$out" "source: none" "gone window in a live session -> none source"
+  assert_contains "$out" "backend target gone" "gone window in a live session reports the dead endpoint"
+  assert_not_contains "$out" "source: status-log" "a gone window must not let the stale log read as current"
+  pass "a gone window of a live session ignores the stale status log"
+}
+
 # Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
 # reached the same false-death path as herdr. A tmux that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
@@ -3270,6 +3373,59 @@ test_missing_meta() {
   assert_contains "$out" "state: unknown" "missing meta -> unknown"
   assert_contains "$out" "source: none" "missing meta -> none source"
   pass "missing meta is handled gracefully"
+}
+
+# (m) override guard: FM_CREW_STATE_*_OVERRIDE is honoured only when its
+# basename is the asked task's own file name. A mismatched override inherited
+# from another task's environment must fall through to $STATE/$ID.*, while the
+# snapshot's own matching-name override keeps steering the read at the captured
+# generation.
+test_mismatched_state_override_is_ignored() {
+  reset_fakes
+  local d out
+  d=$(new_case override-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-ovr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ovr.meta" "window=fm:fm-feat-ovr" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: real task log line\n' > "$d/state/feat-ovr.status"
+  # Another task's snapshot capture, under snapshot-style names.
+  fm_write_meta "$d/state/feat-other.meta" "window=fm:fm-feat-other" "worktree=$d/foreign-missing-wt" "kind=ship" "harness=claude"
+  printf 'blocked: other task log line\n' > "$d/state/feat-other.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ovr
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/state/feat-other.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$d/state/feat-other.status" \
+    run_crew_state "$d" feat-ovr)
+  assert_contains "$out" "state: working" "a mismatched override must be ignored: the task's own working log line wins"
+  assert_contains "$out" "source: status-log" "a mismatched override must fall through to the task's own status log"
+  assert_not_contains "$out" "worktree gone" "a mismatched metadata override must fall through to the task's live worktree"
+  assert_not_contains "$out" "other task log line" "a mismatched override must never surface the other task's status"
+  pass "override guard: a foreign-named override is ignored and the task's own state files are read"
+}
+
+test_matched_state_override_is_honoured() {
+  reset_fakes
+  local d out
+  d=$(new_case override-match)
+  make_repo_on_branch "$d/wt" fm/feat-ovr2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ovr2.meta" "window=fm:fm-feat-ovr2" "worktree=$d/live-missing-wt" "kind=ship" "harness=claude"
+  printf 'working: live log line\n' > "$d/state/feat-ovr2.status"
+  # The fleet snapshot's captured generation for THIS task: matching names.
+  mkdir -p "$d/snapshot"
+  fm_write_meta "$d/snapshot/feat-ovr2.meta" "window=fm:fm-feat-ovr2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: snapshot captured status\n' > "$d/snapshot/feat-ovr2.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ovr2
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/snapshot/feat-ovr2.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$d/snapshot/feat-ovr2.status" \
+    run_crew_state "$d" feat-ovr2)
+  assert_contains "$out" "state: paused" "a matched-name override must be honoured over the live status log"
+  assert_contains "$out" "source: status-log" "a matched-name override reads the captured log through the normal source"
+  assert_not_contains "$out" "worktree gone" "a matched-name metadata override must use the captured worktree"
+  pass "override guard: a matching-name override still steers the read at the captured generation"
 }
 
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
@@ -5552,6 +5708,7 @@ test_terminal_passed_with_open_pr_does_not_claim_merged
 test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
+test_terminal_passed_with_forgejo_pull_reports_its_state
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
@@ -5578,6 +5735,7 @@ test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
+test_external_review_done_reads_ready
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working
@@ -5594,6 +5752,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_gone_window_in_live_session_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
@@ -5605,6 +5764,8 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
+test_mismatched_state_override_is_ignored
+test_matched_state_override_is_honoured
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error

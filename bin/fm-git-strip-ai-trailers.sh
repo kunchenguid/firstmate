@@ -6,12 +6,14 @@
 #   fm-git-strip-ai-trailers.sh <msgfile>
 #       Commit-msg hook mode. Git passes the proposed message file as $1.
 #       Rewrites that file in place, then exits 0 so the commit proceeds.
-#   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
+#   fm-git-strip-ai-trailers.sh install [--no-strip] [--push-guard <guard-file>] <hooks-dir> <worktree>
 #       Recreate <hooks-dir> as a core.hooksPath for this launch: a commit-msg
 #       hook that runs this strip, plus one wrapper per client-side hook name
 #       git documents except reference-transaction and post-index-change,
 #       which are deliberately excluded (see FM_GIT_CLIENT_HOOKS below).
-#       Each wrapper unsets GIT_CONFIG_* and then resolves
+#       Each wrapper removes this directory's own core.hooksPath entry from
+#       GIT_CONFIG_*, keeping every inherited entry (a scoped credential.helper,
+#       safe.directory) for the repository's hook, and then resolves
 #       core.hooksPath (or $GIT_DIR/hooks) in the repository git is actually
 #       running in, so a husky directory that only appears after npm install
 #       still runs, and git -C some-other-repo does not inherit the task
@@ -22,8 +24,21 @@
 #       hook - a skipped pre-push guard. An empty core.hooksPath means no
 #       repository hook, as in plain git; any other failed lookup exits
 #       nonzero rather than skipping the repository's hook. Does not touch the
-#       project's git config; the caller prefixes the pane with
-#       GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 / GIT_CONFIG_VALUE_0.
+#       project's git config; the caller prefixes the pane with env-file below.
+#       --no-strip writes a commit-msg wrapper that only chains, for a home that
+#       keeps trailers but still needs the directory for the push guard.
+#       --push-guard copies <guard-file> into <hooks-dir> read-only and makes
+#       the pre-push wrapper run bin/fm-git-push-guard.sh on it first, with
+#       git's arguments and ref lines, chaining to the repository's pre-push
+#       hook only when the guard passes (that script owns the rules).
+#   fm-git-strip-ai-trailers.sh env-file <hooks-dir> <out-file>
+#       Write <out-file> as one plain export statement that appends
+#       core.hooksPath=<hooks-dir> after the GIT_CONFIG_COUNT entries this
+#       process inherited. The launch runs it in the pane and sources the
+#       result, so the index comes from the environment the worker inherits
+#       while the pane shell (fish included) only parses a simple command, &&,
+#       || and an export list. A count that is not a decimal number, or that
+#       leaves no room in git's signed-int count, exits nonzero with an error.
 #
 # WHY THIS EXISTS. Claude launches already carry attribution-off in their
 # per-launch --settings JSON. Cursor and other non-Claude runtimes inject a
@@ -36,6 +51,9 @@
 # on cursor-agent 2026.09.15 with attribution on: the trailer is already in
 # .git/COMMIT_EDITMSG when the commit-msg hook runs, so the spawn-owned hook is
 # the layer that sees the assembled message before the commit object is written.
+# Command Code adds `Co-authored-by: CommandCodeBot <noreply@commandcode.ai>`
+# to worker commits by default (seen live on 1.74.1); only its settings files can
+# turn that off, with no per-process switch, so this strip is its only layer.
 # Human Co-Authored-By trailers are left untouched. Author identity is not
 # rewritten.
 #
@@ -56,7 +74,7 @@
 # project genuinely needs it. Whoever removes the directory restores the owner
 # write bit first.
 set -u
-unset CDPATH GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+unset CDPATH
 
 SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 
@@ -64,7 +82,8 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-git-strip-ai-trailers.sh <msgfile>
-  fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
+  fm-git-strip-ai-trailers.sh install [--no-strip] [--push-guard <guard-file>] <hooks-dir> <worktree>
+  fm-git-strip-ai-trailers.sh env-file <hooks-dir> <out-file>
 EOF
   exit 2
 }
@@ -104,12 +123,12 @@ fm_is_ai_attribution_line() {
   esac
   name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
   case "$email" in
-  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com)
+  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com | noreply@commandcode.ai)
     return 0
     ;;
   esac
   case "$name" in
-  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai)
+  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai | commandcodebot)
     return 0
     ;;
   esac
@@ -147,10 +166,12 @@ write_executable() {
   chmod 500 "$dest"
 }
 
-# Shared body for every wrapper: after the pane-wide GIT_CONFIG override is
-# cleared, resolve this repository's own hooks directory the way git does
-# (core.hooksPath, else the common dir's hooks) and exec that name if it
-# exists. The lookup runs without GIT_CONFIG_PARAMETERS as well, since git -c
+# Shared body for every wrapper: after this directory's core.hooksPath entries
+# are removed from GIT_CONFIG_* (later entries shift down, so inherited ones
+# such as a scoped credential.helper still reach the repository's hook; a
+# relaunch in the same pane can leave more than one), resolve this
+# repository's own hooks directory the way git does (core.hooksPath, else the
+# common dir's hooks) and exec that name if it exists. The lookup runs without GIT_CONFIG_PARAMETERS as well, since git -c
 # is the other environment channel that can carry this directory as
 # core.hooksPath; only the repository's config files name its own hooks. Skip
 # when the lookup still names this launch's own hooks dir, meaning those files
@@ -161,8 +182,22 @@ write_executable() {
 runtime_chain_body() {
   local ours=$1
   cat <<EOF
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 ours=$(quote_for_hook "$ours")
+case \${GIT_CONFIG_COUNT:-} in
+'' | *[!0-9]*) ;;
+*)
+  count=\$((10#\$GIT_CONFIG_COUNT)) i=0 kept=0
+  while [ "\$i" -lt "\$count" ]; do
+    key=GIT_CONFIG_KEY_\$i value=GIT_CONFIG_VALUE_\$i
+    if [ "\${!key-}" != core.hooksPath ] || [ "\${!value-}" != "\$ours" ]; then
+      [ "\$i" = "\$kept" ] || export "GIT_CONFIG_KEY_\$kept=\${!key-}" "GIT_CONFIG_VALUE_\$kept=\${!value-}"
+      kept=\$((kept + 1))
+    fi
+    i=\$((i + 1))
+  done
+  export GIT_CONFIG_COUNT=\$kept
+  ;;
+esac
 name=\${0##*/}
 orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
   if hooks_path=\$(unset GIT_CONFIG_PARAMETERS; git config --get --type=path core.hooksPath 2>/dev/null) && [ -z "\$hooks_path" ]; then
@@ -209,9 +244,42 @@ FM_GIT_CLIENT_HOOKS='applypatch-msg pre-applypatch post-applypatch pre-commit
 pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout
 post-merge pre-push post-rewrite pre-auto-gc sendemail-validate'
 
+write_env_file() {
+  local hooks_dir=$1 out=$2 count=${GIT_CONFIG_COUNT:-0} tmp
+  [ -n "$hooks_dir" ] && [ -n "$out" ] || usage
+  # Wrappers drop only an entry naming their own install path, which install
+  # canonicalizes; write the same spelling so a symlinked path still matches.
+  hooks_dir=$(CDPATH='' cd -- "$hooks_dir" 2>/dev/null && pwd -P) || {
+    echo "error: cannot resolve hooks directory $1" >&2
+    return 1
+  }
+  case "$count" in
+  *[!0-9]*)
+    echo "error: invalid inherited GIT_CONFIG_COUNT" >&2
+    return 1
+    ;;
+  esac
+  while [ "${count#0}" != "$count" ]; do count=${count#0}; done
+  count=${count:-0}
+  if [ "${#count}" -gt 10 ] || [ "$count" -ge 2147483647 ]; then
+    echo "error: inherited GIT_CONFIG_COUNT cannot be extended" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$out.XXXXXX") || return 1
+  if ! printf 'export GIT_CONFIG_KEY_%s=core.hooksPath GIT_CONFIG_VALUE_%s=%s GIT_CONFIG_COUNT=%s\n' \
+    "$count" "$count" "$(quote_for_hook "$hooks_dir")" "$((count + 1))" >"$tmp" || ! mv -f "$tmp" "$out"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 install_hooks() {
-  local hooks_dir=$1 wt=$2 name
+  local hooks_dir=$1 wt=$2 strip=${3:-1} guard_src=${4:-} name strip_line guard_file guard_cmd
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
+  if [ -n "$guard_src" ] && { [ ! -f "$guard_src" ] || [ ! -r "$guard_src" ]; }; then
+    echo "error: push guard file is not a readable regular file: $guard_src" >&2
+    return 1
+  fi
   [ -d "$wt" ] || {
     echo "error: worktree is not a directory: $wt" >&2
     return 1
@@ -226,14 +294,38 @@ install_hooks() {
   chmod 700 "$hooks_dir" 2>/dev/null || true
   hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
 
+  strip_line=
+  [ "$strip" = 0 ] || strip_line="$(quote_for_hook "$SELF") \"\$1\" || exit \$?"
   write_executable "$hooks_dir/commit-msg" <<EOF
 #!/usr/bin/env bash
 set -u
-$(quote_for_hook "$SELF") "\$1" || exit \$?
+$strip_line
 $(runtime_chain_body "$hooks_dir")
 EOF
 
+  if [ -n "$guard_src" ]; then
+    guard_file="$hooks_dir/fm-push-guard"
+    { cp "$guard_src" "$guard_file" && chmod 400 "$guard_file"; } || return 1
+    guard_cmd="$(quote_for_hook "${SELF%/*}/fm-git-push-guard.sh") $(quote_for_hook "$guard_file")"
+    # git passes the refs being pushed on stdin; the guard reads them, so they
+    # are captured once and replayed to the repository's own pre-push hook.
+    write_executable "$hooks_dir/pre-push" <<EOF
+#!/usr/bin/env bash
+set -u
+refs=\$(cat)
+if [ -n "\$refs" ]; then
+  printf '%s\\n' "\$refs" | $guard_cmd "\$@" || exit 1
+  exec 0<<<"\$refs"
+else
+  $guard_cmd "\$@" </dev/null || exit 1
+  exec 0</dev/null
+fi
+$(runtime_chain_body "$hooks_dir")
+EOF
+  fi
+
   for name in $FM_GIT_CLIENT_HOOKS; do
+    [ -z "$guard_src" ] || [ "$name" != pre-push ] || continue
     write_executable "$hooks_dir/$name" <<EOF
 #!/usr/bin/env bash
 set -u
@@ -246,8 +338,29 @@ EOF
 CMD=${1:-}
 case "$CMD" in
 install)
+  shift
+  strip=1 guard=
+  while [ "$#" -gt 2 ]; do
+    case "$1" in
+    --no-strip)
+      strip=0
+      shift
+      ;;
+    --push-guard)
+      [ "$#" -gt 3 ] || usage
+      guard=$2
+      shift 2
+      ;;
+    *) usage ;;
+    esac
+  done
+  [ "$#" -eq 2 ] || usage
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  install_hooks "$1" "$2" "$strip" "$guard"
+  ;;
+env-file)
   [ "$#" -eq 3 ] || usage
-  install_hooks "$2" "$3"
+  write_env_file "$2" "$3"
   ;;
 -h | --help)
   usage

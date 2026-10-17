@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin commandcode"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -50,6 +50,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
     omp) printf '/quit\tEscape\t1\t\n' ;;
     devin) printf '/quit\tEscape\t2\t\n' ;;
+    commandcode) printf '/quit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
@@ -285,11 +286,11 @@ test_exit_types_each_harness_verified_command() {
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "exit-$harness")
     add_task "$dir" t1 "$harness"
-    if [ "$harness" = cursor ]; then
-      alive_as "$dir" cursor-agent
-    else
-      alive_as "$dir" "$harness"
-    fi
+    case "$harness" in
+      cursor) alive_as "$dir" cursor-agent ;;
+      commandcode) alive_as "$dir" command-code ;;
+      *) alive_as "$dir" "$harness" ;;
+    esac
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
@@ -307,11 +308,11 @@ test_interrupt_sends_each_harness_verified_key() {
     add_task "$dir" t1 "$harness"
     # Devin sends its second press only onto a running turn.
     [ "$harness" != devin ] || printf running > "$dir/fake/devin"
-    if [ "$harness" = cursor ]; then
-      alive_as "$dir" cursor-agent
-    else
-      alive_as "$dir" "$harness"
-    fi
+    case "$harness" in
+      cursor) alive_as "$dir" cursor-agent ;;
+      commandcode) alive_as "$dir" command-code ;;
+      *) alive_as "$dir" "$harness" ;;
+    esac
     out=$(run_control "$dir" t1 interrupt); rc=$?
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
@@ -537,6 +538,8 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  fm_control_harness_supports_kind commandcode secondmate \
+    && fail "commandcode has no primary supervision protocol and must not claim a secondmate"
   for harness in claude codex opencode pi pi-signed grok kimi omp; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
@@ -592,6 +595,45 @@ test_unverified_state_backends_refuse_stop_verbs() {
       "the $backend relaunch refusal should name the missing stop proof"
   done
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
+}
+
+# bin/fm-spawn.sh refuses a Command Code launch off tmux and herdr, but only
+# after a relaunch has stopped the old agent, so fm-control must refuse a
+# relaunch onto commandcode there while the running agent is untouched.
+test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
+  local dir out rc backend meta_before
+  for backend in zellij cmux orca; do
+    dir=$(new_case "cc-relaunch-$backend")
+    case "$backend" in
+      zellij)
+        add_task "$dir" t1 claude ship zellij "sess:7"
+        printf 'zellij_session=sess\nzellij_tab_id=1\nzellij_pane_id=7\n' >> "$dir/home/state/t1.meta"
+        ;;
+      cmux)
+        add_task "$dir" t1 claude ship cmux "ws1:surface1"
+        printf 'cmux_workspace_id=ws1\ncmux_surface_id=surface1\n' >> "$dir/home/state/t1.meta"
+        ;;
+      orca)
+        add_task "$dir" t1 claude ship orca "term-1"
+        sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta" > "$dir/home/state/t1.meta.new"
+        printf 'terminal=term-1\norca_worktree_id=wt-1::/orca/wt-1\n' >> "$dir/home/state/t1.meta.new"
+        mv "$dir/home/state/t1.meta.new" "$dir/home/state/t1.meta"
+        ;;
+    esac
+    alive_as "$dir" claude
+    meta_before=$(cat "$dir/home/state/t1.meta")
+    out=$(run_control "$dir" t1 relaunch --harness commandcode --note x); rc=$?
+    expect_code 1 "$rc" "a commandcode relaunch on $backend should refuse"$'\n'"$out"
+    [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
+      || fail "a refused commandcode relaunch on $backend must send the running agent nothing"
+    [ "$(cat "$dir/fake/command")" = claude ] \
+      || fail "the running agent on $backend must still be running"
+    [ "$(cat "$dir/home/state/t1.meta")" = "$meta_before" ] \
+      || fail "a refused commandcode relaunch on $backend must leave the task record unchanged"
+    [ ! -e "$dir/home/state/t1.control-relaunch" ] && [ ! -e "$dir/home/state/t1.control-relaunch.meta-prior" ] \
+      || fail "a refused commandcode relaunch on $backend must open no relaunch transaction"
+  done
+  pass "fm-control relaunch: commandcode off tmux and herdr is refused before the running agent is stopped"
 }
 
 test_state_verified_backends_are_exactly_tmux_and_herdr() {
@@ -1188,6 +1230,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
+test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
 test_state_verified_backends_are_exactly_tmux_and_herdr
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
