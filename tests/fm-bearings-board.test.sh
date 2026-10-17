@@ -511,6 +511,48 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   pass "charted kind is optional and accepts queued and warning"
 }
 
+test_ticket_and_pr_links_are_optional_https_urls_on_every_list() {
+  local home data out rc filter
+  home=$(make_home linkfields)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call[0] += {"ticket":"ABC-123","ticket_url":"https://tracker.example/issue/ABC-123",
+        "pr_url":"https://forge.example/org/sample/pull/7"}
+      | .captains_call[1] += {"ticket_url":"https://tracker.example/issue/ABC-124"}
+      | .underway = [{"id":"uw","repo":"sample","name":"Linked","state":"working","kind":"ship",
+        "doing":"implementing","ticket":"ABC-125","ticket_url":"https://tracker.example/issue/ABC-125",
+        "pr_url":"https://forge.example/org/sample/pull/8"}]
+      | .landed = [{"id":"ld","repo":"sample","what":"Shipped","owner":"firstmate",
+        "ticket":"ABC-126","ticket_url":"https://tracker.example/issue/ABC-126",
+        "pr_url":"https://forge.example/org/sample/pull/9"}]
+      | .charted[0] += {"ticket":"ABC-127","ticket_url":"https://tracker.example/issue/ABC-127",
+        "pr_url":"https://forge.example/org/sample/pull/10"}' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null \
+    || fail "https ticket and PR links on every list were refused"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    .underway[0].ticket_url == "https://tracker.example/issue/ABC-125"
+      and .underway[0].pr_url == "https://forge.example/org/sample/pull/8"
+      and .landed[0].ticket == "ABC-126"
+      and .charted[0].pr_url == "https://forge.example/org/sample/pull/10"
+  ' >/dev/null || fail "the built board did not carry the ticket and PR links it was given"
+
+  for filter in \
+    '.underway = [{"id":"uw","repo":"sample","name":"n","state":"working","kind":"ship","doing":"d","ticket_url":"http://tracker.example/issue/ABC-1"}]' \
+    '.underway = [{"id":"uw","repo":"sample","name":"n","state":"working","kind":"ship","doing":"d","pr_url":"javascript:alert(1)"}]' \
+    '.landed = [{"id":"ld","repo":"sample","what":"w","owner":"o","ticket_url":"data:text/html,unsafe"}]' \
+    '.charted[0].ticket_url = "http://tracker.example/issue/ABC-1"' \
+    '.charted[0].pr_url = "ftp://forge.example/pull/1"' \
+    '.captains_call[0].ticket_url = "javascript:alert(1)"' \
+    '.charted[0].ticket = ""' \
+    '.underway = [{"id":"uw","repo":"sample","name":"n","state":"working","kind":"ship","doing":"d","ticket":7}]'
+  do
+    write_valid_payload "$data"
+    jq "$filter" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "a malformed ticket or PR link was accepted: $filter"
+  done
+  pass "ticket and PR links are optional https URLs on every list, and anything else refuses"
+}
 
 # --- part 1: never arm a poll on an ended session ---------------------------
 
@@ -772,6 +814,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
+test_ticket_and_pr_links_are_optional_https_urls_on_every_list
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

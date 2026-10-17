@@ -4,8 +4,10 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//   { stats:[{n,label}], underway:[{title,sub,badges,links}],
+//     landed:[{title,sub,badges,links}], charted:[{title,sub,badges,pickable,links}],
+//     calls:[{title,links}], empty, more, error }
+// Each links entry is {text, href, target, rel} for an anchor the renderer made.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -27,6 +29,12 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => {
+        this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" ");
+      },
+      toggle: (c, on) => {
+        if (on) this.classList.add(c); else this.classList.remove(c);
+      },
     };
   }
   get textContent() {
@@ -95,6 +103,18 @@ const stats = strip.children.map((t) => ({
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
 }));
 
+const linksOf = (node) => {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.children) {
+      if (c.tagName === "a") out.push({ text: c.textContent, href: c.href, target: c.target, rel: c.rel });
+      walk(c);
+    }
+  };
+  walk(node);
+  return out;
+};
+
 const rowsOf = (container) =>
   container.children
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
@@ -105,11 +125,31 @@ const rowsOf = (container) =>
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
         badges: badgesOf(row),
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
+        links: linksOf(row),
       };
     });
 
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
+
+const landed = rowsOf(byId.get("bb-landed") || new Node("div"));
+
+const deck = byId.get("bb-call") || new Node("div");
+const findText = (n, cls) => {
+  for (const c of n.children) {
+    if (c.className.split(/\s+/).includes(cls)) return c.textContent;
+    const hit = findText(c, cls);
+    if (hit != null) return hit;
+  }
+  return null;
+};
+const calls = deck.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => ({
+    title: findText(card, "bb-decision__title") ?? "",
+    // The answer form's own controls are not links; only anchors count.
+    links: linksOf(card),
+  }));
 
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
@@ -123,4 +163,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, landed, charted, calls, empty, more, error: errorText }) + "\n");
