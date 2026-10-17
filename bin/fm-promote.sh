@@ -32,6 +32,10 @@
 # A scout spawned on a named base records base_branch= in its meta; promotion
 # keeps that base as the ship's starting point and pull-request target, and
 # refuses a mode that cannot carry one (bin/fm-dod-lib.sh fm_base_branch_valid).
+# In a home with config/spawn-base-primary-checkout, which can start a scout from
+# the primary checkout's default branch, a publishing mode without a named base
+# is told to return to origin's default branch instead, so commits origin has
+# never received cannot ride along in what it publishes.
 # There is no --forge flag here: the binding comes from the registry, and for a
 # task record naming no project it is none. bin/fm-brief.sh takes --forge instead
 # because that script has no registry access at all, and bin/fm-spawn.sh checks
@@ -249,6 +253,12 @@ if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
 fi
 PROMOTE_BASE_WORDS='default-branch base'
 [ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
+# A home with config/spawn-base-primary-checkout may have started this scout from
+# the primary checkout's default branch (bin/fm-spawn.sh's header owns that
+# rule), so a publishing mode is told which default branch to return to.
+if [ -z "$BASE_BRANCH" ] && fm_mode_publishes "$MODE" && [ -e "$CONFIG/spawn-base-primary-checkout" ]; then
+  PROMOTE_BASE_WORDS="copy of origin's default branch rather than the primary checkout's, which can carry commits origin has never received"
+fi
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
