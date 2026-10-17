@@ -364,6 +364,51 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_codex_relaunch_publishes_current_complete_record() {
+  local dir id=rl-full-record out rc before_head before_dirty round launch command arg doorbell record prior=
+  dir=$(new_case full-record "$id")
+  add_ship_task "$dir" "$id" codex
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  {
+    printf '# Task\n## Captain\047s intent\nRetain this complete synthetic intent: '
+    awk 'BEGIN { for (i=0; i<83828; i++) printf "x"; printf "\n" }'
+    printf '\n## Firstmate spec\nOnly exercise same-task transport.\n'
+  } > "$dir/home/data/$id/brief.md"
+  cp "$dir/home/data/$id/brief.md" "$dir/original-brief"
+  printf 'unfinished work\n' > "$dir/wt/unfinished.txt"
+  before_head=$(git -C "$dir/wt" rev-parse HEAD)
+  before_dirty=$(git -C "$dir/wt" status --porcelain)
+  # Each normal control-plane relaunch must render a fresh current record,
+  # without changing the retained copy, head, dirty files, or original intent.
+  for round in first second; do
+    printf '\nCurrent specification token: %s\n' "$round" >> "$dir/home/data/$id/brief.md"
+    out=$(run_control "$dir" "$id" relaunch --note "continue $round synthetic record"); rc=$?
+    expect_code 0 "$rc" "Codex same-task relaunch failed: $out"
+    launch=$(tail -1 "$dir/fake/literal")
+    command=$(fm_test_launch_command "$launch")
+    eval "set -- ${command#*codex }"
+    for arg do doorbell=$arg; done
+    . "$ROOT/bin/fm-operational-input.sh"
+    fm_operational_doorbell_kind "$doorbell" "$dir/home/state" arg || fail "replacement lost home-bound record"
+    fm_operational_doorbell_path "$doorbell" record || fail "replacement prompt lost canonical record"
+    [ "$record" != "$prior" ] || fail "same-task relaunch reused a stale launch record"
+    prior=$record
+    "$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$dir/home/data/$id/launch-brief.md" > "$dir/expected-envelope"
+    cmp -s "$record" "$dir/expected-envelope" || fail "replacement record lost complete launch bytes"
+    assert_grep "Current specification token: $round" "$record" "replacement consumed stale task instructions"
+    [ "$(wc -c < "$record")" -gt 131072 ] || fail "relaunch fixture did not exceed one Linux argument"
+    head -c "$(wc -c < "$dir/original-brief")" "$dir/home/data/$id/brief.md" > "$dir/retained-prefix"
+    cmp -s "$dir/original-brief" "$dir/retained-prefix" || fail "relaunch rewrote retained intent"
+    [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$before_head" ] || fail "relaunch moved retained HEAD"
+    [ "$(git -C "$dir/wt" status --porcelain)" = "$before_dirty" ] || fail "relaunch changed dirty work"
+    [ "$(meta_field "$dir" "$id" window)" = "fmses:fm-$id" ] || fail "relaunch replaced endpoint"
+    [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] || fail "relaunch replaced retained copy"
+    [ "$(meta_field "$dir" "$id" harness)" = codex ] || fail "relaunch changed author runtime"
+  done
+  pass "native Codex normal same-task relaunch publishes a fresh complete current record while preserving intent and unlanded work"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -2773,6 +2818,7 @@ SH
 }
 
 test_relaunch_off_opencode_removes_tracked_wiring
+test_codex_relaunch_publishes_current_complete_record
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
