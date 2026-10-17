@@ -68,6 +68,9 @@ PY
   mkdir -p "$CLAUDE_DIR"
   # No credentials or global hooks are copied. Cached rollout flags let the
   # installed vendor expose its real background transition without signing in.
+  # Claude Code 2.1.302 joins ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json for that
+  # global file (os.homedir when unset). The daemon/session root remains
+  # ${CLAUDE_CONFIG_DIR:-$HOME/.claude} and is a different directory.
   python3 - "$CLAUDE_DIR/.claude.json" <<'PY'
 import json,os,sys
 from pathlib import Path

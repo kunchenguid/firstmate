@@ -110,6 +110,7 @@ The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, 
 ### Claude background continuation identity
 
 Verified on 2026-10-14 with Claude Code `2.1.299 (Claude Code)` on Linux `7.2.9-arch1-1`, using a named non-default Herdr lab and fresh Claude config with no copied credentials.
+Claude Code 2.1.302 resolves the global settings file as `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` (`path.join(process.env.CLAUDE_CONFIG_DIR||os.homedir(), ".claude.json")`; diagnostics name `~/.claude.json`). The daemon and session root remains `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`. The live guard copies only `cachedGrowthBookFeatures` from the global settings file.
 The native daemon starts independently before the foreground conversation, which prevents daemon ancestry from masking the background handoff.
 The guard verifies its config-derived private socket and process birth before launching the frontend, then proves the settled new-id continuation while the frontend remains live outside the model-loop ancestry.
 An independent foreground conversation remains excluded from the same home.

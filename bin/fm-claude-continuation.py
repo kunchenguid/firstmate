@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Native-record proof and process binding for fm-session-lock-lib.sh; Linux only.
 
-Internal interface: <state> <owner-pid> <model-pid> <recorded-id> <current-id>.
-Exit 0 proves the direct background handoff; every uncertainty exits 1 silently.
-The shell library owns the ownership contract and the ancestry trust gate.
+Internal interface: <state> <owner-pid> <model-pid> <recorded-id> <current-id>
+proves the direct background handoff; <state> <owner-pid> <model-pid> proves the
+retained continuation binding still names those live processes. Exit 0 on proof;
+every uncertainty exits 1 silently. The shell library owns the ownership
+contract and the ancestry trust gate.
 """
 
 import datetime
@@ -177,10 +179,22 @@ def prove(state, owner, model, recorded, current):
     return True
 
 
+def bound(state, owner, model):
+    if owner == model:
+        return False
+    if read_regular(Path(state) / ".lock") != f"{owner}\n":
+        return False
+    saved = json.loads(read_regular(Path(state) / ".lock-continuation"), object_pairs_hook=unique_object)
+    return saved["identity"] == [owner, model, list(process(owner)), list(process(model))]
+
+
 if __name__ == "__main__":
     try:
-        state, owner, model, recorded, current = sys.argv[1:]
-        result = prove(state, int(owner), int(model), recorded, current)
+        if len(sys.argv) == 4:
+            result = bound(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))
+        else:
+            state, owner, model, recorded, current = sys.argv[1:]
+            result = prove(state, int(owner), int(model), recorded, current)
     except (OSError, ValueError, KeyError, TypeError, IndexError, UnicodeError):
         result = False
     sys.exit(0 if result else 1)
