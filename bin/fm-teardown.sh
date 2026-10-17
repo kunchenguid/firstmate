@@ -337,6 +337,7 @@ for _teardown_source in \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
+  fm-dod-lib.sh \
   fm-public-followup-lib.sh \
   fm-x-lib.sh \
   fm-env-lib.sh \
@@ -372,6 +373,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1591,7 +1594,10 @@ forge_is_github() {
 
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0 rc=0
-  if [ -n "$PR_URL" ]; then
+  # A cross-repo lane's recorded PR lives outside this copy's origin repository,
+  # so its head cannot be fetched here; prove this copy against its own
+  # branch's same-repo PR instead, or else the caller's origin content check.
+  if [ -n "$PR_URL" ] && ! fm_dod_pr_outside_origin "$WT" "$PR_URL"; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || rc=$?

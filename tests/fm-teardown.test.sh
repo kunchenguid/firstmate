@@ -975,6 +975,50 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
 }
 
+# A cross-repo lane records a PR outside the worktree's origin repository, whose
+# head cannot be fetched here: teardown proves this copy against its own
+# branch's same-repo PR, and still refuses unlanded work.
+test_cross_repo_lane_proves_own_landing() {
+  local case_dir rc head
+  case_dir=$(make_case cross-repo-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  # The recorded fork PR merged at a head this repository never had.
+  mv "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-same-repo"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *example/forked/pull/7*) printf 'MERGED\t18ef3b73a1b2c3d4e5f60718293a4b5c6d7e8f90\t%s\n' "$3" ; exit 0 ;;
+esac
+exec "$(dirname "$0")/gh-same-repo" "$@"
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  git -C "$case_dir/wt" remote set-url origin git@github.com:example/addons.git
+  printf '%s\n' "pr=https://github.com/example/forked/pull/7" >> "$case_dir/state/task-x1.meta"
+  set +e
+  GIT_SSH_COMMAND=false run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cross-repo-merged: teardown should prove the same-repo PR"
+  pass "cross-repo lane with both PRs merged tears down via its own same-repo PR"
+
+  case_dir=$(make_case cross-repo-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unlanded work"
+  cp "$TMP_ROOT/cross-repo-merged/fakebin/gh" "$case_dir/fakebin/gh"
+  git -C "$case_dir/wt" remote set-url origin git@github.com:example/addons.git
+  printf '%s\n' "pr=https://github.com/example/forked/pull/7" >> "$case_dir/state/task-x1.meta"
+  set +e
+  GIT_SSH_COMMAND=false run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cross-repo-unlanded: teardown should still refuse unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "cross-repo-unlanded: no REFUSED line in stderr"
+  pass "cross-repo lane whose worktree HEAD is not landed is still refused"
+}
+
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case no-pr-branch-discovery)
@@ -5122,6 +5166,7 @@ test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_cross_repo_lane_proves_own_landing
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
