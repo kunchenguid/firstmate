@@ -985,6 +985,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
       ;;
     pending:handling:*|announced:handling:*) RECOVERY_ACK_REQUIRED=true ;;
   esac
+  fm_wake_queue_drained_record_locked "$ACTOR" || true
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
@@ -1007,6 +1008,7 @@ if [ "$ACTOR" = main ]; then
     # drain that prints nothing while the queue is visibly non-empty reads as a
     # lost wake, and leaves the caller with no idea who owns what is queued.
     print_branch_held_notice
+    fm_wake_queue_drained_record_locked "$ACTOR" || true
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
@@ -1067,6 +1069,7 @@ case "$RECOVERY_MARKER_TOKEN" in
   pending:*|announced:*|acked:*) ;;
   *) echo "wake drain: durable wakes have no recovery generation" >&2; exit 1 ;;
 esac
+fm_wake_queue_drained_record_locked "$ACTOR" || true
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
