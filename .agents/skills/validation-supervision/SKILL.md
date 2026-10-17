@@ -21,6 +21,15 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
+A worker whose run cannot start because its gate ref is stale reports `needs-decision` with key `gate-ref-stale`, carrying the exit code, `gate_tip`, `head` and verdict line of `bin/fm-gate-ref-probe.sh`, whose header owns the verdicts and exit codes.
+`axi sync --check` reading `custody_returned` with `run_pipeline` does not rule that out, and once custody is stamped no supported no-mistakes command moves the ref.
+Never force the push, delete or rewrite the gate ref, or hand-edit the shared gate repository, and never tell a worker to; the ref is tool-owned state every lane on the project shares.
+Exit 10 means no non-merge commit is unique to the gate ref, so the work is safe; check any merge commit the probe counts before treating the ref as disposable.
+Its only route is a fresh branch name, and firstmate cannot re-point a running ship's branch: the brief's ship branch, the spawn metadata, and the PR and landed-work checks all name the old one, so that route is a re-dispatch of the same work, not a rename.
+Exit 11 means the gate ref holds work the worker's head lacks: have the worker recover custody first, and treat anything left as the captain's call.
+Exit 2 means the probe could not answer, and its `error` line names why; nothing then shows the gate will take the push, so settle that cause before any run.
+A probe that exits 0 does not clear a worker whose `axi sync --check` is blocked for another reason, such as `blocked_recover_manual_reconciliation`; that refusal is a different path and still needs its own decision.
+
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.

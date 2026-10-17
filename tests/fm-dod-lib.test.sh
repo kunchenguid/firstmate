@@ -599,4 +599,25 @@ test_external_review_done_with_backup_needs_the_copy
 
 test_worker_role_names_skill_and_fallback_file
 
+# A recovered lane's gate ref can be stale while axi sync --check reports
+# custody_returned and run_pipeline, so the driving text a no-mistakes worker
+# reads must send it through the read-only probe and onto a keyed decision.
+test_driving_text_routes_through_the_gate_ref_probe() {
+  local out="$TMP_ROOT/driving.txt"
+  fm_dod_block no-mistakes gate-ref-lane >"$out" || fail "could not render the no-mistakes definition of done"
+  assert_grep "$ROOT/bin/fm-gate-ref-probe.sh" "$out" "driving text did not name the gate-ref probe"
+  assert_grep 'key=gate-ref-stale' "$out" "driving text did not name the keyed decision"
+  assert_grep "Immediately before every \`no-mistakes axi run\` that starts a new run" "$out" \
+    "driving text left the trigger to the worker's judgment of whether the branch was touched"
+  assert_grep 'never before a flagless reattach' "$out" "driving text would probe an active run"
+  assert_grep 'the recovery it offers comes first' "$out" "driving text lets the probe pre-empt an offered recovery"
+  assert_grep 'On exit 2, 10 or 11' "$out" "driving text left an unanswerable probe unrouted"
+  assert_grep 'key=gate-ref-stale]: exit=<code> gate_tip=<sha> head=<sha>: <verdict line>' "$out" \
+    "driving text did not make the decision carry the exit code and both refs"
+  [ -x "$ROOT/bin/fm-gate-ref-probe.sh" ] || fail "the probe the driving text names is not executable"
+  pass "driving text routes a recovered lane through the gate-ref probe"
+}
+
+test_driving_text_routes_through_the_gate_ref_probe
+
 echo "all fm-dod-lib tests passed"
