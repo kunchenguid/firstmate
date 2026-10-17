@@ -236,7 +236,7 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-default some-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "a ship brief with no --forge should still scaffold"
   brief="$home/data/brief-forge-default/brief.md"
-  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen" "$brief" \
     "a brief with no --forge must render the exact pre-existing gh-axi Rule 3 line"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
@@ -247,8 +247,10 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a direct-PR ship brief"
   brief="$home/data/brief-forge-forgejo/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen" "$brief" \
     "--forge forgejo must render the tea Rule 3 line"
+  assert_grep "never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser." "$brief" \
+    "--forge forgejo's Rule 3 must carry the full headless-only clause, not just the gh-axi variant"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `tea`' "$brief" \
     "--forge forgejo's direct-PR DOD must tell the worker to open the PR with tea"
@@ -268,7 +270,7 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-nm some-proj --mode no-mistakes --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a no-mistakes ship brief"
   brief="$home/data/brief-forge-nm/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen" "$brief" \
     "a no-mistakes --forge forgejo brief must render the tea Rule 3 line"
   grep -qx "Delivery contract: mode=no-mistakes forge=forgejo" "$brief" \
     || fail "a no-mistakes --forge forgejo brief must mark the delivery contract line"
@@ -642,6 +644,65 @@ test_ship_project_memory_wording() {
   assert_grep "A correction edits only the wrong text: do not run \`$ROOT/bin/fm-ensure-agents-md.sh\`" "$brief" \
     "project-memory contract no longer forbids the ensure helper on a correction"
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
+}
+
+# Regression: workers parking on backgrounded build/test monitors for over
+# an hour, traced to the scaffold never stating the rule. It must land in both
+# heredocs (scout and ship are separate blocks in fm-brief.sh) or half the
+# fleet silently misses the rule, and it must defer to the existing paused
+# declaration rather than contradict it.
+test_no_background_idle_wait_rule() {
+  local home id brief kind
+  home="$TMP_ROOT/no-bg-idle-wait-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-no-bg-idle-wait-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "never background one just to idle-wait on a completion notification" "$brief" \
+      "$kind brief missing the no-background-idle-wait rule"
+    assert_grep "Where a tracked background job is genuinely needed, the paused declaration in rule 4 applies." "$brief" \
+      "$kind brief missing the defer-to-paused-declaration clause"
+    assert_grep "Before ending your turn with your own background shell or monitor still running" "$brief" \
+      "$kind brief lost the existing paused-declaration protocol"
+  done
+  pass "fm-brief.sh: no-background-idle-wait rule renders in both ship and scout briefs and defers to the paused declaration"
+}
+
+# Regression: a worker clobbered its own review fixes with a `git checkout`
+# over uncommitted work, and a stray `pkill -f vite` killed every frontend
+# worker on the machine. Headless-only browser testing closes a third
+# incident: a worker driving the captain's own screen.
+test_temp_edit_process_kill_and_headless_rules() {
+  local home id brief kind
+  home="$TMP_ROOT/temp-edit-process-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-temp-edit-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+    assert_grep 'Never `git checkout` or `git restore` a file that holds uncommitted work' "$brief" \
+      "$kind brief missing the no-checkout-over-uncommitted-work rule"
+    assert_grep "commit the file or copy it aside" "$brief" \
+      "$kind brief missing the copy-before-temporary-edit rule"
+    # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+    assert_grep 'Never `pkill` or `killall` by name or pattern' "$brief" \
+      "$kind brief missing the no-pkill-by-pattern rule"
+    assert_grep "never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser." "$brief" \
+      "$kind brief missing the no-driving-the-captain's-screen rule"
+  done
+  pass "fm-brief.sh: temporary-edit, no-pkill, and headless-only rules render in both ship and scout briefs"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -1613,6 +1674,8 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_no_background_idle_wait_rule
+test_temp_edit_process_kill_and_headless_rules
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
