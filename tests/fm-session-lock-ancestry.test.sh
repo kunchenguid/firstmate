@@ -683,6 +683,23 @@ wait_for_file() {  # <path> <what>
   [ -s "$1" ] || fail "background-session fixture never produced $2"
 }
 
+# After the daemon bridge exits, the pty-host must leave both that daemon and
+# the live frontend. systemd user instances are child subreapers, so the new
+# parent is often that manager rather than pid 1; the product invariant is the
+# broken ancestry, not the specific init pid.
+wait_for_ancestry_divergence() {  # <child-pid> <old-parent-pid> <forbidden-pid> <what>
+  local child=$1 old_parent=$2 forbidden=$3 what=$4 i=0 ppid
+  while [ "$i" -lt 200 ]; do
+    ppid=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d ' ')
+    if [ -n "$ppid" ] && [ "$ppid" != "$old_parent" ] && [ "$ppid" != "$forbidden" ]; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "$what (child $child parent=${ppid:-gone}, daemon $old_parent, frontend $forbidden)"
+}
+
 fire_phase() {  # <dir> <n> <hook-environment-script>
   local dir=$1 n=$2
   printf '%s\n' "$3" > "$dir/state/fire-$n.tmp"
@@ -778,12 +795,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
   # the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
-  i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  wait_for_ancestry_divergence "$ptyhost" "$daemon" "$frontend" "the pty-host was not reparented away from the daemon after it ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id
@@ -871,9 +883,7 @@ PY2
     [ "$(phase_value "$dir" "$n" session-after)" = "$target" ] || fail "ancestry confirmation did not advance sidecar"
   fi
   kill -TERM "$daemon"
-  i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p "$ptyhost" | tr -d ' ')" != 1 ]; do sleep 0.05; i=$((i + 1)); done
-  [ "$(ps -o ppid= -p "$ptyhost" | tr -d ' ')" = 1 ] || fail "continuation chain did not diverge"
+  wait_for_ancestry_divergence "$ptyhost" "$daemon" "$frontend" "continuation chain did not diverge"
   kill -0 "$frontend" || fail "continuation frontend is not alive"
 
   if [ "$mode" = detached ]; then

@@ -15,7 +15,10 @@
 # sidecar written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
-# and left byte-identical when it already names that id. A same-session
+# and left byte-identical when it already names that id. When the trusted id
+# differs, publication first runs the shared same-session proof so a verified
+# direct handoff is bound in state/.lock-continuation before the sidecar
+# advances. A same-session
 # confirmation keeps a live line 1 that is in this session's harness ancestry,
 # because bin/fm-startup-network.sh compares that pid across its deferred
 # sweeps; a dead recorded pid is reclaimed and rewritten to this session's
@@ -158,7 +161,8 @@ remember_lock_session() {
 # Record the trusted session id beside the lock, or remove a sidecar that no
 # trusted id backs. Called only while the claim lock is held. A sidecar already
 # naming this id is left untouched, so a same-session confirmation keeps it
-# byte-identical.
+# byte-identical. A different trusted id first proves same-session identity so
+# the continuation binding is captured before this rewrite.
 publish_lock_session() {
   local trusted recorded tmp
   if trusted=$(fm_session_lock_trusted_session_id); then

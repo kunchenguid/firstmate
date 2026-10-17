@@ -193,15 +193,23 @@ from pathlib import Path
 root=Path(sys.argv[1]); pids=list(map(int,sys.argv[2:5])); source=sys.argv[5]
 def process(pid):
     proc=Path(f'/proc/{pid}'); fields=proc.joinpath('stat').read_text().rsplit(')',1)[1].split()
-    env=dict(row.split('=',1) for row in proc.joinpath('environ').read_bytes().decode().split('\0') if '=' in row)
-    return dict(pid=pid,parent=int(fields[1]),birth=fields[19],cwd=os.readlink(proc/'cwd'),
+    try:
+        env=dict(row.split('=',1) for row in proc.joinpath('environ').read_bytes().decode().split('\0') if '=' in row)
+        cwd=os.readlink(proc/'cwd')
+    except (PermissionError, OSError):
+        env={}; cwd=None
+    return dict(pid=pid,parent=int(fields[1]),birth=fields[19],cwd=cwd,
                 config=env.get('CLAUDE_CONFIG_DIR'),home=env.get('FM_HOME'))
 def registry(pid):
     row=json.loads((root/'sessions'/f'{pid}.json').read_text())
     return {k:row[k] for k in ['pid','procStart','startedAt','sessionId','kind','cwd','pidDomain','parkedJobId','jobId'] if k in row}
 chain=[]; pid=pids[1]
 while pid>1 and len(chain)<24:
-    row=process(pid); chain.append(row); pid=row['parent']
+    try:
+        row=process(pid)
+    except (PermissionError, OSError, IndexError):
+        break
+    chain.append(row); pid=row['parent']
 transcripts=list(root.glob(f'projects/*/{source}.jsonl'))
 links=[json.loads(line) for line in transcripts[0].read_text().splitlines() if json.loads(line).get('type')=='continued-in']
 daemon=json.loads((root/'daemon.lock').read_text())
