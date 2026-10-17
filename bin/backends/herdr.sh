@@ -1480,6 +1480,13 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.
 #
+# Optional <group-order-key> is the opt-in project-group key that
+# bin/fm-herdr-groups.sh order-key prints for the new task. When given, the
+# new workspace lands inside the block right after the last child whose
+# fm_group_order workspace token is absent or sorts at or before that key,
+# else at the block start; existing children are still never moved. When
+# omitted the target stays the block end exactly as before.
+#
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
 # warning and leaves the safely-created worker running in Herdr's current
@@ -1490,8 +1497,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # current workspace-create response.
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
-  local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>] [<group-order-key>]
+  local session=$1 created=$2 parent=$3 parent_ws=${4:-} group_key=${5:-} list analysis current desired socket mover response move_status focus_before move_capable
   local before_existing after_existing
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
@@ -1501,7 +1508,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
   }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" '
+  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" --arg group_key "$group_key" '
     def is_parent:
       if ($parent_ws | length) > 0
       then .workspace_id == $parent_ws
@@ -1560,9 +1567,21 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
         end
       )) as $remainder
     | select($remainder.valid == true)
+    | (
+        if ($group_key | length) > 0 then
+          [range(0; $block)
+            | select(
+                ($spaces[$pidx + 1 + .].tokens.fm_group_order // null) as $key
+                | (($key | type) != "string") or ($key <= $group_key)
+              )]
+          | if length > 0 then (max + 1) else 0 end
+        else
+          $block
+        end
+      ) as $offset
     | {
         current: $current,
-        desired: ($pidx + 1 + $block),
+        desired: ($pidx + 1 + $offset),
         parent_index: $pidx,
         existing: [$spaces[] | select(.workspace_id != $created) | .workspace_id]
       }

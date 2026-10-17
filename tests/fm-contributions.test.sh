@@ -1576,8 +1576,75 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
   pass 'retire is idempotent and refuses non-captain, unknown, malformed and signal-bearing pairs'
 }
 
+# GitHub returns every review with its full body, user object and links; a
+# long-lived PR's history must still leave a record every reader accepts.
+test_many_reviews_stay_readable() {
+  local home size out wakes token
+  home=$(new_home many-reviews)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the many-review delivery'
+  # 300 reviews: a non-member bot comments on every head, while the maintainer
+  # and a collaborator leave formal states on the observed and a replaced head.
+  jq -n --arg a "$HEAD_A" --arg b "$HEAD_B" '
+    ("x" * 4000) as $body
+    | def person($login; $id): {login:$login,id:$id,node_id:"MDQ6VXNlcjE=",type:"User",site_admin:false,
+        avatar_url:"https://avatars.githubusercontent.com/u/1?v=4",gravatar_id:"",
+        url:("https://api.github.com/users/" + $login),html_url:("https://github.com/" + $login),
+        followers_url:("https://api.github.com/users/" + $login + "/followers"),
+        following_url:("https://api.github.com/users/" + $login + "/following{/other_user}"),
+        gists_url:("https://api.github.com/users/" + $login + "/gists{/gist_id}"),
+        starred_url:("https://api.github.com/users/" + $login + "/starred{/owner}{/repo}"),
+        subscriptions_url:("https://api.github.com/users/" + $login + "/subscriptions"),
+        organizations_url:("https://api.github.com/users/" + $login + "/orgs"),
+        repos_url:("https://api.github.com/users/" + $login + "/repos"),
+        events_url:("https://api.github.com/users/" + $login + "/events{/privacy}"),
+        received_events_url:("https://api.github.com/users/" + $login + "/received_events")};
+    [range(1; 301) as $i
+     | (if $i % 10 == 0 then ["maintainer","OWNER",(if $i == 300 then "COMMENTED" elif $i == 290 then "CHANGES_REQUESTED" else "APPROVED" end),$a]
+        elif $i % 10 == 5 then ["helper","COLLABORATOR",(if $i == 295 then "APPROVED" else "COMMENTED" end),(if $i == 295 then $b else $a end)]
+        else ["review-bot","NONE","COMMENTED",$a] end) as [$login,$association,$state,$commit]
+     | {id:(1000 + $i),node_id:"PRR_kwDOAAAA",user:person($login; $i),body:$body,state:$state,
+        html_url:("https://github.com/o/r/pull/8#pullrequestreview-" + ((1000 + $i) | tostring)),
+        pull_request_url:"https://api.github.com/repos/o/r/pulls/8",author_association:$association,
+        _links:{html:{href:"https://github.com/o/r/pull/8"},pull_request:{href:"https://api.github.com/repos/o/r/pulls/8"}},
+        submitted_at:(1789538400 + $i * 10 | todate),commit_id:$commit}]' > "$home/forge/reviews.json"
+  [ "$(wc -c < "$home/forge/reviews.json")" -gt 1048576 ] || fail 'the many-review fixture no longer exceeds the record cap'
+  registered_checks "$home" >/dev/null
+  size=$(wc -c < "$home/data/delivery/contributions.json" | tr -d " ")
+  [ "$size" -lt 524288 ] || fail "a many-review observation wrote a $size-byte record"
+  jq -e '.records[0].observation.reviews | length == 300
+    and all(.[]; keys == ["commit_id","id","state","submitted_at","user"] and .user == {login:.user.login})' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'stored reviews carry more than the classified fields'
+  wakes=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  registered_checks "$home" >/dev/null
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$wakes" ] || fail 'already notified review signals woke again'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) || fail 'a many-review record made pending unreadable'
+  printf '%s' "$out" | jq -e 'length == 60 and all(.[]; .type == "review")' >/dev/null \
+    || fail "pending lost the maintainer review signals: $out"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect many-review contribution input'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project the many-review record'
+  printf '%s' "$out" | jq -e --arg a "$HEAD_A" --arg b "$HEAD_B" '
+    .unreadable_records == 0 and .rows[0].stale_verdicts == 1
+    and .rows[0].reviews == [
+      {id:1295,state:"APPROVED",submitted_at:"2026-09-16T06:49:10Z",commit_id:$b,user:{login:"helper"},freshness:"STALE"},
+      {id:1290,state:"CHANGES_REQUESTED",submitted_at:"2026-09-16T06:48:20Z",commit_id:$a,user:{login:"maintainer"},freshness:"current"}]' \
+    >/dev/null || fail "the stored review projection changed the classified reviews: $out"
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[0].token') || fail 'no review token to acknowledge'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
+    || fail 'a many-review record refused an exact acknowledgement'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
+    https://github.com/o/r/pull/8#pullrequestreview-1290 fleet 'address requested changes' \
+    || fail 'a many-review record refused a verdict'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 59' >/dev/null \
+    || fail 'the acknowledgement did not persist in the many-review record'
+  pass 'a many-review PR stores only classified review fields and stays readable'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

@@ -1068,6 +1068,17 @@ await fire("before_agent_start", {
   message: { role: "custom", customType: "fixture", content: "custom content must not become captain dialog", display: true },
 }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+// Pi 1.2's idle sendMessage trigger carries a CustomMessage, not a prompt.
+// Even report-request wording in it must never become captain dialog.
+await fire("before_agent_start", {
+  type: "before_agent_start",
+  messageType: "custom",
+  message: {
+    role: "custom", customType: "fixture", content: explicitRequest,
+    display: false, timestamp: Date.now(),
+  },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, mainCtx);
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
@@ -1125,6 +1136,7 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
+  text === `[captain] ${explicitRequest}` ||
   text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report") ||
   text.includes("custom content must not become captain dialog")
 )) {
@@ -2145,7 +2157,6 @@ for (const event of [
   await fire("before_agent_start", event, abortCtx);
   contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
   await fire("agent_start", {}, defaultSessionCtx);
-  if (event.messageType === "custom") await fire("message_start", { message: processingMsg }, abortCtx);
   const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
   if (!aborted) throw new Error(`a dedicated ${event.messageType ?? "legacy"} processing turn with history was not aborted under the record`);
   if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
@@ -2153,6 +2164,47 @@ for (const event of [
   }
   await fire("agent_end", {});
 }
+for (const message of [
+  { ...processingMsg, customType: "fixture" },
+  { ...processingMsg, content: "different processing request" },
+]) {
+  aborted = false;
+  await fire("before_agent_start", {
+    type: "before_agent_start", messageType: "custom", message,
+    systemPrompt: "fixture", systemPromptOptions: {},
+  }, abortCtx);
+  const unrelated = await fire("context", { messages: [...history, message, processingMsg] }, abortCtx);
+  if (aborted) throw new Error("an unrelated custom run was aborted after a processing request joined it");
+  if (unrelated?.messages?.some((item) => item.customType === "fm-branch-process")) {
+    throw new Error(`joined processing was not stripped from a custom run: ${JSON.stringify(unrelated)}`);
+  }
+}
+aborted = false;
+await fire("before_agent_start", { messageType: "custom", message: processingMsg }, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
+if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+}
+await fire("agent_end", {});
+contract(["archive"]);
+aborted = false;
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "custom",
+  message: { ...processingMsg, timestamp: Date.now() },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+await fire("turn_start", {});
+await fire("message_start", { message: processingMsg }, abortCtx);
+contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
+const openedByCustomRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a custom processing turn with history was not aborted when the record appeared");
+if (openedByCustomRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`custom processing with history was not stripped: ${JSON.stringify(openedByCustomRequest)}`);
+}
+await fire("agent_end", {});
 await fire("agent_settled", {});
 if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Error(`the record moved the processed marker: ${unprocessedSeqs()}`);
@@ -3214,6 +3266,19 @@ if (mirrored[2].content !== `[captain] ${entries[6].message.content}`) {
 }
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
+}
+
+// A run that pi.sendCustomMessage starts carries a custom message and no
+// prompt, so reading the prompt here threw and every such run surfaced the
+// failure instead of starting. It is not captain input either, so nothing of
+// it reaches the mirror.
+const mirroredBeforeCustomRun = session.ops.filter((op) => op.kind === "custom").length;
+await fire("before_agent_start", {
+  messageType: "custom",
+  message: { role: "custom", customType: "fm-branch-merge", content: "merge note that starts its own run" },
+}, ctx);
+if (session.ops.filter((op) => op.kind === "custom").length !== mirroredBeforeCustomRun) {
+  throw new Error("a custom-message run was mirrored as captain dialog");
 }
 
 // The durable cursor advances: a second turn_end mirrors only NEW dialog.

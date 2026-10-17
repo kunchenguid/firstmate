@@ -228,10 +228,11 @@ set -u
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
-    ;;
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || [ "${FM_FAKE_TMUX_WINDOW_GONE:-0}" = 1 ]; then
+      printf 'other-window\n'
+    else
+      sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:?}"/*.meta 2>/dev/null
+    fi ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
@@ -345,6 +346,7 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOW_GONE=0
   FM_FAKE_TMUX_UNREADABLE=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
@@ -375,7 +377,7 @@ reset_fakes() {
   FM_FAKE_GERRIT_READ_FAIL=0
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOW_GONE FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
@@ -3110,6 +3112,24 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+test_gone_window_in_live_session_ignores_stale_status_log() {
+  reset_fakes
+  local d; d=$(new_case gone-window-live-session)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship"
+  printf 'working: implementing the widget\n' > "$d/state/feat-gone.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_WINDOW_GONE=1
+  local out; out=$(run_crew_state "$d" feat-gone)
+  assert_contains "$out" "state: unknown" "gone window in a live session -> unknown"
+  assert_contains "$out" "source: none" "gone window in a live session -> none source"
+  assert_contains "$out" "backend target gone" "gone window in a live session reports the dead endpoint"
+  assert_not_contains "$out" "source: status-log" "a gone window must not let the stale log read as current"
+  pass "a gone window of a live session ignores the stale status log"
+}
+
 # Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
 # reached the same false-death path as herdr. A tmux that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
@@ -5677,6 +5697,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_gone_window_in_live_session_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

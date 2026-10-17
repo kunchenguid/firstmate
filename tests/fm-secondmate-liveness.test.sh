@@ -273,6 +273,7 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
+windows="${FM_TMUX_CALL_LOG:?}.windows"
 case "${1:-}" in
   display-message)
     for a in "$@"; do
@@ -290,15 +291,30 @@ case "${1:-}" in
     ;;
   list-windows)
     case "$mode" in
-      missing) printf '%s\n' main; exit 0 ;;
+      missing)
+        printf '%s\n' main
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
       unreadable) exit 1 ;;
-      *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
+      *)
+        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
     esac
     ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     if [ "${1:-}" = new-window ] && [ -n "${FM_TEST_NEW_WINDOW_PAUSE:-}" ]; then
       sleep "$FM_TEST_NEW_WINDOW_PAUSE"
+    fi
+    if [ "${1:-}" = new-window ]; then
+      name=
+      previous=
+      for arg in "$@"; do
+        [ "$previous" = -n ] && name=$arg
+        previous=$arg
+      done
+      grep -Fqx -- "$name" "$windows" 2>/dev/null || printf '%s\n' "$name" >> "$windows"
     fi
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
