@@ -1601,6 +1601,51 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   pass "host+hook: the next park takes over the cycle a main-only pass-through left, so one arm owns it"
 }
 
+# The left-arm record was confirmed before main's turn, but a transient parent
+# lookup miss at the next park must not turn its watcher into an attached cycle.
+# The real watcher and arm still run; only that one process-table answer is lost.
+test_next_park_takes_over_when_the_parent_lookup_misses() {
+  local home left_arm left_watcher real_ps
+  home=$(make_primary_home hook-takeover-parent-miss)
+  leave_a_cycle_for_main_and_restart "$home"
+  left_arm=$LEFT_ARM
+  left_watcher=$LEFT_WATCHER
+  real_ps=$(command -v ps)
+  printf '%s\n' "$left_watcher" > "$home/parent-miss-watcher"
+  cat > "$home/fakebin/ps" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -o ] && [ "\$2" = ppid= ] && [ "\$3" = -p ] \
+  && [ "\$4" = "\$(cat "\$FM_HOME/parent-miss-watcher")" ]; then
+  printf 'miss\n' >> "\$FM_HOME/ps-intercepts"
+  printf '1\n'
+  exit 0
+fi
+exec "$real_ps" "\$@"
+SH
+  chmod +x "$home/fakebin/ps"
+  turn_end "$home"
+  wait_until 150 grep -q $'\ttake-over\tarm='"$left_arm"'$' "$home/state/.supervision-host.log" \
+    || fail "parent miss: the next park did not request take-over"
+  wait_until 100 test -s "$home/ps-intercepts" \
+    || fail "parent miss: the process-table miss was not exercised"
+  if ! wait_until 40 grep -q 'reason=taken-over' "$home/state/.watch-cycle-exits.log"; then
+    # Reproduce the observed short-lived successor only on the broken path.
+    kill -TERM "$left_arm" 2>/dev/null || true
+  fi
+  wait_until 200 host_owns_the_only_cycle "$home" \
+    || fail "parent miss: take-over attached and left its watcher to die:"$'\n'"$(cat "$home/state/.supervision-host.log")"$'\n'"$(cat "$home/state/.watch-cycle-exits.log")"
+  ! kill -0 "$left_watcher" 2>/dev/null || fail "parent miss: the old watcher still runs"
+  assert_re 'reason=taken-over' "$home/state/.watch-cycle-exits.log" \
+    "parent miss: no confirmed take-over was recorded"
+  sleep 2
+  ! hook_exited "$home" || fail "parent miss: take-over rewoke main: $(cat "$home/hook.err")"
+  assert_no_re 'rearm-resurface' "$home/state/.supervision-host.log" \
+    "parent miss: take-over announced recovery despite the acknowledged episode"
+  assert_re '^acked:' "$home/state/.watcher-down" \
+    "parent miss: take-over did not restore the acknowledged episode"
+  pass "host+hook: a recorded successor is taken over despite a missed parent lookup"
+}
+
 # A park stopped before its take-over stops the left cycle (here held in the
 # take-over's handover snapshot by the recovery-marker lock) must not forget
 # that cycle's arm: the park the Stop hook runs next still takes it over rather
@@ -1619,7 +1664,7 @@ test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park() {
   holder=$!
   wait_until 100 test -e "$home/marker-lock-held" || fail "fixture: could not hold the recovery-marker lock"
   turn_end "$home"
-  wait_until 150 grep -q "	take-over	arm=$LEFT_ARM\$" "$home/state/.supervision-host.log" \
+  wait_until 150 grep -q $'\ttake-over\tarm='"$LEFT_ARM"'$' "$home/state/.supervision-host.log" \
     || fail "interrupted takeover: the park did not start a take-over of $LEFT_ARM: $(cat "$home/state/.supervision-host.log")"
   host=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   sleep 1
@@ -2994,6 +3039,7 @@ test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
+test_next_park_takes_over_when_the_parent_lookup_misses
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main
 test_primary_without_a_verified_mirror_runs_away_only

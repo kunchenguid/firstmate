@@ -1123,6 +1123,8 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own() {
   FM_HOME="$dir" start_seed_watcher "$state" "$fakebin" "$dir/watch.out"
   sleep 60 &
   other=$!
+  printf '%s\t%s\t%s\t%s\n' "$other" "$(fm_test_pid_identity "$other")" 99999 missing \
+    > "$state/.supervision-host-left"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --take-over 2>/dev/null
   status=$?
   expect_code 2 "$status" "--take-over without an arm pid must be refused"
@@ -1131,6 +1133,8 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own() {
   ARM_PID=$!
   wait_for_file_text "$armout" "watcher: attached pid=$SEED_PID" \
     || fail "--take-over of a cycle the named arm does not own did not attach: $(cat "$armout")"
+  [ ! -e "$state/.supervision-host-left" ] \
+    || fail "--take-over retried an unprovable left-cycle record without settling it"
   sleep 1
   is_live_non_zombie "$SEED_PID" || fail "--take-over stopped a watcher the named arm does not own"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" = "$SEED_PID" ] || fail "--take-over moved a lock it does not own"
@@ -1139,6 +1143,44 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own() {
   wait_for_exit "$SEED_PID" 50 >/dev/null 2>&1 || true
   wait "$other" 2>/dev/null || true
   pass "watch-arm: --take-over attaches to a cycle the named arm does not own and leaves it running"
+}
+
+test_take_over_rejects_a_recorded_attached_successor() {
+  local dir state fakebin owner attached acknowledged origin armout
+  dir=$(make_case take-over-attached-successor)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  start_rearm_arm "$dir" "$state" "$fakebin" "$dir/owner.out" "$$"
+  owner=$ARM_PID
+  SEED_PID=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the wake"
+  acknowledged=$(cat "$state/.watcher-down")
+  FM_HOME="$dir" start_attached_arm "$state" "$fakebin" "$dir/attached.out" 5
+  attached=$ARM_PID
+  for origin in attached ''; do
+    printf '%s\t%s\t%s\t%s' "$attached" "$(fm_test_pid_identity "$attached")" \
+      "$SEED_PID" "$(cat "$state/.watch.lock/pid-identity")" > "$state/.supervision-host-left"
+    [ -z "$origin" ] || printf '\t%s' "$origin" >> "$state/.supervision-host-left"
+    printf '\n' >> "$state/.supervision-host-left"
+    armout="$dir/takeover-${origin:-legacy}.out"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+      "$WATCH_ARM" --take-over "$attached" > "$armout" &
+    ARM_PID=$!
+    wait_for_file_text "$armout" "watcher: attached pid=$SEED_PID" \
+      || fail "recorded attached successor qualified for takeover: $(cat "$armout")"
+    [ ! -e "$state/.supervision-host-left" ] || fail "unowned successor record was not settled"
+    is_live_non_zombie "$SEED_PID" || fail "takeover stopped the attached successor's watcher"
+    [ "$(cat "$state/.watcher-down")" = "$acknowledged" ] || fail "takeover reopened the acknowledged episode"
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  done
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$attached" 120 || fail "attached successor did not deliver the next close"
+  grep -q '^signal:' "$dir/attached.out" || fail "attached successor lost the next wake"
+  ! grep -q 'rearm-resurface' "$dir/attached.out" || fail "attached successor resurfaced acknowledged recovery"
+  wait_for_exit "$owner" 120 || fail "owner did not close after delivering the next wake"
+  pass "watch-arm: recorded attached successors cannot qualify for identity-based takeover"
 }
 
 # --take-over stops the named real arm's watcher, as it would a successor
@@ -1741,6 +1783,7 @@ test_stop_ends_the_home_watcher_and_publishes_downtime
 test_handling_delivered_accepts_already_acked_generation
 test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
+test_take_over_rejects_a_recorded_attached_successor
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_opencode_arm_plugin_decides_with_the_shared_predicate
