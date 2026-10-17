@@ -22,6 +22,9 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A child that exits before reading stdin makes this write fail with
+    // EPIPE; an unhandled stdin error would crash the host process.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }
