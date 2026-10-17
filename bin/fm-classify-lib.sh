@@ -2585,6 +2585,13 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
 FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE-'.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'}
 FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 
+# Optional progress callback for bounded per-item loops whose caller publishes a
+# liveness beacon. Callers that need a beacon redefine this no-op after sourcing
+# the library; the default keeps every other consumer free of callback evaluation.
+fm_classify_progress() {
+  :
+}
+
 # Wall-clock seconds the probe's single walk may take. The walk runs synchronously
 # inside the caller's poll loop at the exact moment an escalation would otherwise
 # fire, and -xdev keeps it out of a nested mount but cannot help when the worktree
