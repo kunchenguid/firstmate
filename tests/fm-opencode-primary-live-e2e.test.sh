@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Opt-in credentialed OpenCode continuity regression on an isolated project and
-# FM_HOME. Existing OpenCode credentials stay in their managed store.
+# Native-Windows OpenCode shell-invocation regression plus the opt-in
+# credentialed continuity regression. Existing OpenCode credentials stay in
+# their managed store.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-
-fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -15,6 +14,148 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
+
+run_native_windows_shell_seams() {
+  [ "$(node -p 'process.platform')" = win32 ] || return 0
+  command -v cygpath >/dev/null 2>&1 || fail "native-Windows OpenCode seam test requires Git Bash cygpath"
+
+  local seam_root="$ROOT/.opencode-windows-shell-seam-$PPID"
+  local node_root out status=0
+  rm -rf "$seam_root"
+  mkdir -p "$seam_root/bin"
+  node_root=$(cygpath -m "$seam_root")
+
+  cat > "$seam_root/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf '\342\201\243FIRSTMATE_OP: v1 session-start: windows-session-nudge\n'
+SH
+  cat > "$seam_root/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'windows-turnend-unhealthy\n' >&2
+exit 2
+SH
+  cat > "$seam_root/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+input=$(cat)
+case "${1:-}" in
+  encode) printf '\342\201\243FIRSTMATE_OP: v1 %s: %s\n' "${2:-unknown}" "$input" ;;
+  classify) printf 'not-operational\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$seam_root/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+command=
+[ "${1:-}" != --command ] || command=${2:-}
+case "$command" in
+  *deny-cd*) printf '[windows-cd-deny] blocked\n' >&2; exit 2 ;;
+  *) exit 0 ;;
+esac
+SH
+  cat > "$seam_root/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+command=
+[ "${1:-}" != --command ] || command=${2:-}
+case "$command" in
+  *deny-arm*) printf '[windows-arm-deny] blocked\n' >&2; exit 2 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$seam_root/bin/"*.sh
+
+  out=$(
+    SESSION_PLUGIN="$(cygpath -m "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js")" \
+    TURN_PLUGIN="$(cygpath -m "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js")" \
+    CD_PLUGIN="$(cygpath -m "$ROOT/.opencode/plugins/fm-primary-cd-check.js")" \
+    ARM_PLUGIN="$(cygpath -m "$ROOT/.opencode/plugins/fm-primary-pretool-check.js")" \
+    WORKTREE="$node_root" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+    },
+  },
+};
+const worktree = process.env.WORKTREE;
+
+const sessionMod = await import(pathToFileURL(process.env.SESSION_PLUGIN).href);
+const sessionHooks = await sessionMod.FmPrimarySessionstartNudge({
+  client,
+  directory: worktree,
+  worktree,
+});
+const created = {
+  type: "session.created",
+  properties: { sessionID: "windows-seam", info: { id: "windows-seam" } },
+};
+await sessionHooks.event({ event: created });
+await sessionHooks.event({ event: created });
+if (prompts.length !== 1) {
+  throw new Error(`session-start expected one prompt, got ${prompts.length}`);
+}
+if (!prompts[0].includes("windows-session-nudge")) {
+  throw new Error(`session-start helper output was not delivered: ${prompts[0]}`);
+}
+
+const turnMod = await import(pathToFileURL(process.env.TURN_PLUGIN).href);
+const turnHooks = await turnMod.FmPrimaryTurnendGuard({
+  client,
+  directory: worktree,
+  worktree,
+});
+await turnHooks.event({
+  event: { type: "session.idle", properties: { sessionID: "windows-turnend" } },
+});
+if (prompts.length !== 2 || !prompts[1].includes("windows-turnend-unhealthy")) {
+  throw new Error(`turn-end guard did not deliver its unhealthy follow-up: ${JSON.stringify(prompts)}`);
+}
+
+async function assertPretool(pluginPath, exportName, denyCommand, denyReason) {
+  const mod = await import(pathToFileURL(pluginPath).href);
+  const hooks = await mod[exportName]({ directory: worktree, worktree });
+  await hooks["tool.execute.before"](
+    { tool: "bash" },
+    { args: { command: "printf allowed" } },
+  );
+  let blocked = false;
+  try {
+    await hooks["tool.execute.before"](
+      { tool: "bash" },
+      { args: { command: denyCommand } },
+    );
+  } catch (error) {
+    blocked = String(error?.message ?? error).includes(denyReason);
+  }
+  if (!blocked) throw new Error(`${exportName} did not preserve deny semantics`);
+}
+
+await assertPretool(
+  process.env.CD_PLUGIN,
+  "FmPrimaryCdCheck",
+  "printf deny-cd",
+  "[windows-cd-deny]",
+);
+await assertPretool(
+  process.env.ARM_PLUGIN,
+  "FmPrimaryPretoolCheck",
+  "printf deny-arm",
+  "[windows-arm-deny]",
+);
+JS
+  ) || status=$?
+  rm -rf "$seam_root"
+  [ "$status" -eq 0 ] || fail "native-Windows OpenCode Bash seams failed: $out"
+  [ -z "$out" ] || fail "native-Windows OpenCode Bash seam test printed output: $out"
+  printf 'ok - OpenCode native Windows session-start, turn-end, cd, and watcher-arm helpers run through Bash\n'
+}
+
+run_native_windows_shell_seams
+
+fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
 
 TMUX=$(command -v tmux)
 SOCKET="fm-opencode-live-e2e-$$"

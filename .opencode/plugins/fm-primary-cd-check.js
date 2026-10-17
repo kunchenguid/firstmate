@@ -54,7 +54,10 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
       const command = output?.args?.command;
       if (!command || typeof command !== "string") return;
 
-      const result = await runProcess(`${root}/bin/fm-cd-pretool-check.sh`, ["--command", command]);
+      const script = `${root}/bin/fm-cd-pretool-check.sh`;
+      const result = process.platform === "win32"
+        ? await runProcess("bash", [script, "--command", command])
+        : await runProcess(script, ["--command", command]);
       if (result.code !== 2) return;
 
       const reason = result.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt";
