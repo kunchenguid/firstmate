@@ -20,6 +20,11 @@
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh migrate-all
+# migrate-all re-arms authenticated existing watches against the current poll
+# program without querying the forge, changing task metadata, or publishing
+# PR-ready lines. It prints migrated/current/refused totals, reports each refused
+# registration on stderr, and returns nonzero if any watch is refused.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +40,72 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+
+# An update changes the tracked poll program, but an existing registration still
+# authenticates its old check bytes. Re-arm only a complete generation whose
+# sidecar, check, registration, and metadata agree under their existing locks.
+migrate_pr_poll_one() (
+  local id=$1 control_lock meta_lock publish_lock provider url host path number
+  control_lock="$STATE/.control-$id.lock"
+  meta_lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
+  publish_lock="$STATE/.pr-poll-publish-$id.lock"
+  local control_held=0 meta_held=0 publish_held=0
+  # shellcheck disable=SC2329 # Called by the EXIT trap in this subshell.
+  migrate_cleanup() {
+    fm_pr_poll_cleanup
+    [ "$publish_held" -eq 0 ] || fm_lock_release "$publish_lock" || true
+    [ "$meta_held" -eq 0 ] || fm_lock_release "$meta_lock" || true
+    [ "$control_held" -eq 0 ] || fm_lock_release "$control_lock" || true
+  }
+  trap migrate_cleanup EXIT
+  fm_lock_acquire_wait "$control_lock" || return 1
+  control_held=1
+  fm_lock_acquire_wait "$meta_lock" || return 1
+  meta_held=1
+  fm_lock_acquire_wait "$publish_lock" || return 1
+  publish_held=1
+  [ ! -e "$STATE/$id.pr-poll-retirement" ] && [ ! -L "$STATE/$id.pr-poll-retirement" ] || return 1
+  fm_pr_poll_artifacts_registered_valid "$STATE" "$id" \
+    || fm_pr_poll_registration_device_shifted "$STATE" "$id" "$STATE/$id.check.sh" \
+    || return 1
+  if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    return 2
+  fi
+  provider=$FM_PR_DATA_PROVIDER url=$FM_PR_DATA_URL host=$FM_PR_DATA_HOST
+  path=$FM_PR_DATA_PATH number=$FM_PR_DATA_NUMBER
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  fm_pr_poll_publish_prepared || return 1
+  fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"
+)
+
+migrate_pr_polls() {
+  local registration id result migrated=0 current=0 refused=0
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo 'error: state directory is unavailable' >&2; return 1; }
+  for registration in "$STATE"/*.pr-poll-registration; do
+    [ -e "$registration" ] || [ -L "$registration" ] || continue
+    id=${registration##*/}
+    id=${id%.pr-poll-registration}
+    if ! fm_pr_task_id_valid "$id"; then
+      printf 'PR watch refused: state/%s.pr-poll-registration\n' "$id" >&2
+      refused=$((refused + 1))
+      continue
+    fi
+    result=0
+    migrate_pr_poll_one "$id" || result=$?
+    case "$result" in
+      0) migrated=$((migrated + 1)) ;;
+      2) current=$((current + 1)) ;;
+      *) printf 'PR watch refused: state/%s.pr-poll-registration\n' "$id" >&2; refused=$((refused + 1)) ;;
+    esac
+  done
+  printf 'PR watches: %s migrated, %s current, %s refused\n' "$migrated" "$current" "$refused"
+  [ "$refused" -eq 0 ]
+}
+
+if [ "${1:-}" = migrate-all ] && [ "$#" -eq 1 ]; then
+  migrate_pr_polls
+  exit $?
+fi
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2

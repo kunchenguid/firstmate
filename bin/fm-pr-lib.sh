@@ -687,8 +687,13 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 data_identity check_identity
+  local state=$1 id=$2 template=$3
   fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
+  fm_pr_poll_artifacts_registered_identities_valid "$state" "$id"
+}
+
+fm_pr_poll_artifacts_registered_identities_valid() {
+  local state=$1 id=$2 data_identity check_identity
   data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
   check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
   # The recorded identities bind the registration to the exact sidecar and
@@ -704,7 +709,22 @@ fm_pr_poll_artifacts_valid() {
 # never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
 # hold the parsed records.
 fm_pr_poll_artifacts_content_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
+  local state=$1 id=$2 template=$3
+  fm_pr_poll_artifacts_registered_content_valid "$state" "$id" || return 1
+  cmp -s "$template" "$state/$id.check.sh"
+}
+
+# Authenticate a registered generation against its own recorded hashes and file
+# identities, even when a later update has changed the tracked poll template.
+# This proof never accepts a changed sidecar, check, registration, or PR identity.
+fm_pr_poll_artifacts_registered_valid() {
+  local state=$1 id=$2
+  fm_pr_poll_artifacts_registered_content_valid "$state" "$id" || return 1
+  fm_pr_poll_artifacts_registered_identities_valid "$state" "$id"
+}
+
+fm_pr_poll_artifacts_registered_content_valid() {
+  local state=$1 id=$2 state_device check data registration meta data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -717,7 +737,6 @@ fm_pr_poll_artifacts_content_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1

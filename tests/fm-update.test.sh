@@ -79,6 +79,12 @@ SH
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-remote-secondmate-control.sh"
   chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
+  cat > "$w/seed/bin/fm-pr-check.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = migrate-all ] || exit 2
+[ -z "${FM_TEST_PR_MIGRATE_LOG:-}" ] || printf '%s\n' "$FM_HOME" >> "$FM_TEST_PR_MIGRATE_LOG"
+SH
+  chmod +x "$w/seed/bin/fm-pr-check.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
@@ -174,6 +180,148 @@ test_updates_main_and_secondmate() {
   [ "$(git -C "$w/sm1" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "secondmate tip is not a single-parent fast-forward"
   pass "T1 main + secondmate fast-forward (single-parent), reread + restart signalled"
+}
+
+test_update_routes_pr_migration_to_primary_and_local_mate() {
+  local w c1 out
+  w=$(new_world pr-migration)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm "$w" sm1
+  git -C "$w/main" worktree add -q --detach "$w/registered" "$c1"
+  printf 'registered\n' > "$w/registered/.fm-secondmate-home"
+  printf -- '- registered - local domain (home: %s/registered; scope: things; projects: p; added 2026-10-12)\n' "$w" \
+    > "$w/home/data/secondmates.md"
+  bump_origin "$w" bin
+  out=$(FM_TEST_PR_MIGRATE_LOG="$w/migrations" run_update "$w")
+  assert_contains "$out" 'secondmate sm1: updated' "local mate did not converge"
+  grep -qxF "$w/home" "$w/migrations" || fail "primary PR watches were not migrated"
+  grep -qxF "$w/sm1" "$w/migrations" || fail "local mate PR watches were not migrated"
+  grep -qxF "$w/registered" "$w/migrations" || fail "registry-only local mate PR watches were not migrated"
+  pass "update invokes guarded PR migration for the primary and local mate homes"
+}
+
+test_old_updater_rollout_migrates_watches_after_one_time_session_start() {
+  local w out fake_ssh initial target watch_state home code_root file
+  local UPDATE
+  w=$(new_world old-updater)
+  UPDATE="$w/main/bin/fm-update.sh"
+  cp -R "$ROOT/bin/." "$w/seed/bin/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-startup-network.sh"
+  printf 'state/\ndata/\nconfig/\n.fm-secondmate-home\n' > "$w/seed/.gitignore"
+  for file in fm-remote-secondmate-control.sh fm-update.sh fm-ff-lib.sh fm-bootstrap.sh; do
+    git -C "$ROOT" show "20dcbf91520b1816663b81873ad67d0b93b3e4d6:bin/$file" > "$w/seed/bin/$file"
+  done
+  printf '\n' >> "$w/seed/bin/fm-pr-poll.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm old-remote-release
+  git -C "$w/seed" push -q origin main
+  initial=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/main" pull -q origin main
+  add_sm "$w" sm1
+  git -C "$w/main" worktree add -q --detach "$w/registered" "$initial"
+  printf 'registered\n' > "$w/registered/.fm-secondmate-home"
+  git clone -q "$w/origin.git" "$w/coderoot"
+  git clone -q "$w/origin.git" "$w/remote"
+  git -C "$w/remote" checkout -q --detach "$initial"
+  printf 'remote\n' > "$w/remote/.fm-secondmate-home"
+  mkdir -p "$w/remote/state" "$w/coderoot/state"
+  touch "$w/coderoot/state/.last-watcher-beat"
+  for home in "$w/home" "$w/sm1" "$w/registered" "$w/remote"; do
+    watch_state="$home/state"
+    mkdir -p "$watch_state" "$home/config"
+    printf 'manual\n' > "$home/config/backlog-backend"
+    for file in task-a task-invalid; do
+      printf 'pr=https://github.com/o/r/pull/1\n' > "$watch_state/$file.meta"
+      chmod 600 "$watch_state/$file.meta"
+      (
+        . "$ROOT/bin/fm-pr-lib.sh"
+        fm_pr_poll_prepare "$watch_state" "$file" github https://github.com/o/r/pull/1 github.com o/r 1 "$w/main/bin/fm-pr-poll.sh" \
+          && fm_pr_poll_publish_prepared
+      ) || fail "could not arm the old PR watch in $home"
+    done
+    printf 'github\nhttps://github.com/o/r/pull/2\ngithub.com\no/r\n2\n' > "$watch_state/task-invalid.pr-poll"
+    cp "$watch_state/task-a.meta" "$watch_state/meta-before"
+    cp "$watch_state/task-invalid.check.sh" "$watch_state/invalid-before"
+  done
+  for file in fm-remote-secondmate-control.sh fm-update.sh fm-ff-lib.sh fm-bootstrap.sh fm-pr-poll.sh; do
+    cp "$ROOT/bin/$file" "$w/seed/bin/$file"
+  done
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm new-remote-release
+  git -C "$w/seed" push -q origin main
+  target=$(git -C "$w/seed" rev-parse HEAD)
+  fake_ssh="$w/fakebin/remote-ssh"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+remote_root=$(decode "$2")
+remote_home=$(decode "$3")
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$4")
+exec env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$remote_root" \
+  "$remote_root/bin/${rargs[0]}" "${rargs[@]:1}"
+SH
+  chmod +x "$fake_ssh"
+  cat > "$w/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" != -p ] || pid=$argument
+  previous=$argument
+done
+case "$*" in
+  *comm=*|*args=*)
+    if [ "$pid" = "$FM_TEST_ROLLOUT_PID" ]; then printf 'codex\n'; else printf 'bash\n'; fi
+    ;;
+  *) exec /bin/ps "$@" ;;
+esac
+SH
+  chmod +x "$w/fakebin/ps"
+  printf -- '- remote - remote domain (host: remote-host; root: %s/coderoot; home: %s/remote; scope: things; projects: p; added 2026-10-12)\n' "$w" "$w" \
+    > "$w/home/data/secondmates.md"
+  printf -- '- registered - local domain (home: %s/registered; scope: things; projects: p; added 2026-10-12)\n' "$w" \
+    >> "$w/home/data/secondmates.md"
+  out=$(FM_TEST_SSH_BIN="$fake_ssh" run_update "$w")
+  assert_contains "$out" 'remote secondmate remote: updated on remote-host' "old remote handler did not converge"
+  [ "$(git -C "$w/coderoot" rev-parse HEAD)" = "$target" ] || fail "remote code root did not advance"
+  [ "$(git -C "$w/remote" rev-parse HEAD)" = "$target" ] || fail "remote home did not advance"
+  for home in "$w/home" "$w/sm1" "$w/registered" "$w/remote"; do
+    code_root=$home
+    [ "$home" != "$w/home" ] || code_root="$w/main"
+    [ "$(git -C "$code_root" rev-parse HEAD)" = "$target" ] || fail "$home did not advance"
+    watch_state="$home/state"
+    (
+      . "$ROOT/bin/fm-pr-lib.sh"
+      fm_pr_poll_artifacts_registered_valid "$watch_state" task-a \
+        && ! fm_pr_poll_artifacts_valid "$watch_state" task-a "$code_root/bin/fm-pr-poll.sh"
+    ) || fail "old updater did not leave an intact stale watch in $home"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$code_root" FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 \
+      PATH="$w/fakebin:$PATH" "$code_root/bin/fm-bootstrap.sh" > "$w/bootstrap.out" 2> "$w/bootstrap.err" \
+      || fail "read-only bootstrap failed for $home"
+    (
+      . "$ROOT/bin/fm-pr-lib.sh"
+      ! fm_pr_poll_artifacts_valid "$watch_state" task-a "$code_root/bin/fm-pr-poll.sh"
+    ) || fail "read-only bootstrap migrated $home"
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$code_root" FM_FAKE_DIR="$w/fake" FM_TEST_ROLLOUT_PID=$$ \
+      PATH="$w/fakebin:$PATH" "$code_root/bin/fm-session-start.sh" > "$w/session-start.out" 2> "$w/session-start.err" \
+      || fail "one-time session start failed for $home: $(cat "$w/session-start.err")"
+    assert_contains "$(cat "$w/session-start.out")" 'lock acquired: harness pid' "one-time session start did not acquire $home"
+    (
+      . "$ROOT/bin/fm-pr-lib.sh"
+      fm_pr_poll_artifacts_valid "$watch_state" task-a "$code_root/bin/fm-pr-poll.sh" \
+        && ! fm_pr_poll_artifacts_valid "$watch_state" task-invalid "$code_root/bin/fm-pr-poll.sh"
+    ) || fail "one-time session start did not preserve the watch authentication boundary in $home"
+    cmp -s "$watch_state/task-a.meta" "$watch_state/meta-before" || fail "bootstrap changed task metadata in $home"
+    cmp -s "$watch_state/task-invalid.check.sh" "$watch_state/invalid-before" || fail "bootstrap rewrote an invalid watch in $home"
+  done
+  pass "old-updater rollout restores valid PR watches after the documented one-time session start in every home"
 }
 
 # --- T3: README-only change does not trigger a reread ----------------------
@@ -557,6 +705,8 @@ test_primary_update_rebinds_local_watch() {
 }
 
 test_updates_main_and_secondmate
+test_update_routes_pr_migration_to_primary_and_local_mate
+test_old_updater_rollout_migrates_watches_after_one_time_session_start
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge

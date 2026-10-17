@@ -2259,6 +2259,46 @@ seed_canonical_poll() {
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
 }
 
+test_update_migrates_only_authenticated_pr_polls() {
+  local dir state historical metadata_before check_before rc
+  dir=$(make_case update-pr-poll)
+  state="$dir/home/state"
+  historical="$dir/previous-fm-pr-poll.sh"
+  cp "$POLL" "$historical"
+  printf '\n# Previous release.\n' >> "$historical"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/22
+  printf 'pr_head=0123456789abcdef0123456789abcdef01234567\n' >> "$state/task-a.meta"
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/22 "$historical"
+  metadata_before=$(fm_pr_sha256 "$state/task-a.meta")
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$dir/home/.fm-secondmate-parent"
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/before.out" 2> "$dir/before.err" \
+    || fail "previous poll watcher failed: $(cat "$dir/before.err")"
+  grep -F "check: rejected unauthenticated state checks: $state/task-a.check.sh" "$dir/before.out" >/dev/null \
+    || fail "changed poll bytes did not produce the watcher rejection"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$PR_CHECK" migrate-all > "$dir/migrate.out" \
+    || fail "authenticated poll migration failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "migrated poll was not authenticated"
+  [ "$(fm_pr_sha256 "$state/task-a.meta")" = "$metadata_before" ] || fail "migration changed task, PR, or head metadata"
+  [ ! -e "$state/parent-replies.status" ] || fail "migration published a duplicate parent-channel ready line"
+  grep -F '1 migrated, 0 current, 0 refused' "$dir/migrate.out" >/dev/null || fail "migration did not report one re-arm"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$PR_CHECK" migrate-all > "$dir/repeat.out" \
+    || fail "idempotent poll migration failed"
+  grep -F '0 migrated, 1 current, 0 refused' "$dir/repeat.out" >/dev/null || fail "repeat migration re-armed a current poll"
+
+  dir=$(make_case invalid-update-pr-poll)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/22
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/22 "$historical"
+  check_before=$(fm_pr_sha256 "$state/task-a.check.sh")
+  printf 'github\nhttps://github.com/o/r/pull/23\ngithub.com\no/r\n23\n' > "$state/task-a.pr-poll"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$PR_CHECK" migrate-all > "$dir/migrate.out" 2> "$dir/migrate.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "migration accepted a changed PR sidecar"
+  [ "$(fm_pr_sha256 "$state/task-a.check.sh")" = "$check_before" ] || fail "migration blessed an invalid watch"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "invalid watch became authenticated"
+  pass "update re-arms registered old poll bytes but refuses a changed PR sidecar"
+}
+
 add_stop_custom_check() {
   local dir=$1 state
   state="$dir/home/state"
@@ -3312,6 +3352,103 @@ shift_registration_device() {  # <state> <id> [both|data|check]
   esac
 }
 
+test_migration_after_device_renumber_and_update() {
+  local dir state historical template generation meta_before mutation snapshot rc out
+  for generation in historical current; do
+    dir=$(make_case "migration-device-$generation")
+    state="$dir/home/state"
+    historical="$dir/historical-poll.sh"
+    cp "$POLL" "$historical"
+    printf '\n' >> "$historical"
+    template=$POLL
+    [ "$generation" != historical ] || template=$historical
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$template"
+    shift_registration_device "$state" task-a
+    fm_pr_poll_artifacts_content_valid "$state" task-a "$template" || fail "remount fixture changed authenticated content"
+    ! fm_pr_poll_artifacts_registered_valid "$state" task-a || fail "remount fixture retained live device identities"
+    meta_before=$(fm_pr_sha256 "$state/task-a.meta")
+    cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.pr-poll-registration "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    [ -d "$FM_TEST_META_LOCK" ] || exit 92
+    [ -d "$FM_TEST_POLL_PUBLISH_LOCK" ] || exit 93
+    : > "$FM_TEST_REGISTRATION_RENAMED"
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+    chmod +x "$dir/fakebin/mv"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+      FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_META_LOCK="$state/.meta-task-a.lock" \
+      FM_TEST_POLL_PUBLISH_LOCK="$state/.pr-poll-publish-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+      FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" \
+      "$PR_CHECK" migrate-all > "$dir/migrate.out" 2> "$dir/migrate.err" \
+      || fail "$generation remount migration failed: $(cat "$dir/migrate.err")"
+    [ -e "$dir/registration-renamed" ] || fail "$generation migration did not publish under all three locks"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "$generation remount migration left the watch refused"
+    [ "$(fm_pr_sha256 "$state/task-a.meta")" = "$meta_before" ] || fail "$generation remount migration changed metadata"
+    rm -f "$dir/fakebin/mv"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$PR_CHECK" migrate-all > "$dir/repeat.out" \
+      || fail "$generation remount migration was not repeatable"
+    grep -qxF 'PR watches: 0 migrated, 1 current, 0 refused' "$dir/repeat.out" || fail "repeat migration changed a current watch"
+    if [ "$generation" = historical ]; then
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" \
+        || fail "migrated remount watch failed: $(cat "$dir/watch.err")"
+      out=$(cat "$dir/watch.out")
+      case "$out" in
+        *'rejected unauthenticated state checks'*) fail "watcher refused the migrated remount watch" ;;
+      esac
+      grep -q '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out" || fail "migrated remount watch did not detect its merge"
+    fi
+  done
+  for mutation in swapped-check altered-check swapped-sidecar altered-sidecar altered-template-hash \
+    changed-pr wrong-mode hardlinked-check data-device check-device retirement; do
+    dir=$(make_case "migration-device-refuses-$mutation")
+    state="$dir/home/state"
+    historical="$dir/historical-poll.sh"
+    cp "$POLL" "$historical"
+    printf '\n' >> "$historical"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical"
+    case "$mutation" in
+      data-device) shift_registration_device "$state" task-a data ;;
+      check-device) shift_registration_device "$state" task-a check ;;
+      *) shift_registration_device "$state" task-a ;;
+    esac
+    case "$mutation" in
+      swapped-check|swapped-sidecar)
+        template="$state/task-a.check.sh"
+        [ "$mutation" != swapped-sidecar ] || template="$state/task-a.pr-poll"
+        cp "$template" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$template"
+        ;;
+      altered-check) printf '\n' >> "$state/task-a.check.sh" ;;
+      altered-sidecar) printf 'github\nhttps://github.com/o/r/pull/2\ngithub.com\no/r\n2\n' > "$state/task-a.pr-poll" ;;
+      altered-template-hash)
+        awk 'NR == 9 { $0 = "0000000000000000000000000000000000000000000000000000000000000000" } { print }' \
+          "$state/task-a.pr-poll-registration" > "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.pr-poll-registration"
+        ;;
+      changed-pr) printf 'pr=https://github.com/o/r/pull/2\n' > "$state/task-a.meta" ;;
+      wrong-mode) chmod 0640 "$state/task-a.check.sh" ;;
+      hardlinked-check) ln "$state/task-a.check.sh" "$dir/check.alias" ;;
+      retirement) : > "$state/task-a.pr-poll-retirement"; chmod 0600 "$state/task-a.pr-poll-retirement" ;;
+    esac
+    snapshot=$(poll_artifact_snapshot "$state" task-a)
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$PR_CHECK" migrate-all > "$dir/migrate.out" 2> "$dir/migrate.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mutation was accepted by remount migration"
+    [ "$(poll_artifact_snapshot "$state" task-a)" = "$snapshot" ] || fail "$mutation migration changed refused artifacts"
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "$mutation became authenticated after migration"
+  done
+  pass "remount migration updates authenticated historical watches under locks and refuses altered artifacts"
+}
+
 test_device_renumbered_poll_stays_armed() {
   local dir state out rc original
   dir=$(make_case device-renumber-merged)
@@ -3636,6 +3773,8 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_update_migrates_only_authenticated_pr_polls
+test_migration_after_device_renumber_and_update
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
