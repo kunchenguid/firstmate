@@ -12,6 +12,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset TYPESAFE_API_KEY TYPESAFE_BASE_URL TYPESAFE_MODEL
+
 TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
 HOME_DIR="$TMP_ROOT/home"
@@ -245,6 +247,77 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- endpoint and model: defaults, environment, .env, precedence -------------
+assert_contains "$out" '  model: jev-1.13.0   latency_ms:' "the output reports the model the response names"
+ENV_BASE='https://gateway.example.test:8443'
+ENV_MODEL='env-model-1'
+FILE_BASE='https://files.example.test'
+FILE_MODEL='file-model-2'
+reset_log
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL=$ENV_BASE TYPESAFE_MODEL=$ENV_MODEL run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "environment base URL and model resolve"
+assert_contains "$(cat "$LOG/argv")" "$ENV_BASE/v1/systemone" "TYPESAFE_BASE_URL in the environment sets the request origin"
+assert_not_contains "$(cat "$LOG/argv")" 'api.typesafe.ai' "an overridden base URL no longer reaches the default endpoint"
+assert_equals "$ENV_MODEL" "$(jq -r .model "$LOG/body")" "TYPESAFE_MODEL in the environment sets the request model"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "the key still rides only on the fd header"
+reset_log
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL="$ENV_BASE/" run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" "$ENV_BASE/v1/systemone" "one trailing slash on the base URL is dropped"
+printf '%s\n' "TYPESAFE_API_KEY=$KEY" "export TYPESAFE_BASE_URL=\"$FILE_BASE\"" "TYPESAFE_MODEL='$FILE_MODEL'" > "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" ".env base URL and model resolve"
+assert_contains "$(cat "$LOG/argv")" "$FILE_BASE/v1/systemone" "a .env TYPESAFE_BASE_URL line sets the request origin"
+assert_equals "$FILE_MODEL" "$(jq -r .model "$LOG/body")" "a .env TYPESAFE_MODEL line sets the request model"
+reset_log
+TYPESAFE_BASE_URL=$ENV_BASE TYPESAFE_MODEL=$ENV_MODEL run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" "$ENV_BASE/v1/systemone" "the environment base URL wins over .env"
+assert_equals "$ENV_MODEL" "$(jq -r .model "$LOG/body")" "the environment model wins over .env"
+reset_log
+TYPESAFE_BASE_URL='' TYPESAFE_MODEL='' run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" "$FILE_BASE/v1/systemone" "an empty environment base URL counts as unset"
+assert_equals "$FILE_MODEL" "$(jq -r .model "$LOG/body")" "an empty environment model counts as unset"
+printf '%s\n' "TYPESAFE_API_KEY=$KEY" > "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "a .env without the settings keeps the default endpoint"
+assert_equals 'jev-latest' "$(jq -r .model "$LOG/body")" "a .env without the settings keeps the default model"
+pass "base URL and model: defaults, environment, .env, environment-wins precedence, empty means unset"
+
+# --- an invalid base URL is a configuration error, never a silent fallback ----
+SECRET_URL_PART='url-secret-7d41'
+for bad_base in \
+  'http://gateway.example.test' \
+  "https://user:${SECRET_URL_PART}@gateway.example.test" \
+  "https://${SECRET_URL_PART}@gateway.example.test"; do
+  reset_log
+  TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL=$bad_base run code out err "$BRIEF" --project pager
+  expect_code 2 "$code" "invalid base URL [$bad_base] exits 2"
+  assert_contains "$err" 'TYPESAFE_BASE_URL must start with https://' "invalid base URL [$bad_base] names the setting"
+  assert_not_contains "$err" "$SECRET_URL_PART" "invalid base URL [$bad_base] is never echoed"
+  assert_equals '' "$out" "invalid base URL [$bad_base] prints nothing on stdout"
+  assert_absent "$LOG/argv" "invalid base URL [$bad_base] never reaches curl"
+  assert_absent "$LOG/quota-axi.calls" "invalid base URL [$bad_base] never reads quota-axi"
+done
+printf '%s\n' "TYPESAFE_API_KEY=$KEY" 'TYPESAFE_BASE_URL=http://files.example.test' > "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 2 "$code" "an invalid .env base URL exits 2"
+assert_contains "$err" 'TYPESAFE_BASE_URL must start with https://' "an invalid .env base URL names the setting"
+assert_absent "$LOG/argv" "an invalid .env base URL never reaches curl"
+reset_log
+TYPESAFE_BASE_URL=$ENV_BASE run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a valid environment base URL overrides an invalid .env one"
+assert_contains "$(cat "$LOG/argv")" "$ENV_BASE/v1/systemone" "the valid environment base URL is the one used"
+printf '%s\n' 'TYPESAFE_BASE_URL=http://files.example.test' > "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an absent key stays off even with an invalid base URL configured"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "the off line is unchanged"
+assert_absent "$LOG/argv" "the off path never reaches curl"
+rm -f "$HOME_DIR/.env"
+pass "an invalid TYPESAFE_BASE_URL exits 2 without echoing the value or sending anything; the off path is unchanged"
 
 # --- never-send list: a match or a bad list withholds the request -------------
 NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
