@@ -2200,6 +2200,158 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
+# --- unread captain note backstop ---------------------------------------------
+# The 2026-10-12 stall: the watcher kept beating and held its lock, so every
+# health check read it as fine, while captain inbox note wakes sat undrained in
+# the durable queue for over an hour. The guard reads the queue directly.
+
+# queue_note_wake <dir> <age-seconds> <seq> [key]
+queue_note_wake() {
+  local dir=$1 age=$2 seq=$3 key=${4:-inbox:note-$3}
+  mkdir -p "$dir/config"
+  : > "$dir/config/unread-note-backstop"
+  printf '%s\t%s\tcheck\t%s\tcheck: captain inbox note %s - summary\n' \
+    "$(( $(date +%s) - age ))" "$seq" "$key" "$seq" >> "$dir/state/.wake-queue"
+}
+
+test_hook_allows_overdue_note_when_backstop_disabled() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-disabled")
+  queue_note_wake "$dir" 90 1
+  rm -f "$dir/config/unread-note-backstop"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "an overdue captain note must not block when the opt-in config is absent"
+  [ -z "$out" ] || fail "disabled unread-note backstop produced output: $out"
+  [ ! -e "$dir/state/.turnend-note-blocks" ] || fail "disabled unread-note backstop wrote block state"
+  pass "fm-turnend-guard: unread captain note backstop is off when config/unread-note-backstop is absent"
+}
+
+# Start a live identity-matched watcher holder with a fresh beacon and the
+# pending recovery marker the stalled cycle left; sets BEATING_WATCHER_PID.
+BEATING_WATCHER_PID=
+start_beating_watcher() {
+  local dir=$1 identity
+  sleep 60 &
+  BEATING_WATCHER_PID=$!
+  identity=$(watcher_identity "$dir" "$BEATING_WATCHER_PID") || {
+    stop_watcher "$BEATING_WATCHER_PID"
+    return 1
+  }
+  record_watcher_lock "$dir" "$BEATING_WATCHER_PID" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'pending:downtime:7\n' > "$dir/state/.watcher-down"
+}
+
+stop_watcher() {
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+test_hook_claude_mode_blocks_overdue_note_despite_healthy_watcher() {
+  local dir pid out status control control_status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-stall")
+  : > "$dir/state/task1.meta"
+  start_beating_watcher "$dir" || fail "could not start the beating watcher fixture"
+  pid=$BEATING_WATCHER_PID
+  control=$(run_hook_claude "$dir" false); control_status=$?
+  queue_note_wake "$dir" 120 1
+  out=$(run_hook_claude "$dir" false); status=$?
+  stop_watcher "$pid"
+  expect_code 0 "$control_status" "control: the beating watcher alone must read as healthy and allow the stop"
+  [ -z "$control" ] || fail "control stop produced output: $control"
+  expect_code 2 "$status" "an unacknowledged captain note wake older than 60s must block the stop despite a healthy watcher"
+  assert_contains "$out" "CAPTAIN NOTE UNREAD" "the block must name the unread captain note"
+  assert_contains "$out" "Run bin/fm-wake-drain.sh first" "the block must carry the drain-first instruction"
+  pass "fm-turnend-guard --claude: an overdue unread captain note blocks the stop while the watcher looks healthy"
+}
+
+test_hook_allows_young_or_acknowledged_note() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-young-acked")
+  : > "$dir/state/task1.meta"
+  start_beating_watcher "$dir" || fail "could not start the beating watcher fixture"
+  pid=$BEATING_WATCHER_PID
+  queue_note_wake "$dir" 10 1
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "a captain note wake younger than 60s must not block the stop"
+  [ -z "$out" ] || fail "young note produced output: $out"
+  : > "$dir/state/.wake-queue"
+  queue_note_wake "$dir" 600 2 heartbeat-key
+  out=$(run_hook_claude "$dir" false); status=$?
+  stop_watcher "$pid"
+  expect_code 0 "$status" "an acknowledged note (row consumed) with only an old non-note row queued must not block"
+  [ -z "$out" ] || fail "acknowledged note produced output: $out"
+  pass "fm-turnend-guard --claude: a young or acknowledged captain note does not block"
+}
+
+test_hook_blocks_overdue_note_in_idle_home_default_mode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-idle")
+  queue_note_wake "$dir" 90 1
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an overdue captain note must block even with no supervision need"
+  assert_contains "$out" "CAPTAIN NOTE UNREAD" "the idle-home block must name the unread captain note"
+  pass "fm-turnend-guard: an overdue captain note blocks an idle home"
+}
+
+test_hook_overdue_note_away_exemption_needs_live_daemon() {
+  local dir out status daemon_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-afk")
+  queue_note_wake "$dir" 90 1
+  printf 'quiet\n' > "$dir/state/.afk"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a quiet-mode record with no daemon leaves draining to main, so the overdue note must block"
+  assert_contains "$out" "CAPTAIN NOTE UNREAD" "the no-daemon block must name the unread captain note"
+  record_daemon_lock "$dir" "$(nonexistent_pid)" stale-identity || fail "could not record the dead daemon lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an away record whose daemon has died must still block on the overdue note"
+  sleep 60 &
+  daemon_pid=$!
+  record_daemon_lock "$dir" "$daemon_pid" || { stop_watcher "$daemon_pid"; fail "could not record the live daemon lock"; }
+  out=$(run_hook "$dir" false); status=$?
+  stop_watcher "$daemon_pid"
+  expect_code 0 "$status" "a live identity-matched daemon drains the queue, so the note must not block"
+  pass "fm-turnend-guard: the away/quiet note exemption needs a live daemon that owns supervision"
+}
+
+test_hook_claude_mode_overdue_note_block_is_bounded() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-bounded")
+  queue_note_wake "$dir" 120 1
+  for i in 1 2 3; do
+    out=$(run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "block $i of the budget must block the stop"
+  done
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the same undrainable note must stop blocking once the budget is spent"
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 1 ] || fail "the exhausted bound must print exactly one stdout line: $out"
+  printf '%s' "$out" | jq -e '.systemMessage | contains("inbox:note-1") and contains("only to avoid a stop-hook loop")' >/dev/null \
+    || fail "the exhausted bound must print one visible systemMessage naming the unread note: $out"
+  queue_note_wake "$dir" 120 2
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a newly overdue note must start a fresh bounded block"
+  assert_contains "$out" "2 captain inbox note wake(s)" "the fresh block must count both overdue notes"
+  pass "fm-turnend-guard --claude: the unread-note block is bounded, notices its fall-through, and restarts on a new overdue note"
+}
+
+test_hook_claude_mode_overdue_note_reblocks_next_turn() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-note-next-turn")
+  queue_note_wake "$dir" 120 1
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "the first stop of the turn must block on the overdue note"
+  for i in 2 3; do
+    out=$(run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "block $i of the turn must block the stop"
+  done
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the turn's bound must be spent after three blocks"
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "a later turn must block again on the same still-unread note"
+  assert_contains "$out" "CAPTAIN NOTE UNREAD" "the later-turn block must name the unread captain note"
+  pass "fm-turnend-guard --claude: a still-unread note blocks again on every later turn"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2289,3 +2441,10 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+test_hook_claude_mode_blocks_overdue_note_despite_healthy_watcher
+test_hook_allows_young_or_acknowledged_note
+test_hook_blocks_overdue_note_in_idle_home_default_mode
+test_hook_overdue_note_away_exemption_needs_live_daemon
+test_hook_allows_overdue_note_when_backstop_disabled
+test_hook_claude_mode_overdue_note_block_is_bounded
+test_hook_claude_mode_overdue_note_reblocks_next_turn

@@ -54,7 +54,7 @@ The guard remains a backstop.
 
 ## Guard predicates
 
-The turn-end guard checks primary scope first, then supervision need, then watcher health.
+The turn-end guard checks primary scope first, then unread captain notes, then supervision need, then watcher health.
 The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently, as described under [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model).
 
 ### Primary scope
@@ -69,6 +69,26 @@ The marker must meet both of these conditions:
 An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
+
+### Unread captain notes
+
+A home opts into this backstop by creating the local, gitignored `config/unread-note-backstop` file; without it, unread notes do not affect turn ends.
+When enabled, the guard reads `state/.wake-queue` directly before any supervision check.
+A captain inbox note wake (the `check` row keyed `inbox:<id>` that `bin/fm-inbox.sh` appends) still queued more than `FM_TURNEND_NOTE_MAX_AGE` seconds (default 60) after it was appended blocks the turn end with the drain-first instruction.
+It blocks whatever watcher health, supervision need, or the supervision host reports, because a watcher that keeps beating without ever closing a cycle reads as healthy to every later check while the note waits.
+A drain's post-handling acknowledgement removes the row, which clears the block.
+
+The check has these limits:
+
+- Away and quiet mode are exempt only while a live identity-matched daemon owns supervision (`fm_afk_daemon_owns_supervision`), because that daemon drains and acknowledges the queue.
+- A `state/.afk` record with no live daemon is not exempt, because this session still owns draining.
+- In `--claude` mode a session that does not own the session lock is exempt, because it must not drain.
+- The bound is per turn.
+- Within one turn, the same session blocking over the same unchanged set of overdue rows stops after `FM_CLAUDE_TURNEND_BLOCK_BUDGET` consecutive blocks and falls through to the ordinary checks, so a row that cannot be drained never wedges the session.
+- That allowed stop is never silent: it carries one visible notice naming the unread notes and saying the stop was allowed only to avoid a loop, as the single `--claude` stdout `systemMessage`.
+- The first stop of a turn (`stop_hook_active` or `stopHookActive` false), a new overdue note, or an acknowledgement starts a fresh count, recorded in `state/.turnend-note-blocks`, so a note that stays unread blocks again on a later user-started turn.
+- In `--claude` mode a turn started by a stop-hook continuation, such as an asyncRewake, also reports `stop_hook_active` true.
+- So once the bound is spent, such a turn ends with the visible notice instead of blocking again on the same unchanged set of overdue notes.
 
 ### Supervision need
 
@@ -549,6 +569,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Child-worktree exclusion.
 - `FM_HOME` and `FM_STATE_OVERRIDE` precedence.
 - The live-lock and fresh-beacon guard predicate.
+- The unread captain note block over a beating watcher, its age and acknowledgement negatives, idle-home scope, its away-mode exemption only under a live daemon, its per-turn bounded re-block, and the visible notice when that bound is spent.
 - The cooperative `--claude` open-generation claim wait.
 - Monotonic failed-epoch progression.
 - Bounded attended fail-open.

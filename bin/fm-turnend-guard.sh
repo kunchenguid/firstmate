@@ -122,7 +122,7 @@ done
 # second Stop writer could land after this one and flip the verdict.
 # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 record_parent_stop_state() {
-  local status=$? pointer="$FM_ROOT/.fm-busy-stop" key value writer='' state='' id='' gen='' verdict=idle event=stop
+  local status=$1 pointer="$FM_ROOT/.fm-busy-stop" key value writer='' state='' id='' gen='' verdict=idle event=stop
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 0
   while IFS='=' read -r key value; do
@@ -140,7 +140,23 @@ record_parent_stop_state() {
   fi
   "$writer" apply "$state" "$id" "$verdict" --gen "$gen" --source claude-hook --event "$event" >/dev/null 2>&1 || true
 }
-trap record_parent_stop_state EXIT
+# One owner of the --claude stdout systemMessage: every notice routes through
+# emit_system_message, which folds in a pending unread-note notice, so an
+# allowed stop never prints two JSON objects.
+NOTE_NOTICE=
+emit_system_message() {
+  jq -cn --arg m "$NOTE_NOTICE${NOTE_NOTICE:+${1:+ }}$1" '{systemMessage: $m}'
+  NOTE_NOTICE=
+}
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+guard_exit() {
+  local status=$1
+  if [ "$status" -eq 0 ] && [ -n "$NOTE_NOTICE" ]; then
+    emit_system_message ''
+  fi
+  record_parent_stop_state "$status"
+}
+trap 'guard_exit $?' EXIT
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -216,6 +232,80 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# --- unread captain note backstop ---------------------------------------------
+# The watcher and auto-arm deliver queued wakes, but a watcher that keeps
+# beating without ever closing reads as healthy to every check below while
+# captain inbox notes sit undrained. So read the durable queue directly first:
+# a captain inbox note wake (bin/fm-inbox.sh appends it as a check row keyed
+# inbox:<id>) older than NOTE_MAX_AGE that no drain has acknowledged blocks the
+# stop whatever watcher health, supervision need, or the supervision host says.
+# Away and quiet mode are exempt only while a live identity-matched daemon owns
+# supervision, because that daemon drains and acknowledges the queue; a bare
+# state/.afk with no such daemon leaves draining to this session. In --claude
+# mode a session that does not own the home lock is exempt because it must not
+# drain. The block is bounded per turn: within one turn the same session
+# re-blocking over the same unchanged set of overdue rows stops after
+# BLOCK_BUDGET consecutive blocks, records one visible notice naming the unread
+# notes, and falls through to the ordinary checks, so a row that cannot be
+# drained never wedges the session. The first stop of a turn (stop hook not
+# active), a new overdue note, or an acknowledgement starts a fresh count. In
+# --claude mode a turn started by a stop-hook continuation such as an
+# asyncRewake also reports the stop hook active, so once the bound is spent
+# such a turn ends with the visible notice instead of blocking again.
+NOTE_MAX_AGE=${FM_TURNEND_NOTE_MAX_AGE:-60}
+case "$NOTE_MAX_AGE" in ''|*[!0-9]*) NOTE_MAX_AGE=60 ;; esac
+NOTE_BLOCKS_FILE="$STATE/.turnend-note-blocks"
+unread_note_backstop() {
+  local now overdue count oldest notes key old_key old_count tmp rule
+  [ -e "$CONFIG/unread-note-backstop" ] || return 0
+  ! fm_afk_daemon_owns_supervision "$STATE" || return 0
+  now=$(date +%s)
+  overdue=$(awk -F '\t' -v now="$now" -v max="$NOTE_MAX_AGE" '
+    NF >= 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 == "check" && $4 ~ /^inbox:/ \
+      && now - $1 > max {
+        n++; seqs = seqs " " $2; notes = notes (notes == "" ? "" : ", ") $4
+        if (oldest == "" || $1 < oldest) oldest = $1
+      }
+    END { if (n) printf "%d %d%s\n%s\n", n, now - oldest, seqs, notes }
+  ' "$STATE/.wake-queue" 2>/dev/null || true)
+  if [ -z "$overdue" ]; then
+    rm -f "$NOTE_BLOCKS_FILE" 2>/dev/null || true
+    return 0
+  fi
+  if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
+    return 0
+  fi
+  notes=${overdue#*$'\n'}
+  overdue=${overdue%%$'\n'*}
+  count=${overdue%% *}
+  oldest=${overdue#* }
+  oldest=${oldest%% *}
+  key="$SESSION_ID ${overdue#* * }"
+  old_key=$(sed -n '1p' "$NOTE_BLOCKS_FILE" 2>/dev/null || true)
+  old_count=$(sed -n '2p' "$NOTE_BLOCKS_FILE" 2>/dev/null || true)
+  case "$old_count" in ''|*[!0-9]*) old_count=0 ;; esac
+  [ "$STOP_HOOK_ACTIVE" = true ] && [ "$old_key" = "$key" ] || old_count=0
+  old_count=$((old_count + 1))
+  tmp="$NOTE_BLOCKS_FILE.tmp.$$"
+  if printf '%s\n%s\n' "$key" "$old_count" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$NOTE_BLOCKS_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  fi
+  if [ "$old_count" -gt "$BLOCK_BUDGET" ]; then
+    NOTE_NOTICE="FIRSTMATE CAPTAIN NOTE STILL UNREAD: $count captain inbox note wake(s) ($notes) have waited more than ${NOTE_MAX_AGE}s unacknowledged (oldest: ${oldest}s). This stop was allowed only to avoid a stop-hook loop after $BLOCK_BUDGET blocks this turn; run bin/fm-wake-drain.sh, handle the notes, and acknowledge them."
+    return 0
+  fi
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH A CAPTAIN NOTE UNREAD\n'
+    printf '●  %s captain inbox note wake(s) in the wake queue have waited more than %ss unacknowledged (oldest: %ss), whatever watcher health says.\n' "$count" "$NOTE_MAX_AGE" "$oldest"
+    printf '●  Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command before ending the turn.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+}
+unread_note_backstop
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
@@ -288,8 +378,7 @@ block_stop() {
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.
 if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision."}\n' \
-    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"
+  emit_system_message "FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid $FM_SESSION_LOCK_FOREIGN_OWNER_PID). Allowing this turn to end safely; the owning session must restore supervision."
   exit 0
 fi
 
@@ -546,7 +635,7 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  emit_system_message "FIRSTMATE SUPERVISION IS GENUINELY DOWN: $NEED_DESC, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
