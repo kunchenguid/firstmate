@@ -53,6 +53,7 @@
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Read receipts are idempotent and retained with the inbox across watcher restarts.
+# Each worker launch clears them, because a replacement has read nothing yet.
 # They prove reading, not completion: the handled/ move remains required.
 # A receipt removes only its own message from unread detection, never a successor.
 # Other worker-liveness alarms are unchanged.
@@ -177,6 +178,10 @@ fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
 
 fm_task_inbox_is_read() {  # <record-path>
   [ -f "${1%/*}/.read/${1##*/}" ]
+}
+
+fm_task_inbox_clear_reads() {  # <state-dir> <task-id>
+  rm -rf -- "$(fm_task_inbox_dir "$1" "$2")/.read"
 }
 
 fm_task_inbox_record_read() {  # <record-path>
