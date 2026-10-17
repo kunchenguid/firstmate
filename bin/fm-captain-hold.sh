@@ -1903,8 +1903,8 @@ open_task_ids() {
 # over-includes tokens that are only prose, and status_key_closing_verb below is
 # what actually decides what the stream says about a key.
 status_log_key_tokens() {  # <status-file>
-  grep -o '\[key=[A-Za-z0-9._-]*\]' "$1" 2>/dev/null |
-    sed 's/^\[key=//; s/\]$//' | LC_ALL=C sort -u
+  grep -oE '(\[key=|[[:space:]]key=)[A-Za-z0-9._-]*' "$1" 2>/dev/null |
+    sed -E 's/^(\[|[[:space:]])key=//' | LC_ALL=C sort -u
 }
 
 list_has_line() {  # <newline-separated-list> <value>
