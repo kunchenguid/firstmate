@@ -97,6 +97,7 @@ Each effective `FM_HOME` contains private operational directories.
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
+Directories named `.scratch` are gitignored, keeping local proof files in disposable isolated copies without adding them to Git.
 
 ### Format and lifecycle references
 
