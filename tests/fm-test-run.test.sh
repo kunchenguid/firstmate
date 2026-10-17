@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -1058,7 +1058,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1071,6 +1071,23 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
+  # The guard sorts under C collation, so it must also compare under it: a
+  # contributor's ambient locale that collates differently must not break it.
+  local collating_locale="" candidate sample c_order
+  sample=$(printf '%s\n' tests/fm-backend-herdr.test.sh tests/fm-backend-herdr-workspace-per-home-e2e.test.sh)
+  c_order=$(printf '%s\n' "$sample" | LC_ALL=C sort)
+  while IFS= read -r candidate; do
+    [ "$(printf '%s\n' "$sample" | LC_ALL=$candidate sort 2>/dev/null)" != "$c_order" ] || continue
+    collating_locale=$candidate
+    break
+  done < <(locale -a 2>/dev/null)
+  if [ -n "$collating_locale" ]; then
+    out=$(LC_ALL=$collating_locale "$RUNNER" --check-coverage 2>&1) \
+      || fail "coverage guard must pass under non-C collation $collating_locale: $out"
+    assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $collating_locale"
+  else
+    echo "skip: coverage guard under non-C collation: no installed locale reorders test paths relative to C"
+  fi
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
