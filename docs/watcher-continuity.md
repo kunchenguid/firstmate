@@ -562,8 +562,8 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
-- The pre-drained banner carrying the staged presentation, the pending acknowledgement recorded and run at the next Stop, the hold consumed unrun, an interrupted turn's record voided by the next prompt, a session mismatch dropped unrun, and the plain-banner fallback when staging fails.
-- Empty `check: rearm-resurface` and `check: inactive-outcome` closes acknowledged and re-armed without a rewake, the same closes with rows delivered, and a signal with an empty presentation delivered.
+- The pre-drained banner carrying the staged presentation, the pending acknowledgement recorded and run at the next Stop, the hold consumed unrun, an interrupted turn's record voided by the next prompt while the rewake's own delivery keeps it, a session mismatch dropped unrun, and the plain-banner fallback when staging fails.
+- Empty `check: rearm-resurface` and `check: inactive-outcome` closes acknowledged and re-armed without a rewake, the same closes with rows or near the hook timeout delivered, the re-arm bounded to the hook budget, the host cycle boundary never absorbed, and a signal with an empty presentation delivered.
 
 `tests/fm-wake-drain-stage.test.sh` covers the staged presentation: nothing committed at stage time, the receipt's contents, the commit at acknowledgement, and its monotonic status cursor.
 `tests/fm-wake-ack.test.sh` covers the pending record's commands and exit codes.
