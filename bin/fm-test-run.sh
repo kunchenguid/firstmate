@@ -545,6 +545,7 @@ tests/fm-send-popup-settle.test.sh 6624
 tests/fm-send-settle.test.sh 2310
 tests/fm-send-strict.test.sh 4804
 tests/fm-spawn-batch.test.sh 2987
+tests/fm-stats-shim.test.sh 1
 tests/fm-supervision-instructions.test.sh 809
 tests/fm-test-run.test.sh 156781
 tests/fm-tmux-submit-busy.test.sh 2600

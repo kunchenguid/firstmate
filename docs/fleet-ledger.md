@@ -89,18 +89,18 @@ The reader's CLI regression journey is the add-on's `fleet-flow/tests/fm-flow.te
 The recorder runs best-effort from `bin/fm-teardown.sh` before the task's durable presentation is retired, and never blocks cleanup.
 
 [`fm-model-stats.sh`](../bin/fm-model-stats.sh) reads every local home's `task-outcomes.tsv` and the main home's sampled `lanes.tsv`/`prs.tsv` into `fm-model-stats.v1`: per model over 7- and 30-day windows, started, finished, merged, merge rate, time-to-merge P50/P75, first-pass rate, rework, revert, escape, cancelled/failed, and model switches, each with its sample size.
-Its header owns usage (`--json [--now <epoch>]`), attribution, and uncertainty limits.
+The firstmate-addons fleet-stats add-on reader's header owns usage (`--json [--now <epoch>]`), attribution, and uncertainty limits.
 A task is attributed to the model of its final launch, and one that changed model mid-flight counts as a switch under that model.
 Every recorded outcome is authoritative; a sampled lane that predates the recorder is a disclosed fallback, and merge rate is computed over recorded outcomes only so a sampled row never fabricates a rate.
 First-pass, rework, revert and escape figures use the same recorded merged PRs as merge rate, since a sampled lane only proves the merges it observed and never the tasks that ended without one; the coverage line counts the sampled tasks they leave out.
-The dashboard's Insights view embeds the reader as the `models` key of `board.json`, and the model/outcome sections of [`tests/fm-flow.test.sh`](../tests/fm-flow.test.sh) are its regression journeys.
+The dashboard's Insights view embeds the reader as the `models` key of `board.json`; its regression journeys are the add-on's `fleet-stats` tests, and the shim's own behavior is covered by [`tests/fm-stats-shim.test.sh`](../tests/fm-stats-shim.test.sh).
 
 ## Skill statistics
 
 [`fm-skill-stats.sh`](../bin/fm-skill-stats.sh) reads the main home's private `data/metrics/skills.tsv` (`day`, `home`, `skill`, `reads`) into `fm-skill-stats.v1`: per skill over 7- and 30-day windows, its read count and the number of homes it was read in, plus a per-home breakdown and, for each window the file's coverage spans, the known skills that had no reads in it.
 Known skill names come from each local home's `skills/` and `.agents/skills/` directories; a missing file or directory contributes nothing rather than failing.
 A registered remote home's reads are not readable locally and are disclosed; while one is registered the reader makes no zero-read claim, since a skill it never saw locally may still have been read there.
-Its header owns usage (`--json [--now <epoch>]`), window arithmetic, and uncertainty limits; the dashboard embeds it as the `skills` key of `board.json`, and the skill section of [`tests/fm-flow.test.sh`](../tests/fm-flow.test.sh) is its regression journey.
+The firstmate-addons fleet-stats add-on reader's header owns usage (`--json [--now <epoch>]`), window arithmetic, and uncertainty limits; the dashboard embeds it as the `skills` key of `board.json`, and its regression journeys are the add-on's `fleet-stats` tests.
 
 ## Not included
 
