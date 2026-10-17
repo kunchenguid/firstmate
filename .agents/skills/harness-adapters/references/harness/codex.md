@@ -20,6 +20,13 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
+## Task-worker launch input
+
+`../../../bin/fm-spawn.sh` owns native Codex ship/scout launch transport and its per-invocation `developer_instructions` bootstrap.
+It publishes the complete launch envelope through the existing operational-input record carrier rather than placing large instructions in one executable argument.
+The initial doorbell is transport, not replacement captain intent: the worker must read the entire record before project work and retain its complete authorized intent for later validation.
+The launch overrides Codex's configured `developer_instructions` for that worker invocation; secondmate launches remain unchanged.
+
 ## Hook trust
 
 A second dialog, "Hooks need review - N hooks are new or changed", appears whenever the machine's `~/.codex/hooks.json` or a project's own `.codex/hooks.json` carries a hook Codex has not persisted trust for.

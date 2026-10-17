@@ -145,6 +145,77 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+# Exercise the actual exec boundary, not just the short staged shell command.
+# The capturing executable is deliberately not evidence of native processing.
+test_codex_full_brief_crosses_exec_boundary() {
+  local kind rec id out launch doorbell record intent_bytes
+  for kind in ship scout; do
+    id="codex-full-$kind"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    # Match the incident's protected-intent size without using product data.
+    # shellcheck disable=SC2016 # These shell metacharacters must stay literal.
+    printf 'Full synthetic intent: shell $HOME `literal` and UTF-8 é.\n' > "$CASE_DIR/intent"
+    intent_bytes=$(wc -c < "$CASE_DIR/intent" | tr -d ' ')
+    awk -v n="$((83828 - intent_bytes))" 'BEGIN { for (i=0; i<n; i++) printf "x" }' >> "$CASE_DIR/intent"
+    {
+      printf '# Task\n## Captain\047s intent\n'
+      cat "$CASE_DIR/intent"
+      printf '\n\n## Firstmate spec\nKeep the entire intent and role contract.\n'
+      awk 'BEGIN { for (i=0; i<120000; i++) printf "s"; printf "\n" }'
+    } > "$HOME_DIR/data/$id/brief.md"
+    cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/authored-before"
+    cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+for arg do printf '%s\n' "$arg" >> "$FM_CAPTURE_ARGS"; done
+for arg do :; done
+printf '%s' "$arg" > "$FM_CAPTURE_PROMPT"
+SH
+    chmod +x "$FAKEBIN_DIR/codex"
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model test-model --effort high)
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model test-model --effort high)
+    fi
+    expect_code 0 "$?" "full Codex $kind stock spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    FM_CAPTURE_ARGS="$CASE_DIR/args" FM_CAPTURE_PROMPT="$CASE_DIR/prompt" PATH="$FAKEBIN_DIR:$PATH" \
+      bash -c "$launch" || fail "full Codex $kind launch did not cross the exec boundary"
+    doorbell=$(cat "$CASE_DIR/prompt")
+    [ "${#doorbell}" -lt 2048 ] || fail "Codex received an oversized argv prompt"
+    # Use the public parser; the envelope must remain in this home's inbox.
+    . "$ROOT/bin/fm-operational-input.sh"
+    fm_operational_doorbell_kind "$doorbell" "$HOME_DIR/state" out || fail "no canonical launch record"
+    [ "$out" = launch-brief ] || fail "wrong record kind: $out"
+    fm_operational_doorbell_path "$doorbell" record || fail "doorbell has no record path"
+    "$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/launch-brief.md" > "$CASE_DIR/expected"
+    cmp -s "$record" "$CASE_DIR/expected" || fail "complete encoded launch bytes changed"
+    [ "$(wc -c < "$record")" -gt 189321 ] || fail "fixture did not exceed the incident's launch size"
+    FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-operational-input.sh" open "$record" > "$CASE_DIR/body" || fail "cannot open full record"
+    cmp -s "$CASE_DIR/body" "$HOME_DIR/data/$id/launch-brief.md" || fail "record body changed"
+    cmp -s "$CASE_DIR/authored-before" "$HOME_DIR/data/$id/brief.md" || fail "authored intent was rewritten"
+    assert_grep '# Current worker role contract' "$CASE_DIR/body" "role missing from full record"
+    assert_grep "$HOME_DIR/state/$id.inbox" "$CASE_DIR/body" "exact safe inbox missing"
+    assert_grep 'developer_instructions=' "$CASE_DIR/args" "native launch omitted task-channel authority"
+    assert_grep 'Before any project work' "$CASE_DIR/args" "native bootstrap omitted complete-read requirement"
+    assert_grep 'test-model' "$CASE_DIR/args" "model changed"
+    assert_grep 'model_reasoning_effort="high"' "$CASE_DIR/args" "effort changed"
+    assert_grep 'hooks' "$CASE_DIR/args" "hook disablement lost"
+    assert_grep 'notify=' "$CASE_DIR/args" "turn-end notification lost"
+    # Publication failure must not fall back to argv or an empty prompt.
+    id="$id-refused"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    : > "$HOME_DIR/state/operational-inbox"
+    if out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); then
+      fail "unpublishable full brief was accepted"
+    fi
+    assert_contains "$out" "could not publish the launch brief" "publication refusal missing"
+    [ ! -s "$LAUNCH_LOG" ] || fail "unpublished record still launched"
+  done
+  pass "Codex ship/scout full briefs cross exec via complete canonical records, never oversized argv"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -712,6 +783,8 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
+  assert_not_contains "$launch" "developer_instructions=" "secondmate inherited task-worker identity"
+  assert_not_contains "$launch" "Firstmate operational input waiting" "secondmate launch changed transport"
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
@@ -2020,6 +2093,7 @@ SH
   done
 }
 
+test_codex_full_brief_crosses_exec_boundary
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
@@ -2068,10 +2142,14 @@ SH
     encoded="$CASE_DIR/encoded-prompt"
     prompt="$CASE_DIR/prompt"
     FM_ROLE_PROMPT="$envelope" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
-    sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
+    # Native Codex receives a doorbell; inspect the complete published record
+    # separately rather than pretending the capture stub processed it.
+    . "$ROOT/bin/fm-operational-input.sh"
+    content=$(tail -1 "$envelope")
+    fm_operational_doorbell_path "$content" encoded || fail "no launch record in $kind prompt"
     "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" ||
       fail "could not decode $kind launch-brief envelope"
-    # The final prompt delivered to the harness is the generated interface.
+    # The complete record is the generated interface.
     # The current identity must precede the authored task, because a Firstmate
     # worktree's own AGENTS.md assigns the unrelated supervisor identity.
     first_line=$(sed -n '1p' "$prompt")
