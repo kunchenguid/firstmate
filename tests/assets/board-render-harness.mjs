@@ -4,7 +4,7 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
+//   { stats:[{n,label}], captains_call:[{title,context:[{label,value}]}], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -26,6 +26,12 @@ class Node {
     this.checked = false;
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      toggle: (c, force) => {
+        const classes = this.className.split(/\s+/).filter((name) => name && name !== c);
+        if (force) classes.push(c);
+        this.className = classes.join(" ");
+        return force;
+      },
       contains: (c) => this.className.split(/\s+/).includes(c),
     };
   }
@@ -108,6 +114,17 @@ const rowsOf = (container) =>
       };
     });
 
+const deck = byId.get("bb-call") || new Node("div");
+const captains_call = deck.children
+  .filter((card) => card.classList.contains("bb-decision"))
+  .map((card) => ({
+    title: card.querySelectorAll(".bb-decision__title")[0]?.textContent ?? "",
+    context: card.querySelectorAll(".bb-ctx__row").map((row) => ({
+      label: row.querySelectorAll(".bb-ctx__k")[0]?.textContent ?? "",
+      value: row.querySelectorAll(".bb-ctx__v")[0]?.textContent ?? "",
+    })),
+  }));
+
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
 
@@ -123,4 +140,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
