@@ -783,10 +783,11 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_agent_state() { printf stale-agent; }
     fm_backend_herdr_projection_close_tab_focus_preserving() { printf "CLOSED %s\n" "$2" >&2; exit 99; }
-    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s" "$?"' "$ROOT" 2>&1)
-  [ "$out" = "rc=1" ] \
-    || fail "reclaim rollback must refuse (never close) a pane with a stale registration, got '$out'"
-  pass "herdr stale registration: presentation reclaim never closes a stale-registration pane"
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=0" ] \
+    || fail "reclaim rollback must refuse (never close) a stale-registration pane and clear the caller's rollback gate, got '$out'"
+  pass "herdr stale registration: presentation reclaim never closes a stale-registration pane and never hands it to the abort cleanup"
 }
 
 test_busy_state_never_reports_a_shell_only_pane_busy() {

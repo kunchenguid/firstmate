@@ -409,7 +409,7 @@ The replacement tab and pane are created and verified before the old pane is rec
 Then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new tab - its terminal and 0.9.x sidebar panes together - when focus-safe verification permits it.
-A reclaim whose own create-time focus restore cannot leave the disposable workspace rolls that exact tab back instead of leaving it beside the husk, and the caller's abort cleanup retries the close when the in-function rollback is refused.
+A reclaim whose own create-time focus restore cannot leave the disposable workspace rolls that exact tab back instead of leaving it beside the husk, and the caller's abort cleanup retries the close when the in-function rollback is refused on a focus or close failure. A rollback that refuses because the replacement pane's agent state is live, stale, or unknown clears the same-process rollback authority, so the abort cleanup never re-closes that pane without the agent-state recheck.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
 

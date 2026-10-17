@@ -2938,7 +2938,10 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
   case "$state" in
     dead) required_state= ;;
     no-agent) ;;
-    live|stale-agent|unknown) return 1 ;;
+    live|stale-agent|unknown)
+      # shellcheck disable=SC2034  # caller consumes the same-process rollback gate
+      FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
+      return 1 ;;
   esac
   # Close the replacement TAB (terminal plus any 0.9.x sidebar pane) so the
   # rollback does not leave the replacement tab behind on releases where a
@@ -2960,7 +2963,8 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
 # A completed replacement create records its exact tab and pane plus the
 # same-process rollback gate (FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE) before
 # the create-time focus restore, so that failure rolls the tab back here and a
-# refused rollback still hands the exact tab to the caller's abort cleanup.
+# rollback refused on a focus or close failure still hands the exact tab to the
+# caller's abort cleanup. An agent-state refusal clears that gate instead.
 fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
   local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
