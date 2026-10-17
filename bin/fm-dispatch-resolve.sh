@@ -16,16 +16,21 @@
 # What it does when on with at least one rule: one POST to
 #   https://api.typesafe.ai/v1/systemone with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
-#   scout brief (the whole brief when it has neither section), as state and
-#   ONE Choice question whose options are every rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. Jev returns
-#   the matched rule, a probability per option, and a confidence. Everything
-#   after that is jq: the confidence floor (0.6 on the answer confidence, or a
-#   rule's declared `min_confidence` on that rule's probability, falling to the
-#   most probable other option that clears its own floor), the rule's declared
-#   `approval` and `floor`, each profile's declared `provider` and `floor`, the
-#   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
-#   candidate binds to one row through quota_row in
+#   scout brief (the whole brief when it has neither section), as state, ONE
+#   Choice question whose options are every rule's `when` from
+#   config/crew-dispatch.json plus one fixed generic none option, and a small
+#   fixed set of classifier questions for model-router evidence. Jev returns
+#   the matched rule, a probability per option, a confidence, and typed
+#   judgments for intent, domain, difficulty, risk, likely model class, and
+#   whether the request should escalate. The rule and escalation answers must
+#   be well formed against the options the request offered; a malformed
+#   evidence axis publishes `unavailable` and leaves the route alone.
+#   Everything after that is jq: the rule confidence floor (0.6 on the answer
+#   confidence, or a rule's declared `min_confidence` on that rule's
+#   probability, falling to the most probable other option that clears its own
+#   floor), the rule's declared `approval` and `floor`, each profile's declared
+#   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot
+#   (schema 5 or 6; each candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
 #   candidate is unmeasured, never blocked), and the spendPriority argmax over
@@ -36,8 +41,10 @@
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
 # Never-send check: when the optional $FM_HOME/config/dispatch-never-send list
-#   exists, every string value of the built request is checked against it
-#   before the POST. Each non-blank, non-# line is a literal matched
+#   exists, every operator-controlled string of the built request - the project
+#   name, the task text, and each rule's `when` - is checked against it before
+#   the POST; the tool's own fixed question and option text carries no operator
+#   content and is not matched. Each non-blank, non-# line is a literal matched
 #   case-insensitively, with surrounding whitespace trimmed and every run of
 #   whitespace, on both sides, treated as one space. A match, or a list that
 #   is not a readable regular file, prints one
@@ -49,13 +56,19 @@
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
+#     classification: intent/domain/difficulty/risk/model_class/escalation with
+#       confidence, or `unavailable` for an evidence axis the answer malformed
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
+#     note: <which profile set the candidates below belong to, or the
+#       eligible-unranked note>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
-#   ambiguous -> confidence below the floor; decide as today from the probabilities
-#   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
+#   ambiguous -> rule confidence below the floor; decide as today from the probabilities
+#   escalate  -> the rule requires captain approval, the classifier recommends
+#                escalation at or above the confidence floor, no candidate is
+#                rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -66,8 +79,9 @@
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
-#   the captain-approval gate, or fm-spawn.sh validation; it publishes one
-#   inspectable answer plus every candidate's evidence, in code.
+#   the captain-approval gate, secondmate scope enforcement, safety boundaries,
+#   or fm-spawn.sh validation; it publishes one inspectable answer, typed
+#   classifier evidence, and every candidate's evidence, in code.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -93,8 +107,28 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+TS_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
+
+# The options offered for each question are built once into the request; the
+# response validator and the resolution program both read that one vocabulary
+# through $offered, so no axis has a second copy of its option list.
+# shellcheck disable=SC2016  # jq program text, not shell expansion
+ANSWER_JQ='
+  def well_formed($answers; $offered; $name):
+    ($offered[$name]) as $choices |
+    ($answers[$name]) as $a |
+    ($a.choice | type) == "string" and
+    ($a.confidence | type) == "number" and
+    $a.confidence >= 0 and $a.confidence <= 1 and
+    ($a.probabilities | type) == "object" and
+    (($a.probabilities | keys) == $choices) and
+    all($a.probabilities[]; type == "number" and . >= 0 and . <= 1) and
+    (($a.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01);
+  def recognized($answers; $offered; $name):
+    well_formed($answers; $offered; $name) and
+    ($offered[$name] | index($answers[$name].choice)) != null;
+'
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
@@ -252,8 +286,12 @@ never_send_off() {
   exit 0
 }
 
-# Checks every string the request carries, so no text reaches the network
-# unchecked. grep's own stderr is discarded because it can echo the pattern.
+# Checks every string the request carries except the tool's own fixed question
+# and option vocabulary, so no text of yours - the project name, the task text,
+# each rule's `when`, and any content the request grows later - reaches the
+# network unchecked. That fixed vocabulary carries no operator content, so a
+# listed value that collides with it alone never turns resolution off.
+# grep's own stderr is discarded because it can echo the pattern.
 never_send_check() {
   local list value n=0 rc
   [ -e "$NEVER_SEND_PATH" ] || [ -L "$NEVER_SEND_PATH" ] || return 0
@@ -261,7 +299,12 @@ never_send_check() {
     || never_send_off "$NEVER_SEND_PATH is not a readable regular file"
   # Collapse whitespace runs on both sides so a value the brief wraps across
   # lines or spaces differently still matches
-  jq -r '.. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
+  jq -r 'del(.model, .questions[].type, .questions[].instructions,
+      .questions.rule.criteria.default,
+      .questions.intent.criteria, .questions.domain.criteria,
+      .questions.difficulty.criteria, .questions.risk.criteria,
+      .questions.model_class.criteria, .questions.escalation.criteria)
+    | .. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
     || never_send_off "could not extract the request text to check"
   list=$(jq -Rr 'gsub("\\s+"; " ")' "$NEVER_SEND_PATH" 2>/dev/null) \
     || never_send_off "could not read $NEVER_SEND_PATH"
@@ -274,7 +317,7 @@ never_send_check() {
     esac
     grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$?
     case "$rc" in
-      0) never_send_off "brief text matches $NEVER_SEND_PATH line $n" ;;
+      0) never_send_off "brief, project, or rule text matches $NEVER_SEND_PATH line $n" ;;
       1) ;;
       *) never_send_off "could not check the request text against $NEVER_SEND_PATH line $n" ;;
     esac
@@ -318,9 +361,16 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
           type: "choice",
           instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
           criteria: ($criteria + {default: $none_criterion})
-        }
+        },
+        intent: {type: "choice", instructions: "Classify the task intent for routing evidence only; local Firstmate policy still owns the route.", criteria: {implementation: "Build or change product/code behavior.", bugfix: "Fix a reported defect or regression.", investigation: "Research, diagnose, reproduce, audit, or report without changing code.", review: "Review existing work, a PR, or a design.", operations: "Operate Firstmate, GitHub, CI, credentials, releases, or project management.", documentation: "Write or update documentation.", design: "Plan architecture, product behavior, or implementation shape.", other: "None of the listed intents is a confident fit."}},
+        domain: {type: "choice", instructions: "Classify the dominant domain for routing evidence only.", criteria: {firstmate: "Firstmate supervisor tooling or instructions.", project_code: "A registered project codebase or tests.", infrastructure: "Runtime, shell, CI, deployment, or local tooling infrastructure.", github: "GitHub issues, pull requests, reviews, or repository settings.", browser_visual: "Browser, visual, UI, or screenshot-driven work.", docs: "Documentation or prose surface.", unknown: "The domain is unclear from the brief."}},
+        difficulty: {type: "choice", instructions: "Estimate implementation or reasoning difficulty; use high only for broad exploration, ambiguity, or higher risk, and do not make xhigh routine.", criteria: {low: "Small, clear, well-bounded work.", medium: "Clear objective with moderate integration or validation.", high: "Broad, ambiguous, multi-system, or high-risk reasoning.", xhigh: "Exceptionally difficult, architecture-heavy, or safety-critical reasoning."}},
+        risk: {type: "choice", instructions: "Estimate the highest relevant safety or delivery risk; sensitive means a human authority boundary may be involved.", criteria: {low: "Routine reversible change with low blast radius.", medium: "Moderate complexity or user-visible impact.", high: "High blast radius, security-adjacent, data-affecting, or hard-to-reverse work.", sensitive: "Destructive, irreversible, credential, security-sensitive, payment, privacy, or merge-authority concern."}},
+        model_class: {type: "choice", instructions: "Recommend likely model capability class as evidence only, not a concrete model launch.", criteria: {small_fast: "Small or fast model is likely sufficient.", standard: "Standard coding/reasoning model is likely sufficient.", strong_reasoning: "Stronger reasoning model is likely useful.", current_web: "Needs current external facts or web/forge context.", vision: "Needs visual/browser evidence.", code_execution: "Needs substantial local code execution or test iteration."}},
+        escalation: {type: "choice", instructions: "Should Firstmate escalate before dispatch because the request may need captain approval, a sensitive decision, unclear scope, credentials, destructive or irreversible action, or a safety boundary?", criteria: {no: "No escalation appears necessary before normal Firstmate policy checks.", yes: "Escalation appears necessary before dispatch or action."}}
       }
     }')
+  OFFERED=$(jq -c '.questions | map_values(.criteria | keys)' <<<"$REQUEST") || emit_error "could not read the offered classifier options"
   never_send_check
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
@@ -330,20 +380,15 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-jq -e --slurpfile rules "$RULES" '
-    (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
-    (.answers.rule.choice | type) == "string" and
-    (.answers.rule.confidence | type) == "number" and
-    .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
-    (.answers.rule.probabilities | type) == "object" and
-    ((.answers.rule.probabilities | keys | sort) == $choices) and
-    all(.answers.rule.probabilities[]; type == "number" and . >= 0 and . <= 1) and
-    ((.answers.rule.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01) and
+jq -e --argjson offered "$OFFERED" "$ANSWER_JQ"'
+    (.answers) as $answers |
+    well_formed($answers; $offered; "rule") and
+    recognized($answers; $offered; "escalation") and
     ((has("usage") | not) or
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
-  "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+  "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a typed dispatch classifier answer"
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
@@ -352,8 +397,14 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  --argjson offered "$OFFERED" \
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ$ANSWER_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
+  def ans($name): $r.answers[$name];
+  def c($name):
+    if recognized($r.answers; $offered; $name)
+    then {choice: ans($name).choice, confidence: ans($name).confidence}
+    else {choice: "unavailable", confidence: null} end;
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
@@ -466,7 +517,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $picked,
     rule_when: when_of($picked),
-    confidence: $a.confidence, probabilities: $a.probabilities
+    confidence: $a.confidence, probabilities: $a.probabilities,
+    classification: {intent: c("intent"), domain: c("domain"), difficulty: c("difficulty"), risk: c("risk"), model_class: c("model_class"), escalation: c("escalation")}
   }
   + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
   as $ev |
@@ -477,6 +529,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+  elif ans("escalation").choice == "yes" and ans("escalation").confidence >= ($floor | tonumber) then
+    $ev + {status: "escalate", reason: "classifier recommends escalation before dispatch", note: $sel.note, candidates: ($sel.use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
@@ -499,11 +553,13 @@ TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def shell_arg: flat | @sh;
+  def axis($a): if $a.confidence == null then ($a.choice | flat) else "\($a.choice | flat)(\($a.confidence | flat))" end;
   "dispatch-resolve:",
   "  status: \(.status | flat)",
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
+  "  classification: intent=\(axis(.classification.intent)) domain=\(axis(.classification.domain)) difficulty=\(axis(.classification.difficulty)) risk=\(axis(.classification.risk)) model_class=\(axis(.classification.model_class)) escalation=\(axis(.classification.escalation))",
   (if .fallback then "  fallback: \(.fallback | flat)" else empty end),
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
