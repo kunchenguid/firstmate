@@ -4,7 +4,20 @@ Audience: maintainer verification.
 
 This record contains reusable version-scoped evidence for active runtime guarantees.
 The backend guides own current setup, safety boundaries, and limitations.
-Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
+
+## Idle worker tab closure
+
+Verified 2026-10-10 with Herdr 0.9.1 and Pi 0.64.0.
+Refresh the token-free native check with:
+
+```sh
+bash tests/fm-control-close-tab-live-e2e.test.sh
+```
+
+The isolated Herdr lab runs the real `fm-control.sh <task> exit --close-tab` against a marked lab home. It confirms guard refusals for an unregistered foreground command, an idle Pi registration over that command, a recorded Pi identity facing a live `agy` process, and a shell with an active background command. Each refused pane remains open. The same run closes a real idle Pi pane, captures a visible single-line unsent draft in a private viewport checkpoint, and proves that the pane and recorded foreground processes are gone.
+Hidden lines of a multiline editor draft are outside this checkpoint contract.
+Lab teardown passed the default-session tripwire.
+`bash tests/fm-control-close-tab.test.sh` additionally covers supervisor, shared, and unreadable targets through focused adapter regressions. The native refusal cases use Herdr's lifecycle reporting for stale and replacement registrations; they do not exercise a model turn or prove every harness version's exit behavior.
 
 ## Harness detection precedence
 

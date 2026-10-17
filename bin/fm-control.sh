@@ -3,7 +3,7 @@
 # lifecycle verbs addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
-#        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> exit [--close-tab]
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -51,6 +51,10 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#              --close-tab explicitly closes an idle Herdr ship/scout tab,
+#              preserving worktree and task records. It saves the viewport
+#              privately and never types into or submits a pending composer.
+#              Shared, busy, unreadable, and supervisor tabs are refused.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -248,6 +252,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CLOSE_TAB=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -269,6 +274,7 @@ for control_arg in "$@"; do
     continue
   fi
   case "$control_arg" in
+    --close-tab) CLOSE_TAB=1 ;;
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
     --model) control_want_value=model ;;
@@ -286,6 +292,8 @@ for control_arg in "$@"; do
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
+[ "$CLOSE_TAB" = 0 ] || [ "$VERB" = exit ] \
+  || die "--close-tab applies to 'exit' only"
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
   die "--$control_want_value requires a value"
@@ -1172,8 +1180,22 @@ case "$VERB" in
     proof=$(do_interrupt)
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
     ;;
-  exit)
+exit)
+  if [ "$CLOSE_TAB" = 1 ]; then
+    [ "$BACKEND" = herdr ] || die "--close-tab requires Herdr"
+    case "$KIND" in ship|scout) ;; *) die "--close-tab refuses supervisor tasks" ;; esac
+    fm_backend_source "$BACKEND" || die "could not load the Herdr control adapter"
+    snapshot=$(umask 077; mktemp "$STATE/$ID.closed-tab.XXXXXX") \
+      || die "could not create the private tab checkpoint"
+    fm_backend_herdr_close_idle_task "$T" \
+      "$(fm_meta_get "$META" herdr_tab_id)" \
+      "$(fm_meta_get "$META" herdr_workspace_id)" "$snapshot" "$HARNESS" \
+      || die "idle tab close refused or unconfirmed; checkpoint=$snapshot"
+    retire_busy_incarnation
+    result="tab-closed checkpoint=$snapshot"
+  else
     result=$(do_exit)
+  fi
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)

@@ -31,7 +31,8 @@ Popup, queued-input, and readiness handling belongs to `../../../bin/fm-composer
 ## Interrupt and exit
 
 Use the control plane so capabilities are checked first.
-Interrupt preserves the agent and work; exit stops only the agent and preserves its endpoint, isolated copy, and uncommitted changes.
+Interrupt preserves the agent and work; ordinary exit stops only the agent and preserves its endpoint, isolated copy, and uncommitted changes.
+For explicit Herdr idle-tab closure, see [`docs/agent-control.md`](../../../../../docs/agent-control.md#verbs).
 Cleanup and discard are not lifecycle verbs.
 The tool reference records repeat, acknowledgement, and clearing behavior, while the executable owner sends or refuses the sequence.
 

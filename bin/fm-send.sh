@@ -449,11 +449,26 @@ shift
 # untouched (contract: bin/fm-lease-lib.sh).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+SEND_CONTROL_LOCK=
+fm_send_release_guards() {
+  if [ -n "$SEND_CONTROL_LOCK" ]; then
+    fm_lock_release "$SEND_CONTROL_LOCK" || true
+  fi
+  fm_lease_guard_release
+}
+trap fm_send_release_guards EXIT
 if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
-    trap 'fm_lease_guard_release' EXIT
+  fi
+fi
+if [ "$TARGET_BACKEND" = herdr ] && [ -n "$TARGET_META" ]; then
+  SEND_CONTROL_LOCK="$STATE/.control-$(fm_send_id_from_meta "$TARGET_META").lock"
+  if ! fm_lock_try_acquire "$SEND_CONTROL_LOCK"; then
+    SEND_CONTROL_LOCK=
+    echo "error: lifecycle action is already running for this task; steer not sent" >&2
+    exit 1
   fi
 fi
 
