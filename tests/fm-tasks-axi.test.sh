@@ -239,6 +239,167 @@ test_wrapper_single_home() {
   pass "fm-tasks-axi.sh keeps the single-home layout addressing its own code-root backlog"
 }
 
+
+# An objective is a row blocked-by the tasks it waits on. tasks-axi closes such a
+# row while its blockers are open, so the wrapper refuses the close; the cases
+# drive the real CLI through the wrapper and pin both directions.
+objective_home() {  # <name>; prints the case directory
+  local dir="$TMP_ROOT/$1" t
+  mkdir -p "$dir/home/data" "$dir/home/state"
+  fm_test_tasks_toml "$dir/home/.tasks.toml"
+  empty_backlog "$dir/home/data/backlog.md"
+  printf '%s\n' "$dir"
+  for t in obj study impl; do
+    (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" add "$t" "$t row" >/dev/null) || return 1
+  done
+  for t in study impl; do
+    (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" block obj --by "$t" >/dev/null) || return 1
+  done
+}
+
+obj_w() {  # <case-dir> <args...>
+  local dir=$1
+  shift
+  (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" "$@")
+}
+
+test_objective_close_refused_while_children_open() {
+  local dir out rc
+  dir=$(objective_home obj-close | sed -n 1p)
+  out=$(obj_w "$dir" "done" obj 2>&1); rc=$?
+  expect_code 2 "$rc" "closing an objective with two open children"
+  assert_contains "$out" "study impl" "the refusal did not name both open children"
+  assert_grep "[ ] obj" "$dir/home/data/backlog.md" "a refused close still moved the objective"
+  obj_w "$dir" "done" study --note finished >/dev/null || fail "closing a child with no blockers failed"
+  out=$(obj_w "$dir" "done" obj 2>&1); rc=$?
+  expect_code 2 "$rc" "closing an objective with one open child"
+  assert_contains "$out" "impl" "the refusal did not name the remaining child"
+  assert_not_contains "$out" "study" "a Done child was reported as open"
+  obj_w "$dir" "done" impl --note finished >/dev/null || fail "closing the last child failed"
+  obj_w "$dir" "done" obj >/dev/null || fail "the objective did not close once every child was Done"
+  obj_w "$dir" "done" obj --note again >/dev/null || fail "the idempotent link backfill on a Done objective was refused"
+  pass "an objective cannot close while a child is open and closes once every child is Done"
+}
+
+test_unblock_clears_a_mistaken_edge() {
+  local dir
+  dir=$(objective_home obj-unblock | sed -n 1p)
+  obj_w "$dir" unblock obj --by study >/dev/null || fail "unblock failed"
+  obj_w "$dir" unblock obj --by impl >/dev/null || fail "unblock failed"
+  obj_w "$dir" close obj >/dev/null || fail "an objective with no remaining edge must close"
+  pass "an explicitly unblocked objective closes; there is no other override"
+}
+
+test_missing_child_remains_a_blocker() {
+  local dir action out rc before
+  for action in 'done' 'close'; do
+    dir=$(objective_home "obj-missing-$action" | sed -n 1p)
+    obj_w "$dir" "done" study >/dev/null || fail "closing study failed"
+    # Simulate a lost child row in the persisted Markdown backlog contract.
+    sed '/^- \[ \] impl - /d' "$dir/home/data/backlog.md" > "$dir/backlog.md"
+    mv "$dir/backlog.md" "$dir/home/data/backlog.md"
+    out=$(obj_w "$dir" show impl 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "the child row was not removed"
+    out=$(obj_w "$dir" show obj) || fail "reading the objective failed"
+    assert_contains "$out" "blocked-by:impl" "the missing child's dependency was lost"
+    before=$(cat "$dir/home/data/backlog.md")
+    out=$(obj_w "$dir" "$action" obj 2>&1); rc=$?
+    expect_code 2 "$rc" "$action with a missing child"
+    assert_contains "$out" "impl" "the refusal did not name the missing child"
+    assert_not_contains "$out" "study" "a Done child was reported as open"
+    assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a refused close changed the backlog"
+    obj_w "$dir" unblock obj --by impl >/dev/null || fail "unblocking the missing child failed"
+    obj_w "$dir" "$action" obj >/dev/null || fail "the explicitly unblocked objective did not close"
+    out=$(obj_w "$dir" show obj) || fail "reading the closed objective failed"
+    assert_contains "$out" "state: done" "the unblocked objective remained open"
+  done
+  pass "done and close refuse a missing child until its dependency is explicitly unblocked"
+}
+
+test_closure_command_help() {
+  local dir action flag expected expected_rc out rc before
+  dir=$(objective_home obj-help | sed -n 1p)
+  before=$(cat "$dir/home/data/backlog.md")
+  for action in 'done' 'close'; do
+    for flag in --help -h; do
+      expected=$(cd "$dir/home" && tasks-axi "$action" "$flag" 2>&1); expected_rc=$?
+      out=$(obj_w "$dir" "$action" "$flag" 2>&1); rc=$?
+      expect_code "$expected_rc" "$rc" "$action $flag"
+      if [ "$flag" = --help ]; then
+        expect_code 0 "$rc" "$action $flag"
+        assert_contains "$out" "usage:" "$action $flag did not return command help"
+      fi
+      assert_equals "$expected" "$out" "$action $flag did not pass through the CLI help"
+      assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "$action $flag changed the backlog"
+    done
+  done
+  pass "done and close pass both command-help flags through without changing the backlog"
+}
+
+test_objective_close_with_relative_directories() {
+  local dir mode action out rc child
+  local relative_env=()
+  for mode in home data root; do
+    for action in 'done' 'close'; do
+      dir=$(objective_home "obj-relative-$mode-$action" | sed -n 1p)
+      case "$mode" in
+        home) relative_env=(FM_HOME=home FM_ROOT_OVERRIDE="$ROOT") ;;
+        data) relative_env=(FM_HOME="$dir/home" FM_DATA_OVERRIDE=home/data FM_ROOT_OVERRIDE="$ROOT") ;;
+        root) relative_env=(FM_ROOT_OVERRIDE=home) ;;
+      esac
+      out=$(cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" obj 2>&1); rc=$?
+      expect_code 2 "$rc" "$action with relative $mode and open children"
+      assert_contains "$out" "study impl" "relative addressing did not find the objective's open children"
+      for child in study impl; do
+        (cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" "$child" >/dev/null) \
+          || fail "$action refused an unblocked child with relative $mode"
+      done
+      (cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" obj >/dev/null) \
+        || fail "$action refused an objective with Done children and relative $mode"
+      out=$(obj_w "$dir" show obj) || fail "reading the closed objective failed"
+      assert_contains "$out" "state: done" "relative $mode closed a different backlog"
+    done
+  done
+  pass "done and close share the caller's backlog with relative home, data, and root paths"
+}
+
+test_objective_close_refused_when_parent_read_fails() {
+  local dir real_tasks mode action out rc before
+  dir=$(objective_home obj-read-failure | sed -n 1p)
+  real_tasks=$(command -v tasks-axi)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = obj ]; then
+  case "$FM_READ_FAILURE" in
+    unreadable) shift 2; exec "$FM_REAL_TASKS_AXI" show missing-objective "$@" ;;
+    timeout) exec sleep 30 ;;
+  esac
+fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  before=$(cat "$dir/home/data/backlog.md")
+  for mode in unreadable timeout; do
+    for action in 'done' 'close'; do
+      out=$(PATH="$dir/fakebin:$PATH" FM_REAL_TASKS_AXI="$real_tasks" \
+        FM_READ_FAILURE="$mode" FM_BACKLOG_ROW_TIMEOUT_SECS=1 \
+        obj_w "$dir" "$action" obj 2>&1); rc=$?
+      expect_code 2 "$rc" "$action with a $mode parent read"
+      assert_contains "$out" "blocker verification failed" "the refusal did not explain the read failure"
+      case "$mode" in
+        unreadable) assert_contains "$out" "NOT_FOUND" "the real CLI read diagnostic was lost" ;;
+        timeout) assert_contains "$out" "exceeded its 1s backlog read bound" "the read timeout diagnostic was lost" ;;
+      esac
+      assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a failed parent read still changed the backlog"
+    done
+  done
+  obj_w "$dir" "done" study >/dev/null || fail "closing study after read failures failed"
+  obj_w "$dir" "done" impl >/dev/null || fail "closing implementation after read failures failed"
+  obj_w "$dir" close obj >/dev/null || fail "closing the objective after read recovery failed"
+  pass "done and close refuse unreadable and timed-out parent reads without losing diagnostics"
+}
+
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
@@ -249,6 +410,12 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refusals
   test_wrapper_refuses_add_start
   test_wrapper_single_home
+  test_objective_close_refused_while_children_open
+  test_unblock_clears_a_mistaken_edge
+  test_missing_child_remains_a_blocker
+  test_closure_command_help
+  test_objective_close_with_relative_directories
+  test_objective_close_refused_when_parent_read_fails
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi

@@ -47,6 +47,14 @@
 #     later would notice (`start <id>` stays a documented direct transition);
 #   - a data directory that cannot be resolved, or whose backend configuration
 #     cannot be read (bin/fm-tasks-axi-lib.sh owns that diagnostic);
+#   - `done` (or `close`) of a task that is not already Done and is blocked-by
+#     a task that is not Done (an unreadable blocker counts as not Done);
+#     the refusal names the open blockers. Only explicit `unblock` clears an
+#     edge; there is no override. Already-Done rows allow idempotent backfill;
+#   - `done` (or `close`) when blocker verification fails, including an
+#     unreadable parent row or a read returning no state; the refusal retains
+#     the read diagnostic. Command help (`done --help`, `close --help`, or
+#     either command with `-h`) passes through without blocker verification;
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
 #     this command exists to prevent. Lifecycle transitions refuse the same file.
@@ -130,6 +138,7 @@ done
 command -v tasks-axi >/dev/null 2>&1 || fail "tasks-axi is not on PATH; run bin/fm-bootstrap.sh for the install command"
 
 FM_BACKLOG_TRANSITION_ERROR=
+DATA=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: ${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if ! fm_backlog_tasks_axi_addressing "$DATA"; then
   fail "${FM_BACKLOG_TRANSITION_ERROR:-data directory cannot be resolved: $DATA}"
 fi
@@ -144,6 +153,20 @@ else
 fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
+case "${1:-}" in
+  done|close)
+    # fm_backlog_open_blockers owns the dependency check and Done-row exemption.
+    if [ -n "${2:-}" ] && [ "$2" != --help ] && [ "$2" != -h ]; then
+      open_blockers=$(fm_backlog_open_blockers "$DATA" "$2")
+      open_status=$?
+      if [ "$open_status" -eq 1 ]; then
+        fail "$2 still has open blockers, so it cannot be closed: $(printf '%s' "$open_blockers" | tr '\n' ' ')"
+      elif [ "$open_status" -ne 0 ]; then
+        fail "$2 cannot be closed because blocker verification failed: $open_blockers"
+      fi
+    fi
+    ;;
+esac
 case "${1:-}" in
   show|view|list)
     set -o pipefail

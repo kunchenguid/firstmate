@@ -540,6 +540,46 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
 }
 
+# The blocked-by edges tasks-axi records are the objective-to-child dependency
+# the backlog already owns; tasks-axi itself closes a row whose blockers are
+# still open, so bin/fm-tasks-axi.sh refuses an explicit close here. Lifecycle
+# teardown deliberately does not call this: landed work is never held open by a
+# blocker that was recorded for ordering. Prints nothing and returns 0 when every
+# blocker of <id> is Done (or <id> is already Done, which keeps the idempotent
+# link backfill working); returns 1 and prints each blocker that is not Done,
+# an unreadable blocker included, because unknown is never done. Returns 2 when
+# the data directory cannot be resolved or the row itself cannot be read or
+# supplies no state; row-read failures print their diagnostic. The wrapper's
+# header owns the public refusal and explicit-unblock contract.
+fm_backlog_open_blockers() {  # <data-dir> <id>
+  local data id=$2 out line blockers b bout bstate open=0
+  data=$(fm_backlog_data_absolute "$1") || return 2
+  if ! out=$(fm_backlog_row_show "$data" "$id"); then
+    printf '%s\n' "${out:-tasks-axi show $id failed with no output}"
+    return 2
+  fi
+  line=$(printf '%s\n' "$out" | sed -n 's/^ *state: *//p' | sed -n '1p')
+  if [ -z "$line" ]; then
+    printf 'tasks-axi show %s returned no state\n' "$id"
+    return 2
+  fi
+  [ "$line" != "done" ] || return 0
+  # blocked_by omits missing rows; deps retains edges until explicit unblock.
+  blockers=$(printf '%s\n' "$out" | sed -n 's/^ *deps: *//p' | sed -n '1p' |
+    tr -d '"' | tr ',' '\n' | sed -n 's/^blocked-by://p')
+  for b in $blockers; do
+    bstate=
+    if bout=$(fm_backlog_row_show "$data" "$b"); then
+      bstate=$(printf '%s\n' "$bout" | sed -n 's/^ *state: *//p' | sed -n '1p')
+    fi
+    if [ "$bstate" != "done" ]; then
+      printf '%s\n' "$b"
+      open=1
+    fi
+  done
+  [ "$open" -eq 0 ] || return 1
+}
+
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
