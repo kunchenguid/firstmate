@@ -3722,6 +3722,21 @@ teardown_herdr_journal_orphaned() {
     [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$T" ]
   fi
 }
+
+teardown_herdr_materialize_workspace_tombstone_and_rm_journal() {  # <session>
+  local session=$1
+  [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ] || return 0
+  if [ -f "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    fm_backend_source herdr || true
+    if declare -F fm_backend_herdr_workspace_tombstone_write >/dev/null 2>&1 \
+      && [ -n "$session" ]; then
+      fm_backend_herdr_workspace_tombstone_write \
+        "$STATE" "$ID" "$HERDR_PRESENTATION_JOURNAL" "$session" "$FM_HOME" \
+        || echo "warning: could not record herdr workspace tombstone for $ID; session-start cleanup may miss a restored projection" >&2
+    fi
+  fi
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+}
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
@@ -3771,7 +3786,7 @@ elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
+    teardown_herdr_materialize_workspace_tombstone_and_rm_journal "$HERDR_PRESENTATION_SESSION"
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
@@ -3885,7 +3900,7 @@ rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard"
 # session-start sweep alone may judge (header).
 if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
   if teardown_herdr_journal_orphaned; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
+    teardown_herdr_materialize_workspace_tombstone_and_rm_journal "$(meta_value "$META" herdr_session)"
   else
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi

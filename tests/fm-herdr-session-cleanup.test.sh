@@ -253,6 +253,25 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+write_tombstone_v1() {
+  {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$ID"
+    printf 'projection_id=%s\n' "$TOKEN"
+    printf 'home=%s\n' "$FM_HOME"
+    printf 'session=test\n'
+    printf 'workspace_label=%s\n' "$TITLE"
+  } > "$FM_STATE_OVERRIDE/$ID.herdr-workspace-tomb"
+}
+
+reset_fixture
+rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+write_tombstone_v1
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-workspace-tomb" ] || fail "tombstone-only cleanup kept the tombstone"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "tombstone-only cleanup did not close exactly once"
+pass "workspace tombstone alone authorizes the same exact stale projection cleanup"
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"

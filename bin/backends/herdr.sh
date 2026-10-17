@@ -148,6 +148,11 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# A per-task tombstone records a torn-down projected workspace Herdr may
+# resurrect from session layout on restart after teardown retires the journal.
+# bin/fm-herdr-session-cleanup.sh is the only consumer; it retires the tombstone
+# after the exact focus-safe pane close confirms the workspace gone again.
+FM_BACKEND_HERDR_WORKSPACE_TOMB_SUFFIX=".herdr-workspace-tomb"
 
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
@@ -716,6 +721,115 @@ fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> 
   fi
   [ -f "$journal" ] && [ ! -L "$journal" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$journal"
+}
+
+# fm_backend_herdr_workspace_tombstone_path: durable path for one task id.
+fm_backend_herdr_workspace_tombstone_path() {  # <state-dir> <task-id>
+  printf '%s/%s%s' "$1" "$2" "$FM_BACKEND_HERDR_WORKSPACE_TOMB_SUFFIX"
+}
+
+# fm_backend_herdr_workspace_tombstone_write: materialize a tombstone from the
+# presentation journal snapshot immediately before teardown retires that
+# journal, so a later Herdr restart can still be swept without task metadata.
+fm_backend_herdr_workspace_tombstone_write() {  # <state-dir> <task-id> <journal> <session> <home>
+  local state=$1 id=$2 journal=$3 session=$4 home=$5 tombstone tmp home_real workspace_label
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  home_real=$(fm_backend_herdr_projection_home_identity "$home") || return 1
+  tombstone=$(fm_backend_herdr_workspace_tombstone_path "$state" "$id")
+  tmp=$(mktemp "$state/.${id}.herdr-workspace-tomb.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  workspace_label=$(fm_backend_herdr_projection_workspace_label \
+    "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+    if ! {
+      printf 'version=2\n'
+      printf 'task_id=%s\n' "$id"
+      printf 'projection_id=%s\n' "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+      printf 'home=%s\n' "$home_real"
+      printf 'session=%s\n' "$session"
+      printf 'workspace_id=%s\n' "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID"
+      printf 'tab_id=%s\n' "$FM_BACKEND_HERDR_JOURNAL_TAB_ID"
+      printf 'pane_id=%s\n' "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
+      printf 'workspace_label=%s\n' "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+      printf 'task_label=%s\n' "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+    } > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    if ! {
+      printf 'version=1\n'
+      printf 'task_id=%s\n' "$id"
+      printf 'projection_id=%s\n' "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+      printf 'home=%s\n' "$home_real"
+      printf 'session=%s\n' "$session"
+      printf 'workspace_label=%s\n' "$workspace_label"
+    } > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  mv -f "$tmp" "$tombstone"
+}
+
+# fm_backend_herdr_workspace_tombstone_snapshot: validate one tombstone record
+# and set FM_BACKEND_HERDR_TOMB_* globals for same-process callers.
+fm_backend_herdr_workspace_tombstone_snapshot() {  # <tombstone> <task-id>
+  local tombstone=$1 id=$2 lines
+  FM_BACKEND_HERDR_TOMB_VERSION=""
+  FM_BACKEND_HERDR_TOMB_TASK_ID=""
+  FM_BACKEND_HERDR_TOMB_PROJECTION_ID=""
+  FM_BACKEND_HERDR_TOMB_HOME=""
+  FM_BACKEND_HERDR_TOMB_SESSION=""
+  FM_BACKEND_HERDR_TOMB_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_TOMB_TAB_ID=""
+  FM_BACKEND_HERDR_TOMB_PANE_ID=""
+  FM_BACKEND_HERDR_TOMB_WORKSPACE_LABEL=""
+  FM_BACKEND_HERDR_TOMB_TASK_LABEL=""
+  [ -f "$tombstone" ] && [ ! -L "$tombstone" ] || return 1
+  lines=$(wc -l < "$tombstone" 2>/dev/null | tr -d '[:space:]')
+  FM_BACKEND_HERDR_TOMB_VERSION=$(fm_backend_herdr_projection_journal_field "$tombstone" version) || return 1
+  FM_BACKEND_HERDR_TOMB_TASK_ID=$(fm_backend_herdr_projection_journal_field "$tombstone" task_id) || return 1
+  FM_BACKEND_HERDR_TOMB_PROJECTION_ID=$(fm_backend_herdr_projection_journal_field "$tombstone" projection_id) || return 1
+  [ "$FM_BACKEND_HERDR_TOMB_TASK_ID" = "$id" ] || return 1
+  [ "${#FM_BACKEND_HERDR_TOMB_PROJECTION_ID}" -eq 22 ] || return 1
+  case "$FM_BACKEND_HERDR_TOMB_PROJECTION_ID" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  FM_BACKEND_HERDR_TOMB_HOME=$(fm_backend_herdr_projection_journal_field "$tombstone" home) || return 1
+  FM_BACKEND_HERDR_TOMB_SESSION=$(fm_backend_herdr_projection_journal_field "$tombstone" session) || return 1
+  FM_BACKEND_HERDR_TOMB_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$tombstone" workspace_label) || return 1
+  case "$FM_BACKEND_HERDR_TOMB_HOME" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$FM_BACKEND_HERDR_TOMB_SESSION" in
+    ''|*[[:space:]]*) return 1 ;;
+  esac
+  case "$FM_BACKEND_HERDR_TOMB_VERSION:$lines" in
+    1:6)
+      expected=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_TOMB_PROJECTION_ID")
+      [ "$FM_BACKEND_HERDR_TOMB_WORKSPACE_LABEL" = "$expected" ]
+      ;;
+    2:10)
+      FM_BACKEND_HERDR_TOMB_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$tombstone" workspace_id) || return 1
+      FM_BACKEND_HERDR_TOMB_TAB_ID=$(fm_backend_herdr_projection_journal_field "$tombstone" tab_id) || return 1
+      FM_BACKEND_HERDR_TOMB_PANE_ID=$(fm_backend_herdr_projection_journal_field "$tombstone" pane_id) || return 1
+      FM_BACKEND_HERDR_TOMB_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$tombstone" task_label) || return 1
+      for exact in \
+        "$FM_BACKEND_HERDR_TOMB_WORKSPACE_ID" \
+        "$FM_BACKEND_HERDR_TOMB_TAB_ID" \
+        "$FM_BACKEND_HERDR_TOMB_PANE_ID"; do
+        case "$exact" in
+          ''|*[[:space:]]*) return 1 ;;
+        esac
+      done
+      expected=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_TOMB_PROJECTION_ID")
+      [ "$FM_BACKEND_HERDR_TOMB_WORKSPACE_LABEL" = "$expected" ] \
+        && [ "$FM_BACKEND_HERDR_TOMB_TASK_LABEL" = "fm-$id" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_herdr_projection_journal_bind: upgrade one exact version 1

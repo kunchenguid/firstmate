@@ -400,7 +400,8 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 ### Startup cleanup of restored projections
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
-It runs only when the current home has at least one ordinary presentation journal, and it considers only that home.
+When teardown retires the presentation journal, it also writes `state/<id>.herdr-workspace-tomb` so the same sweep can close a workspace Herdr resurrects from session layout with no journal left on disk.
+It runs when the current home has at least one ordinary presentation journal or workspace tombstone, and it considers only that home.
 A primary never recursively sweeps a secondmate home.
 
 Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.

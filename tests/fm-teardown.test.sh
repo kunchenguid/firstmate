@@ -3453,6 +3453,8 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
+  assert_present "$case_dir/state/task-x1.herdr-workspace-tomb" \
+    "confirmed exact-pane close did not record a workspace tombstone for session-start cleanup"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "projected teardown must never call workspace close"
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
@@ -3476,6 +3478,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
     || fail "herdr-projection-unconfirmed-close: regression did not exercise an attempted close"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
+  assert_absent "$case_dir/state/task-x1.herdr-workspace-tomb" \
+    "unconfirmed projected close must not record a workspace tombstone"
   [ -e "$case_dir/state/task-x1.meta" ] \
     || fail "unconfirmed task-pane close erased the durable endpoint metadata"
   assert_grep "close could not be confirmed" "$case_dir/stderr" \
