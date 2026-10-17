@@ -151,6 +151,9 @@
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
 # and no keyed status decision may be open.
+# `complete` and `verify` also read an entry that markdown Done retention moved
+# into the configured Done archive, where it counts only through a recorded
+# resolution; no other subcommand reads the archive.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -524,8 +527,15 @@ resolution_block() {  # <mode>
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  local id=$1 show state hold_kind body archived_status
+  task_show "$id" || {
+    [ "$?" -ne 124 ] || fail "the backlog backend exceeded its read bound reading $id"
+    task_show_archived "$id" || {
+      archived_status=$?
+      [ "$archived_status" -ne 124 ] || exit 124
+      fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+    }
+  }
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
@@ -558,20 +568,20 @@ CAPTAIN_MIGRATION_SCAN_LOADED=0
 CAPTAIN_MIGRATION_SCAN_JSON=
 NL_SEP=$'\n'
 
-# Section-aware [beads] extraction from a .tasks.toml: only keys inside the
-# [beads] section, comments stripped. Prints "<key> <value>" lines.
-captain_beads_toml_entries() {  # <toml-file>
+# Section-aware extraction from a .tasks.toml: only the named keys inside the
+# named section, comments stripped. Prints "<key> <value>" lines.
+captain_toml_section_entries() {  # <toml-file> <section> <key-alternation>
   [ -f "$1" ] || return 0
-  LC_ALL=C awk '
+  LC_ALL=C awk -v section="[$2]" -v keys="^($3)[[:space:]]*=" '
     function trim(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); return v }
-    BEGIN { inbeads = 0 }
+    BEGIN { insection = 0 }
     {
       line = $0
       sub(/[[:space:]]*#.*/, "", line)
       line = trim(line)
-      if (line ~ /^\[[^]]+\]$/) { inbeads = (line == "[beads]"); next }
-      if (!inbeads) next
-      if (line ~ /^(prefix|path|binary)[[:space:]]*=/) {
+      if (line ~ /^\[[^]]+\]$/) { insection = (line == section); next }
+      if (!insection) next
+      if (line ~ keys) {
         key = line
         sub(/[[:space:]]*=.*/, "", key)
         sub(/^[^=]*=[[:space:]]*/, "", line)
@@ -580,6 +590,10 @@ captain_beads_toml_entries() {  # <toml-file>
       }
     }
   ' "$1"
+}
+
+captain_beads_toml_entries() {  # <toml-file>
+  captain_toml_section_entries "$1" beads 'prefix|path|binary'
 }
 
 captain_beads_setting() {  # <entries-output> <setting>
@@ -858,6 +872,121 @@ refuse_self_inventory() {
   fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
 }
 
+# --- Done-archive reads on the markdown backend -----------------------------
+#
+# Done retention moves closed markdown rows into the configured archive, which
+# tasks-axi show never reads, so an answered call a scout attested would read as
+# absent once retention ran. Only the completion gate consults the archive: an
+# archived row is closed, so it can satisfy the gate solely through a recorded
+# resolution, and every mutating path keeps seeing it as absent.
+
+# The [markdown] archive key tasks-axi would honour, resolved with tasks-axi's
+# own source precedence: the backlog root's .tasks.toml first, then the
+# user-level $HOME/.tasks-axi/config.toml. Empty when neither sets it; a relative
+# value resolves against the backlog root wherever it was configured, the way
+# tasks-axi resolves it.
+captain_markdown_archive_setting() {  # <backlog-root>
+  local root=$1 archive
+  archive=$(captain_toml_section_entries "$root/.tasks.toml" markdown archive | sed -n 's/^archive //p' | head -1)
+  if [ -z "$archive" ] && [ -n "${HOME:-}" ]; then
+    archive=$(captain_toml_section_entries "$HOME/.tasks-axi/config.toml" markdown archive | sed -n 's/^archive //p' | head -1)
+  fi
+  printf '%s\n' "$archive"
+}
+
+# The archive tasks-axi writes: the [markdown] archive key resolved against the
+# backlog root, else done-archive.md beside the addressed backlog file. Returns
+# 1 when the configured backend keeps no markdown archive.
+captain_markdown_archive_path() {
+  local data root backend archive file
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root" 2>/dev/null) || return 1
+  [ "$backend" = markdown ] || return 1
+  archive=$(captain_markdown_archive_setting "$root")
+  case "$archive" in
+    '')
+      file=$(fm_backlog_file "$data") || return 1
+      archive="${file%/*}/done-archive.md"
+      ;;
+    /*) ;;
+    *) archive="$root/$archive" ;;
+  esac
+  printf '%s\n' "$archive"
+}
+
+# Read an archived row into TASK_SHOW_OUTPUT exactly as tasks-axi shows a live
+# one, by replaying its newest archived block under a scratch Done section. A
+# reused id can be archived more than once, and retention appends, so the last
+# block is the newest. Returns 1 when the row is not archived.
+task_show_archived() {  # <id>; sets TASK_SHOW_OUTPUT
+  local id=$1 archive dir status=0 secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  TASK_SHOW_OUTPUT=
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
+  archive=$(captain_markdown_archive_path) || return 1
+  [ -f "$archive" ] || return 1
+  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-captain-hold-archive.XXXXXX") \
+    || fail "cannot stage the Done archive read for $id"
+  printf 'backend = "markdown"\n' > "$dir/.tasks.toml"
+  {
+    printf '## Done\n'
+    LC_ALL=C awk -v id="$id" '
+      /^- \[.\] / {
+        rest = substr($0, 7)
+        inrow = (rest == id || index(rest, id " ") == 1)
+        if (inrow) block = $0 "\n"
+        next
+      }
+      inrow && ($0 == "" || $0 ~ /^[[:space:]]/) { block = block $0 "\n"; next }
+      { inrow = 0 }
+      END { printf "%s", block }
+    ' "$archive"
+  } > "$dir/backlog.md" || status=1
+  if [ "$status" -eq 0 ]; then
+    # The replayed archive read gets the same bound as a live backlog read, so a
+    # wedged tasks-axi cannot hang verify, or complete while it holds the origin
+    # metadata lock. A bound hit is not absence, so it stops loudly with 124.
+    # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+    TASK_SHOW_OUTPUT=$(fm_run_timed "$secs" bash -c \
+      'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+      _ "$dir" "$id" --full --file "$dir/backlog.md" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      printf 'fm-captain-hold: tasks-axi show %s exceeded its %ss Done-archive read bound\n' "$id" "$secs" >&2
+    elif [ "$status" -ne 0 ]; then
+      status=1
+    fi
+  fi
+  rm -f -- "$dir/backlog.md" "$dir/.tasks.toml"
+  rmdir -- "$dir" 2>/dev/null || true
+  return "$status"
+}
+
+# The archived row an entry names, under its exact id or its legacy identity.
+# A read that hit its bound is not absence: it returns 124 so the caller stops
+# loudly instead of reading the row as unarchived.
+archived_entry() {  # <origin-or-empty> <entry>; prints the archived id
+  local origin=$1 entry=$2 legacy status=0
+  task_show_archived "$entry" || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s' "$entry"
+    return 0
+  fi
+  [ "$status" -ne 124 ] || return 124
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    legacy=$(legacy_hold_id "$origin" "$entry")
+    status=0
+    task_show_archived "$legacy" || status=$?
+    if [ "$status" -eq 0 ]; then
+      printf '%s' "$legacy"
+      return 0
+    fi
+    [ "$status" -ne 124 ] || return 124
+  fi
+  return 1
+}
+
 # Resolve one entry and verify the row it names is durably captain-held. A
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
@@ -865,13 +994,31 @@ refuse_self_inventory() {
 # as absence. The result carries the attestation evidence and whether an
 # origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
-  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id
+  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
     refuse_self_inventory "$origin" "$entry"
   fi
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
+  resolve_err=$(mktemp "${TMPDIR:-/tmp}/fm-captain-hold-resolve.XXXXXX") \
+    || fail "cannot stage the resolution diagnostics for $entry"
+  resolved=$(resolve_entry "$origin" "$entry" 2>"$resolve_err") || resolve_status=$?
+  if [ "$resolve_status" -eq 1 ]; then
+    archived_status=0
+    archived=$(archived_entry "$origin" "$entry") || archived_status=$?
+    if [ "$archived_status" -eq 0 ]; then
+      resolved="$archived archived"
+      resolve_status=0
+    elif [ "$archived_status" -eq 124 ]; then
+      rm -f -- "$resolve_err"
+      exit 124
+    else
+      cat "$resolve_err" >&2
+    fi
+  else
+    cat "$resolve_err" >&2
+  fi
+  rm -f -- "$resolve_err"
   if [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
