@@ -423,6 +423,304 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   fi
 }
 
+# READING THE WHOLE BACKLOG FOR THE FLEET SNAPSHOT. bin/fm-fleet-snapshot.sh
+# reads a home's markdown backlog file itself; for any other configured adapter
+# it asks this owner for the rows, so the structured fleet view shows the
+# configured backend's work instead of the empty shadow file next to it.
+# fm_backlog_rows_backend names the backend that addressing resolves, and
+# fm_backlog_rows_json prints one JSON object, always with exit 0 unless jq is
+# missing: {ok:true,rows:[...]} or {ok:false,error:"..."}. An unavailable,
+# unreadable, malformed or incomplete read is ok:false with a diagnostic and is
+# never an empty inventory.
+# One bounded `tasks-axi list` runs with every state selected (the default) and
+# the fields below; tasks-axi 0.2.5 returns every row when no --limit is given
+# and prints `count: N of M total` only for an explicit smaller limit, so a
+# count marker with N < M is incomplete and earns at most one re-read with
+# --limit M. There is no pagination and no per-row `show`.
+# The decoder accepts exactly one envelope: `count:` line, a `tasks[N]{columns}:`
+# header whose columns equal FM_BACKLOG_ROWS_COLUMNS, N rows of JSON-style quoted
+# or bare cells, then a `help[k]:` block; any other shape is malformed output.
+# Only the title is ever truncated by `list` (with a visible marker): the raw
+# cell stays in title_raw and the title shown ends with an ellipsis.
+# Identifiers are validated against tasks-axi's slug rule. The links cell is read
+# with tasks-axi's own link grammar (a pr: item ends at the first
+# https?://\S+?/pull/<n>, a report: item at the first data/\S+?/report.md, items
+# are comma separated) and must be consumed entirely; a cell that is not, or
+# that holds a doc: URL which itself contains another item separator, keeps
+# links_raw, sets links_ambiguous and yields no parsed artifacts.
+# `blocked_by` lists only unresolved blockers, so blocker ids come from `deps`,
+# which carries every edge. The list output has no hold-set timestamp or
+# in-flight start date, so those stay null rather than being guessed from the
+# creation date.
+FM_BACKLOG_ROWS_FIELDS=blocked,blocked_by,closed,created,deps,held,hold_kind,hold_reason,hold_until,links,priority
+FM_BACKLOG_ROWS_COLUMNS='["id","state","kind","repo","title","blocked","blocked_by","closed","created","deps","held","hold_kind","hold_reason","hold_until","links","priority"]'
+# shellcheck disable=SC2016  # jq program text, expanded by jq not the shell.
+FM_BACKLOG_ROWS_JQ='
+# Strict decoder for one `tasks-axi list --fields <cols>` TOON table (see fm-backlog-transition-lib.sh).
+# Input: the complete stdout text (raw, slurped). --argjson cols: the exact expected header column list.
+# Output: {ok:true,rows:[...]} | {ok:false,incomplete:true,count,total,error} | {ok:false,error:"..."}.
+def bad($m): {ok: false, error: $m};
+def state_ok: . == "queued" or . == "in_flight" or . == "done";
+def yesno_ok: . == "yes" or . == "no";
+def id_ok: test("^[A-Za-z0-9._-]+$");
+def date_ok: . == "-" or test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$");
+def dash_null: if . == "-" then null else . end;
+def single_line_ok: test("^[^\\n\\r]*$");
+def cap($re): [capture($re)] | .[0];
+
+# One table row -> cells. A cell is a JSON-style quoted string or a bare token containing no quote and no comma.
+def row_cells:
+  { rest: ., cells: [], err: null, fin: false }
+  | until(.fin or .err != null;
+      (.rest | cap("^(?<cell>\"(?:[^\"\\\\]|\\\\.)*\")(?<sep>,|$)")) as $q
+      | if $q != null then
+          (try ($q.cell | fromjson) catch null) as $v
+          | if $v == null then .err = "invalid quoted cell"
+            else .cells += [$v] | .rest = (.rest | .[($q.cell | length) + ($q.sep | length):]) | .fin = ($q.sep == "") end
+        else
+          (.rest | cap("^(?<cell>[^\",]*)(?<sep>,|$)")) as $b
+          | if $b == null then .err = "malformed cell"
+            else .cells += [$b.cell] | .rest = (.rest | .[($b.cell | length) + ($b.sep | length):]) | .fin = ($b.sep == "") end
+        end)
+  | if .err != null then {err: .err} else {cells: .cells} end;
+
+# Title truncation marker written by `list` (the only truncated column).
+def title_parts:
+  (cap("^(?<visible>[\\s\\S]*?)\\n\\.\\.\\. \\(truncated, (?<total>[0-9]+) chars total - use show [^ ]+ --full to see complete text\\)$")) as $m
+  | if $m == null then {visible: ., truncated: false, total: null}
+    else {visible: $m.visible, truncated: true, total: ($m.total | tonumber)} end;
+
+def display_title($t):
+  ($t.visible
+   | gsub("https?://\\S*$"; "")
+   | gsub("<?https?://\\S+>?"; "")
+   | gsub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
+   | gsub("[[:space:]]+-[[:space:]]+local main$"; "") | gsub("[[:space:]]+local main$"; "")
+   | gsub("[[:space:]]+-[[:space:]]*$"; "")
+   | gsub("[[:space:]]+"; " ")
+   | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $v
+  | if $t.truncated then ($v + "…") else $v end;
+
+# Links cell: the tasks-axi first-match link grammar with strict full consumption.
+def parse_links:
+  if . == "none" or . == "-" then {ok: true, items: []}
+  else
+    { rest: ., items: [], err: null, fin: false }
+    | until(.fin or .err != null;
+        if (.rest | startswith("pr:")) then
+          ((.rest | cap("^pr:(?<v>https?://\\S+?/pull/[0-9]+)")) // null) as $m
+          | if $m == null then .err = "pr link" else .items += [{kind: "pr", value: $m.v}] | .rest = (.rest | .[3 + ($m.v | length):]) end
+        elif (.rest | startswith("report:")) then
+          ((.rest | cap("^report:(?<v>data/\\S+?/report\\.md\\b)")) // null) as $m
+          | if $m == null then .err = "report link" else .items += [{kind: "report", value: $m.v}] | .rest = (.rest | .[7 + ($m.v | length):]) end
+        elif (.rest | startswith("doc:")) then
+          ((.rest | cap("^doc:(?<v>https?://\\S+)")) // null) as $m
+          | if $m == null then .err = "doc link" else .items += [{kind: "doc", value: $m.v}] | .rest = (.rest | .[4 + ($m.v | length):]) end
+        else .err = "unknown link item" end
+        | if .err != null then .
+          elif .rest == "" then .fin = true
+          elif (.rest | startswith(",")) then .rest = .rest[1:]
+          else .err = "trailing text" end)
+    | if .err != null then {ok: false, items: []}
+      # more than one doc item: a generic URL may itself contain ",doc:", so the split is not provable
+      elif ([.items[] | select(.kind == "doc" and (.value | test(",(doc|pr|report):")))] | length) > 0 then {ok: false, items: []}
+      else {ok: true, items: .items} end
+  end;
+
+def build_row($c; $cols; $order):
+  ([range(0; $cols | length)] | map({key: $cols[.], value: $c[.]}) | from_entries) as $f
+  | ($f.title | title_parts) as $tp
+  | ($f.links | parse_links) as $lk
+  | ($f.deps | if . == "none" then [] else split(",") end) as $deps
+  # `blocked_by` lists only unresolved blockers; `deps` carries every edge, which is what a blocker record resolves against
+  | ([$deps[] | select(startswith("blocked-by:")) | sub("^blocked-by:"; "")]
+     | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end)) as $blockers
+  | ([$lk.items[] | select(.kind == "pr") | .value][0] // null) as $pr
+  | ([$lk.items[] | select(.kind == "report") | .value][0] // null) as $report
+  | (if $f.state == "done" and $tp.visible != null and ($tp.visible | test("[[:space:]]local main$")) then "local main" else null end) as $local_note
+  | (if $f.state != "done" then {verb: null, date: null}
+     # tasks-axi records no merge state: `done --pr` links a PR without checking it, so a link is never proof of a merge
+     elif $report != null and $f.kind == "scout" then {verb: "reported", date: ($f.closed | dash_null)}
+     elif $local_note != null then {verb: "done", date: ($f.closed | dash_null)}
+     else {verb: null, date: ($f.closed | dash_null)} end) as $completion
+  | {order: $order, state: $f.state, structured: true, id: $f.id, checked: ($f.state == "done"),
+     title: display_title($tp), title_raw: $f.title, title_truncated: $tp.truncated, title_chars_total: $tp.total,
+     repo: ($f.repo | dash_null), kind: ($f.kind | dash_null), priority: ($f.priority | dash_null),
+     hold_reason: ($f.hold_reason | dash_null), hold_kind: ($f.hold_kind | dash_null), hold_until: ($f.hold_until | dash_null),
+     hold_set: null,
+     blocked_by: ($blockers[0] // null), blocked_by_ids: $blockers, blocked_reason: null,
+     since: null, merged: (if $completion.verb == "merged" then $completion.date else null end),
+     reported: (if $completion.verb == "reported" then $completion.date else null end),
+     done: (if $completion.verb == "done" then $completion.date else null end),
+     completion: $completion,
+     links: (if $lk.ok then [$lk.items[] | select(.kind == "pr" or .kind == "doc") | .value] else [] end),
+     pr_url: (if $lk.ok then $pr else null end),
+     report_path: (if $lk.ok then $report else null end),
+     local_note: $local_note,
+     links_raw: $f.links, links_ambiguous: ($lk.ok | not),
+     created: ($f.created | dash_null), closed: ($f.closed | dash_null),
+     raw: ("- " + $f.id + " - " + $f.title),
+     body_lines: [], body_excerpt: null,
+     _deps: $deps, _held: $f.held, _blocked: $f.blocked};
+
+def validate_row($r):
+  if ($r.id | id_ok | not) then "invalid id"
+  elif ($r.state | state_ok | not) then "invalid state"
+  elif ($r.held | yesno_ok | not) or ($r.blocked | yesno_ok | not) then "invalid held or blocked flag"
+  elif ($r.created | date_ok | not) or ($r.closed | date_ok | not) or ($r.hold_until | date_ok | not) then "invalid date"
+  elif ($r.priority != "-" and ($r.priority | test("^[0-4]$") | not)) then "invalid priority"
+  elif ($r.blocked_by != "none" and ($r.blocked_by | split(",") | all(id_ok) | not)) then "invalid blocked_by"
+  elif ($r.deps != "none" and ($r.deps | split(",") | all(test("^(blocked-by|parent|discovered-from):[A-Za-z0-9._-]+$")) | not)) then "invalid deps"
+  elif ([$r.kind, $r.repo, $r.hold_kind, $r.links] | all(single_line_ok) | not) then "invalid text"
+  else null end;
+
+. as $raw
+| ($raw | split("\n")) as $all
+| (if ($all | length) > 0 and $all[-1] == "" then $all[:-1] else $all end) as $lines
+| if ($lines | length) == 0 then bad("empty adapter output")
+  elif ($lines[0] | test("^error: ")) then
+    bad(($lines[0] | sub("^error: "; "") | (try fromjson catch .)) as $e
+        | ([$lines[] | select(test("^code: "))][0] // "" | sub("^code: "; "")) as $code
+        | ($e | tostring) + (if $code != "" then " (" + $code + ")" else "" end))
+  else
+    ($lines[0] | cap("^count: (?<n>[0-9]+)(?: of (?<m>[0-9]+) total)?$")) as $cnt
+    | if $cnt == null then bad("malformed adapter output: no count line")
+      else
+        ($cnt.n | tonumber) as $n
+        | (if $cnt.m == null then $n else ($cnt.m | tonumber) end) as $total
+        | if $n != $total then {ok: false, incomplete: true, count: $n, total: $total, error: "incomplete adapter output: \($n) of \($total) rows"}
+          elif $n == 0 and ($lines | length) >= 4 and ($lines[1] | test("^tasks: 0 tasks in this backlog$"))
+               and ($lines[2] | test("^help\\[[0-9]+\\]:( .*)?$")) and ($lines[3:] | all(test("^  - .*$"))) then {ok: true, rows: []}
+          else
+            ($lines[1] // "" | cap("^tasks\\[(?<k>[0-9]+)\\]\\{(?<cols>[a-z_,]+)\\}:$")) as $hdr
+            | if $hdr == null then bad("malformed adapter output: no table header")
+              elif ($hdr.k | tonumber) != $n then bad("malformed adapter output: header row count differs from count line")
+              elif ($hdr.cols | split(",")) != $cols then bad("malformed adapter output: unexpected columns")
+              elif ($lines | length) < (2 + $n) then bad("malformed adapter output: fewer rows than the count line")
+              else
+                ($lines[2: 2 + $n]) as $rows
+                | ($lines[2 + $n:]) as $tail
+                | if ($tail | length) > 0 and (($tail[0] | test("^help\\[[0-9]+\\]:( .*)?$") | not) or ($tail[1:] | all(test("^  - .*$")) | not)) then
+                    bad("malformed adapter output: unexpected trailing lines")
+                  elif ($tail | length) == 0 then bad("malformed adapter output: no help block")
+                  else
+                    ([range(0; $rows | length) as $i
+                      | $rows[$i] as $line
+                      | if ($line | startswith("  ") | not) or ($line | startswith("   ")) then {i: $i, err: "row indentation"}
+                        else ($line[2:] | row_cells) as $rc
+                          | if $rc.err != null then {i: $i, err: $rc.err}
+                            elif ($rc.cells | length) != ($cols | length) then {i: $i, err: "cell count"}
+                            else
+                              ([range(0; $cols | length)] | map({key: $cols[.], value: $rc.cells[.]}) | from_entries) as $f
+                              | (validate_row($f)) as $why
+                              | if $why != null then {i: $i, err: $why} else {i: $i, cells: $rc.cells} end
+                            end
+                        end]) as $parsed
+                    | ([$parsed[] | select(.err != null)][0]) as $first_err
+                    | if $first_err != null then bad("malformed adapter output: row \($first_err.i + 1): \($first_err.err)")
+                      else
+                        ([$parsed[] | . as $p | build_row($p.cells; $cols; $p.i + 1)]) as $out
+                        | if ([$out[].id] | unique | length) != ($out | length) then bad("malformed adapter output: duplicate task id")
+                          else {ok: true, rows: $out} end
+                      end
+                  end
+              end
+          end
+      end
+  end
+'
+
+fm_backlog_rows_backend() {  # <data-dir> -> markdown | <adapter>
+  local data root backend
+  data=$(fm_backlog_data_absolute "$1") || {
+    printf 'data directory cannot be resolved: %s\n' "$1"
+    return 2
+  }
+  root=$(fm_backlog_root "$data") || {
+    printf 'backlog root cannot be resolved for %s\n' "$data"
+    return 2
+  }
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    printf '%s\n' "$backend"
+    return 2
+  }
+  printf '%s\n' "$backend"
+}
+
+fm_backlog_rows_list_once() {  # [flag...] sets FM_BACKLOG_ROWS_OUT, FM_BACKLOG_ROWS_ERR
+  local secs=${FM_BACKLOG_ROWS_TIMEOUT_SECS:-30} errfile status
+  case "$secs" in ''|*[!0-9]*) secs=30 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=30
+  FM_BACKLOG_ROWS_OUT=
+  FM_BACKLOG_ROWS_ERR=
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-backlog-rows.XXXXXX") || {
+    FM_BACKLOG_ROWS_ERR='cannot create a temporary file for the backlog read'
+    return 1
+  }
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  FM_BACKLOG_ROWS_OUT=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec env -u TASKS_AXI_FILE tasks-axi list "$@"' \
+    _ "$FM_BACKLOG_AXI_ROOT" --fields "$FM_BACKLOG_ROWS_FIELDS" "$@" 2>"$errfile")
+  status=$?
+  FM_BACKLOG_ROWS_ERR=$(sed -n '1p' "$errfile" 2>/dev/null)
+  rm -f -- "$errfile"
+  if [ "$status" -eq 124 ]; then
+    FM_BACKLOG_ROWS_ERR="tasks-axi list exceeded its ${secs}s backlog read bound"
+  elif [ "$status" -eq 127 ]; then
+    FM_BACKLOG_ROWS_ERR='tasks-axi is not installed or not on PATH'
+  fi
+  return "$status"
+}
+
+fm_backlog_rows_decode() {  # <raw-list-output>
+  printf '%s\n' "$1" | jq -Rs --argjson cols "$FM_BACKLOG_ROWS_COLUMNS" "$FM_BACKLOG_ROWS_JQ"
+}
+
+fm_backlog_rows_json() {  # <data-dir>
+  local data=$1 status decoded total diagnostic
+  command -v jq >/dev/null 2>&1 || return 1
+  FM_BACKLOG_TRANSITION_ERROR=
+  fm_backlog_tasks_axi_addressing "$data"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    diagnostic=${FM_BACKLOG_TRANSITION_ERROR:-tasks-axi backlog addressing failed}
+    jq -n --arg error "$diagnostic" '{ok:false,error:$error}'
+    return 0
+  fi
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    jq -n '{ok:false,error:"the markdown backend is read from its backlog file"}'
+    return 0
+  fi
+  fm_backlog_rows_list_once
+  status=$?
+  decoded=$(fm_backlog_rows_decode "$FM_BACKLOG_ROWS_OUT") || decoded=
+  if [ "$status" -ne 0 ]; then
+    # A failing list reports its diagnostic as TOON on stdout or text on stderr.
+    diagnostic=$(printf '%s' "$decoded" | jq -r 'select(.ok == false) | .error' 2>/dev/null)
+    case "$diagnostic" in
+      ''|malformed*|empty*) diagnostic=${FM_BACKLOG_ROWS_ERR:-} ;;
+    esac
+    [ -n "$diagnostic" ] || diagnostic="tasks-axi list failed with status $status"
+    jq -n --arg error "$diagnostic" '{ok:false,error:$error}'
+    return 0
+  fi
+  if [ "$(printf '%s' "$decoded" | jq -r '.incomplete // false' 2>/dev/null)" = true ]; then
+    total=$(printf '%s' "$decoded" | jq -r '.total')
+    fm_backlog_rows_list_once --limit "$total"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      diagnostic=${FM_BACKLOG_ROWS_ERR:-tasks-axi list failed with status $status}
+      jq -n --arg error "$diagnostic" '{ok:false,error:$error}'
+      return 0
+    fi
+    decoded=$(fm_backlog_rows_decode "$FM_BACKLOG_ROWS_OUT") || decoded=
+  fi
+  if [ -z "$decoded" ]; then
+    jq -n '{ok:false,error:"malformed adapter output: the table could not be decoded"}'
+    return 0
+  fi
+  printf '%s\n' "$decoded"
+}
+
 fm_backlog_row_probe() {  # <data-dir> <id>
   local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
