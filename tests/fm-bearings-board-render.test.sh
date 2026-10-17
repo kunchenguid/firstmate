@@ -266,6 +266,77 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+LONG_TITLE="Make the 'Already packed with serial' pack-screen warning readable on the smallest handheld scanner we support"
+LONG_REASON="Queued, nothing blocking, waiting on the scanner vendor to confirm which firmware ships next quarter"
+long_charted() {
+  jq -cn --arg title "$LONG_TITLE" --arg reason "$LONG_REASON" '[
+    {id:"long-gate",repo:"packsmith-app",title:$title,reason:$reason,dispatchable:true},
+    {id:"long-warning",repo:"packsmith-app",title:("Repair: " + $title),reason:$reason,dispatchable:false,kind:"warning"}
+  ]'
+}
+
+test_a_long_charted_row_renders_its_full_title_and_reason() {
+  local home out
+  home=$(make_home charted-long)
+  out=$(render "$home" "$(long_charted)")
+  printf '%s' "$out" | jq -e --arg title "$LONG_TITLE" --arg reason "$LONG_REASON" '
+    (.charted | length) == 2
+      and (.charted[0] | .title == $title and .sub == ($reason + " · packsmith-app")
+        and [.badges[] | .text] == ["waiting"])
+      and (.charted[1] | .title == ("Repair: " + $title)
+        and .sub == ($reason + " · packsmith-app"))
+  ' >/dev/null || fail "a long charted row did not render its full title and reason: $out"
+  pass "a long charted row renders its full title and reason text"
+}
+
+find_chrome() {
+  local c
+  for c in "${FM_TEST_CHROME:-}" google-chrome google-chrome-stable chromium chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then command -v "$c"; return 0; fi
+  done
+  return 1
+}
+
+# Lay the built board out in a real browser at phone and desktop widths and
+# measure every Charted Next title and reason line: none may clip its text, and
+# the long ones must wrap rather than stay on one line.
+test_a_long_charted_row_wraps_instead_of_clipping_in_a_browser() {
+  local home chrome probe width dom measured
+  if ! chrome=$(find_chrome); then
+    echo "skip: no Chrome or Chromium found for the Charted Next layout check (set FM_TEST_CHROME)"
+    return 0
+  fi
+  home=$(make_home charted-layout)
+  render "$home" "$(long_charted)" >/dev/null
+  probe="$home/probe.html"
+  awk '{ sub(/<\/body>/, "<script>window.addEventListener(\"load\", function () { var rows = []; document.querySelectorAll(\"#bb-charted .bb-row\").forEach(function (r) { var line = function (c) { var n = r.querySelector(c); return {clipped: n.scrollWidth > n.clientWidth, height: n.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(n).lineHeight)}; }; rows.push({title: line(\".bb-row__title\"), sub: line(\".bb-row__sub\"), right: r.getBoundingClientRect().right}); }); var p = document.createElement(\"pre\"); p.id = \"layout-probe\"; p.textContent = JSON.stringify({rows: rows, viewport: document.documentElement.clientWidth, pageWidth: document.documentElement.scrollWidth}); document.body.appendChild(p); });</script></body>"); print }' \
+    "$home/.lavish/bearings-board.html" > "$probe"
+  for width in 500 1280; do
+    dom=$("$chrome" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
+      --virtual-time-budget=5000 --window-size="$width,1200" --dump-dom "file://$probe" 2>/dev/null) \
+      || fail "Chrome could not lay out the board at width $width"
+    measured=$(printf '%s' "$dom" | node -e '
+      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        const m = s.match(/<pre id="layout-probe">([\s\S]*?)<\/pre>/);
+        const unescape = (t) => t.replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+        process.stdout.write(m ? unescape(m[1]) : "");
+      });')
+    [ -n "$measured" ] || fail "the layout probe did not report at width $width"
+    printf '%s' "$measured" | jq -e '
+      (.rows | length) == 2
+        and all(.rows[]; (.title.clipped | not) and (.sub.clipped | not))
+        and all(.rows[]; .title.height > (.title.lineHeight * 1.5))
+        and all(.rows[]; .right <= $vw) and .pageWidth <= .viewport
+    ' --argjson vw "$width" >/dev/null \
+      || fail "a long charted row clipped or failed to wrap at width $width: $measured"
+  done
+  pass "a long charted row wraps its full text at phone and desktop widths in a browser"
+}
+
+test_a_long_charted_row_renders_its_full_title_and_reason
+test_a_long_charted_row_wraps_instead_of_clipping_in_a_browser
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

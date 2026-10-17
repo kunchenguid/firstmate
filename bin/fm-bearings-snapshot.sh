@@ -50,6 +50,10 @@
 # before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
 # date keep their input order after dated gates. The synthetic (return-catchup)
 # posture row is reserved ahead of that ordering and bound so it always surfaces.
+# A gate's title and reason are shortened for the compact chat digest; --fields
+# gate-text adds title_full and reason_full to every gate row, carrying the same
+# text with only whitespace collapsed, for surfaces such as the /bearings lavish
+# board that must never truncate it.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -77,7 +81,7 @@
 #   (default)        compact projection with bounded remote-ledger collection, TOON
 #   --json           the same projected model as JSON (machine/debug; parity form)
 #   --include-prs    ALSO do live GitHub open-PR discovery + checks
-#   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
+#   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints,gate-text
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision and captain hold in the bounded snapshot
 #   --all-secondmates include every aggregated secondmate record
@@ -163,7 +167,8 @@ For every registered secondmate, readable structured facts from its own home are
   Parent events and bounded terminal reads are labeled fallback or contradiction
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+Opt-in surfaces: --fields bodies|paths|actions|endpoints|gate-text
+  (gate-text adds untruncated gates{title_full,reason_full}), --all-in-flight,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
@@ -381,8 +386,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
   --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
+  def oneline: if . == null then null else (tostring | gsub("\\s+"; " ")) end;
   def trunc($n): if . == null then null else
-    (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+    (oneline | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
     tostring | gsub("\\s+"; " ")
     | if $n <= 0 then ""
@@ -416,6 +422,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     (.hold_reason // .blocked_reason // "-") as $base
     | (hold_note) as $note
     | if $note == null then $base else ($note + ": " + $base) end;
+  def full_hold_gate_reason:
+    (.hold_reason // .blocked_reason // "-") as $base
+    | (if .hold_bucket == "blocked" then
+         ("blocked-by " + ((.unresolved_blocker_ids // []) | map(tostring) | join(",")))
+       else hold_note end) as $note
+    | if $note == null then $base else ($note + ": " + $base) end;
   def hold_summary($title; $base):
     (hold_note) as $note
     | if $note == null then (($title + ": " + $base) | trunc(90))
@@ -431,7 +443,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
      reason:(hold_gate_reason | trunc(40)), owner:$owner,
-     filed:((.since // null) | trunc(40))};
+     filed:((.since // null) | trunc(40)),
+     title_full:(.title | oneline), reason_full:(full_hold_gate_reason | oneline)};
+  def gate_text($wanted):
+    if $wanted then . else del(.title_full, .reason_full) end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -443,6 +458,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
+  | (($fl | index("gate-text")) != null) as $f_gate_text
   | ([ .backlog.records[] | select(landed_record)
        | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
           home:"(main)", home_id:"(main)"} ]) as $main_done
@@ -552,17 +568,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.hold_kind == "captain" and projected_deferred_hold) ]
      | length) as $decisions_marked_deferred
   | (if ($return_catchup.pending // false) then
-       [{id:"(return-catchup)",
-         title:((if ($return_catchup.blockers // 0) > 0 then
-                   "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
-                 elif (($return_catchup.reason // "") != "") then
-                   ("catch-up retained: " +
-                    ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
-                 else "away-return catch-up is still open" end) | trunc(60)),
-         blocked_by:"-",
-         reason:"away-return catch-up",
-         owner:"(main)",
-         filed:null}]
+       ((if ($return_catchup.blockers // 0) > 0 then
+           "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
+         elif (($return_catchup.reason // "") != "") then
+           ("catch-up retained: " +
+            ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
+         else "away-return catch-up is still open" end) as $title
+       | [{id:"(return-catchup)",
+           title:($title | trunc(60)),
+           blocked_by:"-",
+           reason:"away-return catch-up",
+           owner:"(main)",
+           filed:null,
+           title_full:($title | oneline),
+           reason_full:"away-return catch-up"}])
      else [] end) as $return_catchup_gate
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
@@ -570,7 +589,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           blocked_by:"-",
           reason:"main inventory",
           owner:"(main)",
-          filed:null}]
+          filed:null,
+          title_full:((.main_inventory.reason // "main inventory invalid") | oneline),
+          reason_full:"main inventory"}]
       else [] end)
      + [ .backlog.records[]
          | . as $record
@@ -645,7 +666,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
               + ($gates_all | newest_filed_first
-                 | if $all_queued == 1 then . else .[:$gates_n] end)),
+                 | if $all_queued == 1 then . else .[:$gates_n] end)
+              | map(gate_text($f_gate_text))),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }
@@ -662,6 +684,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_paths then empty else {surface:"task paths", reveal:"--fields paths"} end),
         (if $f_actions then empty else {surface:"watch/steer actions", reveal:"--fields actions"} end),
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
+        (if $f_gate_text then empty else {surface:"full gate title and reason text", reveal:"--fields gate-text"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
         (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
