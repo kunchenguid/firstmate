@@ -139,10 +139,12 @@
 # seconds (default 30, and any override must be a positive integer): a bound
 # hit is completion-unknown and exits through this same unconfirmed contract
 # instead of waiting out a busy remote queue.
-# The remote host runs no re-ring ladder of its own: a swallowed ordinary
-# doorbell surfaces through the parent's pending-reply recovery and escalation,
-# whose recovery request re-rings the remote doorbell when it is enqueued;
-# fire-and-forget delivery deliberately arms neither mechanism. Internal
+# The remote host runs no re-ring ladder of its own: the mate's own watcher
+# wakes its session for any unhandled record there (bin/fm-watch.sh
+# parent_inbox_tick), and a still-unread ordinary request surfaces through the
+# parent's pending-reply tracker, which reads the remote inbox and escalates it
+# as unread (bin/fm-pending-reply-lib.sh); a delivery left unknown here is
+# reconciled against that inbox the same way once the mate is reachable. Internal
 # semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN or
 # FM_SEND_EXPECTED_REMOTE_HOST to require that sampled identity to still match
 # during the final locked remote-route validation; unset or empty guards do not
@@ -956,6 +958,9 @@ else
       fi
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+        # Kept for the tracker's one same-correlation resend once the mate is
+        # reachable and its inbox proves the record never landed.
+        fm_pending_reply_store_undelivered_text "$STATE" "$PENDING_REPLY_CORR" "$RESOLVE_ANSWER_TEXT" || true
       fi
       if [ "$remote_rc" -eq 255 ]; then
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
