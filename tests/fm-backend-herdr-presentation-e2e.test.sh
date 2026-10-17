@@ -351,12 +351,18 @@ focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
+  # Herdr 0.9.x's `workspace create --no-focus` and `tab create --no-focus`
+  # steal focus to the new container; the adapter repairs that with an exact
+  # focus restore, so a create is not required to leave focus unchanged here.
+  # The move and close primitives still must preserve or restore the exact
+  # active workspace and tab, and assert_focus_is checks the net focus after
+  # each spawn.
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
-    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close" || $1 == "tab-close") && $2 != $3 {
+    ($1 == "workspace-move" || $1 == "pane-close" || $1 == "tab-close") && $2 != $3 {
       print $0
     }
   ')
-  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
+  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a move or seeded cleanup: $changed"
 }
 
 # The focus-safe emptying-close plan removes a last pane through Herdr's
@@ -897,10 +903,10 @@ case "$ABORT_SEQUENCE" in
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_TAB" -v b="$ABORT_B_TAB" '
-  ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "tab-close" && $4 != a && $4 != b)) && $2 != $3 { print }
+  ($1 == "workspace-move" || ($1 == "tab-close" && $4 != a && $4 != b)) && $2 != $3 { print }
 ')
 [ -z "$ABORT_UNRESTORED" ] \
-  || fail "post-create abort create, prune, or move changed exact focus: $ABORT_UNRESTORED"
+  || fail "post-create abort move changed exact focus: $ABORT_UNRESTORED"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent post-create abort cleanup"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS" "$ABORT_A_TAB"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS" "$ABORT_B_TAB"
