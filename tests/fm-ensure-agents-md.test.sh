@@ -26,6 +26,49 @@ write_fixture_claude_pointer() {
 EOF
 }
 
+test_translated_heading_with_id_is_not_duplicated() {
+  local repo agents out
+  repo="$TMP_ROOT/translated-heading-project"
+  mkdir -p "$repo"
+  printf '# Projectgeheugen\n\nBouw met make.\n\n## Principes voor dit bestand {#maintaining-this-file}\n\nHoud dit bestand beperkt tot kennis die bijna elke toekomstige sessie nodig heeft.\n' > "$repo/AGENTS.md"
+  agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed for a translated heading carrying the maintenance id"
+  assert_contains "$out" "wrote:" "translated equivalent heading did not just get a CLAUDE.md pointer written"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "translated equivalent heading gained an injected duplicate section"
+  ! grep -Fqx '## Maintaining this file' "$agents" \
+    || fail "the canonical English heading was injected alongside the translated equivalent"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  cp "$agents" "$repo/.after-first"
+  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on translated-heading re-run"
+  assert_contains "$out" "unchanged:" "translated-heading re-run did not report unchanged"
+  cmp -s "$repo/.after-first" "$agents" \
+    || fail "translated-heading re-run modified AGENTS.md (idempotency broken)"
+  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
+    || fail "translated-heading re-run modified CLAUDE.md (idempotency broken)"
+  pass "fm-ensure-agents-md.sh: a translated heading carrying {#maintaining-this-file} is not duplicated and stays idempotent"
+}
+
+test_one_line_claude_pointer_is_accepted() {
+  local repo agents out
+  repo="$TMP_ROOT/one-line-pointer-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  agents="$repo/AGENTS.md"
+  printf '@AGENTS.md\n' > "$repo/CLAUDE.md"
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a valid one-line @AGENTS.md pointer"
+  assert_contains "$out" "unchanged:" "one-line pointer plus AGENTS.md was not reported unchanged"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
+    || fail "a valid one-line pointer was rewritten instead of left untouched"
+  pass "fm-ensure-agents-md.sh: a one-line @AGENTS.md CLAUDE.md pointer is accepted, not refused"
+}
+
 test_created_agents_md_includes_self_governance() {
   local repo agents
   repo="$TMP_ROOT/new-project"
@@ -433,3 +476,5 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_translated_heading_with_id_is_not_duplicated
+test_one_line_claude_pointer_is_accepted
