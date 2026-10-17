@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "description": "Presentation inventory for bin/fm-doctor.sh. Each check names an existing owner's fact (a bootstrap line prefix, a bare token, or a read-only owner verb) and says how to show it: area, severity, and a fix hint. Detection stays with the owners; bin/fm-doctor.sh validates this file and bin/fm-lint.sh keeps it in step with what bootstrap can print.",
+  "description": "Presentation inventory for bin/fm-doctor.sh. Each check names an existing owner's fact (a bootstrap line prefix, a bare token, or a read-only owner verb) and says how to show it: area, severity, and a fix hint. Detection stays with the owners; bin/fm-doctor.sh validates this file; bin/fm-lint.sh checks that every line prefix the emitters (and the bin/ libraries they source) can print is mapped here, and that every owner exists.",
+  "emitters": ["bin/fm-bootstrap.sh", "bin/fm-startup-network.sh", "bin/backends/*.sh"],
   "areas": ["doctor", "tools", "backend", "config", "permissions", "no-mistakes", "auth", "supervision", "fleet", "memory"],
   "sources": {
     "bootstrap": {
