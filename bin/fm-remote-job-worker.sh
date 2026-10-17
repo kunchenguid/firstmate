@@ -1240,6 +1240,13 @@ main() {
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker"
       exit 0
     fi
+    # A replacement may reclaim the lock while this worker's readiness looked
+    # stale, for example during a long sweep. Serving on without the lock would
+    # race the owner for every job and reclaim its running claims as dead.
+    if ! worker_shutdown_owns_lock; then
+      worker_error "worker ownership was taken over; stopping the superseded worker"
+      worker_exit_lost_lock
+    fi
     if [ "$SECONDS" -ge "$next_sweep" ]; then
       fm_remote_job_reap_stale "$account_home" || true
       next_sweep=$((SECONDS + sweep_interval))
