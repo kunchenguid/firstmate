@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block and of
+# Single owner of the worker storage contract, a ship task's mode-specific
+# "Definition of done" block, and of
 # the named-head reachability gate that accepts a ship `done:` claim.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
@@ -134,6 +135,25 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
 # shellcheck source=bin/fm-external-review-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-external-review-lib.sh"
+
+# fm_worker_storage_rule <task-data-dir> renders rule 2 for ship/scout and promotion.
+# This is generated guidance, not a path allocator or filesystem enforcement.
+fm_worker_storage_rule() {
+  local task_data=$1
+  cat <<EOF
+2. Authored project source, tests, and documentation belong in the assigned worktree, only within the task's authorized scope.
+   A read-only or source-only task does not gain installation, source-edit, or scratch-commit permission from this scaffold.
+   Authored private task instructions, reports, and handoffs belong in \`${task_data}/\` only as permitted by the task; status and exact steering-inbox access remain authorized below.
+   Generated helpers, logs, profiles, caches, generated fixtures, and proof belong in a task-scoped external runtime location outside every containing Git or source root.
+   Before the first generated write, resolve its physical path and inspect all containing ancestors for Git roots (including .git files), and check that it is outside all source roots; stop and ask firstmate if that cannot be established.
+   Gitignored or merely outside the app root is not enough, and task data or a temporary directory is not automatically a valid runtime location.
+   Native validation support and evidence use the actual executor-owned paths and explicit grants; do not substitute task data or expand those grants.
+   Ordinary ignored build and dependency output stays with its source-copy owner, retained rather than deleted to make Git status clean.
+   Preserve existing source, private records, proof, and unlanded work; report misplaced generated material before staging or publication, without automatically relocating or deleting it.
+   Keep real HOME unchanged; this storage guidance is not an exclusive filesystem sandbox or a publication secrecy filter.
+   The existing publication owners and flags still control what may be committed, uploaded, or published.
+EOF
+}
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
