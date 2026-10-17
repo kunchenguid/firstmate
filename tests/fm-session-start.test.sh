@@ -520,6 +520,33 @@ SH
 # above $PPID. This is the digest-death shape: a per-task herdr liveness
 # read whose process died mid-read, which used to take the whole
 # session-start digest with it.
+# make_fake_herdr_hanging_endpoint_read: like make_fake_herdr_hanging_read, but
+# only the per-task endpoint read (the `bash -c` that sourced fm-backend.sh)
+# hangs on <hangpane>; any other caller's read of it fails at once, so a
+# leftover herdr can only be the endpoint read's own.
+make_fake_herdr_hanging_endpoint_read() {
+  local fakebin=$1 live=$2 hangpane=$3
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  [ "\${3:-}" = "$live" ] && exit 0
+  [ "\${3:-}" = "$hangpane" ] || exit 1
+  ancestor=\$PPID
+  while [ -n "\$ancestor" ] && [ "\$ancestor" -gt 1 ]; do
+    if tr '\\0' ' ' < /proc/\$ancestor/cmdline 2>/dev/null | grep -q 'fm-backend\\.sh'; then
+      sleep 300
+      exit 0
+    fi
+    ancestor=\$(sed 's/^[^)]*) //' /proc/\$ancestor/stat 2>/dev/null | awk '{print \$2}')
+  done
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+}
+
 make_fake_herdr_deadly_read() {
   local fakebin=$1 live=$2 killpane=$3
   cat > "$fakebin/herdr" <<SH
@@ -527,8 +554,16 @@ make_fake_herdr_deadly_read() {
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   if [ "\${3:-}" = "$killpane" ]; then
-    read_shell=\$(sed 's/^[^)]*) //' /proc/\$PPID/stat 2>/dev/null | awk '{print \$2}')
-    kill -KILL "\$read_shell" 2>/dev/null
+    # Walk up to the endpoint read's own shell (the \`bash -c\` that sourced
+    # fm-backend.sh); the bounded-CLI wrappers add a variable number of hops.
+    read_shell=\$PPID
+    while [ -n "\$read_shell" ] && [ "\$read_shell" -gt 1 ]; do
+      if tr '\\0' ' ' < /proc/\$read_shell/cmdline 2>/dev/null | grep -q 'fm-backend\\.sh'; then
+        kill -KILL "\$read_shell" 2>/dev/null
+        break
+      fi
+      read_shell=\$(sed 's/^[^)]*) //' /proc/\$read_shell/stat 2>/dev/null | awk '{print \$2}')
+    done
     exit 0
   fi
   [ "\${3:-}" = "$live" ] && exit 0
@@ -1495,7 +1530,13 @@ EOF
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
     "a bounded endpoint-read hang raised the whole-digest truncation banner"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  # The herdr CLI's own bound, capped at this read's, reaps it moments after
+  # the read is killed.
+  for _ in $(seq 1 50); do
+    stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$stray" -eq 0 ] && break
+    sleep 0.1
+  done
   [ "$stray" -eq 0 ] || fail "the per-task read bound left $stray hung herdr process(es) behind"
 
   pass "a hung per-task endpoint read hits its configured bound, reports the task, and leaves nothing stuck"
@@ -1530,6 +1571,110 @@ EOF
   [ "$stray" -eq 0 ] || fail "the fallback bound left $stray hung herdr process(es) behind"
 
   pass "a padded-zero per-read bound falls back to the 10s default instead of removing the bound"
+}
+
+test_endpoint_herdr_cli_bound_tighter_than_read_bound_is_kept() {
+  local rec root home fakebin out status=0 stray start elapsed
+  rec=$(new_world endpoint-herdr-cli-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
+
+  printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  # A Herdr CLI bound tighter than the per-read bound must survive into the
+  # read: the hung herdr call ends at 1s, long before the 10s read bound.
+  start=$SECONDS
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=10 FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  elapsed=$((SECONDS - start))
+
+  expect_code 0 "$status" "a hung endpoint read under a tight herdr CLI bound must not fail the digest"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+    "the digest did not continue past the hung read to the next task"
+  [ "$elapsed" -lt 10 ] || fail "the tighter herdr CLI bound was widened: the hung herdr read ran ${elapsed}s instead of ending at its 1s bound"
+
+  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$stray" -eq 0 ] || fail "the herdr CLI bound left $stray hung herdr process(es) behind"
+
+  pass "a herdr CLI bound tighter than the per-read bound is kept for the endpoint read"
+}
+
+test_endpoint_read_caps_a_looser_herdr_cli_bound() {
+  local rec root home fakebin out status=0 stray
+  [ -r /proc/self/stat ] || { echo "skip: /proc not readable (the endpoint-only hang needs process ancestry)"; return 0; }
+  rec=$(new_world endpoint-herdr-cli-cap)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_hanging_endpoint_read "$fakebin" "p-live" "p-slow"
+
+  printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  # The herdr CLI runs in its own process group under the adapter's bound, out
+  # of reach of the read's own kill. A 60s herdr CLI bound must be capped at
+  # the read's 2s bound, or the hung herdr outlives the whole digest.
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=2 FM_BACKEND_HERDR_CLI_TIMEOUT=60 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a hung endpoint read under a loose herdr CLI bound must not fail the digest"
+  assert_contains "$out" \
+    "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 2s bound; the digest continued past it)" \
+    "a hung endpoint read was not bounded into that task's own configured bound"
+
+  for _ in $(seq 1 50); do
+    stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$stray" -eq 0 ] && break
+    sleep 0.1
+  done
+  if [ "$stray" -ne 0 ]; then
+    pkill -KILL -f "$fakebin/herdr" 2>/dev/null || true
+    fail "the per-read bound did not cap a looser herdr CLI bound: $stray hung herdr process(es) outlived the digest"
+  fi
+
+  pass "the per-read bound caps a looser herdr CLI bound, so a hung herdr never outlives the read"
+}
+
+test_endpoint_herdr_cli_timeout_default_not_widened() {
+  local rec root home fakebin out status=0 start elapsed cli
+  rec=$(new_world endpoint-herdr-cli-default)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_hanging_endpoint_read "$fakebin" "p-live" "p-slow"
+
+  printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  for cli in unset abc 00; do
+    status=0
+    start=$SECONDS
+    if [ "$cli" = unset ]; then
+      out=$(unset FM_BACKEND_HERDR_CLI_TIMEOUT; FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=20 \
+        run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+    else
+      out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=20 FM_BACKEND_HERDR_CLI_TIMEOUT="$cli" \
+        run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+    fi
+    elapsed=$((SECONDS - start))
+
+    expect_code 0 "$status" "a hung endpoint read under FM_BACKEND_HERDR_CLI_TIMEOUT=$cli must not fail the digest"
+    assert_contains "$out" \
+      "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 20s bound; the digest continued past it)" \
+      "a hung endpoint read under FM_BACKEND_HERDR_CLI_TIMEOUT=$cli was not turned into its own error line"
+    [ "$elapsed" -lt 16 ] || fail "FM_BACKEND_HERDR_CLI_TIMEOUT=$cli was widened beyond the 10s default: the hung herdr read ran ${elapsed}s"
+  done
+
+  pass "unset, non-numeric, and zero-padded herdr CLI timeouts resolve to the 10s default, not the read bound minus one"
 }
 
 test_perl_timeout_fallback_reports_signal_death_nonzero() {
@@ -3070,6 +3215,9 @@ test_endpoint_liveness_herdr
 test_endpoint_read_death_is_isolated_and_reported
 test_endpoint_read_hang_is_bounded_and_reported
 test_endpoint_bound_rejects_padded_zero
+test_endpoint_herdr_cli_bound_tighter_than_read_bound_is_kept
+test_endpoint_read_caps_a_looser_herdr_cli_bound
+test_endpoint_herdr_cli_timeout_default_not_widened
 test_perl_timeout_fallback_reports_signal_death_nonzero
 test_abnormal_digest_death_banners_and_exits_zero
 test_composition_invokes_real_scripts

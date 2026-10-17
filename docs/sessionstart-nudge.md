@@ -144,7 +144,7 @@ Some digest work remains local but unbounded:
 
 So the whole digest still runs as one bounded child, default 120s via `FM_SESSION_START_TIMEOUT`.
 
-Each per-task endpoint liveness read runs serially in its own crash-isolated child, bounded by `FM_SESSION_START_ENDPOINT_TIMEOUT` (default 10s; a non-numeric or zero value falls back to the default).
+Each per-task endpoint liveness read runs serially in its own crash-isolated child, bounded by `FM_SESSION_START_ENDPOINT_TIMEOUT` (default 10s; a non-numeric value or one below 2s falls back to the default), and `FM_BACKEND_HERDR_CLI_TIMEOUT` (default 10s; invalid or zero falls back to 10) is capped strictly below that read bound for the read so an outer kill cannot strand a hung herdr CLI.
 So a read that hangs or dies becomes that task's own `endpoint: error` line and the digest continues.
 With a wedged backend the stage's ceiling is tasks times that per-read bound and can itself reach the digest bound.
 

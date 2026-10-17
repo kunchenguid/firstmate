@@ -61,6 +61,12 @@
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
+#   fm_bound_seconds <raw> [<default>]
+#       Prints <raw> as a positive whole-second integer, or <default> (10 when
+#       omitted) if <raw> is empty, non-numeric, or zero. This is the single
+#       normalizer for whole-second bound values, so a leading-zero zero ("00")
+#       cannot be misread as 0 and disable a caller's deadline.
+#
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
 #
@@ -198,6 +204,14 @@ fm_timed_out() {  # <status>
     124 | 137) return 0 ;;
   esac
   return 1
+}
+
+fm_bound_seconds() {  # <raw> [<default>]
+  local raw=${1:-} default=${2:-10}
+  case "$raw" in ''|*[!0-9]*) printf '%s\n' "$default"; return 0 ;; esac
+  raw=$((10#$raw))
+  [ "$raw" -gt 0 ] || raw=$default
+  printf '%s\n' "$raw"
 }
 
 # The perl watchdog forks the command into its own process group (both sides
