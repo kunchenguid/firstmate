@@ -3,8 +3,8 @@
 # (.agents/skills/bearings/assets/board-template.html), exercised through a real
 # `fm-bearings-board.sh build` and then executed under the minimal DOM shim in
 # tests/assets/board-render-harness.mjs. The assertions are on what the page
-# renders - row badges, the stat strip, the empty state - never on the
-# template's source text.
+# renders - row badges, the stat strip, the empty state, the detail line of a
+# Captain's Call card - never on the template's source text.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -116,6 +116,24 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
+# Build the board from <captains-call-json> alone and return what the renderer
+# produced.
+render_call() {  # <home> <captains-call-json>
+  local home=$1 data="$1/payload.json"
+  jq -n --argjson call "$2" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, captains_call:$call, underway:[], landed:[],
+    charted:[], charted_more:0, charted_warning_more:0}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    || fail "the built board could not be rendered"
+}
+
 charted_next_count() {  # <render-json>
   printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
 }
@@ -203,6 +221,86 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+test_a_decision_card_shows_its_detail_with_the_address_as_a_link() {
+  local home out
+  home=$(make_home call-decision-detail)
+  out=$(render_call "$home" '[
+    {"key":"report-link","type":"decision","repo":"sample","title":"Pick the rollout order",
+     "detail":"Report: https://example.invalid:4388/index.html#sample-task - read it first.",
+     "options":[{"value":"now","label":"Roll out now"},{"value":"wait","label":"Wait"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the call deck: $out"
+  printf '%s' "$out" | jq -e '
+    (.call | length) == 1
+      and (.call[0]
+        | .detail == "Report: https://example.invalid:4388/index.html#sample-task - read it first."
+          and ([.detailParts[] | select(.tag == "a")]
+            | length == 1
+              and (.[0] | .text == "https://example.invalid:4388/index.html#sample-task"
+                and .href == "https://example.invalid:4388/index.html#sample-task"
+                and .target == "_blank" and .rel == "noopener"))
+          and ([.detailParts[] | select(.tag == "#text") | .text]
+            == ["Report: ", " - read it first."]))
+  ' >/dev/null || fail "a decision card lost its detail or did not link the address: $out"
+  pass "a decision card renders its detail and makes the address a link"
+}
+
+test_a_merge_card_keeps_its_detail_and_links_the_address() {
+  local home out
+  home=$(make_home call-merge-detail)
+  out=$(render_call "$home" '[
+    {"key":"merge-one","type":"merge","repo":"sample","title":"Merge the fix","risk":"low",
+     "detail":"Report: https://example.invalid:4388/index.html#merge-task",
+     "pr_url":"https://example.invalid/sample/pull/1",
+     "options":[{"value":"merge","label":"Merge"},{"value":"hold","label":"Hold"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.call | length) == 1
+      and (.call[0]
+        | (.detail | test("#merge-task"))
+          and ([.detailParts[] | select(.tag == "a") | .href]
+            == ["https://example.invalid:4388/index.html#merge-task"]))
+  ' >/dev/null || fail "a merge card lost its detail or its address link: $out"
+  pass "a merge card still renders its detail with the address as a link"
+}
+
+test_detail_prose_without_an_address_stays_plain_text() {
+  local home out
+  home=$(make_home call-plain-detail)
+  out=$(render_call "$home" '[
+    {"key":"plain","type":"credential","repo":"sample","title":"Log in to the registry",
+     "detail":"The token expired <b>yesterday</b> & nobody renewed it.",
+     "options":[{"value":"renew","label":"Renew it"},{"value":"skip","label":"Skip"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.call | length) == 1
+      and (.call[0]
+        | .detail == "The token expired <b>yesterday</b> & nobody renewed it."
+          and ([.detailParts[] | select(.tag == "a")] | length) == 0
+          and ([.detailParts[] | .tag] == ["#text"]))
+  ' >/dev/null || fail "detail prose without an address did not stay plain text: $out"
+  pass "a credential card renders address-free detail unchanged, as text"
+}
+
+test_an_address_in_parentheses_ends_at_the_closing_bracket() {
+  local home out
+  home=$(make_home call-bracketed-detail)
+  out=$(render_call "$home" '[
+    {"key":"bracketed","type":"decision","repo":"sample","title":"Approve the write-up",
+     "detail":"See the report (https://example.invalid:4388/index.html#bracket) before answering.",
+     "options":[{"value":"yes","label":"Approve"},{"value":"no","label":"Reject"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.call[0]
+      | ([.detailParts[] | select(.tag == "a") | .text]
+          == ["https://example.invalid:4388/index.html#bracket"])
+        and ([.detailParts[] | select(.tag == "#text") | .text]
+          == ["See the report (", ") before answering."]))
+  ' >/dev/null || fail "an address in parentheses swallowed the closing bracket: $out"
+  pass "an address followed by a closing bracket ends at the bracket"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
   local home out
   home=$(make_home underway-name)
@@ -275,3 +373,7 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_a_decision_card_shows_its_detail_with_the_address_as_a_link
+test_a_merge_card_keeps_its_detail_and_links_the_address
+test_detail_prose_without_an_address_stays_plain_text
+test_an_address_in_parentheses_ends_at_the_closing_bracket

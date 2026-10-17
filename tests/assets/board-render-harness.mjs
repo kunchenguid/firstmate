@@ -4,7 +4,8 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
+//   { stats:[{n,label}], call:[{title,detail,detailParts}],
+//     underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -25,8 +26,14 @@ class Node {
     this.value = "";
     this.checked = false;
     this.classList = {
-      add: (c) => { this.className = (this.className + " " + c).trim(); },
+      add: (c) => {
+        if (!this.classList.contains(c)) this.className = (this.className + " " + c).trim();
+      },
+      remove: (c) => {
+        this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" ");
+      },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      toggle: (c, on) => { if (on) this.classList.add(c); else this.classList.remove(c); },
     };
   }
   get textContent() {
@@ -62,6 +69,13 @@ byId.set("bearings-data", dataNode);
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
+  // A text node is a node with no tag: it carries text and never markup, which
+  // is exactly the property the template relies on when it builds detail prose.
+  createTextNode: (text) => {
+    const n = new Node("#text");
+    n.textContent = text;
+    return n;
+  },
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {
@@ -108,6 +122,29 @@ const rowsOf = (container) =>
       };
     });
 
+// Captain's Call cards: report the detail line part by part, so a test can tell
+// a rendered address apart from the same characters left as plain text.
+const deck = byId.get("bb-call") || new Node("div");
+const call = deck.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => {
+    const pad = card.children.find((c) => c.className.includes("bb-decision__pad")) ?? card;
+    const detail = pad.children.find((c) => c.className.includes("bb-decision__detail"));
+    return {
+      title: pad.children.find((c) => c.className.includes("bb-decision__title"))?.textContent ?? "",
+      detail: detail ? detail.textContent : null,
+      detailParts: detail
+        ? detail.children.map((n) => ({
+            tag: n.tagName,
+            text: n.textContent,
+            href: n.href ?? null,
+            target: n.target ?? null,
+            rel: n.rel ?? null,
+          }))
+        : [],
+    };
+  });
+
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
 
@@ -123,4 +160,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, call, underway, charted, empty, more, error: errorText }) + "\n");
