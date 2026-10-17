@@ -966,6 +966,11 @@ if [ -n "$ACK_THROUGH" ]; then
   elif [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
+  else
+    # Confirm every other success, including a zero-row repeat with nothing
+    # waiting above the cutoff, so the caller can see the acknowledgement land.
+    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed)\n' \
+      "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
   exit 0
 fi
