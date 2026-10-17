@@ -82,6 +82,7 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
+The [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns Linux startup's live-owner reuse and initialization contract; [`fm_remote_job_ensure_worker`](../bin/fm-remote-job-lib.sh) still gates job staging on fresh readiness and matching code identity.
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
@@ -695,6 +696,7 @@ The portable tests use these pieces:
 - A controlled account fixture for the readiness gate.
 
 [`fm-remote-job-launchagent.test.sh`](../tests/fm-remote-job-launchagent.test.sh) exercises the real worker with stubbed asynchronous `launchctl`, covering slow claim sweeps, missing readiness recovery during a sweep, stale readiness without reload, concurrent repair, untracked owners, interrupted repairs, and asynchronous service removal before bootstrap.
+[`fm-remote-job.test.sh`](../tests/fm-remote-job.test.sh) covers Linux live-owner reuse with aged readiness, absent or stale public PID records, and unpublished code identity, plus readiness-object binding where Linux fd paths are available.
 The lifecycle test covers seeding a registered project that this machine has never cloned.
 It asserts that the local project tree is unchanged afterwards.
 It carries Bitbucket, self-hosted, and scp-like origins through to the remote clone.
