@@ -20,6 +20,8 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 # and that session is absent from the server's listing. `--reopen` restores it.
 # Markers under lavish-state drive the fixture: `user-ended` makes the next
 # plain open refuse, and `refuse-reopen` makes even --reopen leave it dead.
+# Every establish call's flags are appended to `establish-calls`, one line per
+# call, so a test can tell a window-opening call from a `--no-open` one.
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   # Registered with tests/lib.sh, not with a shell array: make_home is called
@@ -61,9 +63,9 @@ case "${1-}" in
     exit 0
     ;;
   '')
-    if [ -e "$state/end-before-next-list" ]; then
+    if [ -e "$state/end-at-next-list" ]; then
       : > "$state/open"
-      rm -f "$state/end-before-next-list"
+      rm -f "$state/end-at-next-list"
     fi
     printf 'sessions[1]{file,status,url,pending_prompts}:\n'
     if [ -s "$state/open" ]; then
@@ -78,6 +80,11 @@ case "${1-}" in
 esac
 file=$1
 shift
+printf '%s\n' "$*" >> "$state/establish-calls"
+if [ -e "$state/end-before-next-list" ]; then
+  rm -f "$state/end-before-next-list"
+  : > "$state/end-at-next-list"
+fi
 reopen=0
 for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
@@ -571,6 +578,66 @@ test_build_reopens_when_an_opened_session_ends_before_listing() {
   pass "build reopens a session that ends between establish and listing"
 }
 
+# The stub's establish-call log: one line of flags per `lavish-axi <board>`
+# call. A line without --no-open is a call that opens a browser window.
+establish_calls() { cat "$1/lavish-state/establish-calls" 2>/dev/null; }
+reset_establish_calls() { rm -f "$1/lavish-state/establish-calls"; }
+
+test_first_build_opens_a_window() {
+  local home data out
+  home=$(make_home window-first)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  out=$(run_board "$home" build "$data") || fail "the first build failed: $out"
+  [ "$(establish_calls "$home")" = "" ] \
+    || fail "a new session was not established with one window-opening call: $(establish_calls "$home")"
+  pass "a build opens a window for a session that was not open"
+}
+
+test_rebuild_reuses_the_open_window() {
+  local home data out
+  home=$(make_home window-reuse)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  reset_establish_calls "$home"
+  out=$(run_board "$home" build "$data") || fail "the rebuild failed: $out"
+  assert_contains "$out" "session: live" "the rebuild did not prove the session live: $out"
+  [ "$(establish_calls "$home")" = "--no-open" ] \
+    || fail "a rebuild of an open session opened another window: $(establish_calls "$home")"
+  pass "a rebuild of an open session reuses its window with --no-open"
+}
+
+test_rebuild_of_an_agent_ended_session_opens_a_window() {
+  local home data out
+  home=$(make_home window-agent-ended)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  PATH="$home/fakebin:$PATH" LAVISH_FAKE_STATE="$home/lavish-state" \
+    lavish-axi end "$home/.lavish/bearings-board.html" >/dev/null
+  reset_establish_calls "$home"
+  out=$(run_board "$home" build "$data") || fail "the rebuild failed: $out"
+  [ "$(establish_calls "$home")" = "" ] \
+    || fail "an agent-ended session was established without opening a window: $(establish_calls "$home")"
+  pass "a rebuild of a session that is no longer open opens a window"
+}
+
+test_rebuild_reopen_opens_a_window() {
+  local home data out
+  home=$(make_home window-reopen)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  end_session_as_captain "$home"
+  reset_establish_calls "$home"
+  out=$(run_board "$home" build "$data") || fail "the rebuild failed: $out"
+  assert_contains "$out" "session: reopened" "the rebuild did not reopen: $out"
+  [ "$(establish_calls "$home")" = "$(printf '\n--reopen')" ] \
+    || fail "a reopened session was not established with window-opening calls: $(establish_calls "$home")"
+  pass "a rebuild that reopens an ended session opens a window"
+}
+
 test_build_refuses_to_arm_when_the_session_stays_ended() {
   local home data rc out sid
   home=$(make_home dead-session)
@@ -780,6 +847,10 @@ test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
 test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
+test_first_build_opens_a_window
+test_rebuild_reuses_the_open_window
+test_rebuild_of_an_agent_ended_session_opens_a_window
+test_rebuild_reopen_opens_a_window
 test_build_starts_a_listener_for_an_already_armed_board
 test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
