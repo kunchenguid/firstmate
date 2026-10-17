@@ -723,6 +723,96 @@ EOF
 # status decisions refuses --none, refuses an inventory naming absent tasks,
 # attests a verified inventory of captain-held task ids, and transfers every
 # still-open status decision to that durable inventory.
+test_archived_answers_remain_verifiable() {
+  local home id call before after variant section command rc
+  local -a args
+  home=$(make_home archived-answers)
+  id=archived-audit
+  call=approved-repair
+  write_origin_meta "$home" "$id"
+  run_captain "$home" hold "$call" --title "Approve repair" --reason "Choose repair" --origin "$id" >/dev/null \
+    || fail "could not create archived approval fixture"
+  printf 'Approve the bounded repair.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not answer approval fixture"
+  run_captain "$home" complete "$id" "$call" >/dev/null || fail "active approval did not complete"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive answered approval"
+  if tasks_in "$home" show "$call" >/dev/null 2>&1; then fail "prune left approval active"; fi
+  cp "$home/data/done-archive.md" "$home/archive-original.md"
+  before=$(shasum -a 256 "$home/data/backlog.md" "$home/data/done-archive.md")
+  run_captain "$home" verify "$id" >/dev/null || fail "archived answered approval did not verify"
+  run_captain "$home" complete "$id" "$call" >/dev/null || fail "archived answered approval did not complete"
+  after=$(shasum -a 256 "$home/data/backlog.md" "$home/data/done-archive.md")
+  [ "$before" = "$after" ] || fail "archive verification mutated task records"
+  for variant in absent mismatched unresolved unrecorded open duplicate mixed queued flight custom headerless; do
+    case "$variant" in
+      queued|flight|custom)
+        case "$variant" in queued) section=Queued ;; flight) section='In flight' ;; custom) section=Other ;; esac
+        sed "s/^## Archived .*/## $section/" "$home/archive-original.md" > "$home/data/done-archive.md"
+        ;;
+      headerless) sed '/^## /d' "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      absent) : > "$home/data/done-archive.md" ;;
+      mismatched) sed "s/Captain hold origin: $id/Captain hold origin: other-audit/" "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      unresolved) sed 's/Resolution recorded by fm-captain-hold\./Unresolved record./' "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      unrecorded) sed '/Captain hold origin:/d' "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      open) sed 's/^- \[x\]/- [ ]/' "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      duplicate) cat "$home/archive-original.md" "$home/archive-original.md" > "$home/data/done-archive.md" ;;
+      mixed)
+        cp "$home/archive-original.md" "$home/data/done-archive.md"
+        sed 's/^- \[x\]/- [ ]/' "$home/archive-original.md" >> "$home/data/done-archive.md"
+        ;;
+    esac
+    if run_captain "$home" verify "$id" >/dev/null 2>&1; then fail "verify accepted $variant archive record"; fi
+    if run_captain "$home" complete "$id" "$call" >/dev/null 2>&1; then fail "complete accepted $variant archive record"; fi
+  done
+  sed 's/^## Archived .*/## Done/' "$home/archive-original.md" > "$home/data/done-archive.md"
+  run_captain "$home" verify "$id" >/dev/null || fail "explicit Done archive did not verify"
+  run_captain "$home" complete "$id" "$call" >/dev/null || fail "explicit Done archive did not complete"
+  awk 'BEGIN { print "## Queued"; for (i=0; i<50000; i++) print "- [ ] padding-" i " - Unrelated archived row" }' > "$home/data/done-archive.md"
+  cat "$home/archive-original.md" >> "$home/data/done-archive.md"
+  run_captain "$home" verify "$id" >/dev/null || fail "large archive lost its Done approval"
+  run_captain "$home" complete "$id" "$call" >/dev/null || fail "large archive did not complete"
+  # The scanner must finish within the bound before tasks-axi sees a snapshot.
+  # A wrapper stalls the archive input operation, leaving other awk calls real.
+  command -v awk > "$home/real-awk"
+  cat > "$home/fakebin/awk" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */done-archive.md) printf 'started\n' > "${arg}.scan-started"; sleep 30 ;; esac
+done
+exec "$(cat "$FM_HOME/real-awk")" "$@"
+EOF
+  chmod +x "$home/fakebin/awk"
+  cp "$home/archive-original.md" "$home/data/done-archive.md"
+  for command in verify complete; do
+    rc=0
+    args=("$command" "$id")
+    [ "$command" != complete ] || args+=("$call")
+    fm_run_timed 8 env PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" FM_BACKLOG_ROW_TIMEOUT_SECS=1 \
+      "$ROOT/bin/fm-captain-hold.sh" "${args[@]}" > "$home/scan-output" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$command accepted an unfinished archive scan"
+    [ -f "$home/data/done-archive.md.scan-started" ] || fail "archive scan was not exercised"
+    assert_grep 'archive read exceeded its bound' "$home/scan-output" "$command escaped the inner archive deadline"
+    rm "$home/data/done-archive.md.scan-started"
+  done
+  rm "$home/fakebin/awk"
+  cp "$home/archive-original.md" "$home/data/done-archive.md"
+  # An active unresolved task with the same id must not borrow an old answer.
+  tasks_in "$home" add "$call" "New unresolved call" --kind captain --repo sample >/dev/null \
+    || fail "could not create active identity precedence fixture"
+  if run_captain "$home" verify "$id" >/dev/null 2>&1; then fail "active unresolved task borrowed archive answer"; fi
+  tasks_in "$home" rm "$call" >/dev/null || fail "could not remove precedence fixture"
+  # Honor a relocated archive configured on the markdown backend.
+  mkdir -p "$home/history"
+  mv "$home/data/done-archive.md" "$home/history/approved.md"
+  sed 's|archive = "data/done-archive.md"|archive = "history/approved.md"|' "$home/.tasks.toml" > "$home/config-new"
+  mv "$home/config-new" "$home/.tasks.toml"
+  run_captain "$home" verify "$id" >/dev/null || fail "configured archive path did not verify"
+  pass "archived answers verify by exact identity and origin without weakening active holds"
+}
+
 test_completion_gate_attests_and_transfers() {
   local home id json open before after
   home=$(make_home completion-gate)
@@ -4638,6 +4728,7 @@ test_complete_refuses_an_entry_held_for_another_origin
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
+test_archived_answers_remain_verifiable
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
