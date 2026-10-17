@@ -69,6 +69,12 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  # An away host held every ask-user park for the captain because the away
+  # words did not name it; the standing ask-user-authority policy decides those.
+  case "$out_a" in
+    *"An ask-user finding needs no mention in the words: decide it under that policy"*"\`bin/fm-send.sh <task> --resolve-key nm-<run>-<step>\`"*"for the worker to apply through its gate with \`no-mistakes axi respond\`; never answer the gate yourself."*"a standing rule such as the ask-user-authority policy applies whether or not they mention it"*) ;;
+    *) fail "branch prompt lost the away rule that decides an ask-user finding under ask-user-authority and carries it to the worker" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 

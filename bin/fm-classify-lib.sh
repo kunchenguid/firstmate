@@ -2525,7 +2525,7 @@ crew_is_paused() {  # <id>
 # The one spelling of the verdict component that says a parked gate's answer is
 # owed by a HUMAN. bin/fm-crew-state.sh mints it (nm_gate_awaits_human_decision
 # owns the derivation: the findings table's `action` column, read by position);
-# crew_gate_awaits_human_decision below is its only consumer.
+# crew_gate_human_decision below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
@@ -2550,7 +2550,17 @@ FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 # which may make a bounded no-mistakes call, so callers take it only where they
 # already accept that cost.
 crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
-  local id=$1 line state src rest part human='' run=''
+  local gate
+  gate=$(crew_gate_human_decision "$1") || return 1
+  printf '%s\n' "${gate%%$'\t'*}"
+}
+
+# The same verdict read for a caller that also needs WHICH park it is: prints
+# "<run-id>\t<parked-at component>" (for example "01RUN\tparked at
+# awaiting_approval: 2 finding(s)"), so a second park of the same run reads as
+# a different park. Same single fm-crew-state.sh read and the same rules.
+crew_gate_human_decision() {  # <id> -> <run-id>\t<parked-at> on stdout
+  local id=$1 line state src rest part human='' run='' parked=''
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac
@@ -2563,11 +2573,14 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
     part=${rest%% · *}
     rest=${rest#* · }
     [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && human=1
-    case "$part" in "run: "?*) run=${part#run: } ;; esac
+    case "$part" in
+      "run: "?*) run=${part#run: } ;;
+      "parked at "?*) parked=$part ;;
+    esac
   done
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
-  printf '%s\n' "$run"
+  printf '%s\t%s\n' "$run" "$parked"
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

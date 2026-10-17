@@ -416,6 +416,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
+Stay with your run until it ends or parks at a gate: while rule 7 finds it live, a \`blocked:\` report never ends your turn, whatever this brief says elsewhere about stopping after one, so append it and reattach, and a gate that parks later still reaches you.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.

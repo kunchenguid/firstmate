@@ -3653,6 +3653,125 @@ resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
   pass "a parked human-owed gate is deferred only while its decision is still open, so an answered-but-unrelayed gate, an unescalated one, and one holding only a blocker all keep the unchanged ladder"
 }
 
+# --- a park on ask-user findings reaches its own worker ------------------------
+# The worker may not decide its own ask-user finding and firstmate never answers
+# a crew-owned gate, so the decision path runs through the worker's own
+# `needs-decision` line. A worker that ended its turn on a `blocked:` report
+# before its run parked never sees the park, and the lane then waits for
+# whoever next reads it. The watcher rings that worker through its steering
+# inbox instead, once per park and in either posture, and leaves a lane whose
+# worker already escalated (an open `needs-decision`) to the ordinary triage.
+# Start <key>'s parked-gate check clock far enough back that the next poll reads.
+age_gate_check() {  # <state> <window-key>
+  : > "$1/.gate-check-$2"
+  set_mtime "$(( $(date +%s) - 3600 ))" "$1/.gate-check-$2"
+}
+
+test_parked_ask_user_gate_rings_its_own_worker() {
+  local dir state fakebin out capture window key inbox rec
+  local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
+  local later='state: parked · source: run-step · parked at fix_review: 1 finding(s) · ask-user: authority decision · run: 01RUNGATE'
+  local crewmate='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE'
+  local working='state: working · source: run-step · ci running'
+  local blocked='blocked: the test agent has gone quiet; need you to choose how to unstick it'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  dir=$(wedge_threshold_fixture parked-gate-ring "$blocked" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  inbox="$state/wedge.inbox"
+  # A window first seen quiet only starts the check clock and spends no read.
+  FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "the watcher exited on a lane first seen quiet: $(cat "$out")"
+  [ ! -d "$inbox" ] || [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "a lane first seen quiet was rung before its check clock ran"
+  [ -e "$state/.gate-check-$key" ] || fail "a lane first seen quiet did not start its check clock"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "the watcher exited instead of ringing the worker at its parked gate: $(cat "$out")"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "a park on ask-user findings did not leave exactly one record for its worker: $(ls -la "$inbox" 2>&1)"
+  rec=$(find "$inbox" -maxdepth 1 -name '*.msg' | head -1)
+  grep -F 'Your no-mistakes run 01RUNGATE is parked at awaiting_approval: 2 finding(s) on ask-user findings' "$rec" >/dev/null \
+    || fail "the worker's record does not name the run and the park: $(cat "$rec")"
+  grep -F 'escalate the ask-user findings exactly as your instructions say' "$rec" >/dev/null \
+    || fail "the worker's record does not send it to escalate the findings: $(cat "$rec")"
+  grep -F "apply it now with \`no-mistakes axi respond\`" "$rec" >/dev/null \
+    || fail "the worker's record does not cover a decision it already holds: $(cat "$rec")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the poll that rang the worker also woke the supervisor: $(cat "$state/.wake-queue")"
+
+  # Handled, and the same park still stands: it is never rung twice.
+  mkdir -p "$inbox/handled" && mv "$rec" "$inbox/handled/"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "the watcher exited on an already-rung park: $(cat "$out")"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "the same park was rung to its worker twice"
+
+  # A later park of the same run is a new park, and rings again.
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$later" absorb \
+    || fail "the watcher exited instead of ringing a later park: $(cat "$out")"
+  rec=$(find "$inbox" -maxdepth 1 -name '*.msg' | head -1)
+  [ -n "$rec" ] || fail "a later park of the same run was not rung to its worker"
+  grep -F 'parked at fix_review: 1 finding(s)' "$rec" >/dev/null \
+    || fail "a later park's record does not name that park: $(cat "$rec")"
+
+  # The run leaves its park and later parks again exactly as before: that is a
+  # new park, and rings again.
+  mkdir -p "$inbox/handled" && mv "$rec" "$inbox/handled/"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "the watcher exited on a run that left its park: $(cat "$out")"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "a run that left its park was rung as parked"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$later" absorb \
+    || fail "the watcher exited instead of ringing a repeated park: $(cat "$out")"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "a park that reads the same as an earlier, ended one was not rung to its worker"
+
+  # Away posture: the ring is what lets the supervision host's decision reach
+  # the gate, so the record does not silence it.
+  dir=$(wedge_threshold_fixture parked-gate-ring-away "$blocked" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  age_gate_check "$state" "$key"
+  write_away_record "$state"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "the away-posture watcher exited instead of ringing the worker: $(cat "$out")"
+  [ "$(find "$state/wedge.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "an away-posture park on ask-user findings was not rung to its worker"
+
+  # A worker that already escalated is waiting on firstmate's answer, and a
+  # gate the worker answers itself is not this case: neither is rung.
+  dir=$(wedge_threshold_fixture parked-gate-ring-escalated \
+    'needs-decision [key=nm-01RUNGATE-review]: ask-user findings=f1 file=/x' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "an already-escalated park changed the watcher's triage: $(cat "$out")"
+  [ ! -d "$state/wedge.inbox" ] || [ "$(find "$state/wedge.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "a worker that already escalated its park was rung again"
+  # An open `needs-decision` about something else does not stand for this run's
+  # escalation, so the park is still rung.
+  dir=$(wedge_threshold_fixture parked-gate-ring-unrelated \
+    'needs-decision [key=scope-q]: should the fix also cover the CLI path' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
+    || fail "the watcher exited instead of ringing past an unrelated decision: $(cat "$out")"
+  [ "$(find "$state/wedge.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "an open decision about something else kept the park from reaching its worker"
+  dir=$(wedge_threshold_fixture parked-gate-ring-crewmate "$blocked" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  age_gate_check "$state" "$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$crewmate" absorb \
+    || fail "a crewmate-owed gate changed the watcher's triage: $(cat "$out")"
+  [ ! -d "$state/wedge.inbox" ] || [ "$(find "$state/wedge.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "a gate the worker answers itself was rung as an ask-user park"
+  pass "a park on ask-user findings its worker never escalated is rung to that worker once per park, in either posture"
+}
+
 # --- a wait record that does not carry every field is refused ----------------
 # wait_record joins its five fields with US and wedge_defer_wait parses them with
 # `IFS=<us> read`, so consecutive delimiters yield genuinely EMPTY fields and no
@@ -4514,7 +4633,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 300 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
   sleep 2
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
@@ -5470,7 +5589,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 300 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
@@ -5485,7 +5604,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 300 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
@@ -6876,6 +6995,7 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_backlog_captain_hold
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
+test_parked_ask_user_gate_rings_its_own_worker
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn

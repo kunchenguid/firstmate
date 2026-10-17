@@ -21,7 +21,8 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
+An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill, and while away the supervision branch or host does the same under its prompt's Postures rules (`bin/fm-branch-prompt.sh`).
+A gate parked on ask-user findings its worker never escalated is rung back to that worker by the watcher (`bin/fm-watch.sh` `parked_gate_ring_owner`).
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.

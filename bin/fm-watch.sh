@@ -67,6 +67,9 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          An idle crew pane whose run parked on ask-user findings
+#                          it never escalated is rung back to its own worker
+#                          first, in every posture (parked_gate_ring_owner).
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -497,7 +500,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .waiting-*, .gate-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -1344,6 +1347,59 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     return 0
   fi
   return 1
+}
+
+# Ring the OWNING WORKER when its no-mistakes run has parked on ask-user
+# findings and the worker never escalated them. A worker may not decide its own
+# finding and firstmate never answers a crew-owned gate, so the decision path
+# runs through the worker's own `needs-decision` line; a worker that ended its
+# turn before the park (a `blocked:` report, a finished drive call) never sees
+# the park, and nothing else wakes it - the gate then waits for whoever next
+# reads the lane, overnight included. So on an idle pane this writes one
+# ordinary steering-inbox record telling the worker to escalate the findings,
+# or to apply a decision it already holds, and rings it; the inbox ladder
+# (bin/fm-task-inbox-lib.sh) owns every later re-ring and the escalation to
+# firstmate when the worker never acknowledges.
+# Runs in every posture: with the captain away this ring is what lets the
+# supervision host's decision reach a gate at all.
+# Cost: one fm-crew-state.sh read, at most once per window per
+# STALE_ESCALATE_SECS (the .gate-check- marker's mtime; a window with no marker
+# only starts that clock, so a pane quiet for a moment spends nothing), and never while an
+# unhandled inbox record is still being delivered. A park whose run the worker's
+# own log already escalated (an open `needs-decision` keyed `nm-<run>-`) is not
+# rung: its answer is owed by firstmate and arrives through the inbox on its own.
+# Each park is rung once: the .gate-rung- marker holds "<run>\t<parked-at>" for
+# the last park rung and is cleared by any read that finds no human-owed park,
+# so every later park rings again, even one that reads the same, while a lane
+# quiet after its ring falls through to the ordinary stale triage.
+# 0 iff a record was written (the caller then skips this poll's stale triage,
+# which the worker's own turn now owns); 1 otherwise.
+parked_gate_ring_owner() {  # <window> <task> <window-key>
+  local w=$1 task=$2 key=$3 check rung gate run parked rec backend ring_rc=0
+  [ -n "$task" ] || return 1
+  check="$STATE/.gate-check-$key"
+  rung="$STATE/.gate-rung-$key"
+  if [ ! -e "$check" ]; then
+    touch "$check" 2>/dev/null || true
+    return 1
+  fi
+  [ "$(age_of "$check")" -ge "$STALE_ESCALATE_SECS" ] || return 1
+  [ -z "$(fm_task_inbox_oldest_unhandled "$STATE" "$task" 2>/dev/null)" ] || return 1
+  touch "$check" 2>/dev/null || return 1
+  if ! gate=$(crew_gate_human_decision "$task"); then
+    rm -f "$rung"
+    return 1
+  fi
+  run=${gate%%$'\t'*}
+  status_has_open_needs_decision "$STATE/$task.status" "$run" && return 1
+  [ "$(cat "$rung" 2>/dev/null || true)" != "$gate" ] || return 1
+  parked=${gate#*$'\t'}
+  rec=$(fm_task_inbox_write "$STATE" "$task" "Your no-mistakes run $run is ${parked:-parked} on ask-user findings, which are never yours to answer. If firstmate already sent you its decision for this gate, apply it now with \`no-mistakes axi respond\`; otherwise escalate the ask-user findings exactly as your instructions say for an ask-user gate, then end your turn.") || return 1
+  printf '%s' "$gate" > "$rung" || true
+  backend=$(window_backend "$w")
+  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+  triage_log "parked ask-user gate rung to its worker: $task run=$run result=$ring_rc"
+  return 0
 }
 
 # Defer ONE wedge escalation for a pane whose wait record explains the quiet
@@ -3150,7 +3206,11 @@ EOF
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
-        # firstmate. Detection itself is unchanged from above.
+        # firstmate. Detection itself is unchanged from above, except that an
+        # unescalated ask-user park goes to its own worker first.
+        if [ "$kind" != secondmate ] && parked_gate_ring_owner "$w" "$task" "$key"; then
+          continue
+        fi
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
