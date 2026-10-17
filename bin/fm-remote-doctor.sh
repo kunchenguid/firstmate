@@ -26,6 +26,16 @@
 # SSH cannot create an Aqua session, so a host with no GUI login is a human
 # gap rather than something --fix attempts to bypass.
 #
+# Every command this account runs is a `#!/usr/bin/env bash` script, so the
+# bash its runtime PATH resolves is the interpreter for this doctor, for the
+# worker, and for every job they spawn. bash 4.0 introduced BASHPID, which
+# bin/fm-timeout-lib.sh and other shared libraries expand under `set -u`, so a
+# macOS account whose PATH still finds the system /bin/bash 3.2 first cannot
+# run a Firstmate script at all. Doctor checks that interpreter and reports an
+# older one as a human gap, because --fix never installs a package. This file
+# stays bash-3.2-clean itself, so it can report such a PATH rather than dying
+# on it.
+#
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
 #   path=<the child PATH this command inherited>
@@ -562,6 +572,43 @@ fix_remote_job_worker() {
 
 # --- checks -----------------------------------------------------------------
 
+# The resolved bash's own major version, read from the public `--version`
+# interface (`GNU bash, version 5.2.15(1)-release ...`); empty when the file
+# does not answer like a bash at all.
+bash_major_version() { # <bash-path>
+  local output
+  output=$("$1" --version 2>/dev/null || true)
+  printf '%s\n' "$output" |
+    sed -n 's/.*[Vv]ersion \([0-9][0-9]*\).*/\1/p' |
+    head -1
+  return 0
+}
+
+# bin/*.sh run under `#!/usr/bin/env bash`, so this PATH's bash is the
+# interpreter every later command and job uses. No --fix path may install a
+# package, so an old one is always the operator's gap rather than a repair.
+check_bash() {
+  local resolved major
+  resolved=$(command -v bash 2>/dev/null || true)
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    record bash "human: no bash resolves on the runtime PATH, so no Firstmate script can run" \
+      "install bash 4 or newer on that account (on macOS: brew install bash), then rerun this command"
+    return 0
+  fi
+  major=$(bash_major_version "$resolved")
+  if [ -z "$major" ]; then
+    record bash "human: $resolved does not report a bash version, so the interpreter behind every Firstmate script cannot be trusted" \
+      "replace it with bash 4 or newer (on macOS: brew install bash), then rerun this command"
+    return 0
+  fi
+  if [ "$major" -lt 4 ]; then
+    record bash "human: $resolved is bash $major, which predates BASHPID, so every Firstmate script run under it fails on an unbound variable before it can start" \
+      "install bash 4 or newer and leave it the bash that resolves on the PATH reported above (on macOS: brew install bash), then rerun this command"
+    return 0
+  fi
+  record bash "ok: $resolved is bash $major"
+}
+
 check_herdr() {
   local resolved selected
   if resolved=$(command -v herdr 2>/dev/null) && [ -x "$resolved" ]; then
@@ -723,6 +770,7 @@ run_checks() { # <resolved-login-shell>
   CHECK_NAMES=()
   CHECK_VALUES=()
   CHECK_ACTIONS=()
+  check_bash
   check_herdr
   check_gui_session
   check_remote_job_worker
