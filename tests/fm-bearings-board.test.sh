@@ -772,6 +772,39 @@ test_build_refuses_a_nondecision_reconcile_value() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
+test_issue_rows_reject_dispatch_and_decision_conversion() {
+  local home data rc
+  home=$(make_home issue-validation)
+  data="$home/data.json"
+  write_valid_payload "$data"
+  jq '.charted=[{id:"example-org/alpha#21",repo:"example-org/alpha",title:"Uncertain outcome",reason:"",dispatchable:true,kind:"issue",issue_url:"https://github.com/example-org/alpha/issues/21",issue_class:"uncertain"}]' "$data" > "$data.tmp"
+  mv "$data.tmp" "$data"
+  rc=0
+  run_board "$home" build "$data" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'issue observation accepted for dispatch'
+  jq '.charted[0].dispatchable=false | .captains_call[0].key="example-org/alpha#21"' "$data" > "$data.tmp"
+  mv "$data.tmp" "$data"
+  rc=0
+  run_board "$home" build "$data" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'issue identity accepted as an answerable decision'
+  # Drive the real answer adapter with the same repo-qualified identity and a
+  # valid control choice; only the real task can reach keyed-answer intake.
+  jq -nr '
+    "prompts[2]{uid,prompt,selector,tag,text}:",
+    (["example-org/alpha#21","real-task"] | to_entries[]
+      | "  " + ([ (.key|tostring),
+          ("Choice: yes\n\nContext data:\n" + ({schema:"fm-bearings-answer.v1",question:.value,selection:"yes",note:""}|tojson)),
+          "form","choice","Choice: yes"] | map(tojson) | join(",")))
+  ' > "$home/answers.txt"
+  local answers
+  answers=$(FM_HOME="$home" bash "$ROOT/bin/fm-procevent-lavish.sh" answers "$home/answers.txt") || fail 'answer adapter failed'
+  assert_contains "$answers" 'real-task' 'control answer did not reach intake'
+  case "$answers" in *example-org*) fail 'issue identity reached keyed-answer intake' ;; esac
+  pass 'board validator and real answer adapter reject issue dispatch/decision conversion'
+}
+
+test_issue_rows_reject_dispatch_and_decision_conversion
+
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
