@@ -892,6 +892,21 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+test_unknown_trailing_metadata_refuses_an_existing_pr_watch() {
+  local dir url
+  dir=$(make_case unknown-trailing-metadata)
+  url=https://github.com/o/r/pull/27
+  write_poll_meta "$dir/home/state" task-a "$url"
+  fm_pr_poll_prepare "$dir/home/state" task-a github "$url" github.com o/r 27 "$POLL" \
+    || fail "could not prepare the unknown-trailing-key fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the unknown-trailing-key fixture"
+  printf '%s\n' 'unknown_trailing_key=1' >> "$dir/home/state/task-a.meta"
+  if fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL"; then
+    fail "an unknown metadata key after pr= was accepted"
+  fi
+  pass "PR watch validation still refuses an unknown trailing metadata key"
+}
+
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
 # used sixty seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
@@ -3634,6 +3649,7 @@ test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
+test_unknown_trailing_metadata_refuses_an_existing_pr_watch
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
