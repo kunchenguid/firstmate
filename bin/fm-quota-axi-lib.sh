@@ -28,18 +28,38 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
+# The native claude lane is a pool marker rather than an account key: its
+# whitespace can never equal a validated schema 6 accountKey, so it binds
+# through the default row when present, else through quota_pool_row.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
+  def quota_pool_lane: "claude pool";
   def quota_lane($harness; $model):
     if $harness == "codex" then "codex-home"
+    elif $harness == "claude" then quota_pool_lane
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
+  def quota_pool_row($rows):
+    $rows | map(
+      [.quotaSemantics.effectiveAvailability[]? |
+        select(.scope == "all_models" or .scope == "all_products")] as $wide |
+      (if any($wide[]; (.runway.status // "") == "exhausted_now" or
+             (.status == "known" and .effectivePercentRemaining <= 0)) then 0
+       elif ($wide | length) > 0 and all($wide[]; .status == "known") then 2
+       else 1 end) as $class |
+      {row: ., key: [
+        (0 - $class),
+        (if $class == 2 then 0 - ([$wide[].effectivePercentRemaining] | min) else 0 end),
+        (0 - ([$wide[].selection.spendPriority | numbers] | min // -1e9)),
+        .accountKey]}
+    ) | sort_by(.key) | (first | .row) // null;
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
       (([$rows[] | select(.accountKey == $lane)] | first) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+       ([$rows[] | select(.accountKey == "default")] | first) //
+       (if $lane == quota_pool_lane then quota_pool_row($rows) else null end))
     else ($rows | first) // null
     end;
 '
