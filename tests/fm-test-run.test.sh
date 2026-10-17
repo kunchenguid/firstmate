@@ -1386,6 +1386,36 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   pass "an unclassified new test stays serial while the proven residual family runs concurrently"
 }
 
+test_changed_supervision_shared_suite_selects_both_parts() {
+  local tmp repo listed expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-supervision.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-supervision-host.test.sh"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-supervision-host-continuity.test.sh"
+  git -C "$repo" add tests/fm-supervision-host.test.sh tests/fm-supervision-host-continuity.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervision-fixture
+  expected=$(printf '%s\n' tests/fm-supervision-host.test.sh tests/fm-supervision-host-continuity.test.sh)
+
+  printf '\n' >>"$repo/tests/fm-supervision-host.test.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ "$listed" = "$expected" ] || fail "shared suite edit must select exactly both parts: $listed"
+  git -C "$repo" add tests/fm-supervision-host.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm shared-change
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD~1)
+  [ "$listed" = "$expected" ] || fail "committed shared suite edit must select both parts: $listed"
+
+  printf '\n' >>"$repo/tests/fm-supervision-host-continuity.test.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD~1)
+  [ "$listed" = "$expected" ] || fail "editing both parts must select each once: $listed"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ "$listed" = tests/fm-supervision-host-continuity.test.sh ] \
+    || fail "wrapper-only edit must select only the wrapper: $listed"
+
+  rm -rf "$tmp"
+  pass "changed shared supervision suite selects both parts without widening wrapper-only edits"
+}
+
 test_changed_shared_fixture_selects_its_readers() {
   local tmp repo listed rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fixture.XXXXXX")
@@ -1859,6 +1889,7 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
+test_changed_supervision_shared_suite_selects_both_parts
 test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang

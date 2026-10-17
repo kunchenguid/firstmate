@@ -689,6 +689,13 @@ tests/fm-turnend-guard.test.sh
 
 ## Supervision host
 
+Run both scripts to refresh the complete deterministic host suite:
+
+```sh
+bash tests/fm-supervision-host.test.sh
+bash tests/fm-supervision-host-continuity.test.sh
+```
+
 This pre-flip evidence supports [supervision-host.md](../supervision-host.md)'s Claude engine, away-wake path, and failure direction; its no-file baseline describes the earlier opt-in release, not the current Claude default.
 It was measured on 2026-09-23 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as both primary and engine (model `sonnet`), Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, and Herdr 0.9.0, in disposable lab homes on private tmux sockets and named Herdr lab sessions.
 
@@ -731,10 +738,9 @@ Before the Claude default-on flip, without `config/supervision-host`, the same l
 
 The Herdr return guard needs the operator's login shell: under `SHELL=/bin/bash` its lab pane's login profile drops `pi` from `PATH` and the guard reports that the primary never became idle, in both trees.
 
-Deterministic entry points:
+Additional deterministic entry points alongside the [host suite](#supervision-host):
 
 ```sh
-tests/fm-supervision-host.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-afk-launch.test.sh
 tests/fm-supervision-instructions.test.sh
@@ -784,10 +790,9 @@ The live guards gave the same results in both trees:
 
 The Grok stop guard was last verified on 0.2.112 and has drifted from Grok 1.0.41 in both trees.
 
-Deterministic entry points:
+Additional deterministic entry points alongside the [host suite](#supervision-host):
 
 ```sh
-tests/fm-supervision-host.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-cursor-primary.test.sh
 tests/fm-pi-watch-extension.test.sh
@@ -856,10 +861,9 @@ $ FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh
 ok - supervision host live (2.1.283 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
 ```
 
-Deterministic entry points:
+Additional deterministic entry points alongside the [host suite](#supervision-host):
 
 ```sh
-tests/fm-supervision-host.test.sh
 tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
