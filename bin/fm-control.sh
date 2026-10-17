@@ -638,8 +638,11 @@ do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
+  # Same busy-wiring retirement as do_stop's already-not-running early returns:
+  # a no-op where no incarnation is armed.
   case "$state" in
     dead)
+      retire_busy_incarnation
       printf 'already-stopped'
       return 0
       ;;
@@ -658,6 +661,7 @@ do_exit() {
           # verb normally preserves did not survive. The worktree and every
           # uncommitted change are untouched, and `relaunch` re-creates the
           # endpoint from here.
+          retire_busy_incarnation
           printf 'endpoint-gone'
           return 0
           ;;
@@ -666,6 +670,7 @@ do_exit() {
           # no agent - a herdr pane whose session server was merely stopped is
           # the common case. Nothing is gone, so this is the ordinary
           # already-stopped outcome.
+          retire_busy_incarnation
           printf 'already-stopped'
           return 0
           ;;
