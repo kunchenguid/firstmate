@@ -107,9 +107,13 @@ Only an away record is away: no record, or the record daemon-backed quiet mode w
 
 The host asks the Pi branch's offer rule (`branchOfferForWake`, through `bin/fm-branch-dispatch.mjs offer`) whether the branch may take the close.
 So a close reaches main off Pi exactly when it would on Pi: a check trigger, a decision-owned signal or stale trigger, and a scan that is unsafe or holds nothing for the branch stay main's.
-On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
+On that main-only pass-through the host leaves a verified successor watcher cycle running, then prints the close unchanged.
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
-The host leaves the watcher's recovery marker reading downtime, confirming no handling handoff, because the re-arm owner delivers a close to main only while that marker reads downtime.
+The host leaves the watcher's recovery marker reading downtime, because the re-arm owner delivers a close to main only while that marker reads downtime.
+Registered check sweeps continue through repeated events while main or the engine is in a long turn; the [arm header](../bin/fm-watch-arm.sh), "Scheduling continuation", owns the single-owner restart and handoff contract.
+While the host is busy in a turn, the arm hands it those closes through a spool that its next wait consumes; once the host relinquishes the arm, the closes wait in the wake queue for main.
+An attended batch containing any main-only close reaches main in full.
+Any accepted heartbeat in a batch retains its rows and fleet scope.
 The session's next park without `--restart` requests a take-over to restore a single host-owned arm; the [host header](../bin/fm-supervision-host.sh) owns successor persistence and cleanup, and the [arm header](../bin/fm-watch-arm.sh) owns take-over eligibility and fallback.
 OpenCode and omp still launch the host with `--restart`, which takes precedence over recorded take-over and lacks its acknowledgement-preserving handover; changing that first-cycle path remains a follow-up.
 The host-off Claude Stop hook's detached handling successor is also unchanged; see [Claude handling successor](watcher-continuity.md#claude-handling-successor).
@@ -161,7 +165,7 @@ omp has no verified writer, because no omp was available to prove one against.
 
 On each actionable close the engine takes, the host runs these steps:
 
-1. It starts and verifies the successor watcher cycle and confirms the handling handoff, so the fleet stays supervised while the engine works.
+1. It establishes a verified successor watcher cycle and confirms the handling handoff, so the fleet stays supervised while the engine works.
 2. It computes the branch-claimable rows in the turn's posture and publishes the grant.
 3. It runs one bounded engine turn with the branch prompt and the wake message carrying, attended, the dialog mirror and, away, the record's read-back.
    The engine drains, handles, reports through `bin/fm-branch-report.sh`, and acknowledges, exactly as the Pi branch does.
@@ -408,7 +412,8 @@ Each arm owner's own suite covers its host mode against a stub host.
 
 | Test | What it covers |
 |---|---|
-| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
+| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule, the drain's `BRANCH OUTCOMES` section, continued scheduled sweeps, synchronized spool consumption and relinquishment, mixed-batch routing, and heartbeat scope in either order. |
+| `tests/fm-watch-arm.test.sh` | Covers the continuing arm's repeated actionable closes, including a close before initial health observation. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |
