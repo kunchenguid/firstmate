@@ -1724,6 +1724,80 @@ test_scout_ignored_files_survive_scratch_clean() {
   pass "ignored files survive the scratch clean and plain scratch does not"
 }
 
+# Push a shippable commit so a ship teardown has nothing unlanded to refuse.
+push_shippable_commit() {
+  local case_dir=$1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+}
+
+# A project may commit .claude/settings.local.json. It is project content, so
+# a landed ship tears down cleanly and the committed file is still there.
+test_teardown_keeps_a_committed_claude_local_settings_file() {
+  local case_dir wt rc
+  case_dir=$(make_case committed-claude-local)
+  wt="$case_dir/wt"
+  write_meta "$case_dir" no-mistakes ship
+  mkdir -p "$wt/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm run test:*)"]}}' > "$wt/.claude/settings.local.json"
+  git -C "$wt" add -f .claude/settings.local.json
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m "commit local settings"
+  cp "$wt/.claude/settings.local.json" "$case_dir/local-settings.before"
+  push_shippable_commit "$case_dir"
+  add_treehouse_clean_fd "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "committed-claude-local: teardown should succeed: $(cat "$case_dir/stderr")"
+  cmp -s "$case_dir/local-settings.before" "$wt/.claude/settings.local.json" \
+    || fail "committed-claude-local: teardown removed or changed the committed settings.local.json"
+  [ -z "$(git -C "$wt" status --porcelain --untracked-files=all)" ] \
+    || fail "committed-claude-local: teardown left the copy dirty: $(git -C "$wt" status --porcelain --untracked-files=all)"
+  pass "teardown keeps a project's committed .claude/settings.local.json"
+}
+
+# A worker spawned before Claude's hooks moved to --settings has them in its
+# untracked, excluded .claude/settings.local.json, which the pool's reset
+# keeps. Teardown retires exactly that file so a reused slot cannot fire the
+# dead task's Stop hook, and keeps a local file that is not firstmate's.
+test_teardown_retires_only_a_legacy_claude_hook_file() {
+  local variant case_dir wt rc exclude
+  for variant in legacy foreign; do
+    case_dir=$(make_case "claude-hook-$variant")
+    wt="$case_dir/wt"
+    write_meta "$case_dir" no-mistakes ship
+    push_shippable_commit "$case_dir"
+    if [ "$variant" = legacy ]; then
+      fm_test_legacy_claude_hook_file "$wt" "$case_dir/state" task-x1
+    else
+      mkdir -p "$wt/.claude"
+      printf '%s\n' '{"permissions":{"allow":["Bash(captain-approved:*)"]}}' > "$wt/.claude/settings.local.json"
+      exclude=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude)
+      printf '%s\n' '.claude/settings.local.json' >> "$exclude"
+      cp "$wt/.claude/settings.local.json" "$case_dir/local-settings.before"
+    fi
+    add_treehouse_clean_fd "$case_dir"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "claude-hook-$variant: teardown should succeed: $(cat "$case_dir/stderr")"
+    if [ "$variant" = legacy ]; then
+      assert_absent "$wt/.claude/settings.local.json" "claude-hook-legacy: the earlier spawn's hook file survived teardown"
+    else
+      cmp -s "$case_dir/local-settings.before" "$wt/.claude/settings.local.json" \
+        || fail "claude-hook-foreign: teardown removed a local settings file firstmate never wrote"
+    fi
+  done
+  pass "teardown retires an earlier spawn's claude hook file and keeps anyone else's"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -5090,6 +5164,8 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean
 test_forced_secondmate_dirty_child_return_warns_and_completes
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
+test_teardown_keeps_a_committed_claude_local_settings_file
+test_teardown_retires_only_a_legacy_claude_hook_file
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down

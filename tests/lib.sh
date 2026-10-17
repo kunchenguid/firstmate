@@ -770,6 +770,21 @@ fm_git_worktree() {
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
+# fm_test_legacy_claude_hook_file <worktree> <state> <id>
+# Plants the hook file a spawn wrote before Claude's hooks moved to --settings:
+# firstmate's Stop hook in the worktree's untracked .claude/settings.local.json,
+# hidden through the repository's info/exclude exactly as that spawn hid it.
+fm_test_legacy_claude_hook_file() {
+  local wt=$1 state=$2 id=$3 exclude
+  mkdir -p "$wt/.claude"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch %s; %s apply %s %s idle --gen %s --source claude-hook --event stop 2>/dev/null || true"}]}]}}\n' \
+    "'$state/$id.turn-ended'" "'$ROOT/bin/fm-busy-event.sh'" "'$state'" "'$id'" "'g-legacy'" \
+    > "$wt/.claude/settings.local.json"
+  exclude=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude)
+  mkdir -p "${exclude%/*}"
+  printf '%s\n' '.claude/settings.local.json' >> "$exclude"
+}
+
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta

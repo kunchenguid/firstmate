@@ -389,16 +389,17 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
   local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    # A secondmate's .claude/settings.local.json belongs to the captain.
-    # Retire only the firstmate-owned settings file the launch passes to
-    # --settings and the Stop pointer that carries the same busy generation.
-    # A crewmate's hook file is the worktree settings.local.json.
+    # Claude's hooks live in the firstmate-owned settings file the launch
+    # passes to --settings; the launch directory's .claude/settings.local.json
+    # belongs to its project or to the captain. A secondmate also retires the
+    # Stop pointer that carries the same busy generation, and a crewmate the
+    # hook file an earlier spawn left in its worktree.
     claude)
+      printf '%s\n' "$state/$id.claude-settings.json"
       if [ "$kind" = secondmate ]; then
-        printf '%s\n' "$state/$id.claude-settings.json"
         printf '%s\n' "$wt/.fm-busy-stop"
       else
-        printf '%s\n' "$wt/.claude/settings.local.json"
+        fm_control_legacy_claude_hook_file "$wt"
       fi
       ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
@@ -432,6 +433,24 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # the generation from its own launch command, so the retired process
     # takes its wiring with it.
   esac
+}
+
+# A worker spawned before bin/fm-spawn.sh moved Claude's hooks to --settings
+# carries them in its worktree's .claude/settings.local.json, where a reused
+# pool slot would keep firing that dead task's Stop hook; the pool's own
+# reset keeps ignored files. Prints that path only when git answers that it
+# does not track it and it holds firstmate's busy-hook command, so a
+# project's committed file and anyone else's local file are never removed.
+fm_control_legacy_claude_hook_file() {  # <worktree>
+  local wt=${1-} file
+  [ -n "$wt" ] || return 0
+  file="$wt/.claude/settings.local.json"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  ! git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1 || return 0
+  grep -qF "/bin/fm-busy-event.sh' apply " "$file" 2>/dev/null || return 0
+  grep -qF -- "--source claude-hook" "$file" 2>/dev/null || return 0
+  printf '%s\n' "$file"
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

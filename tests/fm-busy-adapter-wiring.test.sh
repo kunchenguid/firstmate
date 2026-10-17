@@ -234,16 +234,33 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+# The one --settings value the staged claude launch carries, as the pane runs it.
+claude_launch_settings() {  # <launch-log>
+  sed -n "s/.* --settings '\([^']*\)' .*/\1/p" "$1" | tail -1
+}
+
+# Spawn a claude worker and print the --settings file its launch passes.
+spawn_claude_settings() {  # <id>
+  local out settings
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$1" "$PROJ_DIR") \
+    || fail "claude spawn should succeed: $out"
+  settings=$(claude_launch_settings "$CASE_DIR/launch.log")
+  [ -n "$settings" ] || fail "the claude launch carries no --settings file: $(cat "$CASE_DIR/launch.log")"
+  printf '%s\n' "$settings"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "claude spawn should succeed: $out"
+  settings=$(spawn_claude_settings "$id") || exit 1
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  [ "$settings" = "$(cd "$state" && pwd -P)/$id.claude-settings.json" ] \
+    || fail "the claude launch must pass this task's state settings file, got '$settings'"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  jq -e '.feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' "$settings" >/dev/null \
+    || fail "the claude settings file lost the session keys the launch needs"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
@@ -276,16 +293,122 @@ test_claude_hooks_stale_incarnation_harmless() {
   local rec id=busy-cl-2 out state settings
   rec=$(make_spawn_case claude-stale claude "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "claude spawn should succeed: $out"
+  settings=$(spawn_claude_settings "$id") || exit 1
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# A project may commit .claude/settings.local.json, ignore it, or have none.
+# <shape> builds the worker copy for one of those: tracked (committed with
+# its own allow-list, force-added past any global excludes), ignored (the
+# project ignores the path and the copy holds an untracked local file), or
+# absent (only the shared .claude/settings.json is committed).
+make_claude_local_settings_case() {  # <name> <id> <shape>
+  local name=$1 id=$2 shape=$3 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_init_commit "$proj"
+  mkdir -p "$proj/.claude"
+  case "$shape" in
+    tracked)
+      printf '%s\n' '{"permissions":{"allow":["Bash(npm run test:*)","Bash(docker compose:*)"]}}' \
+        > "$proj/.claude/settings.local.json"
+      git -C "$proj" add -f .claude/settings.local.json
+      ;;
+    ignored)
+      printf '%s\n' '.claude/settings.local.json' > "$proj/.gitignore"
+      git -C "$proj" add .gitignore
+      ;;
+    absent)
+      printf '%s\n' '{"permissions":{"allow":["Bash(make:*)"]}}' > "$proj/.claude/settings.json"
+      git -C "$proj" add .claude/settings.json
+      ;;
+  esac
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "project claude settings"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
+  if [ "$shape" = ignored ]; then
+    mkdir -p "$wt/.claude"
+    printf '%s\n' '{"permissions":{"allow":["Bash(captain-approved:*)"]}}' > "$wt/.claude/settings.local.json"
+  fi
+  fm_test_spawn_brief "$home" "$id"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+# Claude's wiring rides only the launch's --settings file, so whatever shape
+# the project gives .claude/settings.local.json, the worker's tree is exactly
+# as git left it, a worker that stages everything has nothing of this home or
+# this busy generation to commit, and the hooks still reach this task.
+assert_claude_spawn_leaves_local_settings() {  # <shape>
+  local shape=$1 rec id="busy-cl-local-$1" local_file before after settings state gen leaked staged
+  rec=$(make_claude_local_settings_case "claude-local-$shape" "$id" "$shape")
+  read_case_record "$rec"
+  local_file="$WT_DIR/.claude/settings.local.json"
+  [ ! -f "$local_file" ] || cp "$local_file" "$CASE_DIR/local-settings.before"
+  before=$(git -C "$WT_DIR" status --porcelain --ignored --untracked-files=all)
+  settings=$(spawn_claude_settings "$id") || exit 1
+  state="$HOME_DIR/state"
+
+  if [ "$shape" = absent ]; then
+    assert_absent "$local_file" "$shape: the spawn created .claude/settings.local.json"
+  else
+    cmp -s "$CASE_DIR/local-settings.before" "$local_file" \
+      || fail "$shape: the spawn changed .claude/settings.local.json: $(cat "$local_file")"
+  fi
+  after=$(git -C "$WT_DIR" status --porcelain --ignored --untracked-files=all)
+  [ "$after" = "$before" ] || fail "$shape: the spawn changed the worker tree git sees: before='$before' after='$after'"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] || fail "$shape: the fresh worker tree is not clean"
+  staged=$(git -C "$WT_DIR" add --all --dry-run)
+  [ -z "$staged" ] || fail "$shape: a worker that stages everything would commit: $staged"
+  gen=$(cat "$state/$id.busy-gen")
+  leaked=$(grep -rlF -e "$HOME_DIR" -e "$(cd "$state" && pwd -P)" -e "$gen" "$WT_DIR" 2>/dev/null || true)
+  [ -z "$leaked" ] || fail "$shape: the worker tree names this home or busy generation in: $leaked"
+
+  [ "$(jq -r '[.hooks[][].hooks[].command | select(contains("--gen '"'$gen'"'"))] | length' "$settings")" = 4 ] \
+    || fail "$shape: the four claude hooks do not all carry this spawn's busy generation"
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "$shape: Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "$shape: Stop did not reach this task's turn-ended marker"
+  [ "$(classify claude "$id" "$state")" = "idle claude-hook" ] || fail "$shape: Stop did not record idle for this task"
+  run_claude_hook "$settings" UserPromptSubmit || fail "$shape: UserPromptSubmit hook command failed"
+  [ "$(classify claude "$id" "$state")" = "busy claude-hook" ] || fail "$shape: UserPromptSubmit did not record busy"
+  pass "claude spawn ($shape .claude/settings.local.json) keeps the worker tree clean while the hooks reach this task"
+}
+
+test_claude_spawn_leaves_project_local_settings_untouched() {
+  assert_claude_spawn_leaves_local_settings tracked
+  assert_claude_spawn_leaves_local_settings ignored
+  assert_claude_spawn_leaves_local_settings absent
+}
+
+# A raw command carries no --settings value, so a raw claude worker gets no
+# wiring at all, and an arm an earlier launch of the task left is retired
+# rather than left to stand for a process that can no longer update it.
+test_raw_claude_launch_has_no_semantic_wiring() {
+  local rec id=busy-cl-raw out state
+  rec=$(make_spawn_case claude-raw claude "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null || fail "could not seed an earlier arm"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'claude --fm-raw-flag')
+  expect_code 0 $? "raw claude spawn should succeed: $out"
+  assert_grep 'claude --fm-raw-flag' "$CASE_DIR/launch.log" "raw claude spawn did not launch the raw command"
+  assert_absent "$state/$id.busy-gen" "raw claude launch kept the earlier busy generation"
+  assert_absent "$state/$id.claude-settings.json" "raw claude launch wrote hook settings no command loads"
+  assert_absent "$WT_DIR/.claude/settings.local.json" "raw claude launch wrote hooks into the worktree"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw claude launch must classify unknown, got '$out'"
+  pass "raw claude launch remains unwired, retires an earlier arm, and classifies unknown"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -852,6 +975,8 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_spawn_leaves_project_local_settings_untouched
+test_raw_claude_launch_has_no_semantic_wiring
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring

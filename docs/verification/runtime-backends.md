@@ -650,6 +650,7 @@ A tmux-backed secondmate's active-turn gate reads the parent home's semantic bus
 Launches of opencode, pi, pi-signed, and omp arm that record and load the same hook or extension an ordinary worker uses, and those hooks do not touch the parent's turn-ended marker.
 A Claude secondmate arms the same record through busy hooks in the parent home's `state/<id>.claude-settings.json`, passed as Claude Code's `--settings` file, and does not write the mate home's `.claude/settings.local.json`.
 That `--settings` load and the merge of its hook entries with the home's own hooks rest on Claude Code's documentation (<https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/hooks>) and not on a live run recorded in this section: the sample output below predates the `--settings` mechanism.
+[Claude worker settings placement](#claude-worker-settings-placement) records a live run of the same `--settings` load and hook merge for a worker.
 A Claude secondmate is the one exception on Stop: its home's tracked Stop guard is the only Stop writer, recording idle when it allows the Stop and busy when it blocks it into a continuation, because Claude runs Stop hooks in parallel.
 Claude Code 2.1.278 was probed live in a scratch project with logging `UserPromptSubmit` and `Stop` hooks.
 A synchronous Stop hook that exits 2 forced a continuation with no `UserPromptSubmit`, which is why the guard itself records busy when it blocks.
@@ -699,6 +700,28 @@ ok - secondmate busy contract live guard checked every installed harness
 
 Pi's real parked pane classified `unknown launch-prompt`.
 That is the launch-prompt backstop: the same spawn's record classified `busy fm-spawn` for a non-prompt mid-turn tail, which is what the active-turn gate reads while a turn is in progress.
+
+## Claude worker settings placement
+
+Verified 2026-10-15 on Claude Code 2.1.300 on macOS (Darwin 25.2.0).
+
+Every Claude launch, worker or secondmate, takes its busy hooks from `state/<id>.claude-settings.json` as Claude Code's per-session `--settings` value, and nothing is written into the launch directory's `.claude/settings.local.json`.
+For a project that commits that file and for one that ignores it, the guard runs the real `bin/fm-spawn.sh` against a fake pane, then one real print-mode Claude turn in the worker copy with the `--settings` value the launch carries.
+Each project's own local file holds an allow-list and a `UserPromptSubmit` hook of its own.
+In both shapes the busy record advanced from the spawn's seed to `seq=4` on the armed generation and ended `idle` from `claude-hook` on `session-end`, the Stop hook touched the task's `turn-ended` marker, and the project's own hook fired beside firstmate's.
+The local file stayed byte-identical and `git status` stayed empty.
+
+```sh
+FM_CLAUDE_WORKER_SETTINGS_LIVE=1 tests/fm-claude-worker-settings-live-e2e.test.sh
+```
+
+```text
+ok - claude 2.1.300 (Claude Code): (tracked .claude/settings.local.json) the --settings hooks reach this task beside the project's own, and the tree stays clean
+ok - claude 2.1.300 (Claude Code): (ignored .claude/settings.local.json) the --settings hooks reach this task beside the project's own, and the tree stays clean
+# claude worker settings live guard checked: tracked ignored
+```
+
+The guard submits one short prompt per shape, so it is opt-in; rerun it after every Claude Code upgrade.
 
 ## Codex hook trust
 
@@ -1219,7 +1242,7 @@ The credential must also be present before the session-provider daemon starts, s
 
 ### Settings placement
 
-Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because that path is the project's own committed settings file.
 They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
 Two measurements support that choice.
 Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:
