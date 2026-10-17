@@ -814,6 +814,7 @@ FM_SECONDMATE_CHARTER='Receipt charter.' FM_SECONDMATE_SCOPE='receipt routing' \
   seed_env env FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-remote-home-seed.sh" seed-receipt remote-mac \
   "$REMOTE_ROOT" "$RECEIPT_HOME" --no-projects >/dev/null \
   || fail "seeding from a local code root distinct from the remote one failed"
+# shellcheck disable=SC2016 # Backticks are literal generated Markdown.
 receipt_cmd=$(sed -n 's/^Immediately after reading each message.*: `\(.*\)`\.$/\1/p' "$RECEIPT_HOME/data/charter.md")
 [ -n "$receipt_cmd" ] || fail "remote charter carried no read-receipt command"
 eval "set -- $receipt_cmd"
