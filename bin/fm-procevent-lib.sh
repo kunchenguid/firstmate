@@ -622,7 +622,7 @@ fm_procevent_claim_state_root_identity() {  # <state-root>
   fm_procevent_claim_state_root_field_valid "$canonical" || return 1
   device=$(fm_pr_file_device "$canonical") || return 1
   inode=$(fm_pr_file_inode "$canonical") || return 1
-  owner=$(id -u) || return 1
+  owner=$EUID
   mode=$(fm_pr_file_mode "$canonical") || return 1
   printf '%s\t%s\t%s\t%s\t%s\n' "$canonical" "$device" "$inode" "$owner" "$mode"
 }
@@ -1000,12 +1000,12 @@ fm_procevent_path_normalize() {
 
 fm_procevent_directory_owned_by_current_user() {
   local owner
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$_FM_UNAME" = Darwin ]; then
     owner=$(/usr/bin/stat -f %u "$1" 2>/dev/null)
   else
     owner=$(stat -c %u "$1" 2>/dev/null)
   fi
-  [ "$owner" = "$(id -u)" ]
+  [ "$owner" = "$EUID" ]
 }
 
 # fm_procevent_state_root_resolve <state-root>
