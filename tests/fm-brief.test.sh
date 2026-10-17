@@ -1300,11 +1300,16 @@ test_worker_role_scope() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
     fi
     brief="$home/data/$kind/brief.md"
+    assert_grep 'Immediately after reading each message, before acting' "$brief" "$kind omitted early read acknowledgement"
+    assert_grep "fm-task-inbox-read.sh' '$home/state/$kind.inbox'/NNN.msg" "$brief" "$kind omitted the scripted receipt command"
+    assert_grep 'acknowledge completed handling by moving it' "$brief" "$kind lost the handled move"
     assert_no_grep '# Current worker role contract' "$brief" "$kind scaffolded a second owner of the role scope fm-spawn.sh delivers"
   done
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
     "$ROOT/bin/fm-brief.sh" supervisor --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed"
   brief="$home/data/supervisor/brief.md"
+  assert_grep 'Immediately after reading each message, before acting' "$brief" "secondmate omitted early read acknowledgement"
+  assert_grep "fm-task-inbox-read.sh' '$home/state/supervisor.inbox'/NNN.msg" "$brief" "secondmate omitted the scripted receipt command"
   assert_no_grep '# Current worker role contract' "$brief" "secondmate received the worker exception"
   assert_no_grep 'do not adopt the supervisor identity' "$brief" "secondmate received the worker exception"
   assert_grep "The local \`AGENTS.md\` is your job description" "$brief" "secondmate lost its supervisor contract"

@@ -541,7 +541,7 @@ window_key() {  # <window>
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
   reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
-  if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
+  if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ] || fm_task_inbox_is_read "$rec"; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
   fi
@@ -567,7 +567,8 @@ inbox_steer_busy() {  # <window> <backend> <task> <tail40>
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
-# bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
+# bin/fm-task-inbox-lib.sh owns read receipts, delivery, busy-deferral, retry,
+# and escalation policy; read messages stay pending without unread alarms.
 # Endpoint and busy checks precede delivery so recovery never types into a busy,
 # dead, or missing worker; the ring helper protects pending composer text.
 # Normal retries keep the watcher blocking rather than waking firstmate.
@@ -603,6 +604,10 @@ inbox_steer_check() {  # <window> <task>
   esac
   watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
   tail40=$WATCHER_CAPTURE
+  if [ ! -f "$rec" ] || fm_task_inbox_is_read "$rec"; then
+    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    return 0
+  fi
   if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
     [ "$verb" != retry ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
@@ -627,7 +632,7 @@ inbox_steer_check() {  # <window> <task>
         return 0
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
-        if [ ! -f "$rec" ]; then
+        if [ ! -f "$rec" ] || fm_task_inbox_is_read "$rec"; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
         fi
@@ -651,7 +656,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
     escalate)
       reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}
-      if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
+      if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ] || fm_task_inbox_is_read "$rec"; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi
