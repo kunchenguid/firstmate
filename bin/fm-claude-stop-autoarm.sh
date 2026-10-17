@@ -98,8 +98,9 @@
 #     seconds (default 1800) of its registered FM_CLAUDE_AUTOARM_HOOK_TIMEOUT
 #     (default 28800, the tracked .claude/settings.json timeout) left is
 #     acknowledged by this hook and absorbed: the cycle re-arms in this same
-#     process (a host park is bounded to the remaining budget) and main is not
-#     woken. Any other close - a signal, a decision, a check with rows, a host
+#     process, bounded to the remaining budget, and main is not woken. A host
+#     re-park ends at that bound with its cycle boundary; a watcher re-arm still
+#     open at it is TERMed and delivered as a "check: hook-budget" wake. Any other close - a signal, a decision, a check with rows, a host
 #     line, a heartbeat - is delivered unchanged. The host's cycle boundary is
 #     delivered too, because it exists to end this hook before its timeout.
 #   - Translation: while supervision is still needed and AFK remains inactive,
@@ -401,15 +402,31 @@ trap 'handle_autoarm_signal INT' INT
 # Every non-actionable close is checked against the same identity-matched live
 # watcher and fresh-beacon predicate used by the turn-end guard before it is
 # retried or translated into an operator-visible failure.
+# With a bound, an arm still open when it expires is TERMed and ARM_BOUND_HIT
+# is set, so the caller can deliver a wake before Claude's hook timeout.
 ARM_PID=
 CLOSED_ARM_PID=
-run_arm() {  # <output file, or empty for none>
+ARM_BOUND_HIT=0
+run_arm() {  # <output file, or empty for none> [bound seconds]
+  local deadline
+  ARM_BOUND_HIT=0
   if [ -n "$1" ]; then
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
   else
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
+  if [ -n "${2:-}" ]; then
+    deadline=$(( $(date +%s) + $2 ))
+    while kill -0 "$ARM_PID" 2>/dev/null; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        ARM_BOUND_HIT=1
+        kill -TERM "$ARM_PID" 2>/dev/null || true
+        break
+      fi
+      sleep 1
+    done
+  fi
   wait "$ARM_PID" || true
   CLOSED_ARM_PID=$ARM_PID
   ARM_PID=
@@ -560,15 +577,17 @@ try_suppress_plumbing_close() {
 print_presentation_bounded() {  # <file>
   local line used=0 omitted=0 bytes
   while IFS= read -r line || [ -n "$line" ]; do
-    fm_cap_line_var "$line" "$PRESENT_LINE"
-    line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$PRESENT_BYTES" ]; then
-      omitted=$((omitted + 1))
-      continue
+    if [ "$omitted" -eq 0 ]; then
+      fm_cap_line_var "$line" "$PRESENT_LINE"
+      line=$FM_LINE_CAP_LINE
+      bytes=$(( ${#line} + 1 ))
+      if [ $((used + bytes)) -le "$PRESENT_BYTES" ]; then
+        printf '%s\n' "$line"
+        used=$((used + bytes))
+        continue
+      fi
     fi
-    printf '%s\n' "$line"
-    used=$((used + bytes))
+    omitted=$((omitted + 1))
   done < "$1"
   [ "$omitted" -eq 0 ] \
     || printf 'WAKE PRESENTATION CUT: %s more line(s) not shown (byte cap); run bin/fm-wake-drain.sh to see everything - it presents this same wake again, and the turn-end acknowledgement still covers it.\n' "$omitted"
@@ -616,6 +635,15 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
         FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
         "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
     fi
+  elif [ "$SUPPRESSED" -gt 0 ]; then
+    # The watcher re-arm after an absorbed close gets the same bound; a cycle
+    # still open at it is delivered as an ordinary wake instead of being
+    # killed silently at the hook timeout.
+    ARM_BOUND=$(hook_budget_remaining)
+    [ "$ARM_BOUND" -ge 1 ] || ARM_BOUND=1
+    run_arm "$OUT" "$ARM_BOUND"
+    [ "$ARM_BOUND_HIT" -eq 0 ] || [ -z "$OUT" ] \
+      || printf 'check: hook-budget - this Stop hook re-armed after absorbing an empty plumbing close and reached its registered timeout budget; handle the wake and end the turn, and the next cycle arms on its own\n' >> "$OUT"
   else
     run_arm "$OUT"
   fi
@@ -742,15 +770,17 @@ if [ "$ACTIONABLE" -eq 1 ]; then
         PREDRAINED=0
       fi
       if [ "$PREDRAINED" -eq 1 ]; then
-        "$SCRIPT_DIR/fm-wake-ack.sh" record --ack-through "$PREDRAIN_ACK_THROUGH" \
+        ACK_NONCE=$("$SCRIPT_DIR/fm-wake-ack.sh" record --ack-through "$PREDRAIN_ACK_THROUGH" \
           --recovery-generation "$PREDRAIN_GENERATION" --receipt "$PREDRAIN_RECEIPT" \
           --session-pid "$(sed -n '1p' "$STATE/.lock" 2>/dev/null)" --generation "$MY_GEN" \
-          "${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"}" >/dev/null 2>&1 || PREDRAINED=0
+          "${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"}" 2>/dev/null) || PREDRAINED=0
+        [ -n "$ACK_NONCE" ] || PREDRAINED=0
       fi
       [ "$PREDRAINED" -eq 1 ] || rm -f "$PREDRAIN_RECEIPT" 2>/dev/null || true
     fi
     {
       printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+      [ "$PREDRAINED" -eq 0 ] || printf 'Wake acknowledgement id: %s (it pends until this turn ends).\n' "$ACK_NONCE"
       if [ "$HOST_MODE" -eq 1 ]; then
         [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
       else

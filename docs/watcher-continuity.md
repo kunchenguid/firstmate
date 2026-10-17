@@ -296,7 +296,9 @@ A step that cannot be applied is reported in `state/wake-ack.log` and the lines 
 
 Claude Code fires no Stop for a turn the captain interrupts: a mid-stream Escape fired neither `Stop` nor `StopFailure` on Claude Code 2.1.302 ([verification](verification/supervision.md#interrupted-turns-and-the-turn-end-acknowledgement)), and a turn that ends in an API error fires `StopFailure`, not `Stop`.
 So neither turn reaches the acknowledging Stop, and the wake stays queued.
-The pending record is then stale, and the tracked `UserPromptSubmit` entry (`bin/fm-wake-ack.sh void`) drops it unrun when the next prompt reaches the session, before any later Stop could run it; a Stop-hook continuation fires no `UserPromptSubmit`, so a normally handled wake is never voided by its own delivery.
+The pending record is then stale, and the tracked `UserPromptSubmit` entry (`bin/fm-wake-ack.sh void`) drops it unrun when the next prompt reaches the session, before any later Stop could run it.
+The pre-drained wake's own delivery is not such a prompt: an `asyncRewake` exit 2 does fire `UserPromptSubmit`, with the hook's stderr as the payload's `prompt` ([verification](verification/supervision.md#asyncrewake-delivery-fires-userpromptsubmit)).
+So each pending record carries a fresh random nonce, the banner prints it, and `void` keeps the record, consuming nothing, when the prompt contains that nonce; any other prompt voids it.
 The same void fires for a steer, a background subagent's return, or a cross-session message that reaches the session during the handling turn; the wake is then presented once more at the next drain, which is the deliberate safe side.
 A session that restarts drops the record on its first Stop, and its session-start digest presents the queue as before.
 
@@ -309,7 +311,8 @@ The hook absorbs a close only when all of these hold:
 - The staged presentation printed nothing at all: no queue row, no `UNREAD STATUS`, `OPEN DECISIONS`, `RECORD DIVERGENCE`, `STATUS OUTCOME BACKSTOP`, or `BRANCH OUTCOMES` line, and no drain notice.
 - The hook still has at least `FM_CLAUDE_AUTOARM_SUPPRESS_MIN` seconds (default 1800) of its registered timeout left.
 
-It then acknowledges the close itself and re-arms in the same process; a supervision-host re-park is bounded to the hook's remaining budget.
+It then acknowledges the close itself and re-arms in the same process, bounded to the hook's remaining budget.
+A supervision-host re-park ends at that bound with its cycle boundary; a watcher re-arm still open at it is stopped and delivered as an ordinary pre-drained `check: hook-budget` wake, so Claude never kills the hook silently at its timeout.
 A signal, a `needs-decision`, a check with rows, a heartbeat, any `supervision-host:` line, and any presentation with content are delivered unchanged.
 The host's cycle boundary is delivered even when empty: it exists to end the hook before its registered timeout, and nothing inside that hook can outlive it.
 

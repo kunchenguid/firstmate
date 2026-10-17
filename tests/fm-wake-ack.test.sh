@@ -54,7 +54,6 @@ test_commit_runs_the_recorded_acknowledgement() {
   local dir rc=0 out
   dir=$(make_home commit)
   record "$dir"
-  ack "$dir" show >/dev/null || fail "show must exit 0 while a record is pending"
   out=$(ack "$dir" commit --session-id sess-one 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "commit must exit 0 after a successful acknowledgement, got $rc: $out"
   grep -Fx -- "--ack-through 7 --recovery-generation gen-a --commit-stage $dir/state/.wake-ack-pending.receipt" "$dir/state/drain-calls" >/dev/null \
@@ -93,15 +92,6 @@ test_hold_leaves_the_wake_queued_and_is_consumed() {
   pass "hold drops the acknowledgement unrun and is consumed once"
 }
 
-test_release_removes_a_hold() {
-  local dir
-  dir=$(make_home release)
-  ack "$dir" hold >/dev/null
-  ack "$dir" release >/dev/null
-  [ ! -e "$dir/state/.wake-ack-hold" ] || fail "release must remove the hold marker"
-  pass "release removes a hold"
-}
-
 test_void_drops_the_record_unrun() {
   local dir rc=0
   dir=$(make_home void)
@@ -116,6 +106,35 @@ test_void_drops_the_record_unrun() {
   [ "$rc" -eq 3 ] || fail "a commit after void must find nothing pending, got $rc"
   grep -q 'void' "$dir/state/wake-ack.log" || fail "the log must record the void"
   pass "a prompt voids the pending acknowledgement and leaves the wake queued"
+}
+
+test_void_keeps_the_record_on_its_own_rewake_delivery() {
+  local dir nonce prompt
+  dir=$(make_home void-delivery)
+  stage_receipt "$dir"
+  nonce=$(ack "$dir" record --ack-through 7 --recovery-generation gen-a --receipt "$dir/state/.wake-ack-pending.receipt" \
+    --session-pid 4242 --generation 3 --session-id sess-one) || fail "record failed"
+  prompt="<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\nStop hook blocking error from command \\\"Stop\\\": firstmate watcher wake\nWake acknowledgement id: $nonce\n\n</system-reminder>"
+  printf '{"session_id":"sess-one","prompt":"%s"}\n' "$prompt" | ack "$dir" void --claude prompt || fail "void must exit 0"
+  [ -e "$dir/state/.wake-ack-pending" ] || fail "the record's own rewake delivery must not void it"
+  [ -e "$dir/state/.wake-ack-pending.receipt" ] || fail "the record's own rewake delivery must keep its receipt"
+  ack "$dir" commit --session-id sess-one >/dev/null 2>&1 || fail "the turn end after the delivery must commit the record"
+  grep -q -- '--ack-through 7' "$dir/state/drain-calls" || fail "the acknowledgement must run after its own delivery"
+  pass "void keeps a record whose nonce its rewake prompt carries"
+}
+
+test_record_prints_a_fresh_nonce() {
+  local dir first second
+  dir=$(make_home nonce)
+  stage_receipt "$dir"
+  first=$(ack "$dir" record --ack-through 7 --recovery-generation gen-a --receipt "$dir/state/.wake-ack-pending.receipt" \
+    --session-pid 4242 --generation 3) || fail "first record failed"
+  stage_receipt "$dir"
+  second=$(ack "$dir" record --ack-through 8 --recovery-generation gen-a --receipt "$dir/state/.wake-ack-pending.receipt" \
+    --session-pid 4242 --generation 4) || fail "second record failed"
+  [ -n "$first" ] && [ "$first" != "$second" ] || fail "each record must print a fresh nonce: '$first' '$second'"
+  grep -qx "nonce=$second" "$dir/state/.wake-ack-pending" || fail "the record must store its printed nonce"
+  pass "record prints and stores a fresh nonce per record"
 }
 
 test_void_on_a_foreign_host_payload_is_inert() {
@@ -218,7 +237,8 @@ test_parallel_commits_acknowledge_once() {
 test_commit_runs_the_recorded_acknowledgement
 test_commit_without_generation_commits_the_stage_alone
 test_hold_leaves_the_wake_queued_and_is_consumed
-test_release_removes_a_hold
+test_void_keeps_the_record_on_its_own_rewake_delivery
+test_record_prints_a_fresh_nonce
 test_void_drops_the_record_unrun
 test_void_on_a_foreign_host_payload_is_inert
 test_void_with_nothing_pending_is_silent

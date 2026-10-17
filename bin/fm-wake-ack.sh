@@ -15,7 +15,7 @@
 #                              fm-wake-ack-pending.v1): ack_through,
 #                              recovery_generation (empty when no episode needs
 #                              acknowledging), receipt, session_id, session_pid,
-#                              generation, recorded_at.
+#                              generation, nonce, recorded_at.
 #   .wake-ack-pending.receipt  the staged presentation receipt that
 #                              bin/fm-wake-drain.sh --stage wrote for it.
 #   .wake-ack-hold             main's keep-open marker: while it exists the next
@@ -30,23 +30,22 @@
 #     then drops the pending acknowledgement without running it, the queue
 #     rows, UNREAD STATUS lines, and BRANCH OUTCOMES stay unacknowledged, and
 #     the next drain presents them again.
-#   fm-wake-ack.sh release
-#     Remove a hold placed by mistake, so the turn end acknowledges as usual.
-#   fm-wake-ack.sh show
-#     Print the pending record and whether a hold exists; exit 0 when a record
-#     is pending, 3 when nothing is pending.
 #   fm-wake-ack.sh void [--claude] [REASON]
 #     A prompt-submit hook's entry: a captain prompt (or a steer) reached the
 #     session, so any pending acknowledgement belongs to a turn that is over or
 #     was interrupted. The record and its receipt are dropped unrun, the hold is
 #     consumed, and the wake stays queued. A home with no pending record is a
 #     silent no-op; --claude additionally stands down on a payload another host
-#     delivered (bin/fm-hook-host-lib.sh). Always exits 0.
+#     delivered (bin/fm-hook-host-lib.sh). The delivery of the pre-drained wake
+#     itself is not such a prompt: an asyncRewake fires UserPromptSubmit with
+#     the hook's stderr as its prompt, so a --claude payload whose .prompt
+#     carries the pending record's nonce consumes nothing. Always exits 0.
 #   fm-wake-ack.sh record --ack-through N --recovery-generation G --receipt PATH
 #                         --session-pid PID --generation GEN [--session-id ID]
 #     The Stop hook's entry after it committed a rewake: write the pending
-#     record atomically, replacing any earlier record whose turn never reached
-#     its acknowledgement (its rows were re-presented by this drain).
+#     record atomically with a fresh random nonce, replacing any earlier record
+#     whose turn never reached its acknowledgement (its rows were re-presented
+#     by this drain), and print the nonce for the rewake banner.
 #   fm-wake-ack.sh commit [--session-id ID]
 #     The Stop hook's entry at the next turn end. Exactly one caller claims the
 #     record (an atomic rename). A record bound to another session id or
@@ -93,6 +92,7 @@ read_record() {  # <file>; sets REC_*
   REC_RECEIPT=''
   REC_SESSION_ID=''
   REC_SESSION_PID=''
+  REC_NONCE=''
   [ "$(sed -n '1p' "$1" 2>/dev/null)" = schema=fm-wake-ack-pending.v1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *=*) ;; *) continue ;; esac
@@ -104,6 +104,7 @@ read_record() {  # <file>; sets REC_*
       receipt) REC_RECEIPT=$value ;;
       session_id) REC_SESSION_ID=$value ;;
       session_pid) REC_SESSION_PID=$value ;;
+      nonce) REC_NONCE=$value ;;
     esac
   done < "$1"
   case "$REC_ACK_THROUGH" in ''|*[!0-9]*) return 1 ;; esac
@@ -131,29 +132,9 @@ cmd_hold() {
   fi
 }
 
-cmd_release() {
-  if [ -e "$HOLD" ] || [ -L "$HOLD" ]; then
-    rm -f -- "$HOLD"
-    log_line release ''
-    echo "wake acknowledgement hold released"
-  else
-    echo "no wake acknowledgement hold exists"
-  fi
-}
-
-cmd_show() {
-  if [ -e "$HOLD" ]; then echo "hold: present ($(tr '\n' ' ' < "$HOLD"))"; else echo "hold: none"; fi
-  if [ -f "$PENDING" ] && [ ! -L "$PENDING" ]; then
-    echo "pending:"
-    sed 's/^/  /' "$PENDING"
-    return 0
-  fi
-  echo "pending: none"
-  return 3
-}
-
 cmd_void() {
-  local reason='' claim
+  local reason='' claim prompt
+  PAYLOAD=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --claude)
@@ -167,6 +148,15 @@ cmd_void() {
     shift
   done
   [ -e "$PENDING" ] || [ -e "$HOLD" ] || exit 0
+  if [ -n "$PAYLOAD" ] && [ -f "$PENDING" ] && read_record "$PENDING" && [ -n "$REC_NONCE" ]; then
+    prompt=$(printf '%s' "$PAYLOAD" | jq -r '.prompt // empty' 2>/dev/null) || prompt=$PAYLOAD
+    case "$prompt" in
+      *"$REC_NONCE"*)
+        log_line delivered "ack_through=$REC_ACK_THROUGH: the prompt is this record's own rewake; kept for its turn end"
+        exit 0
+        ;;
+    esac
+  fi
   if [ -e "$HOLD" ] || [ -L "$HOLD" ]; then
     rm -f -- "$HOLD"
     log_line hold-consumed "void: ${reason:-prompt}"
@@ -182,7 +172,7 @@ cmd_void() {
 }
 
 cmd_record() {
-  local ack_through='' generation='' receipt='' session_id='' session_pid='' claim_gen='' tmp
+  local ack_through='' generation='' receipt='' session_id='' session_pid='' claim_gen='' nonce tmp
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --ack-through) ack_through=${2:-}; shift ;;
@@ -202,6 +192,9 @@ cmd_record() {
   case "$session_pid" in ''|*[!0-9]*) echo "fm-wake-ack: record needs a numeric --session-pid" >&2; exit 2 ;; esac
   [ -n "$claim_gen" ] || { echo "fm-wake-ack: record needs the hook --generation" >&2; exit 2; }
   case "$session_id" in *[!A-Za-z0-9._:-]*) session_id= ;; esac
+  nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  case "$nonce" in ''|*[!0-9a-f]*) echo "fm-wake-ack: no random nonce could be read" >&2; exit 1 ;; esac
+  nonce="wake-ack-$nonce"
   if [ -e "$PENDING" ] && read_record "$PENDING"; then
     log_line replaced "earlier record ack_through=$REC_ACK_THROUGH never reached its turn end; its rows were re-presented"
     [ "$REC_RECEIPT" = "$receipt" ] || drop_receipt
@@ -216,10 +209,12 @@ cmd_record() {
     printf 'session_id=%s\n' "$session_id"
     printf 'session_pid=%s\n' "$session_pid"
     printf 'generation=%s\n' "$claim_gen"
+    printf 'nonce=%s\n' "$nonce"
     printf 'recorded_at=%s\n' "$(date +%s)"
   } > "$tmp" || { rm -f -- "$tmp"; exit 1; }
   mv -f -- "$tmp" "$PENDING" || { rm -f -- "$tmp"; exit 1; }
   log_line record "ack_through=$ack_through recovery_generation=$generation session_pid=$session_pid"
+  printf '%s\n' "$nonce"
 }
 
 cmd_commit() {
@@ -281,8 +276,6 @@ cmd_commit() {
 
 case "${1:-}" in
   hold) shift; cmd_hold "$@" ;;
-  release) shift; cmd_release ;;
-  show) shift; cmd_show ;;
   void) shift; cmd_void "$@" ;;
   record) shift; cmd_record "$@" ;;
   commit) shift; cmd_commit "$@" ;;

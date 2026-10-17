@@ -2076,6 +2076,27 @@ test_prompt_voids_the_pending_acknowledgement() {
   pass "auto-arm: a prompt after an interrupted handling turn voids the acknowledgement and leaves the wake queued"
 }
 
+test_rewake_delivery_prompt_keeps_the_pending_acknowledgement() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-delivery")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  printf '3\n' > "$dir/state/drain-ack"
+  run_autoarm_twice "$dir" 'jq -n --arg p "<task-notification>
+<summary>Stop hook feedback</summary>
+</task-notification>
+<system-reminder>
+Stop hook blocking error from command \"Stop\": $(cat "$FM_HOME/state/run1.out")
+</system-reminder>" "{session_id: \"sess-autoarm\", prompt: \$p}" | "$FM_HOME/bin/fm-wake-ack.sh" void --claude prompt; rm -f "$FM_HOME/state/task.meta"'
+  [ "$(cat "$dir/state/run1.rc")" = 2 ] || fail "the first Stop must rewake: $(cat "$dir/state/run1.out")"
+  grep -q '^Wake acknowledgement id: wake-ack-' "$dir/state/run1.out" || fail "the pre-drained banner must print the record's nonce: $(cat "$dir/state/run1.out")"
+  grep -Fx -- "--ack-through 3 --recovery-generation fixture-generation --commit-stage $dir/state/.wake-ack-pending.receipt" "$dir/state/drain-calls" >/dev/null \
+    || fail "the turn end after the rewake's own UserPromptSubmit must still acknowledge: $(cat "$dir/state/drain-calls")"
+  ! grep -q '	void	' "$dir/state/wake-ack.log" || fail "the rewake's own delivery must not void the record: $(cat "$dir/state/wake-ack.log")"
+  pass "auto-arm: the pre-drained wake's own UserPromptSubmit keeps the record and the next Stop commits it"
+}
+
 test_session_change_drops_the_pending_acknowledgement() {
   local dir
   dir=$(make_primary_dir "$TMP_ROOT/predrain-session")
@@ -2255,6 +2276,43 @@ SH
   pass "auto-arm: an empty plumbing close is delivered when the hook cannot re-park inside its timeout"
 }
 
+test_watcher_rearm_after_absorbed_close_is_bounded_to_the_hook_budget() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/plumbing-rearm-bound")
+  : > "$dir/state/task.meta"
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  : > "$FM_HOME/state/successor-ran"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+n=$(wc -l < "$FM_HOME/state/arm-ran" | tr -d ' ')
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$n" -eq 1 ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+trap 'echo TERM >> "$FM_HOME/state/arm-termed"; exit 143' TERM
+while :; do sleep 0.1; done
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  out=$(FM_CLAUDE_AUTOARM_HOOK_TIMEOUT=303 FM_CLAUDE_AUTOARM_SUPPRESS_MIN=0 FM_CLAUDE_AUTOARM_ATTEMPTS=1 \
+    run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a watcher re-arm still open at the hook budget must be delivered as a wake"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 2 ] || fail "the absorbed close must re-arm once: $(cat "$dir/state/arm-ran")"
+  [ -e "$dir/state/arm-termed" ] || fail "the re-arm must be stopped at the hook budget"
+  assert_contains "$out" "check: hook-budget" "the banner must name the budget close"
+  assert_contains "$out" "WAKE PRESENTATION" "the budget close must arrive pre-drained"
+  [ -f "$dir/state/.wake-ack-pending" ] || fail "the budget close records its pending acknowledgement"
+  [ -e "$dir/state/successor-ran" ] || fail "the budget close must start a handling successor"
+  pass "auto-arm: a watcher re-arm after an absorbed close ends inside the hook budget with a delivered wake"
+}
+
 test_host_plumbing_close_is_absorbed_and_reparked_within_budget() {
   local dir out status bound
   dir=$(make_primary_dir "$TMP_ROOT/host-plumbing")
@@ -2322,7 +2380,24 @@ test_presentation_is_bounded_in_the_banner() {
   assert_contains "$out" "WAKE PRESENTATION CUT:" "an over-budget presentation must say it was cut"
   assert_contains "$out" "[truncated]" "an over-long line must carry the shared truncation marker"
   [ "$(printf '%s\n' "$out" | grep -c '^line ')" -lt 40 ] || fail "the byte cap must drop lines past the budget"
-  pass "auto-arm: the pre-drained presentation is bounded per line and in total, with a cut note"
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-prefix")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  : > "$dir/state/drain-present"
+  for i in $(seq 1 12); do
+    if [ "$i" -eq 6 ]; then
+      printf 'line %s %s\n' "$i" "$(printf 'x%.0s' $(seq 1 300))" >> "$dir/state/drain-present"
+    else
+      printf 'line %s\n' "$i" >> "$dir/state/drain-present"
+    fi
+  done
+  out=$(FM_CLAUDE_AUTOARM_PRESENT_BYTES=150 FM_CLAUDE_AUTOARM_PRESENT_LINE=400 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a bounded presentation still rewakes"
+  [ "$(printf '%s\n' "$out" | grep '^line ' | cut -d' ' -f2 | tr '\n' ' ')" = "1 2 3 4 5 " ] \
+    || fail "the presentation must be a clean prefix that stops at the first overflowing line: $out"
+  assert_contains "$out" "WAKE PRESENTATION CUT: 7 more line(s)" "every line from the first overflow on must be counted as omitted"
+  pass "auto-arm: the pre-drained presentation is a clean prefix bounded per line and in total, with a cut note"
 }
 
 test_arguments_never_arm() {
@@ -2436,6 +2511,7 @@ test_predrained_banner_records_the_acknowledgement
 test_next_stop_runs_the_recorded_acknowledgement
 test_hold_keeps_the_predrained_wake_open
 test_prompt_voids_the_pending_acknowledgement
+test_rewake_delivery_prompt_keeps_the_pending_acknowledgement
 test_session_change_drops_the_pending_acknowledgement
 test_stage_failure_falls_back_to_the_plain_banner
 test_empty_plumbing_close_is_absorbed_and_rearmed
@@ -2443,6 +2519,7 @@ test_plumbing_close_with_rows_is_delivered
 test_signal_with_empty_presentation_is_delivered
 test_signals_and_decisions_are_never_absorbed
 test_plumbing_close_near_the_hook_timeout_is_delivered
+test_watcher_rearm_after_absorbed_close_is_bounded_to_the_hook_budget
 test_host_plumbing_close_is_absorbed_and_reparked_within_budget
 test_host_cycle_boundary_is_never_absorbed
 test_presentation_is_bounded_in_the_banner
