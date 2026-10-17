@@ -2,10 +2,11 @@
 """Native-record proof and process binding for fm-session-lock-lib.sh; Linux only.
 
 Internal interface: <state> <owner-pid> <model-pid> <recorded-id> <current-id>
-proves the direct background handoff; <state> <owner-pid> <model-pid> proves the
-retained continuation binding still names those live processes. Exit 0 on proof;
-every uncertainty exits 1 silently. The shell library owns the ownership
-contract and the ancestry trust gate.
+proves the direct background handoff and writes state/.lock-continuation on first
+success; <state> <owner-pid> <model-pid> proves the retained continuation binding
+still names those live processes. Exit 0 on proof; every uncertainty exits 1
+silently. The shell library owns the ownership contract and the ancestry trust
+gate.
 """
 
 import datetime
