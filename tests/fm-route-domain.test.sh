@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+# tests/fm-route-domain.test.sh - verify Jev domain router behavior against a
+# local stub of the Jev System One endpoint (hermetic, no network).
+set -euo pipefail
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+[ -x "$ROOT/bin/fm-route-domain.sh" ] || fail "bin/fm-route-domain.sh missing or not executable"
+[ -x "$ROOT/bin/fm-route-dispatch.sh" ] || fail "bin/fm-route-dispatch.sh missing or not executable"
+
+TDIR=$(fm_test_tmproot fm-route-test)
+
+# A private copy of bin/ so fm-send.sh can be faked and FM_HOME defaults to it.
+FAKE="$TDIR/home"
+mkdir -p "$FAKE/bin" "$FAKE/data" "$FAKE/state"
+cp -R "$ROOT/bin/." "$FAKE/bin/"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "FM_HOME=$FM_HOME" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"
+chmod +x "$FAKE/bin/fm-send.sh"
+ROUTER="$FAKE/bin/fm-route-domain.sh"
+DISPATCH="$FAKE/bin/fm-route-dispatch.sh"
+
+REG="$FAKE/data/secondmates.md"
+cat <<'EOF' > "$REG"
+- portal-ops - Clinical operations and EMR work: Portal implementation, UrgentIQ and DoseSpot, provider onboarding. (home: /tmp/p; scope: Arcs Portal clinical operations, UrgentIQ, DoseSpot; projects: portal; added 2026-07-29)
+- seller-outreach - Seller lead generation and outreach for urgent-care clinics. (home: /tmp/s; scope: All urgent-care seller lead generation, campaigns, Flow; projects: agents-flow; added 2026-07-29)
+- websites - Rebuild of arcs.health and jonroosevelt.com frontend. (host: box; root: /r; home: /tmp/w; scope: Frontend website rebuild, UI components, Next.js, Framer Motion; projects: website-covenant; added 2026-08-06)
+- spaced-ops - Accepted whitespace variation. (home:/tmp/sp;scope:  spaced scope;projects: sp;  added  2026-08-06)
+- retired-ops - Registered but with no live task record. (home: /tmp/r; scope: retired work; projects: r; added 2026-08-06)
+EOF
+# Only secondmates with a live state/<id>.meta record can receive fm-send.sh.
+for id in portal-ops seller-outreach websites spaced-ops long-ops zorbex-ops; do
+  printf 'kind=secondmate\n' > "$FAKE/state/$id.meta"
+done
+
+# Stub Jev: the answer is chosen from a keyword in the task so every mapping is deterministic.
+cat > "$TDIR/stub.py" <<'PY'
+import http.server, json, sys
+ANSWERS = [
+    ("remote-route", "remote-ops", 0.0),
+    ("seller", "seller-outreach", 0.1),
+    ("morning", "captain_direct", 0.0),
+    ("drone", "new_domain", 0.9),
+    ("emr-overflow", "portal-ops", 0.8),
+    ("bogus", "not-a-secondmate", 0.0),
+    ("retired", "retired-ops", 0.0),
+]
+RAW = {
+    "null-answers": {"answers": None},
+    "not-an-object": [1],
+    "null-confidence": {"answers": {"route": {"choice": "portal-ops", "confidence": None}}},
+    "null-noul": {"answers": {"route": {"choice": "portal-ops"}, "needs_new_secondmate": {"noul": None}}},
+    "no-noul": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.9}}},
+    "no-choice": {"answers": {"route": {"confidence": 0.9}}},
+    "weak-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.34}, "needs_new_secondmate": {"noul": 0.2}}},
+    "floor-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.7}, "needs_new_secondmate": {"noul": 0.2}}},
+    "nan-confidence": {"answers": {"route": {"choice": "seller-outreach", "confidence": float("nan")}, "needs_new_secondmate": {"noul": 0.2}}},
+    "nan-noul": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.9}, "needs_new_secondmate": {"noul": float("nan")}}},
+    "weak-newdomain": {"answers": {"route": {"choice": "new_domain", "confidence": 0.5}, "needs_new_secondmate": {"noul": 0.2}}},
+}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        with open(sys.argv[2], "ab") as log:
+            log.write(json.dumps({"auth": self.headers.get("Authorization"), "body": json.loads(raw)}).encode() + b"\n")
+        task = json.loads(raw)["state"]["task"].lower()
+        answers = {}
+        for word, choice, noul in ANSWERS:
+            if word in task:
+                answers = {"route": {"choice": choice, "confidence": 0.8, "probabilities": {choice: 0.8}},
+                           "needs_new_secondmate": {"noul": noul}}
+                break
+        reply = {"answers": answers}
+        for word, raw_reply in RAW.items():
+            if word in task:
+                reply = raw_reply
+        out = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *a):
+        pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_port))
+srv.serve_forever()
+PY
+LOG="$TDIR/requests.log"
+: > "$LOG"
+python3 "$TDIR/stub.py" "$TDIR/port" "$LOG" &
+STUB_PID=$!
+trap 'kill "$STUB_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
+for _ in $(seq 50); do [ -s "$TDIR/port" ] && break; sleep 0.1; done
+[ -s "$TDIR/port" ] || fail "stub Jev server did not start"
+
+FM_JEV_TS_BASE="http://127.0.0.1:$(cat "$TDIR/port")"
+export FM_JEV_TS_BASE
+export TYPESAFE_API_KEY=test-dummy-key
+unset FM_HOME FM_ROOT_OVERRIDE
+FM_CONFIG_OVERRIDE="$TDIR/no-config"
+export FM_CONFIG_OVERRIDE
+
+requests() { wc -l < "$LOG" | tr -d ' '; }
+last_request() { tail -n1 "$LOG"; }
+field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+
+# 1. Empty input is unavailable, and an empty --task never waits on an open stdin pipe.
+out=$(timeout 10 "$ROUTER" --task "" < <(sleep 20)) || fail "empty --task must not block on stdin"
+assert_contains "$out" "action=unavailable" "empty task emits unavailable"
+
+# 2. Missing brief file is reported as missing.
+code=0; err=$("$ROUTER" --brief "$TDIR/nope.md" 2>&1) || code=$?
+[ "$code" -eq 2 ] || fail "missing brief must exit 2, got $code"
+assert_contains "$err" "brief file not found" "missing brief is named"
+
+# 3. The environment key is used, and the registry is read from the router's own home.
+before=$(requests)
+out=$("$ROUTER" --task "Seller outreach campaign for clinics")
+assert_contains "$out" "action=dispatch" "known domain emits dispatch"
+assert_contains "$out" "route=seller-outreach" "known domain routes to seller-outreach"
+[ "$(requests)" -eq $((before + 1)) ] || fail "one request expected"
+[ "$(last_request | field auth)" = "Bearer test-dummy-key" ] || fail "environment key must be sent"
+crit=$(last_request | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"])))')
+[ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach,spaced-ops,websites" ] || fail "registry parse sent wrong criteria: $crit"
+out=$("$ROUTER" --task "retired work")
+assert_contains "$out" "action=unavailable" "a registered secondmate with no live record is never a route"
+
+# An empty or missing registry is unavailable and nothing is sent.
+before=$(requests)
+out=$("$ROUTER" --registry "$TDIR/no-registry.md" --task "seller leads")
+assert_contains "$out" "action=unavailable" "missing registry emits unavailable"
+: > "$TDIR/empty.md"
+out=$("$ROUTER" --registry "$TDIR/empty.md" --task "seller leads")
+assert_contains "$out" "action=unavailable" "empty registry emits unavailable"
+[ "$(requests)" -eq "$before" ] || fail "no request may be made without a live secondmate"
+
+# 4. The home's .env is the fallback key source.
+printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$FAKE/.env"
+env -u TYPESAFE_API_KEY "$ROUTER" --task "seller leads" >/dev/null
+[ "$(last_request | field auth)" = "Bearer env-file-key" ] || fail ".env key must be sent"
+rm "$FAKE/.env"
+
+# 5. No key: unavailable, no network call, and no privilege escalation attempted.
+SUDOBIN="$TDIR/sudobin"; mkdir -p "$SUDOBIN"
+printf '#!/usr/bin/env bash\ntouch %q\nexit 1\n' "$TDIR/sudo-called" > "$SUDOBIN/sudo"
+chmod +x "$SUDOBIN/sudo"
+printf '#!/usr/bin/env bash\necho TYPESAFE_API_KEY=wrapper-key\n' > "$FAKE/bin/jev-typesafe-run.py"
+chmod +x "$FAKE/bin/jev-typesafe-run.py"
+before=$(requests)
+out=$(env -u TYPESAFE_API_KEY PATH="$SUDOBIN:$PATH" "$ROUTER" --task "seller leads")
+assert_contains "$out" "action=unavailable" "missing key emits unavailable"
+assert_contains "$out" "TYPESAFE_API_KEY unavailable" "missing key reason"
+[ "$(requests)" -eq "$before" ] || fail "no request may be made without a key"
+[ ! -e "$TDIR/sudo-called" ] || fail "router must never invoke sudo"
+rm "$FAKE/bin/jev-typesafe-run.py"
+
+# 6. Choice and noul map to actions; high noul overrides a matched secondmate.
+out=$("$ROUTER" --task "Good morning, status?")
+assert_contains "$out" "action=handle_direct" "captain message emits handle_direct"
+assert_contains "$out" "route=captain_direct" "captain message routes to captain_direct"
+assert_not_contains "$out" "dispatch_cmd=" "handle_direct has no dispatch command"
+out=$("$ROUTER" --task "Drone firmware in Rust")
+assert_contains "$out" "action=create_secondmate" "new domain emits create_secondmate"
+assert_contains "$out" "route=new_domain" "new domain routes to new_domain"
+out=$("$ROUTER" --task "emr-overflow of unrelated work")
+assert_contains "$out" "action=create_secondmate" "noul >= 0.7 overrides a matched secondmate"
+assert_contains "$out" "route=new_domain" "noul override reports new_domain, not the matched id"
+out=$("$ROUTER" --task "bogus route please")
+assert_contains "$out" "action=unavailable" "unknown route choice is unavailable"
+json=$("$ROUTER" --json --task "Good morning")
+[ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "json action wrong: $json"
+
+# 7. dispatch_cmd is shell-safe for hostile task text and names the home's fm-send.sh.
+# shellcheck disable=SC2016
+EVIL='seller $(touch pwned1) `touch pwned2` \ "q" '"'"'s'"'"
+out=$("$ROUTER" --task "$EVIL")
+cmd=$(printf '%s\n' "$out" | sed -n 's/^dispatch_cmd=//p')
+assert_contains "$cmd" "$FAKE/bin/fm-send.sh" "dispatch_cmd names the home's fm-send.sh by absolute path"
+RUNDIR="$TDIR/elsewhere"; mkdir -p "$RUNDIR"
+rm -f "$TDIR/argv"
+(cd "$RUNDIR" && bash -c "$cmd")
+[ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatch_cmd executed task text"
+[ "$(sed -n 1p "$TDIR/argv")" = "FM_HOME=$FAKE" ] || fail "dispatch_cmd must set FM_HOME to the home"
+[ "$(sed -n 2p "$TDIR/argv")" = "seller-outreach" ] || fail "dispatch_cmd route wrong"
+[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL" ] || fail "dispatch_cmd message altered: $(sed -n 3p "$TDIR/argv")"
+
+# 8. Never-send values are withheld from every request field, including overlapping entries.
+CFG="$TDIR/config"; mkdir -p "$CFG"
+printf '# comment\nHoldings\nAcme Hold\nHoldings Ltd\nurgentiq\n' > "$CFG/dispatch-never-send"
+FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --task "seller outreach to ACME Holdings Ltd today" >/dev/null
+body=$(last_request | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["body"]).lower())')
+for frag in acme hold ltd urgentiq; do
+  assert_not_contains "$body" "$frag" "never-send fragment '$frag' must not leave the box"
+done
+task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
+[ "$task" = "seller outreach to [withheld] today" ] || fail "withheld task wrong: $task"
+
+# A value straddling the 140-character scope cut is still withheld.
+REG_LONG="$TDIR/long.md"
+pad=$(printf 'P%.0s' $(seq 131))
+printf -- '- long-ops - Long scope. (home: /tmp/l; scope: %s Zorbex Holdings group; projects: l; added 2026-08-01)\n' "$pad" > "$REG_LONG"
+printf 'Zorbex Holdings\n' > "$CFG/dispatch-never-send"
+FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_LONG" --task "seller leads" >/dev/null
+body=$(last_request | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["body"]).lower())')
+assert_not_contains "$body" "zorbex" "never-send value straddling the scope cut must not leave the box"
+scope=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"]["long-ops"])')
+[ "${#scope}" -le 140 ] || fail "scope must still be capped at 140 characters: ${#scope}"
+
+# Tabs inside a registry home or scope keep the secondmate routable; malformed lines stay out.
+REG_TAB="$TDIR/tab.md"
+printf -- '- portal-ops - Tabbed. (home: /tmp/p\tx; scope: clinical\tops work; projects: p; added 2026-08-01)\n- seller-outreach - Plain. (home: /tmp/s; scope: seller leads; projects: s; added 2026-08-01)\n- spaced-ops - Malformed. (home: /tmp/sp; scope: no projects field; added 2026-08-01)\n' > "$REG_TAB"
+FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_TAB" --task "seller leads" >/dev/null
+criteria=$(last_request | python3 -c 'import json,sys; c=json.load(sys.stdin)["body"]["questions"]["route"]["criteria"]; print("|".join(f"{k}={v}" for k, v in sorted(c.items()) if k not in ("new_domain", "captain_direct")))')
+[ "$criteria" = "portal-ops=clinical ops work|seller-outreach=seller leads" ] || fail "tab-bearing registry rows parsed wrong: $criteria"
+
+# A secondmate id matching the list fails closed with nothing sent.
+REG_ID="$TDIR/id.md"
+printf -- '- zorbex-ops - Client work. (home: /tmp/z; scope: client work; projects: z; added 2026-08-01)\n' > "$REG_ID"
+printf 'zorbex\n' > "$CFG/dispatch-never-send"
+before=$(requests)
+out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_ID" --task "seller leads")
+assert_contains "$out" "action=unavailable" "withheld secondmate id fails closed"
+assert_contains "$out" "zorbex-ops" "withheld secondmate id is named in the reason"
+[ "$(requests)" -eq "$before" ] || fail "nothing may be sent when a secondmate id is withheld"
+
+# Common words matching only the built-in routes do not disable the router.
+printf 'new\ndirect\ndomain\n' > "$CFG/dispatch-never-send"
+out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --task "seller leads")
+assert_contains "$out" "action=dispatch" "built-in route names are not checked against the never-send list"
+
+rm "$CFG/dispatch-never-send"; mkdir "$CFG/dispatch-never-send"
+before=$(requests)
+out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --task "seller leads")
+assert_contains "$out" "action=unavailable" "unreadable never-send list fails closed"
+[ "$(requests)" -eq "$before" ] || fail "nothing may be sent when the never-send list is unreadable"
+
+# 9. Malformed 200 responses are unavailable, not a crash.
+for word in null-answers not-an-object null-confidence null-noul no-noul no-choice; do
+  out=$("$ROUTER" --task "$word reply") || fail "$word response must not crash the router"
+  assert_contains "$out" "action=unavailable" "$word response emits unavailable"
+done
+# A confident route with no needs_new_secondmate answer is never dispatched.
+rm -f "$TDIR/argv"
+out=$("$DISPATCH" --task "no-noul seller leads" --execute)
+assert_contains "$out" "needs_new_secondmate" "a missing noul answer is named"
+[ ! -e "$TDIR/argv" ] || fail "a route without a needs_new_secondmate answer must never be dispatched"
+json=$("$DISPATCH" --task "no-noul seller leads" --json --execute)
+[ "$(printf '%s' "$json" | field action)" = unavailable ] || fail "missing noul json must be unavailable: $json"
+[ ! -e "$TDIR/argv" ] || fail "a route without a needs_new_secondmate answer must never be dispatched (json)"
+
+# jq is not a dependency: a jq that cannot run changes nothing.
+NOJQ="$TDIR/nojq"; mkdir -p "$NOJQ"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$NOJQ/jq"; chmod +x "$NOJQ/jq"
+out=$(env -u TYPESAFE_API_KEY PATH="$NOJQ:$PATH" "$DISPATCH" --task "seller leads") || fail "dispatcher must not need jq"
+assert_contains "$out" "Router unavailable (TYPESAFE_API_KEY unavailable)" "dispatcher falls back without jq"
+rm -f "$TDIR/argv"
+json=$(PATH="$NOJQ:$PATH" "$DISPATCH" --task "seller leads" --json --execute 2>/dev/null) || fail "dispatch must not need jq"
+[ "$(printf '%s' "$json" | field dispatched)" = True ] || fail "dispatch without jq must still send: $json"
+out=$("$DISPATCH" --task "null-answers reply") || fail "dispatcher must survive a malformed response"
+assert_contains "$out" "Router unavailable" "dispatcher falls back on a malformed response"
+
+# 10. Route confidence shares the noul floor: below it never dispatches.
+out=$("$ROUTER" --task "weak-signal seller leads")
+assert_contains "$out" "action=handle_direct" "confidence below the floor falls back to handle_direct"
+assert_contains "$out" "route=captain_direct" "confidence below the floor routes to the captain"
+assert_not_contains "$out" "dispatch_cmd=" "confidence below the floor has no dispatch command"
+out=$("$ROUTER" --task "floor-signal seller leads")
+assert_contains "$out" "action=dispatch" "confidence exactly at the floor dispatches"
+assert_contains "$out" "route=seller-outreach" "confidence at the floor keeps the route"
+out=$("$ROUTER" --task "Seller outreach campaign")
+assert_contains "$out" "action=dispatch" "confidence above the floor dispatches"
+out=$("$ROUTER" --task "weak-newdomain request")
+assert_contains "$out" "action=handle_direct" "a weak new_domain choice does not charter a secondmate"
+rm -f "$TDIR/argv"
+out=$("$DISPATCH" --task "weak-signal seller leads" --execute)
+assert_contains "$out" "Status: Direct communication" "dispatcher handles a weak signal directly"
+[ ! -e "$TDIR/argv" ] || fail "a weak signal must never be dispatched"
+for word in nan-confidence nan-noul; do
+  out=$("$ROUTER" --task "$word seller leads")
+  assert_contains "$out" "action=handle_direct" "$word falls back to handle_direct"
+  assert_not_contains "$out" "dispatch_cmd=" "$word has no dispatch command"
+  rm -f "$TDIR/argv"
+  json=$("$DISPATCH" --task "$word seller leads" --json --execute)
+  [ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "$word json must be handle_direct: $json"
+  [ ! -e "$TDIR/argv" ] || fail "$word must never be dispatched"
+done
+
+# 11. Dispatcher branches.
+out=$("$DISPATCH" --task "Good morning")
+assert_contains "$out" "Status: Direct communication" "dispatcher handle_direct branch"
+out=$("$DISPATCH" --task "Drone firmware")
+assert_contains "$out" "Unmatched domain (new_domain)" "dispatcher create_secondmate branch"
+out=$(env -u TYPESAFE_API_KEY "$DISPATCH" --task "seller leads")
+assert_contains "$out" "Router unavailable (TYPESAFE_API_KEY unavailable)" "dispatcher unavailable branch"
+code=0; err=$("$DISPATCH" --brief "$TDIR/nope.md" 2>&1) || code=$?
+[ "$code" -eq 2 ] || fail "dispatcher missing brief must exit 2"
+assert_contains "$err" "brief file not found" "dispatcher names the missing brief"
+out=$("$DISPATCH" --task "-seller leads")
+assert_contains "$out" "Route:      seller-outreach" "task text starting with a dash is not parsed as a flag"
+
+out=$("$DISPATCH" --task "$EVIL")
+cmd=$(printf '%s\n' "$out" | sed -n '/^Recommended dispatch command:/{n;s/^  //p;}')
+rm -f "$TDIR/argv"
+(cd "$RUNDIR" && bash -c "$cmd")
+[ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatcher command executed task text"
+[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL" ] || fail "dispatcher command message altered"
+
+rm -f "$TDIR/argv"
+"$DISPATCH" --task "seller leads" --execute >/dev/null
+[ "$(sed -n 1p "$TDIR/argv")" = "FM_HOME=$FAKE" ] || fail "--execute must export FM_HOME to fm-send.sh"
+[ "$(sed -n 2p "$TDIR/argv")" = "seller-outreach" ] || fail "--execute must dispatch to the route"
+
+rm -f "$TDIR/argv"
+json=$("$DISPATCH" --task "seller leads" --json --execute 2>/dev/null)
+[ "$(printf '%s' "$json" | field action)" = dispatch ] || fail "--json --execute must emit json: $json"
+[ -e "$TDIR/argv" ] || fail "--json --execute must still dispatch"
+[ "$(printf '%s' "$json" | field dispatched)" = True ] || fail "--json --execute must report the send: $json"
+
+# A failed send in --json --execute still emits JSON reporting the failure.
+cp "$FAKE/bin/fm-send.sh" "$TDIR/fm-send.ok"
+printf '#!/usr/bin/env bash\nexit 3\n' > "$FAKE/bin/fm-send.sh"
+code=0; json=$("$DISPATCH" --task "seller leads" --json --execute 2>/dev/null) || code=$?
+cp "$TDIR/fm-send.ok" "$FAKE/bin/fm-send.sh"
+[ "$code" -eq 3 ] || fail "a failed send must exit with its status, got $code"
+[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a failed send must be reported in json: $json"
+[ "$(printf '%s' "$json" | field send_exit_code)" = 3 ] || fail "send exit code must be reported: $json"
+
+# A brief larger than one argv string can hold still routes.
+HUGE="$TDIR/huge.md"
+{ printf 'seller leads\n'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$HUGE"
+out=$("$DISPATCH" --brief "$HUGE") || fail "a brief over 128 KiB must not abort the dispatcher"
+assert_contains "$out" "Route:      seller-outreach" "a brief over 128 KiB is classified"
+# A local send writes the inbox directly, so the remote encoded cap does not
+# apply: a brief past that cap (but within one argv string) is sent whole.
+LOCALBIG="$TDIR/local-big.md"
+{ printf 'seller leads\n'; head -c 100000 /dev/zero | tr '\0' 'l'; printf '\n'; } > "$LOCALBIG"
+rm -f "$TDIR/argv"
+"$DISPATCH" --brief "$LOCALBIG" --execute >/dev/null 2>&1 || fail "a brief over the remote cap to a local secondmate must be sent"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALBIG")" ] || fail "a brief over the remote cap must reach a local fm-send.sh whole"
+# A local send still passes the message as one fm-send.sh argument: a message
+# at the 131072-byte single-argument limit is refused unsent, one byte under
+# is delivered whole.
+LOCALMAX="$TDIR/local-max.md"
+{ printf 'seller leads\n'; head -c $((131071 - 13)) /dev/zero | tr '\0' 'm'; } > "$LOCALMAX"
+rm -f "$TDIR/argv"
+"$DISPATCH" --brief "$LOCALMAX" --execute >/dev/null 2>&1 || fail "a local brief one byte under the argument limit must be sent"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALMAX")" ] || fail "a local brief under the argument limit must arrive whole"
+printf 'm' >> "$LOCALMAX"
+for big in "$LOCALMAX" "$HUGE"; do
+  rm -f "$TDIR/argv"
+  code=0; err=$("$DISPATCH" --brief "$big" --execute 2>&1 >/dev/null) || code=$?
+  [ "$code" -eq 2 ] || fail "a local brief at or over the argument limit must exit 2, got $code"
+  assert_contains "$err" "not sent" "a local over-limit brief is refused unsent"
+  [ ! -e "$TDIR/argv" ] || fail "a local over-limit brief must not reach fm-send.sh"
+  code=0; json=$("$DISPATCH" --brief "$big" --json --execute 2>/dev/null) || code=$?
+  [ "$code" -eq 2 ] || fail "a local over-limit --json --execute brief must exit 2, got $code"
+  [ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a local over-limit brief must be reported undispatched"
+  [ ! -e "$TDIR/argv" ] || fail "a local over-limit --json brief must not reach fm-send.sh"
+done
+# A remote secondmate's send rides one ssh argument, so it is capped.
+printf 'kind=secondmate\nremote_host=box\n' > "$FAKE/state/seller-outreach.meta"
+rm -f "$TDIR/argv"
+code=0; err=$("$DISPATCH" --brief "$HUGE" --execute 2>&1 >/dev/null) || code=$?
+[ "$code" -eq 2 ] || fail "an oversized --execute message must be refused with exit 2, got $code"
+assert_contains "$err" "single-argument limit" "an oversized --execute message is refused loudly"
+# The cap is on the base64 form: one byte past it is refused unsent.
+CAP=90000 # the most raw bytes whose base64 fits MAX_ENCODED_BYTES=120000
+OVER="$TDIR/over.md"
+{ printf 'seller leads\n'; head -c $((CAP + 1 - 13)) /dev/zero | tr '\0' 'y'; } > "$OVER"
+rm -f "$TDIR/argv"
+code=0; "$DISPATCH" --brief "$OVER" --execute >/dev/null 2>&1 || code=$?
+[ "$code" -eq 2 ] || fail "a message one byte over the encoded cap must exit 2, got $code"
+[ ! -e "$TDIR/argv" ] || fail "a message over the encoded cap must not reach fm-send.sh"
+code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code=$?
+[ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
+[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "an oversized message must be reported undispatched"
+printf 'kind=secondmate\n' > "$FAKE/state/seller-outreach.meta"
+
+# A registry whose last entry has no trailing newline still offers that entry.
+REG_NONL="$TDIR/no-newline.md"
+head -n1 "$REG" > "$REG_NONL"
+sed -n 2p "$REG" | tr -d '\n' >> "$REG_NONL"
+"$ROUTER" --registry "$REG_NONL" --task "seller leads" >/dev/null
+crit=$(last_request | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"])))')
+[ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach" ] || fail "a final registry line without a newline must be parsed: $crit"
+
+# A brief reaches the real inbox byte-identical - leading and trailing
+# whitespace, CRLF, blank-line runs, trailing newlines - while Jev sees one line.
+BRIEF="$TDIR/brief.md"
+# shellcheck disable=SC2016
+printf '  seller leads for the spring campaign\r\n\n\n\n- call the Dallas clinics  \r\n\t- email the Austin list\n\n```sh\nbin/fm-send.sh seller-outreach "done"\n```\nFINAL-REQUIREMENT keep\n\n\n' > "$BRIEF"
+REAL="$TDIR/real-home"
+mkdir -p "$REAL/bin" "$REAL/data" "$REAL/state" "$TDIR/fakebin"
+cp -R "$ROOT/bin/." "$REAL/bin/"
+cp "$REG" "$REAL/data/secondmates.md"
+fm_write_secondmate_meta "$REAL/state/seller-outreach.meta" "$REAL" "sess:fm-seller-outreach"
+cat > "$TDIR/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n' ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+esac
+exit 0
+SH
+chmod +x "$TDIR/fakebin/tmux"
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$REAL" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$BRIEF" --execute >/dev/null 2>&1 || fail "real multi-line dispatch failed"
+bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/001.msg" > "$TDIR/body"
+# The body is the firstmate marker and correlation followed by the brief bytes.
+tail -c "$(wc -c < "$BRIEF")" "$TDIR/body" > "$TDIR/body-tail"
+[ "$(cksum < "$TDIR/body-tail")" = "$(cksum < "$BRIEF")" ] || fail "inbox body must end with the brief byte-identical: $(od -c "$TDIR/body" | head)"
+task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
+[ "$task" = "$(python3 -c 'import sys; print(" ".join(open(sys.argv[1], "rb").read().decode().split()))' "$BRIEF")" ] || fail "the Jev request must collapse the brief to one line: $task"
+
+# Invalid UTF-8 in a brief reaches the inbox unchanged; Jev gets valid text.
+BADBRIEF="$TDIR/bad-utf8.md"
+printf 'seller leads \377\376 caf\351 \300\257 \355\240\200 done\n' > "$BADBRIEF"
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$REAL" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$BADBRIEF" --execute >/dev/null 2>&1 || fail "an invalid-UTF-8 dispatch failed"
+bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/002.msg" > "$TDIR/bad-body"
+tail -c "$(wc -c < "$BADBRIEF")" "$TDIR/bad-body" > "$TDIR/bad-body-tail"
+[ "$(cksum < "$TDIR/bad-body-tail")" = "$(cksum < "$BADBRIEF")" ] || fail "inbox body must end with the invalid-UTF-8 brief byte-identical: $(od -c "$TDIR/bad-body" | tail -3)"
+last_request | python3 -c 'import json,sys; t=json.load(sys.stdin)["body"]["state"]["task"]; sys.exit(0 if t.startswith("seller leads \ufffd") else 1)' || fail "Jev must get a replacement-decoded view of invalid bytes"
+cmd=$("$ROUTER" --brief "$BADBRIEF" | sed -n 's/^dispatch_cmd=//p')
+rm -f "$TDIR/argv"
+bash -c "$cmd"
+# The fake fm-send.sh appends one newline after the message.
+tail -n +3 "$TDIR/argv" | head -c "$(wc -c < "$BADBRIEF")" > "$TDIR/bad-argv"
+[ "$(cksum < "$TDIR/bad-argv")" = "$(cksum < "$BADBRIEF")" ] || fail "dispatch_cmd must carry invalid UTF-8 bytes intact"
+
+# A remote secondmate receives a brief at the encoded cap through the real
+# fm-on.sh, byte-identical, and every argument fits Linux's per-argument limit.
+fm_write_meta "$REAL/state/remote-ops.meta" \
+  "window=fm-remote:w1:p1" "endpoint_task_id=remote-ops" "harness=claude" "kind=secondmate" \
+  "mode=secondmate" "yolo=off" "remote_host=remote-box" "remote_root=/remote/root" \
+  "remote_backend=herdr" "remote_herdr_session=fm-remote" "remote_target=fm-remote:w1:p1"
+printf -- '- remote-ops - Remote ops work. (host: remote-box; root: /remote/root; home: /remote/home; scope: remote ops work; projects: d; added 2026-08-02)\n' >> "$REAL/data/secondmates.md"
+cat > "$TDIR/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+while [ "$1" != -- ]; do shift; done
+shift 2
+# sshd hands the joined command to the remote shell as one argument.
+env true "$*" || exit 255
+printf '%s' "$5" | base64 -d > "$FM_SSH_ARGV"
+SH
+chmod +x "$TDIR/fakebin/fake-ssh"
+CAPBRIEF="$TDIR/cap.md"
+{ printf 'remote-route\r\n\n'; head -c $((CAP - 16)) /dev/zero | tr '\0' 'z'; printf '\n'; } > "$CAPBRIEF"
+[ "$(wc -c < "$CAPBRIEF" | tr -d ' ')" -eq "$CAP" ] || fail "cap brief size wrong"
+rm -f "$TDIR/ssh-argv"
+# fm-on.sh only forwards commands tracked by a git checkout, so root at this repo.
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  FM_SSH_BIN="$TDIR/fakebin/fake-ssh" FM_SSH_ARGV="$TDIR/ssh-argv" \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$CAPBRIEF" --execute >/dev/null 2>&1 || fail "a brief at the encoded cap must reach a remote secondmate"
+python3 -c 'import sys; argv = open(sys.argv[1], "rb").read().split(b"\0"); sys.exit(0 if argv[2] == b"remote-ops" and argv[3].endswith(open(sys.argv[2], "rb").read()) else 1)' \
+  "$TDIR/ssh-argv" "$CAPBRIEF" || fail "the remote message must end with the brief byte-identical"
+
+# The text-mode dispatch command keeps a multi-line message on one runnable line.
+cmd=$("$ROUTER" --brief "$BRIEF" | sed -n 's/^dispatch_cmd=//p')
+rm -f "$TDIR/argv"
+bash -c "$cmd"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$BRIEF")" ] || fail "dispatch_cmd must carry the multi-line brief intact"
+
+pass "all fm-route-domain tests passed"
