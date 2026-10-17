@@ -42,6 +42,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -314,18 +316,15 @@ sync_project() {
   # and fast-forward that repository under this project's label, turning a routine
   # refresh into an unrequested self-update reported as a project sync. Require
   # $PROJ to be the root of its own work tree before any other git command runs.
-  proj_top=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) || proj_top=""
-  if [ -z "$proj_top" ]; then
-    echo "$label: skipped: not a git repo"
-    return 0
-  fi
-  # Compare filesystem identity, not spelling: the question is whether git's root
-  # and $PROJ are the same directory, and a string compare of the two paths also
-  # fails when they merely differ in case (case-insensitive volume) or in how a
-  # symlink is spelled.
-  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
-  if [ -z "$proj_abs" ] || ! [ "$proj_top" -ef "$proj_abs" ]; then
-    echo "$label: skipped: not a clone root (git would act on $proj_top)"
+  if proj_top=$(fm_forge_clone_root "$PROJ" 2>/dev/null); then
+    :
+  else
+    clone_root_status=$?
+    if [ "$clone_root_status" -eq 1 ]; then
+      echo "$label: skipped: not a git repo"
+    else
+      echo "$label: skipped: not a clone root (git would act on $proj_top)"
+    fi
     return 0
   fi
   if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
@@ -339,6 +338,12 @@ sync_project() {
   fi
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     echo "$label: skipped: no origin remote"
+    return 0
+  fi
+  # Fleet sync is a network mutation, so an origin outside the supported forge
+  # boundary must be left untouched regardless of whether this script was
+  # launched by bootstrap or invoked directly.
+  if [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
     return 0
   fi
 
