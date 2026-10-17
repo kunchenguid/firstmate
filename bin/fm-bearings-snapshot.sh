@@ -61,7 +61,8 @@
 # (return-catchup) gate row naming the blockers left to clear or the reason the
 # catch-up was retained. Reporting is not ordinary captain work, so the gate never
 # suppresses the digest; an ACTIVE away window still refuses, because the right
-# answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
+# answer there is to run the return first. Quiet mode permits the digest.
+# bin/fm-afk-return.sh owns the gate.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -207,8 +208,8 @@ done
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
 # The shared read-only away-return owner is consulted, not obeyed. An active
-# away window still refuses here: the correct answer to a bearings request then
-# is to run the return first. Return CATCH-UP is different - the captain is
+# away window still refuses here; quiet mode passes. During away mode, run the
+# return first. Return CATCH-UP is different - the captain is
 # back and asking for the picture, so the catch-up posture is reported as
 # content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
 # owns both the gate format and the branch distinction; bearings reproduces

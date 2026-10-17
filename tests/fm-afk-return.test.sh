@@ -316,7 +316,7 @@ test_away_reentry_refuses_pending_return_gate() {
 test_return_is_mode_agnostic_for_quiet_mode() {
   # kunchenguid/firstmate#2356's /quiet off calls this exact script, unchanged
   # - it must behave identically whether state/.afk declares "away" or
-  # "quiet", since return_guard/return_reconcile only ever test presence.
+  # "quiet": stopping the posture is independent of the read-only guard.
   local dir out
   dir="$TMP_ROOT/quiet-mode-return"
   install_runner "$dir"
@@ -878,6 +878,52 @@ test_statusful_leftover_record_lets_catchup_clear() {
   pass "a leftover record with a readable status file lets return catch-up clear"
 }
 
+test_return_guard_distinguishes_quiet_and_away() {
+  local dir out rc mode record_mode expected before after
+  dir="$TMP_ROOT/guard-modes"
+  install_runner "$dir"
+  for mode in absent quiet away legacy unknown; do
+    for record_mode in absent quiet away; do
+      rm -f "$dir/home/state/.afk" "$dir/home/state/.afk-contract"
+      case "$mode" in
+        absent) ;;
+        legacy) printf '1784074271\n' > "$dir/home/state/.afk" ;;
+        *) printf '%s\n1784074271\n' "$mode" > "$dir/home/state/.afk" ;;
+      esac
+      if [ "$record_mode" != absent ]; then
+        FM_AFK_MODE="$record_mode" contract_in "$dir" enter >/dev/null 2>&1 \
+          || fail "could not write $record_mode posture record"
+      fi
+      expected=0
+      case "$mode" in away|legacy|unknown) expected=3 ;; esac
+      [ "$record_mode" != away ] || expected=3
+      before=$(find "$dir/home/state" -type f -exec cksum {} \; | sort)
+      set +e
+      out=$(run_return "$dir" guard)
+      rc=$?
+      set -e
+      [ "$rc" -eq "$expected" ] \
+        || fail "guard flag=$mode record=$record_mode expected $expected, got $rc: $out"
+      after=$(find "$dir/home/state" -type f -exec cksum {} \; | sort)
+      [ "$before" = "$after" ] || fail "guard changed state for flag=$mode record=$record_mode"
+    done
+  done
+  rm -f "$dir/home/state/.afk" "$dir/home/state/.afk-contract"
+  printf 'quiet\n1784074271\n' > "$dir/home/state/.afk"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
+  set +e
+  out=$(run_return "$dir" guard)
+  rc=$?
+  set -e
+  [ "$rc" -eq 4 ] || fail "quiet mode bypassed catch-up gate (rc=$rc): $out"
+  rm -f "$dir/home/state/.afk-return-catchup"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+    || fail "Bearings refused during quiet mode: $out"
+  printf '%s' "$out" | jq -e '.in_flight == []' >/dev/null \
+    || fail "quiet-mode Bearings did not render its fleet snapshot: $out"
+  pass "read-only guard permits quiet, refuses away, and retains the catch-up gate"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -1375,6 +1421,7 @@ test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
 test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
+test_return_guard_distinguishes_quiet_and_away
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
