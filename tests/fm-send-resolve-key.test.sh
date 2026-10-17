@@ -788,6 +788,58 @@ test_stamped_close_line_stays_within_the_status_line_cap() {
   pass "fm-send --resolve-key: a stamped close line stays inside the status-line cap"
 }
 
+# A captain ruling longer than the status-line cap must stay recoverable from
+# the durable record: the close keeps the loud cut marker, and points at a file
+# holding the complete answer, newlines and all.
+test_long_answer_close_points_at_full_text() {
+  local dir fb log home rc answer line ptr
+  dir="$TMP_ROOT/full-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home full-answer)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=advisor-seats]: keep or retire the advisor secondmates\n' > "$home/state/t1.status"
+  answer="Captain ruling: all advisor secondmates retire at their next natural relaunch.
+$(printf 'detail %.0s' {1..60})END-OF-RULING"
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key advisor-seats "$answer"; rc=$?
+  expect_code 0 "$rc" "a long ruling should close, not refuse"
+  line=$(grep -F 'resolved [key=advisor-seats]' "$home/state/t1.status") \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t1.status")"
+  [ "${#line}" -le 220 ] || fail "the close is ${#line} characters, past the 220-character cap: $line"
+  assert_contains "$line" " [truncated]" "a cut close should stay loud about the cut"
+  ptr=$(printf '%s' "$line" | sed -nE 's/.*\[full answer: (state\/resolved-answers\/[0-9a-f]+\.txt)\]$/\1/p')
+  [ -n "$ptr" ] || fail "a cut close carries no pointer to the full answer: $line"
+  [ "$(cat "$home/$ptr")" = "$answer" ] \
+    || fail "the pointed-at file does not hold the complete answer: $(cat "$home/$ptr" 2>&1)"
+  if drain_out "$home" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "a long-answer close did not close the decision"
+  fi
+  pass "fm-send --resolve-key: a long answer closes with a pointer to its complete stored text"
+}
+
+test_unstorable_full_answer_leaves_decision_open() {
+  local dir fb log home rc answer err
+  dir="$TMP_ROOT/full-answer-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home full-answer-fail)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: REST or gRPC\n' > "$home/state/t1.status"
+  : > "$home/state/resolved-answers"
+  answer=$(printf 'y%.0s' {1..400})
+
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key api-shape "$answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unstorable full answer should fail loudly"
+  assert_contains "$(cat "$err")" "do not resend the answer" "the failure should say the answer was delivered"
+  if grep -F 'resolved' "$home/state/t1.status" >/dev/null; then
+    fail "an unstorable full answer still wrote a truncated close: $(cat "$home/state/t1.status")"
+  fi
+  drain_out "$home" | grep -F 'OPEN DECISIONS' >/dev/null \
+    || fail "the decision closed although its full answer was never stored"
+  pass "fm-send --resolve-key: an answer whose full text cannot be stored leaves the decision open"
+}
+
 test_failed_close_recovery_command_is_shell_safe() {
   local dir fb log home err marker answer rc diagnostic manual out
   dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
@@ -926,6 +978,8 @@ test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
 test_long_decision_key_refuses_before_send
 test_stamped_close_line_stays_within_the_status_line_cap
+test_long_answer_close_points_at_full_text
+test_unstorable_full_answer_leaves_decision_open
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
