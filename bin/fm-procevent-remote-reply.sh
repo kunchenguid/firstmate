@@ -16,8 +16,10 @@
 # home's state/parent-replies.status log. The process-event runner owns blocking,
 # capture, publication, and one machine-wide source owner. Each captured delta is
 # terminal for that exact registration; `handle` validates and idempotently
-# ingests it, acknowledges the captured generation, then registers the next
-# cursor-anchored source. `relisten` tells that runner to poll again in the same
+# ingests it, registers the next cursor-anchored source, then acknowledges the
+# captured generation. Replaying an already acknowledged generation leaves that
+# registration untouched, so it cannot supersede a listener already polling it.
+# `relisten` tells that runner to poll again in the same
 # process, still holding the claim, after an empty window and after that re-arm.
 # A window the remote job worker preempted is reported to the runner as an empty
 # window, so it relistens too (see JOB_PREEMPTED below).
@@ -682,10 +684,14 @@ EOF
 }
 
 cmd_handle_locked() {
-  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to
+  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to handled_marker already_handled=0
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
   sid=$(source_id "$id")
+  handled_marker="$STATE/procevent-inbox/$sid.$seq.handled"
+  if [ -f "$handled_marker" ] && [ ! -L "$handled_marker" ]; then
+    already_handled=1
+  fi
   class=$(classify_result "$result")
   [ "$class" != malformed ] || die "remote reply result is malformed"
   if ingest_receipt_matches "$id" "$seq" "$result"; then
@@ -697,7 +703,7 @@ cmd_handle_locked() {
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     return "$rc"
   fi
-  if [ "$class" = delta ]; then
+  if [ "$class" = delta ] && [ "$already_handled" -eq 0 ]; then
     cmd_arm_locked "$id" || return 1
   fi
   "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
