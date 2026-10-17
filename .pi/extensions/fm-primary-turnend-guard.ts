@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -469,6 +469,104 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   });
 }
 
+function isWatcherProcessLive(): boolean {
+  try {
+    const lockPidPath = `${state}/.watch.lock/pid`;
+    if (!existsSync(lockPidPath)) return false;
+    const lockPid = readFileSync(lockPidPath, "utf8").trim();
+    if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
+    if (!pidAlive(lockPid)) return false;
+
+    const lockHomePath = `${state}/.watch.lock/fm-home`;
+    if (existsSync(lockHomePath)) {
+      const lockHome = readFileSync(lockHomePath, "utf8").trim();
+      if (lockHome && lockHome !== fmHome) {
+        try {
+          if (realpathSync(lockHome) !== realpathSync(fmHome)) return false;
+        } catch {
+          return false;
+        }
+      }
+    }
+
+    const wakeLib = `${root}/bin/fm-wake-lib.sh`;
+    const identityPath = `${state}/.watch.lock/pid-identity`;
+    if (existsSync(wakeLib) && existsSync(identityPath)) {
+      const expectedIdentity = readFileSync(identityPath, "utf8").trim();
+      if (expectedIdentity) {
+        const idCheck = spawnSync("bash", [
+          "-c",
+          '. "$1" && [ "$(fm_pid_identity "$2")" = "$3" ]',
+          "_",
+          wakeLib,
+          lockPid,
+          expectedIdentity,
+        ], {
+          env: {
+            ...process.env,
+            FM_HOME: fmHome,
+            FM_STATE_OVERRIDE: state,
+          },
+        });
+        if (idCheck.status !== 0) return false;
+      }
+    }
+
+    const beatPath = `${state}/.last-watcher-beat`;
+    if (!existsSync(beatPath)) return false;
+    const beatStat = statSync(beatPath);
+    const ageSec = Math.floor((Date.now() - beatStat.mtimeMs) / 1000);
+    const grace = Number(process.env.FM_GUARD_GRACE) || 300;
+    const stallBound = Number(process.env.FM_WATCHER_STALL_BOUND) || (grace * 3);
+    if (ageSec >= stallBound) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkExtensionArmLiveness(pi: ExtensionAPI): boolean {
+  try {
+    const query: {
+      reported?: boolean;
+      liveArmChild?: boolean;
+      armPid?: number | null;
+      watcherPid?: string | null;
+    } = {};
+    (pi as any).events?.emit?.("fm-supervision:liveness", query);
+    if (!query.reported || !query.liveArmChild) return false;
+    if (query.armPid !== null && query.armPid !== undefined && !pidAlive(String(query.armPid))) {
+      return false;
+    }
+    if (query.watcherPid && !pidAlive(query.watcherPid)) {
+      return false;
+    }
+
+    const lockPath = `${state}/.watch.lock/pid`;
+    if (existsSync(lockPath)) {
+      const lockPid = readFileSync(lockPath, "utf8").trim();
+      if (/^[0-9]+$/.test(lockPid) && !pidAlive(lockPid)) {
+        return false;
+      }
+    }
+
+    const beatPath = `${state}/.last-watcher-beat`;
+    if (existsSync(beatPath)) {
+      const beatStat = statSync(beatPath);
+      const ageSec = Math.floor((Date.now() - beatStat.mtimeMs) / 1000);
+      const grace = Number(process.env.FM_GUARD_GRACE) || 300;
+      const stallBound = Number(process.env.FM_WATCHER_STALL_BOUND) || (grace * 3);
+      if (ageSec >= stallBound) return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
 // bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
 // extension file rather than separate ones so no extra Pi -e flag is needed at
@@ -608,6 +706,8 @@ export default function (pi: ExtensionAPI) {
 
     const result = await runGuard();
     if (result.code !== 2) return;
+
+    if (isWatcherProcessLive() || checkExtensionArmLiveness(pi)) return;
 
     guardFollowupActive = true;
     try {

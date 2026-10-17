@@ -622,6 +622,25 @@ export default function (pi: ExtensionAPI) {
       stockExportRendering: next.stockExportRendering === true,
     };
   });
+  pi.events?.on?.("fm-supervision:liveness", (query: unknown) => {
+    if (!query || typeof query !== "object") return;
+    const q = query as {
+      reported?: boolean;
+      liveArmChild?: boolean;
+      armPid?: number | null;
+      watcherPid?: string | null;
+    };
+    if (activeGeneration) {
+      const child = liveArmChild(activeGeneration);
+      if (child) {
+        q.reported = true;
+        q.liveArmChild = true;
+        q.armPid = child.pid ?? null;
+        const recovery = armRecovery.get(child);
+        q.watcherPid = recovery?.watcherPid ?? null;
+      }
+    }
+  });
   const calmHides = (itemClass: Parameters<typeof calmTranscriptClassIsVisible>[0]): boolean =>
     calmPresentation.active &&
     !calmPresentation.stockExportRendering &&

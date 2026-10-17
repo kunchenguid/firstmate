@@ -1179,6 +1179,290 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+test_pi_extension_liveness_avoids_stale_beacon_false_positive_and_fires_on_kill() {
+  local repo home ext out status pid identity
+  repo="$TMP_ROOT/pi-liveness-root"
+  home="$TMP_ROOT/pi-liveness-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state/.watch.lock"
+  install_guard_scripts "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n' >&2
+printf '●  1 task(s) in flight, but no live watcher holds this home lock (last beat: 312s ago).\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$repo/bin/fm-wake-lib.sh" "$pid")
+
+  printf '%s\n' "$pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$repo/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  : > "$home/state/.last-watcher-beat"
+
+  out=$(PLUGIN="$ext" FM_HOME="$home" WATCHER_PID="$pid" node --input-type=module 2>&1 <<'EOF'
+import { utimesSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message, options) {
+    prompts += 1;
+    if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
+    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("agent_settled handler was not registered");
+
+// Case 1: Watcher is alive, but sweep took 312s (>300s grace, <900s stall bound).
+// Guard must NOT false-positive.
+const beatPath = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+const now = Date.now() / 1000;
+utimesSync(beatPath, now - 312, now - 312);
+
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 0) throw new Error(`guard false-positived on long sweep with live watcher, prompts=${prompts}`);
+
+// Case 2: Watcher is stalled past hard bound (950s >= 900s).
+// Guard MUST fire.
+utimesSync(beatPath, now - 950, now - 950);
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 1) throw new Error(`guard failed to fire on stalled watcher, prompts=${prompts}`);
+
+// Case 3: Watcher beacon is 312s again, but watcher process is killed.
+// Guard MUST fire.
+utimesSync(beatPath, now - 312, now - 312);
+process.kill(Number(process.env.WATCHER_PID), "SIGKILL");
+
+let dead = false;
+for (let i = 0; i < 50; i += 1) {
+  try {
+    process.kill(Number(process.env.WATCHER_PID), 0);
+    await new Promise((r) => setTimeout(r, 10));
+  } catch {
+    dead = true;
+    break;
+  }
+}
+if (!dead) throw new Error("watcher process did not die");
+
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 2) throw new Error(`guard failed to fire when watcher was killed, prompts=${prompts}`);
+EOF
+)
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "Pi guard must not false-positive on long sweep when alive, and must fire on stall or kill"
+  [ -z "$out" ] || fail "Pi guard liveness test printed output: $out"
+  pass ".pi primary extension: suppresses false positive on long sweep (>300s) and fires on stall or kill"
+}
+
+test_pi_extension_arm_child_liveness_cooperation() {
+  local repo home watch_ext guard_ext out status pid
+  repo="$TMP_ROOT/pi-arm-coop-root"
+  home="$TMP_ROOT/pi-arm-coop-home"
+  watch_ext="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  guard_ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state"
+  install_guard_scripts "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$guard_ext"
+  cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$watch_ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+
+  sleep 60 &
+  pid=$!
+
+  out=$(GUARD_PLUGIN="$guard_ext" WATCH_PLUGIN="$watch_ext" FM_HOME="$home" ARM_PID="$pid" node --input-type=module 2>&1 <<'EOF'
+import { EventEmitter } from "node:events";
+import { writeFileSync, utimesSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const events = new EventEmitter();
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  events,
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message, options) {
+    prompts += 1;
+  },
+};
+
+events.on("fm-supervision:liveness", (query) => {
+  query.reported = true;
+  query.liveArmChild = true;
+  query.armPid = Number(process.env.ARM_PID);
+  query.watcherPid = Number(process.env.ARM_PID);
+});
+
+const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+guardMod.default(pi);
+
+const beatPath = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+writeFileSync(beatPath, "");
+const now = Date.now() / 1000;
+utimesSync(beatPath, now - 312, now - 312);
+
+const settled = handlers.get("agent_settled");
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 0) throw new Error(`guard fired despite live arm child, prompts=${prompts}`);
+
+process.kill(Number(process.env.ARM_PID), "SIGKILL");
+let dead = false;
+for (let i = 0; i < 50; i += 1) {
+  try {
+    process.kill(Number(process.env.ARM_PID), 0);
+    await new Promise((r) => setTimeout(r, 10));
+  } catch {
+    dead = true;
+    break;
+  }
+}
+if (!dead) throw new Error("arm child process did not die");
+
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 1) throw new Error(`guard failed to fire when arm child died, prompts=${prompts}`);
+EOF
+)
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "Pi guard must recognize arm child liveness and fire when killed"
+  [ -z "$out" ] || fail "Pi arm child liveness test printed output: $out"
+  pass ".pi primary extension: respects live arm child and fires when arm child process dies"
+}
+
+test_omp_extension_liveness_avoids_stale_beacon_false_positive_and_fires_on_kill() {
+  local repo home ext out status pid identity
+  repo="$TMP_ROOT/omp-liveness-root"
+  home="$TMP_ROOT/omp-liveness-home"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$home/state/.watch.lock"
+  install_guard_scripts "$repo"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n' >&2
+printf '●  1 task(s) in flight, but no live watcher holds this home lock (last beat: 312s ago).\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$repo/bin/fm-wake-lib.sh" "$pid")
+
+  printf '%s\n' "$pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$repo/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  : > "$home/state/.last-watcher-beat"
+
+  out=$(PLUGIN="$ext" FM_HOME="$home" WATCHER_PID="$pid" node --input-type=module 2>&1 <<'EOF'
+import { utimesSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionStop = handlers.get("session_stop");
+if (!sessionStop) throw new Error("session_stop handler was not registered");
+
+// Case 1: Watcher is alive, sweep is 312s (>300s grace, <900s stall bound).
+// session_stop must return undefined (no continuation compelled).
+const beatPath = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+const now = Date.now() / 1000;
+utimesSync(beatPath, now - 312, now - 312);
+
+const res1 = await sessionStop({ stop_hook_active: false });
+if (res1 !== undefined) throw new Error(`omp guard compelled continuation on long sweep with live watcher: ${JSON.stringify(res1)}`);
+
+// Case 2: Watcher is stalled past hard bound (950s >= 900s).
+// session_stop must compel continuation.
+utimesSync(beatPath, now - 950, now - 950);
+const res2 = await sessionStop({ stop_hook_active: false });
+if (!res2?.continue || !res2?.additionalContext?.includes("TURN WOULD END BLIND")) {
+  throw new Error(`omp guard failed to compel continuation on stalled watcher: ${JSON.stringify(res2)}`);
+}
+
+// Case 3: Watcher beacon is 312s, but watcher process is killed.
+// session_stop must compel continuation.
+utimesSync(beatPath, now - 312, now - 312);
+process.kill(Number(process.env.WATCHER_PID), "SIGKILL");
+
+let dead = false;
+for (let i = 0; i < 50; i += 1) {
+  try {
+    process.kill(Number(process.env.WATCHER_PID), 0);
+    await new Promise((r) => setTimeout(r, 10));
+  } catch {
+    dead = true;
+    break;
+  }
+}
+if (!dead) throw new Error("watcher process did not die");
+
+const res3 = await sessionStop({ stop_hook_active: false });
+if (!res3?.continue || !res3?.additionalContext?.includes("TURN WOULD END BLIND")) {
+  throw new Error(`omp guard failed to compel continuation when watcher was killed: ${JSON.stringify(res3)}`);
+}
+EOF
+)
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "omp guard must not compel continuation on long sweep when alive, and must fire on stall or kill"
+  [ -z "$out" ] || fail "omp guard liveness test printed output: $out"
+  pass ".omp primary extension: suppresses false positive on long sweep (>300s) and compels continuation on stall or kill"
+}
+
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -2252,6 +2536,9 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_liveness_avoids_stale_beacon_false_positive_and_fires_on_kill
+test_pi_extension_arm_child_liveness_cooperation
+test_omp_extension_liveness_avoids_stale_beacon_false_positive_and_fires_on_kill
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

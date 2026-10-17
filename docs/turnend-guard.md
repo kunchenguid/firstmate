@@ -273,8 +273,11 @@ The registrations in detail:
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+  It drops that follow-up when a watcher sweep has outrun the guard grace but supervision is still live.
+  Live means either a live `.watch.lock` holder with a beacon younger than the stall bound, or a live arm child that `.pi/extensions/fm-primary-pi-watch.ts` reports on the `fm-supervision:liveness` event.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
   When the guard returns 2, it returns `{ continue: true, additionalContext }`, so the continuation is compelled rather than requested.
+  It skips that continuation when the same live `.watch.lock` holder check as Pi passes.
   The continuation's stop carries `stop_hook_active: true`, which bounds it to one per turn, and omp's own cap of eight consecutive continuations is the second backstop.
   `session_stop` never fires for an interrupted turn or a task session, so those boundaries are deliberately unguarded.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
@@ -559,6 +562,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Away-mode daemon ownership between watcher cycles and over a watcher lock left behind by an exited watcher, plus its dead, pid-reused, absent, stale-beacon, and away-mode-off negatives.
 - The away-mode beacon's poll-derived grace widening for a live daemon still mid-cycle and its bound against a dead daemon, a beacon older than that wider grace, and FM_POLL's inapplicability with away mode off.
 - Pi logical-run latching.
+- Pi and omp follow-up suppression during a live watcher sweep past grace, and the alarm once that watcher is killed.
 - Missing-`jq` behavior.
 - All five primary registrations.
 - Grok native and legacy selection.
