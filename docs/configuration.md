@@ -1306,7 +1306,7 @@ The task-specific text is the brief's `## Captain's intent` and `## Firstmate sp
 When the sections are sent from a scout brief, the line `Brief kind: scout (report only)` comes first, taken from the scaffold's scout contract line; ship briefs and briefs sent whole get no kind line.
 A ship brief's delivery mode is deliberately not sent, because in live runs naming it pushed a routine ship brief toward the hardest tier (see [the verification record](verification/dispatch-resolve.md)).
 
-The scaffold's standard setup, rules, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
+When those sections exist, the resolver sends only the brief's task-specific sections and leaves standard scaffold prose out, so its safety language does not read as a signal about the task.
 
 **Never-send list (config/dispatch-never-send)**
 

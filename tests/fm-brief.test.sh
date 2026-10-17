@@ -644,6 +644,66 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
+# A phased ship task carries the four planning gate fields ported from the
+# source planning skill - Model, Gate (Full/Standard/Minimal), Depends on, and
+# File scope - with a DONE/NOT-DONE marker, mandatory pre-commit verification,
+# and the batch cross-phase review note. Declared file scopes plus dependency
+# edges are what make concurrent dispatch mechanically checkable. Scout briefs
+# and secondmate charters omit the section because neither makes a deliverable
+# commit, so phase gates and pre-commit verification have nothing to govern.
+test_ship_phase_plan_fields() {
+  local home id brief mode other_id other_brief
+  home="$TMP_ROOT/phase-plan-home"
+  mkdir -p "$home/data"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-phase-plan-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode: brief was not scaffolded"
+    assert_grep "# Phase plan" "$brief" "$mode: ship brief missing its phase-plan section"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep '- `Model:` the model tier the phase needs' "$brief" \
+      "$mode: phase plan lost the Model field"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep '- `Gate:` `Full`, `Standard`, or `Minimal`' "$brief" \
+      "$mode: phase plan lost the Gate field or its closed set"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep '- `Depends on:` the phases that must be `DONE`' "$brief" \
+      "$mode: phase plan lost the Depends on field"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep '- `File scope:` the path globs this phase may touch' "$brief" \
+      "$mode: phase plan lost the File scope field"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep 'Each phase carries a `DONE`/`NOT-DONE` marker' "$brief" \
+      "$mode: phase plan lost the DONE/NOT-DONE marker rule"
+    assert_grep "Mandatory pre-commit verification: run a phase's own checks before its commit" "$brief" \
+      "$mode: phase plan lost mandatory pre-commit verification"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    assert_grep 'Batch cross-phase review: `Standard` and `Minimal` phases are covered by one later review over the whole batch' "$brief" \
+      "$mode: phase plan lost the batch cross-phase review note"
+    assert_grep 'phases with disjoint scopes and no dependency between them can run in parallel' "$brief" \
+      "$mode: phase plan lost the file-scope concurrency rule"
+  done
+
+  other_id="brief-phase-plan-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
+  other_brief="$home/data/$other_id/brief.md"
+  assert_present "$other_brief" "scout brief was not scaffolded"
+  assert_no_grep "# Phase plan" "$other_brief" \
+    "scout brief received the ship-only phase-plan contract"
+
+  other_id="brief-phase-plan-mate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='handle routed work' \
+    "$ROOT/bin/fm-brief.sh" "$other_id" --secondmate --no-projects >/dev/null 2>&1
+  other_brief="$home/data/$other_id/brief.md"
+  assert_present "$other_brief" "secondmate charter was not scaffolded"
+  assert_no_grep "# Phase plan" "$other_brief" \
+    "secondmate charter received the ship-only phase-plan contract"
+
+  pass "fm-brief.sh: ship briefs carry the four phase-plan fields with the marker, verification, and batch-review rules; scout and charter scaffolds do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1613,6 +1673,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_phase_plan_fields
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

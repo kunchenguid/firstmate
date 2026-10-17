@@ -312,6 +312,12 @@ The refusal library's header owns the gate detection, lab-home exception, test-h
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
+## Phased ship plans
+
+A phased ship task carries one planning block per phase with four fields - `Model:`, `Gate:` (`Full`/`Standard`/`Minimal`), `Depends on:`, and `File scope:` - plus a `DONE`/`NOT-DONE` marker, mandatory pre-commit verification, and the batch cross-phase review note; `bin/fm-brief.sh` owns the exact contract and renders it into every ship brief.
+The gate decides review timing rather than whether review happens, so `Standard` (the default) and `Minimal` docs- and config-only phases commit on passing checks and are covered together by one later batch review, while a `Full` phase waits for its own review before it commits and is used only when the task asks for one.
+Declared `File scope:` globs plus `Depends on:` edges make concurrent dispatch mechanically checkable - phases with disjoint scopes and no dependency between them can run in parallel, and overlapping or undeclared scopes stay serial - and scout briefs carry no phase blocks because a scout makes no deliverable commit.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.

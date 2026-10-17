@@ -131,6 +131,15 @@
 # additions of missing knowledge. A correction edits only the wrong text and
 # never runs fm-ensure-agents-md.sh, whose inserted sections and created
 # pointer file are themselves additions.
+# Ship tasks also carry a `# Phase plan` section: a phased task records one
+# block per phase, in dependency order, with `Model:`, `Gate:`
+# (Full/Standard/Minimal), `Depends on:`, and `File scope:`, plus a
+# DONE/NOT-DONE marker, the mandatory pre-commit verification rule, and the
+# batch cross-phase review note. Declared file scopes plus dependency edges
+# are what make concurrent dispatch mechanically checkable. The section is
+# emitted only for ship briefs: a scout makes no deliverable commit, so phase
+# gates and pre-commit verification have nothing to govern there.
+# docs/architecture.md "Phased ship plans" describes the contract.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -666,6 +675,27 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# The phase-plan contract for ship briefs, ported from the source planning
+# skill's per-phase gate fields so a scaffolded brief carries them: Model,
+# Gate (Full/Standard/Minimal), Depends on, and File scope, with a
+# DONE/NOT-DONE marker, mandatory pre-commit verification, and the batch
+# cross-phase review note. Emitted for ship briefs only - a scout makes no
+# deliverable commit, so phase gates and pre-commit verification have nothing
+# to govern there.
+IFS= read -r -d '' PHASE_PLAN_SECTION <<'EOF' || true
+# Phase plan
+A phased task carries one block per phase, in dependency order, with four fields:
+- `Model:` the model tier the phase needs; the task's normal tier unless the phase is small and mechanical.
+- `Gate:` `Full`, `Standard`, or `Minimal`, deciding review timing rather than whether review happens: `Standard` (the default) and `Minimal` (docs- and config-only work) commit on passing checks and are covered by a later batch review, while a `Full` phase waits for its own review before it commits and is used only when the task asks for one.
+- `Depends on:` the phases that must be `DONE` before this one starts, or `none` for an entry phase.
+- `File scope:` the path globs this phase may touch: phases with disjoint scopes and no dependency between them can run in parallel, and overlapping or undeclared scopes stay serial.
+Each phase carries a `DONE`/`NOT-DONE` marker, kept current as the work proceeds.
+Mandatory pre-commit verification: run a phase's own checks before its commit, and mark it `DONE` only after they pass.
+Batch cross-phase review: `Standard` and `Minimal` phases are covered by one later review over the whole batch rather than a review each, and checking the phases against each other - where seam defects between them live - is that review's point.
+EOF
+PHASE_PLAN_SECTION=${PHASE_PLAN_SECTION%$'\n'}
+PHASE_PLAN_BLOCK="$PHASE_PLAN_SECTION"$'\n\n'
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -794,7 +824,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$PHASE_PLAN_BLOCK$WAIT_BLOCK$INBOX_SECTION
 
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
