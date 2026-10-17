@@ -496,6 +496,37 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_retries_late_listed_workspace() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-task-late"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-late)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace; 3-4: post-create lists do not show it yet; 5: it appears
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  printf '{"workspaces":[]}' > "$dir/responses/4.out"
+  cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_response "$dir" 6 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-late /tmp/proj' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should retry until a late-listed workspace appears, got '$out'"
+  pass "fm_backend_cmux_create_task: retries the id lookup when cmux lists a new workspace late"
+}
+
+test_create_task_fails_when_workspace_never_listed() {
+  local dir fb out status n
+  dir="$TMP_ROOT/create-task-never"; mkdir -p "$dir/responses"
+  for n in 1 3 4 5 6 7 8 9 10 11 12 13; do printf '{"workspaces":[]}' > "$dir/responses/$n.out"; done
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-never /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the new workspace never appears"
+  assert_contains "$out" "could not resolve a cmux workspace id" "create_task did not report the unresolved workspace"
+  pass "fm_backend_cmux_create_task: gives up with a clear error when the workspace never appears"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1161,8 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_retries_late_listed_workspace
+test_create_task_fails_when_workspace_never_listed
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
