@@ -893,9 +893,9 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
     if [ "$i" -ge 3 ]; then
       # Past FM_WEDGE_DEMAND_INSPECT_COUNT the watcher enriches the same reason with
       # its demand-deep-inspection marker; a declaration outranks both forms.
-      reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone)"
+      reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone) task=$task"
     else
-      reason="stale: $win (idle 250s, possible wedge, escalation $i)"
+      reason="stale: $win (idle 250s, possible wedge, escalation $i) task=$task"
     fi
     LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
@@ -929,7 +929,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   # enriched wedge escalates again, unchanged.
   : > "$state/.subsuper-escalations"
   printf 'working: the audit finished, resuming\n' >> "$state/$task.status"
-  reason="stale: $win (idle 250s, possible wedge, escalation 6)"
+  reason="stale: $win (idle 250s, possible wedge, escalation 6) task=$task"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
