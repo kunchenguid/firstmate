@@ -201,6 +201,48 @@ fm_pr_forgejo_segment_valid() {
   esac
 }
 
+# The forge host and owner/repository of a git clone URL, for comparing a
+# pull request's repository with a worktree's origin. Accepted forms are the
+# remotes git itself accepts: https://, http://, ssh://, and git:// URLs with
+# an optional user@, and scp-like [user@]host:path. A .git suffix and a
+# trailing slash are dropped. FM_PR_GIT_REPO is set only when the path is
+# exactly owner/repository, so a subgroup, nested, or local path and any URL
+# whose repository cannot be isolated leave it empty and the caller keeps its
+# existing behavior instead of guessing a repository. An explicit port in a
+# scheme URL (ssh://host:2222/owner/repo.git) stays in the path, so such a
+# remote also leaves FM_PR_GIT_REPO empty and is never isolated.
+fm_pr_repo_from_git_url() {  # <url>
+  local url=$1 rest path
+  FM_PR_GIT_HOST=
+  FM_PR_GIT_REPO=
+  case $url in
+    https://* | http://* | ssh://* | git://*)
+      rest=${url#*://}
+      rest=${rest##*@}
+      FM_PR_GIT_HOST=${rest%%[:/]*}
+      case $rest in
+        */*) path=${rest#*/} ;;
+        *) return 0 ;;
+      esac
+      ;;
+    /*) return 0 ;;
+    *:*)
+      FM_PR_GIT_HOST=${url%%:*}
+      FM_PR_GIT_HOST=${FM_PR_GIT_HOST##*@}
+      path=${url#*:}
+      ;;
+    *) return 0 ;;
+  esac
+  path=${path%.git}
+  path=${path%/}
+  case $path in
+    '' | /* | */*/*) ;;
+    */*) # shellcheck disable=SC2034
+      FM_PR_GIT_REPO=$path ;;
+  esac
+  return 0
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
 # username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo

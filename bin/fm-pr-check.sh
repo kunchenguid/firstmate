@@ -3,7 +3,11 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge.
+# head is that named head and is already stored on the forge. A pull request
+# that lives in a repository other than the worktree's origin (a cross-repo
+# lane's second PR) checks the completion receipt against its verified forge
+# head instead of the worktree's HEAD, because the merge binds to that forge
+# head and the worker's one receipt names it.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
@@ -157,6 +161,17 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+# A cross-repository lane's completion receipt names the pull request's forge
+# head, which is also what bin/fm-pr-merge.sh binds the merge to, so the
+# gate's receipt candidate is that verified forge head when the pull request's
+# owner and repository are not this worktree's origin. A same-repository pull
+# request, an unverified forge head, or an origin whose repository cannot be
+# isolated keep the worktree HEAD candidate.
+RECEIPT_CANDIDATE=
+if [ -n "$PR_HEAD" ] && fm_dod_pr_outside_origin "$WT" "$URL"; then
+  RECEIPT_CANDIDATE=$PR_HEAD
+fi
+
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 # The gate is asked about the ready report this task's worker was told to give;
@@ -167,7 +182,7 @@ case "$PROVIDER:$MODE" in
   *) DONE_LINE="done: PR $URL" ;;
 esac
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
-  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
+  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" "" "$RECEIPT_CANDIDATE"); then
   echo "error: $GATE_REASON" >&2
   exit 1
 fi

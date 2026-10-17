@@ -682,7 +682,13 @@ fm_dod_meta_value() {  # <meta> <key>
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
 # mode the pipeline pushes it, possibly with commits the worker clone never
 # fetched. A direct-PR worker pushes from its own copy, so its named head stays
-# that copy's HEAD and a later unpushed commit is refused.
+# that copy's HEAD and a later unpushed commit is refused. The one exception,
+# applied by fm_dod_accept_ship_done: a registered direct-PR pull request
+# outside the worktree's origin repository takes its recorded pr_head=
+# (bin/fm-pr-check.sh's verified forge head) as the receipt candidate, so the
+# one receipt the worker published for that head also passes
+# bin/fm-crew-state.sh and bin/fm-inactive-reconcile.sh; a same-repository
+# direct-PR keeps the copy's HEAD.
 fm_dod_forge_head_is_named_head() {  # <mode>
   case "$1" in
     no-mistakes|'') return 0 ;;
@@ -793,6 +799,23 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+# 0 when <url> names a pull request outside <worktree>'s origin repository:
+# both sides must isolate to one host and one owner/repository pair, and at
+# least one of them differs, the same comparison bin/fm-pr-check.sh uses to
+# arm a cross-repository lane. An unparsable URL, a missing worktree, or an
+# origin whose repository cannot be isolated returns 1, so an unknown origin
+# never reclassifies a pull request as cross-repository.
+fm_dod_pr_outside_origin() {  # <worktree> <pr-url>
+  local wt=$1 url=$2 origin_url
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  fm_pr_url_parse "$url" || return 1
+  origin_url=$(git -C "$wt" remote get-url origin 2>/dev/null) || return 1
+  fm_pr_repo_from_git_url "$origin_url" || return 1
+  [ -n "$FM_PR_GIT_HOST" ] && [ -n "$FM_PR_GIT_REPO" ] || return 1
+  [ "$(printf '%s' "$FM_PR_GIT_HOST" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$FM_PR_HOST" | tr '[:upper:]' '[:lower:]')" ] \
+    || [ "$(printf '%s' "$FM_PR_GIT_REPO" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$FM_PR_PATH" | tr '[:upper:]' '[:lower:]')" ]
+}
+
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
@@ -809,14 +832,36 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # same mode-specific declaration and named-head proof, not a new opt-in marker.
 # Optional captured run output preserves an explicit unreturned-custody refusal
 # even when the declared head is already on the forge.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> <run-output>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} url sha gerrit
+# The optional trailing <forge-head> is a verified forge head the caller read
+# for a pull request that lives outside the worktree's origin repository. A
+# cross-repository lane's one completion receipt names that pull request's
+# head, because bin/fm-pr-merge.sh binds the merge to the live forge head, so
+# the receipt is checked against it instead of the worktree's HEAD; an absent
+# or invalid value keeps the worktree HEAD candidate, and a forge-head mode's
+# recorded pr_head still wins over it.
+# In direct-PR mode the recorded pr_head= becomes the candidate once the done
+# note names the task's registered pr= and that pull request lives outside
+# the worktree's origin repository (fm_dod_pr_outside_origin): registration
+# recorded bin/fm-pr-check.sh's verified forge head there, so every gate
+# caller accepts the worker's one receipt from local state alone, while a
+# same-repository direct-PR keeps the worktree HEAD candidate and still
+# refuses a later unpushed commit.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> <run-output> [<forge-head>]]
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} forge_head=${10:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || sha=
-  if fm_dod_forge_head_is_named_head "$mode" && [ -f "$meta" ]; then
+  if [ -n "$forge_head" ] && fm_pr_head_valid "$forge_head"; then
+    sha=$forge_head
+  fi
+  if [ -f "$meta" ]; then
     url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || url=
     if [ -n "$url" ] && [ "$(fm_dod_meta_value "$meta" pr)" = "$url" ]; then
-      if fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
+      if fm_dod_forge_head_is_named_head "$mode"; then
+        if fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
+          sha=$(fm_dod_meta_value "$meta" pr_head)
+        fi
+      elif [ "$mode" = direct-PR ] && fm_dod_pr_outside_origin "$wt" "$url" \
+        && fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
         sha=$(fm_dod_meta_value "$meta" pr_head)
       fi
     fi
