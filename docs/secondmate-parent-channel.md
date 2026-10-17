@@ -29,6 +29,7 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | PR merged | the merge poll or the mate's own merge | `bin/fm-merge-outcome-lib.sh` |
 | Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
 | Child ended silently | terminal current state with a silent ledger | the existing inactive-outcome scan in `bin/fm-inactive-reconcile.sh` |
+| Lookout events on the flagship: a dead watcher, its restart, a silent flagship, and taking or handing back the con | the lookout's own record under `state/lookout/` | `bin/fm-lookout.sh` on each lookout pass |
 | Answer to a marked request | a correlated line guarded by the pending-reply record | `bin/fm-secondmate-report.sh`, which resolves the parent channel from the mate home; the pending-reply guard repairs a line stranded in the local mate's same-basename status file before recovery or escalation |
 | An outcome that exists only in the mate's reasoning | none | the charter and the `AGENTS.md` carve-outs only |
 

@@ -25,6 +25,9 @@
 #                                    remove the child while it is undelivered
 #   - bin/fm-secondmate-report.sh     a marked request's correlated answer,
 #                                    with this resolver choosing its destination
+#   - bin/fm-lookout.sh              a lookout's facts about the flagship:
+#                                    a dead watcher, its restart, silence, and
+#                                    taking or handing back the con
 # The mate's own appends are reserved for judgement (bin/fm-brief.sh charter).
 # docs/secondmate-parent-channel.md records the design and its coverage.
 #

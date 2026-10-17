@@ -914,6 +914,28 @@ test_return_brief_health_leads_with_a_gap() {
   pass "the return brief leads with supervisor health and names every detected gap"
 }
 
+test_return_brief_reports_the_lookout() {
+  local dir out now health_line words_line
+  dir="$TMP_ROOT/brief-lookout"
+  install_runner "$dir"
+  cp "$ROOT/bin/fm-lookout.sh" "$ROOT/bin/fm-parent-channel-lib.sh" "$ROOT/bin/fm-secondmate-parent-lib.sh" "$dir/bin/"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+  touch "$dir/home/state/.last-watcher-beat"
+  now=$(date +%s)
+  printf '%s\tmini-capacity\trecovery-failed\tcould not restart the flagship watcher (attempt 1)\n' "$now" > "$dir/home/state/.lookout.log"
+  printf '1\tmini-capacity\tstale\tbefore the away window\n' >> "$dir/home/state/.lookout.log"
+  printf '%s\tCR-100\tclaim\tmini-capacity\ttakeover\n' "$now" > "$dir/home/state/.review-claims.log"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a clean fleet should clear the gate: $out"
+  assert_contains "$out" 'lookout mini-capacity at ' "the lookout's events are missing from the brief"
+  assert_contains "$out" 'lookout: CR-100 is still claimed by mini-capacity' "the brief does not list the review the other host claims"
+  assert_not_contains "$out" 'before the away window' "the brief lists a lookout event from before the away window"
+  health_line=$(line_of "$out" 'CR-100 is still claimed')
+  words_line=$(line_of "$out" 'Your instructions:')
+  [ "$health_line" -lt "$words_line" ] || fail "the lookout lines are not under supervisor health"
+  pass "the return brief reports the lookout's events in the window and the reviews it still claims"
+}
+
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   local dir out
   dir="$TMP_ROOT/brief-acked-marker"
@@ -1377,6 +1399,7 @@ test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
+test_return_brief_reports_the_lookout
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_reports_only_an_open_downtime_episode_as_a_gap
 test_return_brief_reports_an_engine_latch_in_the_window

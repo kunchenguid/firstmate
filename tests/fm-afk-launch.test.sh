@@ -31,6 +31,9 @@ CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # the CLAUDECODE=1 marker below and refuse the daemon paths under test.
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 export CLAUDECODE=1 FM_TEST_HARNESS=claude FM_TEST_SEAM=1
+# These units exercise entry itself, so the batten-down check, which reads this
+# machine's disk, load, swap and Midway, stays off (tests/fm-batten-down.test.sh owns it).
+export FM_BATTEN_DOWN=off
 # A Claude home runs the supervision host unless config/supervision-host-off
 # opts it out (docs/configuration.md "Supervision host"), and the host is that home's
 # away session, so the daemon units run on a Claude home that opted out; the
