@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the treehouse-get settle poll after `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -121,6 +121,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_SPAWN_TREEHOUSE_SETTLE_SECONDS="${FM_SPAWN_TREEHOUSE_SETTLE_SECONDS-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -232,9 +233,116 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# The refusal must name the configured settle limit, not a hard-coded 60s default.
+test_failure_message_reports_configured_settle_seconds() {
+  local rec id out status
+  id=settle-timeout-message-z5
+  rec=$(make_primary_case settle-timeout-message "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  FM_SPAWN_TREEHOUSE_SETTLE_SECONDS=7
+  out=$(run_settle_spawn "$id")
+  status=$?
+  unset FM_SPAWN_TREEHOUSE_SETTLE_SECONDS
+  [ "$status" -ne 0 ] || fail "spawn should refuse when the pane never settles"$'\n'"$out"
+  assert_contains "$out" "within 7s" \
+    "the refusal did not report the configured FM_SPAWN_TREEHOUSE_SETTLE_SECONDS limit"
+  assert_not_contains "$out" "within 60s" \
+    "the refusal still named the old hard-coded 60s limit"
+  pass "the settle refusal reports FM_SPAWN_TREEHOUSE_SETTLE_SECONDS in the message"
+}
+
+# The v10 incident: a worktree that needs more than the old hard-coded 60 polls
+# to settle (about 65s under load) must now succeed under the default limit,
+# which is 180, not 60. The pane reports the primary for 65 reads, settles at
+# read 66, and is confirmed at read 67 - past the old deadline but inside the
+# new default.
+test_default_limit_tolerates_worktree_acquiring_past_sixty_polls() {
+  local rec id out status
+  id=settle-default-past-sixty-z6
+  rec=$(make_primary_case settle-default-past-sixty "$id" 65)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed once a 65-poll acquisition settles under the default limit"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the settled worktree for a past-60-poll acquisition"
+  pass "the default limit tolerates a worktree that settles past the old 60-poll deadline"
+}
+
+# When no FM_SPAWN_TREEHOUSE_SETTLE_SECONDS is set, the refusal names the new
+# 180s default rather than the retired 60s figure.
+test_default_refusal_reports_the_180s_default() {
+  local rec id out status
+  id=settle-default-message-z6b
+  rec=$(make_primary_case settle-default-message "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when the pane never settles"$'\n'"$out"
+  assert_contains "$out" "within 180s" \
+    "the default refusal did not name the 180s default limit"
+  assert_not_contains "$out" "within 60s" \
+    "the default refusal still named the old hard-coded 60s limit"
+  pass "the default refusal reports the 180s default limit"
+}
+
+# A configured limit below the acquisition time shortens the real poll loop, not
+# only the message: this pane would settle in ~12 polls (well under the 180
+# default), yet a limit of 3 polls must still refuse at 3s.
+test_configured_limit_shortens_the_poll_loop() {
+  local rec id out status
+  id=settle-limit-shortens-loop-z7
+  rec=$(make_primary_case settle-limit-shortens-loop "$id" 10)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  FM_SPAWN_TREEHOUSE_SETTLE_SECONDS=3
+  out=$(run_settle_spawn "$id")
+  status=$?
+  unset FM_SPAWN_TREEHOUSE_SETTLE_SECONDS
+  [ "$status" -ne 0 ] || fail "spawn should refuse when a 3-poll limit expires before a ~12-poll acquisition settles"$'\n'"$out"
+  assert_contains "$out" "within 3s" \
+    "the refusal did not report the configured 3s limit"
+  pass "a configured limit below the acquisition time shortens the actual poll loop"
+}
+
+# Invalid values fall back to the 180 default rather than collapsing the loop to
+# zero iterations (0) or failing to parse (non-numeric). Both must still
+# tolerate a 65-poll acquisition.
+test_invalid_settle_seconds_falls_back_to_default() {
+  local rec id out status val name
+  for val in 0 abc; do
+    id=settle-invalid-fallback-$val
+    name=settle-invalid-fallback-$val
+    rec=$(make_primary_case "$name" "$id" 65)
+    read_settle_record "$rec"
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+    FM_SPAWN_TREEHOUSE_SETTLE_SECONDS=$val
+    out=$(run_settle_spawn "$id")
+    status=$?
+    unset FM_SPAWN_TREEHOUSE_SETTLE_SECONDS
+    expect_code 0 "$status" "spawn should succeed for FM_SPAWN_TREEHOUSE_SETTLE_SECONDS='$val', which falls back to the default"$'\n'"$out"
+    assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+      "meta did not record the settled worktree for invalid value '$val'"
+  done
+  pass "invalid FM_SPAWN_TREEHOUSE_SETTLE_SECONDS values fall back to the default"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_failure_message_reports_configured_settle_seconds
+test_default_limit_tolerates_worktree_acquiring_past_sixty_polls
+test_default_refusal_reports_the_180s_default
+test_configured_limit_shortens_the_poll_loop
+test_invalid_settle_seconds_falls_back_to_default
 
 echo "# all fm-spawn-worktree-settle tests passed"

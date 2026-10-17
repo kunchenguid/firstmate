@@ -290,6 +290,8 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   FM_SPAWN_TREEHOUSE_SETTLE_SECONDS (default 180) is how many one-second polls
+#   that wait allows after `treehouse get`; invalid values fall back to 180.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -4730,7 +4732,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  TREEHOUSE_SETTLE_SECONDS=${FM_SPAWN_TREEHOUSE_SETTLE_SECONDS:-180}
+  case "$TREEHOUSE_SETTLE_SECONDS" in ''|*[!0-9]*|0*) TREEHOUSE_SETTLE_SECONDS=180 ;; esac
+  for _ in $(seq 1 "$TREEHOUSE_SETTLE_SECONDS"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4748,7 +4752,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${TREEHOUSE_SETTLE_SECONDS}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
