@@ -39,7 +39,7 @@ The brief submitted itself with no extra Enter, the turn ran, and the reply rend
 A second launch into the same directory answered a fresh prompt the same way, so the shape is repeatable, not a first-run accident.
 The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted together.
 
-## Trust dialog: pre-registered before launch, gated on a busy turn as the backstop
+## Native-Linux 1.2.0 trust dialog: pre-registration and readiness backstop
 
 A first launch in a fresh worktree shows this dialog:
 
@@ -57,8 +57,8 @@ Antigravity CLI requires permission to read, edit, and execute files here.
 ```
 `agy --help` (1.2.0) lists no trust flag or pre-registration command, but agy honours a `trustedWorkspaces` entry written to `~/.gemini/antigravity-cli/settings.json` ahead of launch.
 Verified under a throwaway `HOME` holding a copy of `~/.gemini` (the real settings file was never written): a folder appended to that array by hand launched `--prompt-interactive` straight into its turn and rendered the reply with no dialog, while an unregistered sibling folder launched the same way parked on the dialog.
-agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog, so `bin/fm-agy-trust.sh` records both the logical path and its resolved form when they differ.
-`bin/fm-spawn.sh` runs that helper before launch at the same point it pre-registers claude trust; the helper applies the same structural scope test (a linked worktree of the spawning project, never a primary checkout, a subdirectory, a plain directory, or the home directory), preserves every other key in the store, and writes atomically with a fingerprint check.
+agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog.
+`bin/fm-spawn.sh` runs the helper before launch at the same point it pre-registers claude trust; [`bin/fm-agy-trust.sh`](../../bin/fm-agy-trust.sh)'s header and write-path comments own path registration, scope, and settings-preservation guarantees.
 A failed registration is a stderr warning rather than a refusal, because agy's dialog preselects the safe answer and the gate below can answer it.
 Two supervised Herdr runs in treehouse worktrees completed file-writing turns while the dialog was still unanswered at observation time (worker file and `done:` status line both verified on disk before Enter was ever sent to those panes).
 Isolated runs in untrusted `/tmp` directories never reached the workspace until Enter: the turn spun through exploratory tool calls in agy's own scratch directory instead, and only the queued prompt ran after the answer.
@@ -153,9 +153,26 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## Windows/WSL 1.3.1 refresh
+
+Verified on 2026-10-08 with the installed Windows `agy.exe` (1.3.1), launched from its Linux `agy` symlink on WSL Ubuntu.
+The selected binary has PE `MZ` bytes, not the native Linux ELF format; `%LOCALAPPDATA%\agy\bin\agy.exe` is its Windows installation shape.
+Herdr 0.9.3 / protocol 22 reported foreground name `agy`; Linux `/proc/<pid>/cmdline` began with the WSL interop `/init`, so the earlier native-Linux argv observation does not describe this variant.
+The UI retained `esc to cancel`, `? for shortcuts`, the `>` row between solid rules, and `Interrupted · What should Antigravity CLI do instead?`.
+No busy or interrupt signature change was needed.
+Windows child-tool ancestry and marker behavior were not refreshed; the environment observations above remain native-Linux evidence.
+
+The normal Windows profile reads `%USERPROFILE%\.gemini\antigravity-cli\settings.json`, not Linux `~/.gemini`, and stores trusted Linux folders as Windows UNC paths returned by `wslpath -w`.
+A Linux-store-only registration did not dismiss a plain-interactive trust dialog.
+`bin/fm-agy-trust.sh` owns the selected-executable registration contract.
+`tests/fm-agy-harness.test.sh` covers native-home behavior, a bare symlink to a PE executable, the System32 fallback when `cmd.exe` is not on PATH, accented and ampersand-containing Windows profile names, UNC trust paths, unrelated-key preservation, and refusal without writing either store.
+Native Linux 1.2.x was not rerun for this refresh; its existing portable launch, trust, busy, and steering regressions still pass.
+
 ## What is still unproven
 
-The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
+Windows dialog suppression was not independently reproduced in the isolated validation profile: the launch stopped at authentication.
+The captain reported a Gemini 3.8 Flash worker reaching a working state in a fresh worktree without a dialog on 2026-10-08 using this trust change; that supporting observation is not an isolated reproduction.
+Native-Linux unauthenticated behavior remains unverified; any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
 No primary or secondmate behavior was built or tested, and none is claimed.
