@@ -198,6 +198,29 @@ fi
 exit "$status"
 SH
 
+# Count real retry events rather than scheduling a timed lock hold. Only the
+# designated recovery exports this directory; other sleeps remain untouched.
+cat > "$FAKEBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 0.1 ] && [ -n "${FM_TEST_RECOVERY_RETRIES:-}" ]; then
+  count=0
+  [ ! -f "$FM_TEST_RECOVERY_RETRIES/count" ] || read -r count < "$FM_TEST_RECOVERY_RETRIES/count"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_TEST_RECOVERY_RETRIES/count"
+  if [ "$count" -eq 50 ] && [ "${FM_TEST_RECOVERY_REFUSE:-}" != 1 ]; then
+    printf 'waiting\n' > "$FM_TEST_RECOVERY_RETRIES/ready"
+    read -r _ < "$FM_TEST_RECOVERY_RETRIES/continue"
+  fi
+  # After the old window, keep the real retry cadence: the other recovery
+  # may win the released lock and legitimately hold it through launch.
+  if [ "$count" -le 50 ] || [ "${FM_TEST_RECOVERY_REFUSE:-}" = 1 ]; then
+    exit 0
+  fi
+fi
+exec /bin/sleep "$@"
+SH
+chmod +x "$FAKEBIN/sleep"
+
 cat > "$FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -282,9 +305,10 @@ RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
 LOCK_REFUSE_HOLDER_PID=
 LOCK_WAIT_HOLDER_PID=
+RECOVERY_HOLDER_PID=
 cleanup_all() {
   local wt pid
-  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID"; do
+  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID" "$RECOVERY_HOLDER_PID"; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -1329,10 +1353,32 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
-spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
+RECOVERY_RETRIES="$TMP_ROOT/recovery-retries"
+mkdir "$RECOVERY_RETRIES"
+mkfifo "$RECOVERY_RETRIES/ready" "$RECOVERY_RETRIES/continue" \
+  "$RECOVERY_RETRIES/holder-ready" "$RECOVERY_RETRIES/release"
+RECOVERY_LOCK_PATH=$(session_presentation_lock_path) || fail "could not resolve recovery lock"
+bash -c '
+  . "$1"
+  fm_lock_try_acquire "$2" || exit 1
+  printf "ready\n" > "$3/holder-ready"
+  read -r _ < "$3/release"
+  fm_lock_release "$2"
+' _ "$ROOT/bin/fm-wake-lib.sh" "$RECOVERY_LOCK_PATH" "$RECOVERY_RETRIES" &
+RECOVERY_HOLDER_PID=$!
+IFS= read -r _ < "$RECOVERY_RETRIES/holder-ready"
+FM_TEST_RECOVERY_RETRIES="$RECOVERY_RETRIES" \
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
+# Exhaust the clean-create retry window before releasing the holder. The
+# recovery must make another acquisition attempt, without a wall-clock race.
+IFS= read -r _ < "$RECOVERY_RETRIES/ready"
+printf 'release\n' > "$RECOVERY_RETRIES/release"
+wait "$RECOVERY_HOLDER_PID" || fail "recovery lock holder failed"
+RECOVERY_HOLDER_PID=
+printf 'continue\n' > "$RECOVERY_RETRIES/continue"
 wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
 wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
@@ -1377,22 +1423,25 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for resume lock-refuse"
 
 LOCK_REFUSE_READY="$TMP_ROOT/lock-refuse-ready"
-LOCK_REFUSE_HOLD_SECONDS=15
+LOCK_REFUSE_RELEASE="$TMP_ROOT/lock-refuse-release"
+LOCK_REFUSE_RETRIES="$TMP_ROOT/lock-refuse-retries"
+mkdir "$LOCK_REFUSE_RETRIES"
+mkfifo "$LOCK_REFUSE_READY" "$LOCK_REFUSE_RELEASE"
 LOCK_REFUSE_PATH=$(session_presentation_lock_path) \
   || fail "could not resolve session lock for resume lock-refuse"
-ROOT="$ROOT" READY="$LOCK_REFUSE_READY" HOLD="$LOCK_REFUSE_HOLD_SECONDS" LOCK="$LOCK_REFUSE_PATH" bash -c '
+ROOT="$ROOT" READY="$LOCK_REFUSE_READY" RELEASE="$LOCK_REFUSE_RELEASE" LOCK="$LOCK_REFUSE_PATH" bash -c '
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_try_acquire "$LOCK" || exit 1
-  : > "$READY"
-  sleep "$HOLD"
+  printf "ready\n" > "$READY"
+  read -r _ < "$RELEASE"
   fm_lock_release "$LOCK"
 ' &
 LOCK_REFUSE_HOLDER_PID=$!
-while [ ! -e "$LOCK_REFUSE_READY" ] && kill -0 "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null; do sleep 0.01; done
-[ -e "$LOCK_REFUSE_READY" ] || fail "could not hold the session presentation lock for resume lock-refuse"
+IFS= read -r _ < "$LOCK_REFUSE_READY"
 
 LOCK_REFUSE_FOCUS=$(focus_snapshot)
-if spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" \
+if FM_TEST_RECOVERY_RETRIES="$LOCK_REFUSE_RETRIES" FM_TEST_RECOVERY_REFUSE=1 \
+    spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" \
     > "$TMP_ROOT/lock-refuse-resume.out" 2> "$TMP_ROOT/lock-refuse-resume.err"; then
   LOCK_REFUSE_STATUS=0
 else
@@ -1403,6 +1452,9 @@ if [ "$LOCK_REFUSE_STATUS" -eq 0 ]; then
   wait "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null || true
   fail "default resumed identity succeeded under session lock contention instead of refusing: $(cat "$TMP_ROOT/lock-refuse-resume.out")"
 fi
+[ "$(cat "$LOCK_REFUSE_RETRIES/count")" -eq 300 ] \
+  || fail "default resume did not exhaust its extended bounded retry window"
+printf 'release\n' > "$LOCK_REFUSE_RELEASE"
 wait "$LOCK_REFUSE_HOLDER_PID" || fail "resume lock-refuse lock holder failed"
 LOCK_REFUSE_HOLDER_PID=
 [ "$LOCK_REFUSE_STATUS" -ne 0 ] \

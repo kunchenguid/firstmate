@@ -1576,8 +1576,9 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention remains a deliberate hard refusal by default rather than a flat fallback, which default-on makes reachable from any Herdr home.
-Callers that need concurrent recoveries to serialize can pass `fm-spawn.sh --herdr-resume-lock-wait`.
+One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun under the then-current bounded retry window.
+Current recovery retries presentation-lock contention for up to 30 seconds of retry delay before refusing rather than falling back flat, which lets a legitimate concurrent spawn finish without making recovery wait indefinitely.
+Callers that need concurrent recoveries to serialize beyond that bound can pass `fm-spawn.sh --herdr-resume-lock-wait`.
 The flag applies to a fresh ship or scout spawn, and the multi-task path forwards it to each per-pair spawn.
 It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.

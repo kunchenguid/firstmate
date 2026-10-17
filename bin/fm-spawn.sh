@@ -149,10 +149,10 @@
 #   session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff.
 #   On contention a create makes one bounded attempt and falls back to the
-#   ordinary flat layout before any projection mutation. A resume refuses by
-#   default on the same contention (it does not degrade flat; a concurrent
-#   resume is a hard failure). Pass --herdr-resume-lock-wait to opt that
-#   resume into waiting for the lock instead, so two concurrent recoveries
+#   ordinary flat layout before any projection mutation. A resume retries for
+#   up to 30 seconds of retry delay before refusing (it cannot degrade flat),
+#   allowing a concurrent spawn to finish. Pass --herdr-resume-lock-wait to opt
+#   that resume into waiting without a retry limit, so concurrent recoveries
 #   can serialize and each still replace its own exact husk. The flag acts
 #   only on that fresh ship or scout spawn path: --relaunch reuses the
 #   recorded endpoint without taking this lock, so the flag has no effect
@@ -1600,8 +1600,9 @@ trap spawn_abort_cleanup EXIT
 #
 # Default mode is one BOUNDED attempt. A clean create uses that default and
 # falls back to the ordinary flat layout on contention. An exact resume also
-# defaults to the bounded attempt and hard-refuses on contention (it does not
-# degrade flat). Passing mode `wait` makes this call WAIT for the lock instead
+# uses mode `recovery` for a longer bounded attempt (30 seconds of retry delay)
+# and hard-refuses if contention persists (it does not degrade flat).
+# Passing mode `wait` makes this call WAIT for the lock instead
 # (`fm_lock_acquire_wait`, the same unbounded-wait idiom this file already uses
 # for its other fleet-shared locks). Only the recovery path under the explicit
 # --herdr-resume-lock-wait opt-in passes `wait`, so unbounded blocking on a
@@ -1609,7 +1610,7 @@ trap spawn_abort_cleanup EXIT
 # Dead-owner reclaim inside `fm_lock_try_acquire` still bounds a wait against a
 # holder that crashed mid-hold.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} mode=${2:-} attempt lock_path
+  local session=${1:-} mode=${2:-} attempt lock_path attempts=50
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
@@ -1618,8 +1619,9 @@ spawn_herdr_presentation_order_lock_acquire() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=1
     return 0
   fi
+  [ "$mode" != recovery ] || attempts=300
   attempt=0
-  while [ "$attempt" -lt 50 ]; do
+  while [ "$attempt" -lt "$attempts" ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
@@ -4092,7 +4094,7 @@ else
             exit 1
           }
         else
-          spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" recovery || {
             echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
             exit 1
           }

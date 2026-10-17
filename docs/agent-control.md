@@ -137,7 +137,7 @@ A seat with no herdr launcher pane at all - a plain ssh or cron shell, which is 
 The reclaim pins the recorded **session** but not the **workspace**: the container follows the reclaiming seat, so a reclaim run from a seat inside the recorded session places the new tab in *that seat's* workspace rather than the recorded `herdr_workspace_id`, even when the recorded workspace still exists and only the pane was destroyed.
 The record is republished consistently and no work is lost, but the task's `herdr_workspace_id` moves with it.
 The pane id necessarily changes (the pane did not survive), and the record follows it.
-A Herdr reclaim deliberately uses the flat container shape rather than presentation projection: projection is a presentation-only layout that is never endpoint or ownership authority, and flat is already the documented fallback for every recovery it cannot bind exactly ([`docs/herdr-backend.md`](herdr-backend.md)).
+[`docs/herdr-backend.md`](herdr-backend.md) owns the Herdr reclaim container and projection fallback rule.
 
 **Known limitation - a refusal before the record is republished leaves a stray husk pane** (follow-up bead `fm-herdr-rebind-leak-20260913`).
 The rebind registers no abort cleanup, so a refusal in the window between the new tab being created and the record being republished leaves that pane behind while the record still names the old, gone one.
