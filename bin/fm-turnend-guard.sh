@@ -245,10 +245,15 @@ fi
 # (poll-cadence-derived, see the comment above) instead of the flat $GRACE
 # every other check on this page uses, so a daemon that is genuinely still
 # cycling - just slower than a fixed 300s window - is not misread as down.
-AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
-if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
-  && fm_afk_daemon_owns_supervision "$STATE"; then
-  allow_supervised_stop
+# The daemon predicate requires state/.afk first, so without it neither half
+# can allow and neither is computed.
+if [ -e "$STATE/.afk" ]; then
+  AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+  fm_path_age_to BEAT_AGE "$STATE/.last-watcher-beat"
+  # shellcheck disable=SC2153 # Assigned by fm_path_age_to.
+  if [ "$BEAT_AGE" -lt "$AFK_GRACE" ] && fm_afk_daemon_owns_supervision "$STATE"; then
+    allow_supervised_stop
+  fi
 fi
 
 block_stop() {
@@ -393,17 +398,17 @@ autoarm_owns_recovery() {
   # Legacy shim: a pre-generation build's claim holds the owner lock with the
   # autoarm role for its whole cycle; defer to it under the legacy abandonment
   # proof so an upgrade mid-session cannot double-arm.
-  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
-  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  fm_read_file_to pid "$OWNER_LOCK/pid" || true
+  fm_read_file_to role "$OWNER_LOCK/role" || true
   if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
     && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  fm_autoarm_ledger_outcome_to outcome "$STATE"
   case "$outcome" in
     rewake)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      fm_path_age_to age "$STATE/.claude-autoarm-epoch"
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
         return 0
@@ -506,7 +511,7 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  fm_autoarm_ledger_outcome_to outcome "$STATE"
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;
     *) return 1 ;;

@@ -20,6 +20,8 @@
 # decision, so this file delegates to it rather than widening the name match.
 _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
+# shellcheck source=bin/fm-path-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-path-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
@@ -45,13 +47,49 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
 fm_harness_path_name() {  # <path>
-  local path=$1 name
-  [ -n "$path" ] || return 1
-  for name in "${FM_HARNESS_NAMES[@]}"; do
-    case "/$path/" in
-      */"$name"/*) printf '%s' "$name"; return 0 ;;
+  local name
+  _fm_harness_path_name_to name "${1-}" || return 1
+  printf '%s' "$name"
+}
+
+# fm_harness_path_name into <output-variable>, without a command substitution.
+_fm_harness_path_name_to() {  # <output-variable> <path>
+  local fm_path=$2 fm_name
+  [ -n "$fm_path" ] || return 1
+  for fm_name in "${FM_HARNESS_NAMES[@]}"; do
+    case "/$fm_path/" in
+      */"$fm_name"/*) printf -v "$1" '%s' "$fm_name"; return 0 ;;
     esac
   done
+  return 1
+}
+
+# True when <text> matches FM_HARNESS_RE the way `printf '%s' <text> | grep -qE`
+# does. Plain single-line ASCII matches in-process; anything else keeps grep, so
+# a multi-line or non-ASCII string is judged exactly as before.
+_fm_harness_re_matches() {  # <text>
+  if fm_ascii_plain "$1"; then
+    [[ $1 =~ $FM_HARNESS_RE ]]
+    return
+  fi
+  printf '%s' "$1" | grep -qE "$FM_HARNESS_RE"
+}
+
+# Evidence steps 1 and 2 of fm_harness_process_matches below for the command
+# name alone, which need no argument string. A match here is that function's
+# verdict whatever the arguments are, so a caller may skip reading them.
+_fm_harness_comm_matches() {  # <comm>
+  local comm=$1 base name
+  FM_HARNESS_IS_CLAUDE=0
+  fm_basename_to base "$comm"
+  if _fm_harness_re_matches "$base"; then
+    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
+  if _fm_harness_path_name_to name "$comm"; then
+    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
   return 1
 }
 
@@ -69,22 +107,17 @@ fm_harness_path_name() {  # <path>
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
-  FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    return 0
-  fi
+  local comm=$1 args=$2 argv0 name
+  _fm_harness_comm_matches "$comm" && return 0
   argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+  if _fm_harness_path_name_to name "$argv0"; then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
+      if _fm_harness_re_matches "$args"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
@@ -116,12 +149,16 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# Each hop reads the parent pid and command name in one ps call and reads the
+# argument string only when the command name alone does not decide the match.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm parent extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    _fm_harness_ps_hop "$pid" || break
+    comm=$FM_HARNESS_HOP_COMM
+    parent=$FM_HARNESS_HOP_PPID
+    if _fm_harness_pid_comm_matches "$pid" "$comm"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -129,7 +166,11 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ -n "$parent" ]; then
+      pid=$parent
+    else
+      pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    fi
     # Examine the top of the chain before stopping. Inside a PID namespace the
     # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
     # very process this walk exists to find. A host's real pid 1 (init, systemd,
@@ -138,6 +179,45 @@ fm_harness_ancestry_pids() {
     [ "$pid" -ge 1 ] || break
   done
   [ "$printed" -eq 1 ]
+}
+
+# Read one ancestry hop for pid $1: sets FM_HARNESS_HOP_COMM to exactly what
+# `ps -o comm= -p` reports and FM_HARNESS_HOP_PPID to the parent pid, or leaves
+# the parent empty for the caller to read the old way. A combined
+# `ps -o ppid= -o comm=` line is used only in its exact "<digits> <comm>" shape;
+# anything else falls back to the separate comm read, so the walk's verdict
+# never depends on which form a ps happens to support. Returns 1 when the
+# command name cannot be read, which ends the walk exactly as before.
+FM_HARNESS_HOP_COMM=
+FM_HARNESS_HOP_PPID=
+_fm_harness_ps_hop() {  # <pid>
+  local line
+  FM_HARNESS_HOP_COMM=
+  FM_HARNESS_HOP_PPID=
+  if line=$(ps -o ppid= -o comm= -p "$1" 2>/dev/null); then
+    case "$line" in *$'\n'*) line= ;; esac
+    line=${line#"${line%%[! ]*}"}
+    case "${line%% *}" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "${line#* }" != "$line" ]; then
+          FM_HARNESS_HOP_PPID=${line%% *}
+          FM_HARNESS_HOP_COMM=${line#* }
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  FM_HARNESS_HOP_COMM=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+}
+
+# fm_harness_process_matches for pid $1 whose command name $2 is already read,
+# reading its argument string only when the command name alone does not decide.
+_fm_harness_pid_comm_matches() {  # <pid> <comm>
+  local args
+  _fm_harness_comm_matches "$2" && return 0
+  args=$(ps -o args= -p "$1" 2>/dev/null)
+  fm_harness_process_matches "$2" "$args"
 }
 
 # Print the outermost pid of this session's contiguous harness run for callers
@@ -165,11 +245,10 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  _fm_harness_pid_comm_matches "$pid" "$comm"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -199,7 +278,7 @@ fm_harness_pid_alive() {
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -209,8 +288,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    _fm_harness_pid_comm_matches "$pid" "$comm" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0

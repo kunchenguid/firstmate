@@ -48,6 +48,12 @@
 # adapter-local composer normalizer would be the second copy that owner exists
 # to prevent.
 
+_FM_CURSOR_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_CURSOR_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_CURSOR_LIB_DIR=.
+# shellcheck source=bin/fm-path-lib.sh
+. "${_FM_CURSOR_LIB_DIR:-/}/fm-path-lib.sh"
+unset _FM_CURSOR_LIB_DIR
+
 # Bounded probe budget in seconds. Cursor's --help is local and returns
 # immediately; the bound exists so a hung or interactive impostor cannot wedge
 # a spawn or a readiness check.
@@ -96,6 +102,26 @@ fm_cursor_canonical_path() {  # <path>
   printf '%s\n' "$dir/$base"
 }
 
+# True when path $1 provably canonicalizes to no Cursor path, decided without a
+# subprocess so a process scan pays nothing for an ordinary command path. An
+# absolute plain-ASCII path with no symlink at any component canonicalizes to the
+# same components, up to letter case and dot segments, so when it never spells
+# cursor-agent in any case neither Cursor signal below can appear. Anything else
+# returns 1 and takes the full canonicalization.
+_fm_cursor_path_plainly_not_cursor() {  # <path>
+  local path=$1 prefix='' rest
+  case "$path" in /*) ;; *) return 1 ;; esac
+  fm_ascii_plain "$path" || return 1
+  case "$path" in *[Cc][Uu][Rr][Ss][Oo][Rr]-[Aa][Gg][Ee][Nn][Tt]*) return 1 ;; esac
+  rest=${path#/}
+  while [ -n "$rest" ]; do
+    prefix="$prefix/${rest%%/*}"
+    [ ! -L "$prefix" ] || return 1
+    case "$rest" in */*) rest=${rest#*/} ;; *) rest='' ;; esac
+  done
+  return 0
+}
+
 # True when path $1 carries Cursor's own structural evidence: its canonical
 # name is cursor-agent, or it is inside Cursor's
 # cursor-agent/versions/<version>/ install tree. A directory component merely
@@ -103,6 +129,7 @@ fm_cursor_canonical_path() {  # <path>
 fm_cursor_path_is_cursor() {  # <path>
   local path=$1 canonical
   [ -n "$path" ] || return 1
+  _fm_cursor_path_plainly_not_cursor "$path" && return 1
   canonical=$(fm_cursor_canonical_path "$path") || return 1
   case "${canonical##*/}" in cursor-agent) return 0 ;; esac
   case "$canonical" in */cursor-agent/versions/*/*) return 0 ;; esac
@@ -274,7 +301,7 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   local comm=$1 argv0=${3:-} base
   [ -n "$comm" ] || [ -n "$argv0" ] || return 1
   argv0=${argv0:-$comm}
-  base=$(basename -- "$comm")
+  fm_basename_to base "$comm"
   base=${base#-}
   case "$base" in
     cursor-agent) return 0 ;;

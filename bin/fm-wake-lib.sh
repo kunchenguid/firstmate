@@ -104,22 +104,45 @@ fm_pid_identity() {
   # same width for the same reason.
   out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
+  # Strip leading whitespace in-process when sed could not judge the line any
+  # differently: one line of plain ASCII.
+  if fm_ascii_plain "$out"; then
+    printf '%s\n' "${out#"${out%%[![:space:]]*}"}"
+    return 0
+  fi
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
 fm_path_mtime() {
+  local m
+  fm_path_mtime_to m "$1" || return 1
+  printf '%s\n' "$m"
+}
+
+# fm_path_mtime into <output-variable>: one stat fork and no command
+# substitution around it.
+fm_path_mtime_to() {  # <output-variable> <path>
+  local fm_mtime_raw
   if [ "$_FM_UNAME" = Darwin ]; then
-    /usr/bin/stat -f %m "$1" 2>/dev/null
+    fm_mtime_raw=$(/usr/bin/stat -f %m "$2" 2>/dev/null) || return 1
   else
-    stat -c %Y "$1" 2>/dev/null
+    fm_mtime_raw=$(stat -c %Y "$2" 2>/dev/null) || return 1
   fi
+  printf -v "$1" '%s' "$fm_mtime_raw"
 }
 
 fm_path_age() {
-  local path=$1 m now
-  m=$(fm_path_mtime "$path") || { echo 999999; return; }
-  fm_epoch_seconds_to now
-  echo $(( now - m ))
+  local age
+  fm_path_age_to age "$1"
+  echo "$age"
+}
+
+# fm_path_age into <output-variable>; 999999 when the path has no mtime.
+fm_path_age_to() {  # <output-variable> <path>
+  local fm_m fm_now
+  fm_path_mtime_to fm_m "$2" || { printf -v "$1" '%s' 999999; return 0; }
+  fm_epoch_seconds_to fm_now
+  printf -v "$1" '%s' "$(( fm_now - fm_m ))"
 }
 
 # fm_poll_derived_grace [poll-seconds]
@@ -162,7 +185,7 @@ fm_watcher_lock_unheld() {
   lockdir="$state/.watch.lock"
   [ ! -e "$lockdir" ] && return 0
   [ ! -e "$lockdir/pid" ] && return 0
-  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  fm_read_file_to pid "$lockdir/pid" || return 1
   [ -z "$pid" ]
 }
 
@@ -171,9 +194,9 @@ fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
-  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  fm_read_file_to lock_home "$lockdir/fm-home" || true
+  fm_read_file_to lock_path "$lockdir/watcher-path" || true
+  fm_read_file_to lock_identity "$lockdir/pid-identity" || true
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
@@ -190,11 +213,11 @@ fm_watcher_healthy() {
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_read_file_to pid "$lockdir/pid" || true
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
-  age=$(fm_path_age "$beat")
+  fm_path_age_to age "$beat"
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
@@ -366,9 +389,9 @@ fm_afk_daemon_owns_supervision() {
   local state=$1 lockdir pid recorded current
   [ -e "$state/.afk" ] || return 1
   lockdir="$state/.supervise-daemon.lock"
-  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  fm_read_file_to pid "$lockdir/pid" || return 1
   fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  fm_read_file_to recorded "$lockdir/pid-identity" || return 1
   [ -n "$recorded" ] || return 1
   current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
@@ -510,7 +533,7 @@ fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
-  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  fm_read_file_to back "$ownerdir/pid" || true
   [ "$back" = "$mypid" ]
 }
 
@@ -562,7 +585,7 @@ fm_lock_claim() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  fm_read_file_to back "$ownerdir/pid" || true
   if [ "$back" != "$mypid" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -1173,7 +1196,7 @@ fm_lock_try_acquire() {
   fi
 
   fm_current_pid current || return 1
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_read_file_to pid "$lockdir/pid" || true
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
@@ -1377,14 +1400,14 @@ fm_lock_release() {
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
-    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    fm_read_file_to pid "$ownerdir/pid" || true
     [ "$pid" = "$current" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_read_file_to pid "$lockdir/pid" || true
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
@@ -1788,18 +1811,45 @@ fm_failure_episode_reset() {
 # code cannot re-check generations - so an upgrade mid-session can neither
 # double-arm nor deadlock behind a hung legacy hook.
 _fm_autoarm_epoch_field() {  # <epoch-file> <field>
-  local file=$1 field=$2 tok
-  local -a toks=()
-  [ -r "$file" ] || return 1
+  local value
+  _fm_autoarm_epoch_field_to value "$1" "$2" || return 1
+  printf '%s\n' "$value"
+}
+
+# _fm_autoarm_epoch_field into <output-variable>, without a command
+# substitution; the variable is left untouched when the field is absent.
+_fm_autoarm_epoch_field_to() {  # <output-variable> <epoch-file> <field>
+  local fm_file=$2 fm_field=$3 fm_tok
+  local -a fm_toks=()
+  [ -r "$fm_file" ] || return 1
   # 2> before <: a failed input redirection reports through whatever stderr is
   # current when it runs, so the suppression has to be established first.
-  IFS=' ' read -r -a toks 2>/dev/null < "$file" || return 1
-  for tok in ${toks[@]+"${toks[@]}"}; do
-    case "$tok" in
-      "$field="?*) printf '%s\n' "${tok#*=}"; return 0 ;;
+  IFS=' ' read -r -a fm_toks 2>/dev/null < "$fm_file" || return 1
+  for fm_tok in ${fm_toks[@]+"${fm_toks[@]}"}; do
+    case "$fm_tok" in
+      "$fm_field="?*) printf -v "$1" '%s' "${fm_tok#*=}"; return 0 ;;
     esac
   done
   return 1
+}
+
+# fm_autoarm_ledger_outcome_to <output-variable> <state-dir>
+# Assign the ledger's outcome field exactly as
+# `sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p'` prints it, or empty. A
+# NUL-free plain-ASCII first line is matched in-process; any other ledger keeps
+# sed, so no locale or byte can make the two disagree.
+_FM_AUTOARM_OUTCOME_RE='^.*outcome=([a-z][a-z-]*) .*$'
+fm_autoarm_ledger_outcome_to() {  # <output-variable> <state-dir>
+  local fm_epoch="$2/.claude-autoarm-epoch" fm_content fm_line fm_outcome=''
+  if fm_read_file_to fm_content "$fm_epoch"; then
+    fm_line=${fm_content%%$'\n'*}
+    if [ "$FM_READ_FILE_NUL" -eq 0 ] && fm_ascii_plain "$fm_line"; then
+      [[ ! $fm_line =~ $_FM_AUTOARM_OUTCOME_RE ]] || fm_outcome=${BASH_REMATCH[1]}
+    else
+      fm_outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$fm_epoch" 2>/dev/null || true)
+    fi
+  fi
+  printf -v "$1" '%s' "$fm_outcome"
 }
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
@@ -1808,7 +1858,7 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 # line 2 - identity is never substituted from a lock, so a transient
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
 fm_autoarm_ledger_read() {  # <state-dir>
-  local state=$1 epoch
+  local state=$1 epoch content
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_GEN=
   FM_AUTOARM_OWNER=
@@ -1816,15 +1866,19 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_SESSION=
   FM_AUTOARM_RECOVERY=
   FM_AUTOARM_IDENTITY=
-  FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
-  FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
-  FM_AUTOARM_OUTCOME=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
-  FM_AUTOARM_SESSION=$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null || true)
-  FM_AUTOARM_RECOVERY=$(_fm_autoarm_epoch_field "$epoch" recovery_generation 2>/dev/null || true)
+  _fm_autoarm_epoch_field_to FM_AUTOARM_GEN "$epoch" epoch || return 1
+  _fm_autoarm_epoch_field_to FM_AUTOARM_OWNER "$epoch" owner_pid || return 1
+  _fm_autoarm_epoch_field_to FM_AUTOARM_OUTCOME "$epoch" outcome || return 1
+  _fm_autoarm_epoch_field_to FM_AUTOARM_SESSION "$epoch" session_pid || true
+  _fm_autoarm_epoch_field_to FM_AUTOARM_RECOVERY "$epoch" recovery_generation || true
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  FM_AUTOARM_IDENTITY=$(sed -n '2p' "$epoch" 2>/dev/null || true)
+  # Line 2 exactly as `sed -n 2p` reports it through a command substitution.
+  fm_read_file_to content "$epoch" || true
+  case "$content" in
+    *$'\n'*) content=${content#*$'\n'}; FM_AUTOARM_IDENTITY=${content%%$'\n'*} ;;
+  esac
   return 0
 }
 
@@ -1838,7 +1892,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # build's entry gets its deference from its held role-carrying lock through
 # the legacy shim, and anything else must not defer.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current epoch_age beat_age
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
@@ -1850,9 +1904,10 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
-  if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
-    && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
-    return 1
+  fm_path_age_to epoch_age "$epoch"
+  if [ "$epoch_age" -ge "$grace" ]; then
+    fm_path_age_to beat_age "$state/.last-watcher-beat"
+    [ "$beat_age" -lt "$grace" ] || return 1
   fi
   return 0
 }
