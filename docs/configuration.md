@@ -103,6 +103,8 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
 - `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
+  A ready PR whose owning backlog row has unresolved `blocked-by` ids or a future `hold-until` date is fleet work (`held: blocked by <ids>` or `held until <date>`) rather than a captain merge call; it returns to the captain once the blocker is done or the date arrives.
+  Draft, mergeability, check, verdict and review reasons still win over a held owner.
 
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 
