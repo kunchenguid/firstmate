@@ -2390,6 +2390,69 @@ test_forgejo_combined_status_reads_every_page() {
   pass "fm-pr-merge reads every Forgejo combined-status page before merging"
 }
 
+# tea api exits 0 on an HTTP-level failure, so a later status page that comes
+# back as an error object instead of a combined status must refuse the merge
+# rather than read as the empty page that ends pagination. The legitimate empty page,
+# with statuses either null (the verified real shape) or an empty array, still
+# ends pagination and lets an all-green head merge.
+test_forgejo_combined_status_rejects_error_pages() {
+  local case_dir rc name body spec
+  for spec in \
+    'http-error|{"errors":null,"message":"Not Found","url":"https://forgejo.example/api/swagger"}' \
+    'no-statuses-key|{"state":"","total_count":0}' \
+    'statuses-not-array|{"state":"success","total_count":1,"statuses":"ci"}'; do
+    name=${spec%%|*}
+    body=${spec#*|}
+    case_dir=$(make_forgejo_case "forgejo-status-page2-$name")
+    printf '%s\n' "$body" > "$case_dir/tea-status-page2.json"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-status-page2-$name: an unreadable later status page should refuse"
+    assert_grep 'the combined commit status is "unreadable", not success' "$case_dir/stderr" \
+      "forgejo-status-page2-$name: the unreadable later page was not reported as unreadable"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "forgejo-status-page2-$name: a merge was attempted past an unreadable later page"
+  done
+
+  case_dir=$(make_forgejo_case forgejo-status-page1-http-error)
+  printf '%s\n' '{"message":"Not Found","url":"https://forgejo.example/api/swagger"}' \
+    > "$case_dir/tea-status.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-status-page1-http-error: an error object on the first page should refuse"
+  assert_grep 'the combined commit status is "unreadable", not success' "$case_dir/stderr" \
+    "forgejo-status-page1-http-error: an error object was read as an absent combined status"
+
+  for spec in \
+    'null|{"state":"","sha":"","total_count":0,"statuses":null,"repository":null,"commit_url":"","url":""}' \
+    'array|{"state":"","total_count":0,"statuses":[]}'; do
+    name=${spec%%|*}
+    body=${spec#*|}
+    case_dir=$(make_forgejo_case "forgejo-status-page3-empty-$name")
+    write_forgejo_status_json "$case_dir/tea-status-page2.json"
+    printf '%s\n' "$body" > "$case_dir/tea-status-page3.json"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "forgejo-status-page3-empty-$name: a legitimate empty page should end pagination and merge"
+    assert_grep 'page=3' "$case_dir/tea.log" \
+      "forgejo-status-page3-empty-$name: the empty third page was never read"
+  done
+  pass "fm-pr-merge refuses a Forgejo status page that is an HTTP error object, and still ends on a legitimate empty page"
+}
+
 test_forgejo_stale_recorded_head_is_reported() {
   local case_dir rc merge_line
   case_dir=$(make_forgejo_case forgejo-stale-head)
@@ -2982,6 +3045,7 @@ test_forgejo_refuses_when_login_is_ambiguous
 test_forgejo_each_condition_refuses_independently
 test_forgejo_unconfigured_ci_refuses_as_none
 test_forgejo_combined_status_reads_every_page
+test_forgejo_combined_status_rejects_error_pages
 test_forgejo_stale_recorded_head_is_reported
 test_forgejo_invalid_head_refuses
 test_forgejo_missing_tool_refuses_before_recording
