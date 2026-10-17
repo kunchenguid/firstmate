@@ -681,6 +681,20 @@ child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
+# The successor a child that exited cleanly without a wake stood down for. A
+# child that stood down for a holder which has already exited could not reclaim
+# that dead holder's lock, so no successor is coming from it: only one already
+# healthy is attached, instead of waiting out the confirmation window for none.
+stood_down_successor() {
+  local holder
+  holder=$(sed -n 's/^watcher: already running pid \([0-9][0-9]*\)$/\1/p' "$child_out" 2>/dev/null | head -1)
+  if [ -n "$holder" ] && ! fm_pid_alive "$holder"; then
+    healthy_watcher
+    return
+  fi
+  wait_for_healthy_successor
+}
+
 owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
@@ -695,7 +709,7 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
-    if wait_for_healthy_successor; then
+    if stood_down_successor; then
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true

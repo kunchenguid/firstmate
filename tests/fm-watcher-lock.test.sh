@@ -1244,6 +1244,67 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   pass "arm attaches to a peer watcher after child stands down and surfaces a missing successor"
 }
 
+test_arm_fails_fast_when_child_stands_down_for_a_dead_holder() {
+  local dir state fakebin armout armout_fast holder identity real_mktemp armpid status
+  dir=$(make_case arm-dead-holder-standdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armout_fast="$dir/arm-one-second.out"
+  # A real process holds the lock, then exits: the arm cannot attach to it, and
+  # while the downtime republication fails the fresh child cannot reclaim the
+  # dead lock either, so the child stands down for a holder that no longer
+  # exists and no successor can come from it.
+  sleep 300 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the seed holder pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'.watcher-down.tmp.'*) exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  # The stand-down must not cost the arm its confirmation window, so the budget
+  # stays at the exported 30 and this case's own ceiling stays well inside the
+  # budget-plus-one burn an arm pays while waiting for a successor a dead
+  # holder can never give.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=30 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 200
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm spent its confirmation window behind a dead lock holder"
+  [ "$status" -ne 0 ] || fail "arm exited zero when its child stood down for a dead holder: $(cat "$armout")"
+  grep -qF "watcher: already running pid $holder" "$armout" \
+    || fail "fixture: the child did not stand down for the dead holder: $(cat "$armout")"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
+    || fail "dead-holder arm did not emit the typed cycle-end failure: $(cat "$armout")"
+  grep -q 'reason=unexpected-clean-exit' "$state/.watch-cycle-exits.log" \
+    || fail "dead-holder cycle was not classified as a clean exit without a successor"
+  ! grep -q 'reason=confirmation-timeout' "$state/.watch-cycle-exits.log" \
+    || fail "dead-holder arm spent the confirmation window before failing"
+  # The same stand-down must fail loudly and promptly under a minimal budget
+  # too, where waiting out the window is no longer even available.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout_fast" &
+  armpid=$!
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -ne 124 ] && [ "$status" -ne 0 ] \
+    || fail "one-second-budget arm did not fail promptly behind the dead holder (status $status)"
+  grep -qF 'watcher: FAILED' "$armout_fast" || fail "one-second-budget arm did not fail loudly: $(cat "$armout_fast")"
+  pass "arm fails fast when its child stands down for a dead lock holder"
+}
+
 test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   local dir state fakebin armout live armpid status
   dir=$(make_case arm-failed-stale)
@@ -1604,6 +1665,7 @@ test_arm_term_during_steal_waits_for_watcher_cleanup_trap
 test_arm_term_bounds_wait_for_stalled_startup
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
+test_arm_fails_fast_when_child_stands_down_for_a_dead_holder
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

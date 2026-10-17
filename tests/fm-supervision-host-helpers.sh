@@ -23,6 +23,9 @@ CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 LEASE="$ROOT/bin/fm-lease.sh"
 
 command -v node >/dev/null 2>&1 || { printf 'skip: node absent\n'; exit 0; }
+# Fixtures that wrap node exec this binary, never a version-manager shim:
+# a shim behind such a wrapper finds the wrapper again on PATH and loops.
+NODE_BIN=$(node -p process.execPath)
 command -v perl >/dev/null 2>&1 || { printf 'skip: perl absent\n'; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-supervision-host)
@@ -1089,8 +1092,7 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # than racing the successor startup. The first offer accepts the close; the
 # turn-boundary offer must see the new main-owned decision.
 turn_main_only_at_second_offer() {  # <home> [quiet]
-  local real_node turn
-  real_node=$(command -v node)
+  local turn
   turn='printf '"'"'needs-decision [at=%s]: which export format?\n'"'"' "$(date +%s)" >> "$FM_HOME/state/demo.status"'
   # Quiet: the offer alone turns main-only, with no status line for the
   # successor watcher to close on.
@@ -1112,7 +1114,7 @@ case "\$*" in
       cp "\$FM_HOME/state/demo.status" "\$FM_HOME/pi-offer-state/demo.status"
     fi ;;
 esac
-exec "$real_node" "\$@"
+exec "$NODE_BIN" "\$@"
 SH
   chmod +x "$1/fakebin/node"
 }
@@ -1777,7 +1779,7 @@ test_dialog_bearing_files_are_owner_only() {
   local home old
   home=$(make_home attended-private attended)
   {
-    printf '#!/usr/bin/env bash\nREAL_NODE=%q\n' "$(command -v node)"
+    printf '#!/usr/bin/env bash\nREAL_NODE=%q\n' "$NODE_BIN"
     cat <<'SH'
 prev=
 for a in "$@"; do
@@ -1852,13 +1854,12 @@ park_after_stop() {  # <home>
 # resumable without it, so the next turn must still carry it; a turn with no
 # report starts a new conversation, which must carry it too.
 test_undelivered_dialog_is_fed_again_on_the_next_turn() {
-  local home real_node second third fourth
+  local home second third fourth
   home=$(make_home mirror-boundary attended)
-  real_node=$(command -v node)
   cat > "$home/fakebin/node" <<SH
 #!/usr/bin/env bash
 if [ "\${2:-}" = wake-prompt ] && [ -e "\$FM_HOME/slow-render" ]; then echo 120 > "\$FM_HOME/park-clock"; fi
-exec "$real_node" "\$@"
+exec "$NODE_BIN" "\$@"
 SH
   chmod +x "$home/fakebin/node"
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p1","prompt":"first ask"}' > "$home/mirror-seed.1"
@@ -1971,7 +1972,7 @@ test_attended_wake_with_an_unreadable_mirror_reaches_main() {
   main_drain_and_ack "$home"
 
   printf '#!/usr/bin/env bash\nprev=\nfor a in "$@"; do [ "$prev" != --mirror-file ] || chmod 000 "$a"; prev=$a; done\nexec %q "$@"\n' \
-    "$(command -v node)" > "$home/fakebin/node"
+    "$NODE_BIN" > "$home/fakebin/node"
   chmod +x "$home/fakebin/node"
   park_again "$home"
   append_status "$home" 'mirror lost before the prompt'
@@ -2475,9 +2476,8 @@ test_park_boundary_holds_under_back_to_back_closes() {
 # park bound stays past the case's wall-clock checks, so an ignored test clock
 # would let the turn run and the engine-call assertions catch it.
 test_park_boundary_rechecked_just_before_the_engine_turn() {
-  local home real_node pid park=120 turn=3 grace=1
+  local home pid park=120 turn=3 grace=1
   home=$(make_home boundary-late away)
-  real_node=$(command -v node)
   mkfifo "$home/render-release"
   echo 0 > "$home/park-clock"
   cat > "$home/fakebin/node" <<SH
@@ -2486,7 +2486,7 @@ if [ "\${2:-}" = wake-prompt ]; then
   cp "\$FM_HOME/state/.supervision-host" "\$FM_HOME/host-record-at-render" 2>/dev/null
   read -r _ < "\$FM_HOME/render-release"
 fi
-exec "$real_node" "\$@"
+exec "$NODE_BIN" "\$@"
 SH
   chmod +x "$home/fakebin/node"
   FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=$park \
