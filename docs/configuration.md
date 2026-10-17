@@ -77,7 +77,7 @@ Each effective `FM_HOME` contains private operational directories.
 
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
-- Learnings, backlog, briefs, scout reports, and the optional per-task no-mistakes pipeline-spend ledger.
+- Learnings, backlog, briefs, scout reports, optional task status archives, and the optional per-task no-mistakes pipeline-spend ledger.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -618,6 +618,16 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
+
+## Task status archive (config/status-archive)
+
+The optional local, gitignored `config/status-archive` presence flag opts this home into retaining task status history during teardown.
+Create it with `touch "$FM_HOME/config/status-archive"`; remove it to disable future archival and pruning.
+It is off by default: without the flag, teardown deletes status logs as before and leaves existing archives untouched.
+The flag applies to teardown run by this home, including forced retirement of its secondmate children; it is not inherited by other homes.
+Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
+Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
+[`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
