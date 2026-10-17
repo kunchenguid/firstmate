@@ -357,7 +357,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
-  def bare($m): ($m | split("/") | last);
+  def bare($m): (($m | split("/") | last) // "");
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
   def lane_of($c): quota_lane($c.harness; $c.model);
   def measured($p; $lane):
@@ -366,6 +366,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(
       .scope == "all_models" or .scope == "all_products" or
+      ($p == "agy" and (
+        if ($bare | startswith("claude")) or ($bare | startswith("gpt")) then .scope == "claude_gpt"
+        elif ($bare | startswith("gemini")) then .scope == "gemini"
+        else (.scope == "gemini" or .scope == "claude_gpt")
+        end
+      )) or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
   def floor_state($f; $p; $lane):
