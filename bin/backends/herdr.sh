@@ -2460,6 +2460,21 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+fm_backend_herdr_drive_call_alive() {  # <target> [quiet-secs]
+  local target=$1 info shell_pid FM_BACKEND_HERDR_SESSION FM_BACKEND_HERDR_PANE
+  fm_backend_herdr_parse_target "$target" || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+    --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er --arg pane "$FM_BACKEND_HERDR_PANE" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 1
+  fm_process_tree_holds_drive_call "$shell_pid" "${2:-0}"
+}
+
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
