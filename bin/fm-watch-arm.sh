@@ -95,26 +95,57 @@
 # state from a checkout that is about to be deleted. A marked stock-layout lab
 # home is disposable and permitted; ordinary tests use the sandbox bypass
 # exported by tests/lib.sh.
+#
+# A copy living under a treehouse pool slot (a path containing /.treehouse/)
+# refuses for the same reason with
+# "watcher: FAILED - refusing to arm from a disposable treehouse worktree",
+# except for the one live shape that belongs there: a firstmate home that lives
+# in a pool slot (bin/fm-home-seed.sh's durable lease). That copy may arm when
+# it hosts the operational home layout (data, state, config, projects) AND the
+# state root this arm writes resolves inside that same copy, so the watcher
+# belongs to the home it runs from and dies with it. A task worktree copy - no
+# home layout, or a foreign home's state root - is disposable: a watcher armed
+# from a stale pool slot outlives the copy, keeps a home's lock, and forks from
+# a path that is about to be deleted (the fork-storm incident). A marked lab
+# home keeps the same allowance as above.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
+  # The home and state root this arm would write, resolved once for both
+  # disposable-copy guards below.
+  arm_lab_root=$(cd -P -- "${FM_HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)
+  arm_state_dir=${FM_STATE_OVERRIDE:-${STATE:-${FM_HOME:-}/state}}
+  if [ -d "$arm_state_dir" ]; then
+    arm_state=$(cd -P -- "$arm_state_dir" 2>/dev/null && pwd -P || true)
+  elif [ ! -e "$arm_state_dir" ] && [ ! -L "$arm_state_dir" ]; then
+    arm_state=$(cd -P -- "$(dirname -- "$arm_state_dir")" 2>/dev/null && pwd -P)/$(basename -- "$arm_state_dir")
+  else
+    arm_state=
+  fi
+  case "$arm_state" in "$arm_lab_root"/*) arm_state_in_lab=1 ;; *) arm_state_in_lab=0 ;; esac
   case "$SCRIPT_DIR/:$(cd "$SCRIPT_DIR" && pwd -P)/" in
     */.no-mistakes/worktrees/*)
-      lab_root=$(cd -P -- "${FM_HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)
-      state_dir=${FM_STATE_OVERRIDE:-${STATE:-${FM_HOME:-}/state}}
-      if [ -d "$state_dir" ]; then
-        resolved_state=$(cd -P -- "$state_dir" 2>/dev/null && pwd -P || true)
-      elif [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
-        resolved_state=$(cd -P -- "$(dirname -- "$state_dir")" 2>/dev/null && pwd -P)/$(basename -- "$state_dir")
-      else
-        resolved_state=
-      fi
-      case "$resolved_state" in "$lab_root"/*) state_in_lab=1 ;; *) state_in_lab=0 ;; esac
-      if ! fm_gate_lab_permitted || [ "$state_in_lab" -ne 1 ]; then
+      if ! fm_gate_lab_permitted || [ "$arm_state_in_lab" -ne 1 ]; then
         echo "watcher: FAILED - refusing to arm from a disposable validation checkout: $SCRIPT_DIR"
+        exit 1
+      fi ;;
+    */.treehouse/*)
+      arm_copy_root=$(dirname "$SCRIPT_DIR")
+      arm_state_in_copy=0
+      for arm_root in "$arm_copy_root" "$(cd -P -- "$arm_copy_root" 2>/dev/null && pwd -P)"; do
+        [ -n "$arm_root" ] || continue
+        for arm_state_form in "$arm_state" "$arm_state_dir"; do
+          case "$arm_state_form" in "$arm_root"/*) arm_state_in_copy=1 ;; esac
+        done
+      done
+      if ! { [ "$arm_state_in_copy" -eq 1 ] \
+             && [ -d "$arm_copy_root/data" ] && [ -d "$arm_copy_root/state" ] \
+             && [ -d "$arm_copy_root/config" ] && [ -d "$arm_copy_root/projects" ]; } \
+         && ! { fm_gate_lab_permitted && [ "$arm_state_in_lab" -eq 1 ]; }; then
+        echo "watcher: FAILED - refusing to arm from a disposable treehouse worktree: $SCRIPT_DIR"
         exit 1
       fi ;;
   esac

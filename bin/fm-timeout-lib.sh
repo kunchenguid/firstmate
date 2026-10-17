@@ -11,7 +11,9 @@
 #       to force the dependency-free fallback.
 #
 #   fm_run_timed <seconds> <command> [args...]
-#       Runs the command with a hard bound. Exit status is the command's own,
+#       Runs the command with a hard bound and no stdin: the command reads EOF
+#       rather than any caller terminal or pipe, so a backgrounded bounded call
+#       can never be stopped by SIGTTIN. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks), and a command killed by
 #       signal n, which reports 128+n on every mechanism - so a SIGKILLed child
@@ -26,7 +28,9 @@
 #   fm_exec_timed <seconds> <grace-seconds> <command> [args...]
 #       Replaces the calling shell with the bounded command, so it must be the
 #       last command of a subshell: the bound kills the command, not the
-#       caller. The command runs in its own process group; TERM goes to that
+#       caller. Like fm_run_timed it gives the command stdin at /dev/null, so a
+#       bounded call can never be stopped by SIGTTIN on a caller terminal.
+#       The command runs in its own process group; TERM goes to that
 #       group at the bound, and KILL once <grace-seconds> more have passed,
 #       for a command that ignores TERM or is mid-way through work it will not
 #       abandon. A TERM, INT, or HUP delivered to the bounding process is
@@ -94,13 +98,16 @@ fm_run_bash_timeout() {
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
+  # stdin is /dev/null for the same reason as fm_run_external_timeout below: the
+  # bounded command runs in its own process group, where a read of the caller's
+  # terminal raises SIGTTIN and freezes the call in T state.
   (
     set +m
     "$@"
     command_rc=$?
     printf '%s\n' "$command_rc" > "$command_status"
     exit "$command_rc"
-  ) &
+  ) < /dev/null &
   child_pid=$!
   (
     set +m
@@ -141,6 +148,13 @@ fm_run_external_timeout() {
   # A shell wrapper can exit promptly on TERM while one of its descendants
   # ignores TERM; timeout then considers the command finished and does not send
   # its configured KILL. Explicitly reap that leftover group on a real timeout.
+  #
+  # stdin is /dev/null for the whole invocation. The invocation is backgrounded,
+  # and timeout runs the command in its own process group, so a command that
+  # read the inherited terminal would be stopped by SIGTTIN and freeze the call
+  # in T state for as long as the caller holds its locks (the STAT T
+  # .task-set.lock hold). No caller feeds stdin through fm_run_timed, and the
+  # probes that already hit this force the same redirect at their call sites.
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
   "$runner" -k 1 "$seconds" bash -c '
     status_file=$1
@@ -149,7 +163,7 @@ fm_run_external_timeout() {
     command_rc=$?
     printf "%s\n" "$command_rc" > "$status_file"
     exit "$command_rc"
-  ' _ "$status_file" "$@" &
+  ' _ "$status_file" "$@" < /dev/null &
   runner_pid=$!
   if wait "$runner_pid"; then
     runner_rc=0
@@ -186,7 +200,7 @@ fm_run_timed() {  # <seconds> <command...>
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
       perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' \
-        "$seconds" "$@"
+        "$seconds" "$@" < /dev/null
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
     *) return 124 ;;
@@ -274,11 +288,11 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
         }
         select undef, undef, undef, 0.05;
       }
-    ' -- "$seconds" "$grace" "$owner" "$PPID" "$@"
+    ' -- "$seconds" "$grace" "$owner" "$PPID" "$@" < /dev/null
   elif command -v timeout >/dev/null 2>&1; then
-    exec timeout -k "$grace" "$seconds" "$@"
+    exec timeout -k "$grace" "$seconds" "$@" < /dev/null
   elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout -k "$grace" "$seconds" "$@"
+    exec gtimeout -k "$grace" "$seconds" "$@" < /dev/null
   fi
   printf 'fm_exec_timed: cannot bound %s within %ss: none of perl, timeout, or gtimeout is available\n' "${1##*/}" "$seconds" >&2
   exit 127
