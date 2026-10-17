@@ -1,8 +1,8 @@
-# Markdown -> HTML for fm-berichte-dash.sh; that script's header owns the
+# Markdown -> HTML for fm-reports-page.sh; that script's header owns the
 # generator contract and this file owns the rendered subset.
 #
-# Input:  [{id, datei, stand, ts, md}]   (md is the raw report text)
-# Output: [{id, titel, datei, stand, ts, html}]  newest first
+# Input:  [{id, file, updated, ts, md}]   (md is the raw report text)
+# Output: [{id, title, file, updated, ts, html}]  newest first
 #
 # NOTHING FROM A REPORT EVER BECOMES MARKUP BY ACCIDENT. Every line is HTML
 # escaped first, and only this file's own constructions add tags afterwards, so
@@ -14,6 +14,12 @@
 # later stage can never look inside a code span or an href. unpark restores the
 # parked markup at the end, repeating while a restored fragment still carries a
 # placeholder of its own (a link whose text contained code).
+#
+# A line ending in two or more spaces is commonmark's hard break and becomes
+# <br>, which the reports of this fleet use heavily for stacked one-line facts.
+# The substitution runs after code spans are parked, so a break inside a code
+# span stays literal, and trailing spaces at the very end of a block are
+# dropped rather than left as a dangling break.
 
 def htmlesc:
   gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
@@ -29,7 +35,7 @@ def slugify:
   | gsub("[^\\w-]"; "");
 
 # Inline markdown out of a heading, for the list title and the window title.
-def sauber:
+def clean_inline:
   gsub("!?\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; "\(.t)")
   | gsub("`|\\*|~~"; "")
   | gsub("^[[:space:]]+|[[:space:]]+$"; "");
@@ -85,6 +91,10 @@ def inline_links:
           end)
   | {s: (.s + $t[(.cur):]), hold: .hold};
 
+# commonmark hard break: two or more spaces before a newline.
+def hard_breaks:
+  gsub("[ ]{2,}\n"; "<br>\n") | gsub("[ ]+$"; "");
+
 def unpark:
   .hold as $hold
   | .s
@@ -94,6 +104,7 @@ def unpark:
 def inline:
   {s: htmlesc, hold: []}
   | inline_code
+  | .s |= hard_breaks
   | inline_links
   | .s |= (emph | linkify)
   | unpark;
@@ -194,7 +205,7 @@ def flush_inline_blocks:
 # Heading ids are unique inside one report, so an in-report link can never be
 # ambiguous; a repeated heading gets -1, -2, ... as markdown-it's anchors do.
 def heading_key($raw):
-  ($raw | sauber | slugify) as $base
+  ($raw | clean_inline | slugify) as $base
   | if $base == "" then "abschnitt" else $base end;
 
 def md_to_html:
@@ -289,13 +300,13 @@ def md_to_html:
   | close_all_lists
   | .out | join("\n");
 
-def titel_of($md; $id):
+def title_of($md; $id):
   (($md | gsub("\r"; "") | (match("(?m)^#[ \\t]+(?<t>.+)$") // null)) as $m
    | if $m == null then "" else ($m.captures[0].string // "") end
-   | sauber) as $t
+   | clean_inline) as $t
   | if $t == "" then $id else $t end;
 
-map({id, datei, stand, ts,
-     titel: titel_of(.md; .id),
+map({id, file, updated, ts,
+     title: title_of(.md; .id),
      html: (.md | md_to_html)})
 | sort_by(-.ts)
