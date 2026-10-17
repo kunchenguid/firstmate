@@ -691,10 +691,12 @@ EOF
     printf '  (no routine outcomes recorded in the store for this window)\n'
   fi
 
-  # 7. cost.
+  # 7. cost. The task count enumerates retained task records, not live
+  # workers: a record outlives the agent that ran it, so only the spend cap's
+  # endpoint read (bin/fm-afk-contract.sh live-workers) may call one live.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
-  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
+  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task record(s) at return.\n' \
     "$((routine + captain))" "$routine" "$captain" "$live"
 }
 
