@@ -181,6 +181,13 @@ The Claude Code mod reloads it on every `session.start`, including same-process 
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+### Working-presentation variant (config/calm-ship)
+
+The optional gitignored `config/calm-ship` file selects Calm's animated working-presentation variant, resolved from the same effective Firstmate home and `FM_CONFIG_OVERRIDE` rules as `config/calm`.
+The only recognized value is `spaceship`, written with or without one trailing newline; an absent, unreadable, or unrecognized value keeps the default boat.
+The extension reads this file at load and re-reads it on every `session_start` and `/calm` toggle, so a mid-session change takes effect at the next of those points rather than mid-run.
+This file is local to each Firstmate home and is not part of secondmate inherited configuration.
+
 ## Pi repeated-read containment
 
 The tracked `.pi/extensions/fm-primary-read-repetition.ts` extension provides an optional read-loop safeguard for a Linux Pi primary.

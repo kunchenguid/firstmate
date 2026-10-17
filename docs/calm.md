@@ -60,6 +60,39 @@ Hidden elapsed time does not advance the animation.
 A resize while hidden clamps the frozen boat to the new width without changing its valid travel direction.
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 
+### Spaceship variant (config/calm-ship)
+
+Calm's Pi working presentation has one selectable variant, chosen by the gitignored `config/calm-ship` file under the effective Firstmate home (the same home and `FM_CONFIG_OVERRIDE` rules `config/calm` uses).
+Anything other than `spaceship` - including an absent file - keeps the boat as the default.
+With `spaceship`, Calm replaces the boat with a saucer banner that stays visible the whole time Calm is active, not only while a run is under way.
+When idle, the saucer drifts slowly and continuously left to right across the banner in the two-row rest pose, the three-cell `(|)` saucer directly over the three-cell `|^|` hull, one column every ~1.5 seconds, wrapping marquee-style back to the left edge when it crosses the right edge, while the hull row's asymmetric `*`/`.` starfield streams one column every ~1.3 seconds, so the stars visibly move left past the chasing ship instead of just twinkling in place.
+While a run is thinking, the sprite becomes the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield speeds up to two phases per 220ms tick, and the field renders as warp streaks streaming left past the sprite.
+
+### Spaceship crew markers (idle)
+
+While the spaceship banner is idle (the two-row rest pose), one `>` marker appears for every live crew in the home, spread across the right side of the top (saucer) row where the sparse dots ride, and the marker band drifts right on its own cadence (one column every ~2.2 seconds), wrapping marquee-style across the full width, so the crews flow right in a distinct rhythm past the saucer instead of in lockstep with it.
+Only active crews show: one `>` per crew whose work is on the go right now - actively working (green), or blocked/needs-you/failed (red). A concluded-and-reported job, a deliverable that merely awaits review (a ready branch or open PR), and a paused or held crew are not active, so they drop off the banner, leaving it to the crews actually doing something.
+The banner lists crews from the home's own `state/<id>.meta` records and reads each crew's latest `state/<id>.status` event, re-read on a slow tick (~11s) rather than every frame, and never shells out to the runtime backend.
+Each marker is a single standard ANSI foreground colour mapped from a coarse crew state:
+
+| Crew state | Colour |
+| --- | --- |
+| Working / dispatched | Green `>` |
+| Blocked / needs-you | Red `>` |
+| Done / awaiting review | Blue `>` |
+| Idle | Dim (default foreground) `>` |
+
+One marker per crew, never one per state.
+Because only live crews reach the banner, its markers are green or red; the blue and dim rows are the classifier's full mapping for the states the live filter drops.
+The saucer and the marker band both drift right, so the saucer sweeps the full row and crosses the markers, always passing in front of any marker it overlaps.
+Markers reflow with terminal width and drop off on the left when the row is too narrow, keeping the rightmost ones.
+The mapping is basic-ANSI only (no truecolour or theme lookup), matching the spaceship module's existing contract.
+When the run settles, the sprite relaxes back to the two-row rest pose, the stars return to the idle cadence immediately, and the movement pace eases back into the slow drift over a bounded handful of graduated moves, one column per move and never teleporting, before the marquee sweep continues indefinitely.
+Freeze/resume continuity, resize clamping, fresh-session reset, and narrow fallbacks follow the boat's contract, and a run start or settle drives the mode instead of the banner's visibility.
+[`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
+
+The spaceship banner installs under its own Firstmate-only Pi widget slot, so the standalone Pi Calm extension's shared boat slot rule above does not apply to it.
+
 ### What Calm hides on Pi
 
 Calm hides these rows:
@@ -161,6 +194,7 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
 - `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
 - `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable spaceship banner and its idle crew markers (`setCrew` + `readCalmCrewMarkers`).
 
 ### Pi regression entry points
 
