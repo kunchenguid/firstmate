@@ -5369,6 +5369,32 @@ test_status_archive_failed_publish_preserves_presentation() {
   pass "failed archive publication preserves presentation and watcher bookkeeping"
 }
 
+test_status_archive_cursor_failure_retries_without_duplicate() {
+  local case_dir rc
+  case_dir=$(make_case status-archive-cursor-retry)
+  prepare_status_archive_presentation "$case_dir"
+  cp "$case_dir/state/task-x1.status" "$case_dir/expected"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
+  printf 'broken\tidentity\tnot-an-offset\t0\n' >> "$case_dir/state/.status-presentation-cursor"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.malformed"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "malformed presentation cursor"
+  assert_present "$case_dir/state/task-x1.status" "cursor failure lost live history"
+  cmp -s "$case_dir/cursor.malformed" "$case_dir/state/.status-presentation-cursor" \
+    || fail "cursor failure changed presentation rows"
+  assert_absent "$case_dir/data/task-x1/status.log" "failed retirement left a duplicate archive"
+  assert_present "$case_dir/state/task-x1.meta" "cursor failure removed task metadata"
+  cp "$case_dir/cursor.before" "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "retry after cursor repair"
+  cmp -s "$case_dir/expected" "$case_dir/data/task-x1/status.log" || fail "retry archive lost history"
+  assert_absent "$case_dir/state/task-x1.status" "successful retry retained live status"
+  assert_absent "$case_dir/data/task-x1/status.1.log" "retry wrote a duplicate archive"
+  pass "cursor retirement failure removes its archive so retry publishes one history"
+}
+
 test_status_archive_publish_and_cold_log_stay_inert() {
   local case_dir rc text
   case_dir=$(make_case status-archive-inert)
@@ -5498,6 +5524,7 @@ test_status_archive_missing_status_noop
 test_status_archive_reuse_and_retention
 test_status_archive_unsafe_paths_refuse
 test_status_archive_failed_publish_preserves_presentation
+test_status_archive_cursor_failure_retries_without_duplicate
 test_status_archive_publish_and_cold_log_stay_inert
 test_status_archive_pruning_failure_warns_and_completes
 test_missing_startup_source_refuses_before_cleanup

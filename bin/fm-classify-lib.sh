@@ -1735,7 +1735,7 @@ status_presentation_marker_commit() {
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
   local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1793,8 +1793,9 @@ EOF
       || ! ln -n -- "$archive_tmp" "$archive" \
       || [ -L "$archive" ] || [ ! "$archive_tmp" -ef "$archive" ]; then
       rc=1
+    else
+      archive_published=1
     fi
-    [ -z "$archive_tmp" ] || rm -f -- "$archive_tmp"
   fi
   if [ "$rc" -eq 0 ] && { [ -e "$manifest" ] || [ -L "$manifest" ]; }; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
@@ -1825,6 +1826,12 @@ EOF
       "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
+  if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \
+    && { [ -e "$state/$task.status" ] || [ -L "$state/$task.status" ]; } \
+    && [ -n "$archive_tmp" ] && [ "$archive_tmp" -ef "$archive" ]; then
+    rm -f -- "$archive"
+  fi
+  [ -z "$archive_tmp" ] || rm -f -- "$archive_tmp"
   fm_lock_release "$lock" || rc=1
   return "$rc"
 }
