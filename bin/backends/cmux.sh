@@ -343,15 +343,17 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
-# itself). Resolves the fresh workspace's default surface via one list-panes
-# call (finding: a freshly created workspace already has exactly one surface,
-# so no separate new-surface call is needed). --focus false is passed for
+# itself). After new-workspace acknowledges, workspace list can briefly omit
+# its title, so resolution makes up to 20 polling attempts with a 0.1-second
+# sleep between attempts for the exact scoped title and its default surface.
+# A fresh workspace already has one surface, so no separate new-surface call
+# is needed. --focus false is passed for
 # defense in depth though verified to already be the default (finding:
 # workspace/surface/pane create all default focus to false) - no
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out wsid sfid attempt
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
@@ -362,11 +364,23 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
-  sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
-  printf '%s %s' "$wsid" "$sfid"
+  for attempt in $(seq 1 20); do
+    wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+    if [ -n "$wsid" ]; then
+      sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
+      if [ -n "$sfid" ]; then
+        printf '%s %s' "$wsid" "$sfid"
+        return 0
+      fi
+    fi
+    [ "$attempt" -eq 20 ] || sleep 0.1
+  done
+  if [ -z "$wsid" ]; then
+    echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2
+  else
+    echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
+  fi
+  return 1
 }
 
 # fm_backend_cmux_parse_target: split "<workspace_uuid>:<surface_uuid>" on the
