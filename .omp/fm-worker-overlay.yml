@@ -4,10 +4,76 @@
 # analogue of the Pi adapter's `--tui-mode regular` pin: a per-launch overlay,
 # never a write to the captain's own ~/.omp/agent/config.yml, which stays
 # exactly as the captain set it (model roles, theme, providers, compaction).
-# Each key below pins one setting whose captain-facing value would park an
+# Most keys below pin one setting whose captain-facing value would park an
 # unattended worker on an interactive prompt, change its pinned model under it,
 # or make its composer unreadable to bin/fm-composer-lib.sh. Verified against
-# omp 18.1.11's own settings schema (`omp config list`).
+# omp 18.1.11's own settings schema (`omp config list`). `bash.patterns` is the
+# exception: it adds the worker's hard refusals.
+bash:
+  # Deny rules hold under --auto-approve (omp 18.11.0: a pattern `deny` is
+  # absolute in every approval mode), so a worker's bash tool cannot merge a PR,
+  # run sudo, or push to a main/master default branch; its own task-branch push
+  # still runs. A rule matches the whole command or any segment split on &&, ||,
+  # ;, |, &, a newline and subshells, with `*` as the only wildcard. A push rule
+  # names the ref exactly (main or master as a bare argument, after `:` or `+`,
+  # or as refs/heads/<name>), as an end-of-segment and a followed-by-space
+  # variant, so a task branch such as maintenance-x or a refspec such as fm/x:main-fix still
+  # pushes. Known limits: the rules cover the bash tool only (omp's eval tool can
+  # still spawn a shell), they read the command text as typed (a script,
+  # `bash -c "..."`, `env sudo`, an assignment prefix, `git -c k=v push` or
+  # `git --no-pager push`, `git push --all` or `--mirror`, or a default branch
+  # named other than main/master sidesteps them), a push chained with another
+  # command whose last argument is main or master (`git push origin fm/x && gh
+  # pr create --base main`) is refused because the whole-command match sees that
+  # trailing ref, so a worker runs the push as its own command, a gh call that
+  # merely mentions `pr merge` (`gh pr comment 7 --body "run pr merge after
+  # CI"`) or an api PUT whose path contains /merge is refused likewise, so a
+  # worker rewords or splits that command, they reach every
+  # omp session launched with this overlay (workers and secondmates; the
+  # sanctioned bin/fm-pr-merge.sh and bin/fm-merge-local.sh paths do not match
+  # them), and this list replaces any `bash.patterns` of the captain's own for
+  # the session.
+  patterns:
+    - {match: "sudo", approval: deny}
+    - {match: "sudo *", approval: deny}
+    - {match: "gh*pr merge*", approval: deny}
+    - {match: "gh*stack merge*", approval: deny}
+    - {match: "gh* api*PUT*/merge*", approval: deny}
+    - {match: "gh* api*/merge*PUT*", approval: deny}
+    - {match: "gh* api*mergePullRequest*", approval: deny}
+    - {match: "gh* api*PullRequestAutoMerge*", approval: deny}
+    - {match: "git push* main", approval: deny}
+    - {match: "git push* main *", approval: deny}
+    - {match: "git push*:main", approval: deny}
+    - {match: "git push*:main *", approval: deny}
+    - {match: "git push*+main", approval: deny}
+    - {match: "git push*+main *", approval: deny}
+    - {match: "git push*refs/heads/main", approval: deny}
+    - {match: "git push*refs/heads/main *", approval: deny}
+    - {match: "git push* master", approval: deny}
+    - {match: "git push* master *", approval: deny}
+    - {match: "git push*:master", approval: deny}
+    - {match: "git push*:master *", approval: deny}
+    - {match: "git push*+master", approval: deny}
+    - {match: "git push*+master *", approval: deny}
+    - {match: "git push*refs/heads/master", approval: deny}
+    - {match: "git push*refs/heads/master *", approval: deny}
+    - {match: "git -C * push* main", approval: deny}
+    - {match: "git -C * push* main *", approval: deny}
+    - {match: "git -C * push*:main", approval: deny}
+    - {match: "git -C * push*:main *", approval: deny}
+    - {match: "git -C * push*+main", approval: deny}
+    - {match: "git -C * push*+main *", approval: deny}
+    - {match: "git -C * push*refs/heads/main", approval: deny}
+    - {match: "git -C * push*refs/heads/main *", approval: deny}
+    - {match: "git -C * push* master", approval: deny}
+    - {match: "git -C * push* master *", approval: deny}
+    - {match: "git -C * push*:master", approval: deny}
+    - {match: "git -C * push*:master *", approval: deny}
+    - {match: "git -C * push*+master", approval: deny}
+    - {match: "git -C * push*+master *", approval: deny}
+    - {match: "git -C * push*refs/heads/master", approval: deny}
+    - {match: "git -C * push*refs/heads/master *", approval: deny}
 composer:
   # Renders a bare `❯` (U+276F) row, a glyph the shared composer classifier
   # already reads; the shipped default `band` and six other shapes are not in
