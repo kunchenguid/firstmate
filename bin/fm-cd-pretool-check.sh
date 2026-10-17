@@ -124,12 +124,7 @@ fi
 # form the classifier decodes REQUIRES extending it here in the same change, or
 # the prefilter stops being a strict superset. Deliberate deeper obfuscation is
 # out of scope by the same agent-mistake threat model the policy uses.
-PREFILTER=$CMD
-PREFILTER=${PREFILTER//\\/}
-PREFILTER=${PREFILTER//\"/}
-PREFILTER=${PREFILTER//\'/}
-PREFILTER=${PREFILTER//$'\n'/}
-PREFILTER=${PREFILTER//$'\r'/}
+PREFILTER=$(printf '%s' "$CMD" | tr -d '\\"\047\n\r')
 case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)

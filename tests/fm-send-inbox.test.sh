@@ -34,6 +34,24 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+utf8_locale() {
+  local candidate charmap
+  for candidate in C.UTF-8 C.utf8 en_US.UTF-8; do
+    charmap=$(LC_ALL="$candidate" locale charmap 2>/dev/null) || continue
+    case "$charmap" in UTF-8|UTF8|utf8) printf '%s\n' "$candidate"; return 0 ;; esac
+  done
+  return 1
+}
+
+multibyte_text() {
+  local i=0 text='Línea áéíóú ñ «comillas» — → '
+  while [ "$i" -lt 11 ]; do text="$text$text"; i=$((i + 1)); done
+  printf '%s' "$text"
+}
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
@@ -520,3 +538,19 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+
+test_multibyte_steer_bounded() {
+  local dir locale_name message
+  locale_name=$(utf8_locale) || { printf 'SKIP: UTF-8 locale unavailable\n'; return; }
+  dir=$(setup_case multibyte)
+  message=$(multibyte_text)
+  printf '%s' "$message" > "$dir/expected"
+  fm_run_timed 20 env LC_ALL="$locale_name" PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_SEND_LOG="$dir/send.log" \
+    FM_SEND_SETTLE=0 /bin/bash "$SEND" t1 "$message" > "$dir/out" 2> "$dir/err" \
+    || fail "multibyte steer failed or exceeded 20 seconds"
+  record_body _ "$dir/home/state/t1.inbox/001.msg" > "$dir/actual"
+  cmp -s "$dir/expected" "$dir/actual" || fail "multibyte steer payload changed"
+  pass "fm-send: large UTF-8 steer enqueues byte-exact within the bound"
+}
+test_multibyte_steer_bounded

@@ -11,6 +11,24 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+utf8_locale() {
+  local candidate charmap
+  for candidate in C.UTF-8 C.utf8 en_US.UTF-8; do
+    charmap=$(LC_ALL="$candidate" locale charmap 2>/dev/null) || continue
+    case "$charmap" in UTF-8|UTF8|utf8) printf '%s\n' "$candidate"; return 0 ;; esac
+  done
+  return 1
+}
+
+multibyte_text() {
+  local i=0 text='Línea áéíóú ñ «comillas» — → '
+  while [ "$i" -lt 11 ]; do text="$text$text"; i=$((i + 1)); done
+  printf '%s' "$text"
+}
+
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
@@ -481,3 +499,33 @@ test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
 test_shellcheck_clean
+
+test_multibyte_prefilter_bounded() {
+  local locale_name text dir fakebin marker tool tool_path check protected rc
+  locale_name=$(utf8_locale) || { printf 'SKIP: UTF-8 locale unavailable\n'; return; }
+  text=$(multibyte_text)
+  dir=$(fm_test_tmproot multibyte-prefilter)
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  marker="$dir/node-called"
+  for tool in dirname tr git; do
+    tool_path=$(command -v "$tool") || continue
+    ln -s "$tool_path" "$fakebin/$tool"
+  done
+  printf '#!/bin/bash\n: > "%s"\nexit 2\n' "$marker" > "$fakebin/node"
+  chmod +x "$fakebin/node"
+  check="$CHECK"
+  protected="bin/fm-\"watch\"-arm.sh &"
+  fm_run_timed 20 env LC_ALL="$locale_name" PATH="$fakebin" /bin/bash "$check" \
+    --command "echo '$text'" > "$dir/out" 2>&1 \
+    || fail "multibyte fast allowance failed or exceeded 20 seconds"
+  [ ! -e "$marker" ] || fail "multibyte fast allowance invoked Node"
+  protected="$protected # $text"$'\\\n\r'"'"
+  fm_run_timed 20 env LC_ALL="$locale_name" PATH="$fakebin" /bin/bash "$check" \
+    --command "$protected" > "$dir/out" 2>&1
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "multibyte delegation exceeded 20 seconds"
+  [ -e "$marker" ] || fail "obfuscated protected command did not delegate"
+  pass "hook: large UTF-8 commands fast-allow and delegate within the bound"
+}
+test_multibyte_prefilter_bounded
