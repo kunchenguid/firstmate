@@ -389,7 +389,7 @@ SH
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'quota-axi 0.1.51 (fake)'
+  printf '%s\n' 'quota-axi 0.1.55 (fake)'
 fi
 exit 0
 SH

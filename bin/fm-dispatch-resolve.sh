@@ -347,6 +347,7 @@ jq -e --slurpfile rules "$RULES" '
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
+fm_quota_axi_compatible || emit_error "quota-axi $FM_QUOTA_AXI_MIN or newer required"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
