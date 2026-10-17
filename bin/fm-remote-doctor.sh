@@ -36,7 +36,7 @@
 #   fix <check>=applied: <what changed>       (--fix only)
 #   fix <check>=failed: <why the repair did not land>   (--fix only)
 #   check <check>=ok: <evidence>
-#   check <check>=skip: <why this host is exempt>
+#   check <check>=skip: <why this host or this run is exempt>
 #   check <check>=fixable: <gap --fix can close>
 #   check <check>=human: <gap only a person at that machine can close>
 #   action: <check>: <the exact step to take>
@@ -51,7 +51,10 @@
 # wrapper for a required tool it can discover under nvm, asdf, or mise. It never
 # installs packages, creates a login session, writes an auto-login password,
 # changes FileVault, stores an account password, or replaces a non-Firstmate
-# wrapper; those remain reported gaps.
+# wrapper; those remain reported gaps. Reached without the entrypoint's
+# FM_ROOT_OVERRIDE, it skips the remote-job-worker and launch-agent checks
+# instead of installing either agent on the caller's own machine; run_checks
+# owns why.
 set -eu
 
 # Resolve this script's directory with builtins only: a host missing a required
@@ -725,8 +728,26 @@ run_checks() { # <resolved-login-shell>
   CHECK_ACTIONS=()
   check_herdr
   check_gui_session
-  check_remote_job_worker
-  check_launch_agent "$shell"
+  # Both of the checks below install a reboot-surviving LaunchAgent under
+  # --fix, and this command is documented to run on a remote second mate's
+  # account, reached through fm-on.sh's fixed entrypoint - which is what sets
+  # FM_ROOT_OVERRIDE. Without that marker the run is a local invocation, where
+  # installing dev.firstmate.remote-job and the Aqua Herdr agent gives the
+  # captain's own machine persistence it never asked for and that no command
+  # here removes. check_entrypoint_link already reads the same marker the same
+  # way; these two were the pair that did not.
+  if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
+    local why="skip: this run did not come through the fixed remote entrypoint"
+    record remote-job-worker "$why"
+    record remote-job-worker-loaded "$why"
+    record remote-job-probe "$why"
+    record launchagent "$why"
+    record launchagent-scope "$why"
+    record launchagent-loaded "$why"
+  else
+    check_remote_job_worker
+    check_launch_agent "$shell"
+  fi
   check_herdr_server
   check_entrypoint_link
 }
