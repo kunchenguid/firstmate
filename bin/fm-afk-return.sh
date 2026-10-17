@@ -759,7 +759,7 @@ EOF
     fi
   fi
 
-  if drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err"); then
+  if drained=$(FM_WAKE_DRAIN_OPEN_DECISIONS=full "$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err"); then
     remove_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence" || lifecycle_ok=0
   else
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
