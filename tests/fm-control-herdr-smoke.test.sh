@@ -107,7 +107,7 @@ WT_REAL=$(cd "$WT" && pwd -P)
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
-CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT") || fail "container_ensure failed"
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT" worker "$SESSION" fm-hsmoke) || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 WORKSPACE_ID=${CONTAINER#*:}
