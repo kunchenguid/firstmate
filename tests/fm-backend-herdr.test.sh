@@ -4037,7 +4037,8 @@ test_composer_state_inactive_session_fails_fast_without_server_autostart() {
 # shellcheck disable=SC2016
 test_composer_state_piped_reader_does_not_hang() {
   local out rc=0
-  out=$( timeout 3s bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
+  out=$( bash -c '. "$0/bin/fm-timeout-lib.sh"; fm_run_timed 3 bash -c "$1" "$0"' "$ROOT" \
+    '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' ) || rc=$?
   [ "$rc" -eq 0 ] || fail "piped composer probe on bad target hung or failed with rc=$rc"
   [ "$out" = unknown ] || fail "piped composer probe should print unknown, got '$out'"
   pass "fm_backend_composer_state (herdr): piped probe on bad target does not hang EOF-sensitive readers"
@@ -4371,6 +4372,34 @@ test_wait_for_working_samples_budget_endpoint_without_final_sleep() {
   sleeps=$(grep -c '^sleep:0.1000$' "$sleep_log")
   [ "$sleeps" -eq 5 ] || fail "six polls across a 0.5s budget should sleep five times at 0.1000s, got $sleeps matching sleeps; log: $(cat "$sleep_log")"
   pass "fm_backend_herdr_wait_for_working: spreads six samples across the full budget endpoint without a final trailing sleep"
+}
+
+# macOS awk honors a comma-decimal LC_NUMERIC (ar_EG.UTF-8 on the machine that
+# found this): it parsed 0.5 as 0 and printed 0٫1000, so the poll interval
+# collapsed and the confirmation budget shrank to back-to-back samples.
+test_wait_for_working_budget_ignores_comma_decimal_locale() {
+  local dir log resp fb out sleep_log sleeps loc='' candidate n
+  for candidate in ar_EG.UTF-8 de_DE.UTF-8 fr_FR.UTF-8; do
+    case "$(LC_ALL=$candidate awk 'BEGIN { printf "%.1f", 0.5 }' 2>/dev/null)" in
+      0.5|'') ;;
+      *) loc=$candidate; break ;;
+    esac
+  done
+  if [ -z "$loc" ]; then
+    echo "skip: no installed locale makes this awk print a non-dot decimal separator"
+    return 0
+  fi
+  dir="$TMP_ROOT/wait-budget-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
+  for n in 1 2 3 4 5 6; do
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/$n.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" LC_ALL=$loc FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
+    bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_wait_for_working default w1:p2 "$(fm_backend_herdr_submit_confirm_budget 0.5)" 6' "$ROOT" )
+  [ "$out" = idle ] || fail "wait_for_working under $loc should report idle, got '$out'"
+  sleeps=$(grep -c '^sleep:0.1200$' "$sleep_log")
+  [ "$sleeps" -eq 5 ] || fail "under $loc six polls across the 0.6s minimum budget should sleep five times at 0.1200s, got $sleeps; log: $(cat "$sleep_log")"
+  pass "fm_backend_herdr_wait_for_working: the confirmation budget keeps its interval under the comma-decimal locale $loc"
 }
 
 test_send_text_submit_applies_herdr_minimum_confirm_budget() {
@@ -5238,6 +5267,39 @@ test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted() {
   [ "$enter_count" -eq 1 ] || fail "the proven grey slash command should be submitted once, sent $enter_count Enter(s)"
   [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven grey slash command must not be cleared"
   pass "fm_backend_herdr_send_text_submit: a typed slash command Claude draws in muted truecolor grey is proven and submitted"
+}
+
+# Live Claude Code 2.1.301 on herdr 0.9.3 (recorded 2026-10-15) can draw the
+# slash-command popup BELOW the composer's closing rule, with its selected row
+# led by the same `❯` as the composer. The payload proof read that row as the
+# composer, cleared the typed /exit, and reported send-failed, so fm-control
+# exit and relaunch never stopped the worker.
+test_send_text_submit_claude_popup_below_composer_is_proven_and_submitted() {
+  local dir log resp fb out enter_count text rule
+  dir="$TMP_ROOT/submit-claude-popup-below"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
+  {
+    printf 'transcript line\n\n'
+    printf '\x1b[0m\x1b[38;2;61;90;128m%s\x1b[0m\n' "$rule"
+    printf '\xe2\x9d\xaf\xc2\xa0\x1b[0m\x1b[38;2;94;179;246m/exit\x1b[0m\n'
+    printf '\x1b[0m\x1b[38;2;61;90;128m%s\x1b[0m\n' "$rule"
+    printf '  \x1b[0m\x1b[38;2;94;179;246m\xe2\x9d\xaf /\x1b[0m\x1b[1m\x1b[38;2;94;179;246mexit\x1b[0m\x1b[38;2;94;179;246m                    \x1b[0m\x1b[1m\x1b[38;2;94;179;246mExit\x1b[0m\x1b[38;2;94;179;246m the CLI\x1b[0m\n'
+    printf '  \x1b[0m\x1b[38;2;123;135;156m  /context                 Visualize current context usage as a colored grid\x1b[0m\n'
+    printf '  \x1b[0m\x1b[38;2;123;135;156m  /usage-credits           Configure usage credits or request them from your admin when you\x1b[0m\n'
+    printf '  \x1b[0m\x1b[38;2;123;135;156m                           hit a limit\x1b[0m\n'
+  } > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a typed /exit above Claude's popup must be proven and submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the proven /exit should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven /exit must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a typed /exit with Claude's popup drawn below the composer is proven and submitted"
 }
 
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
@@ -6111,6 +6173,7 @@ test_composer_state_codex_non_faint_same_text_is_pending
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep
+test_wait_for_working_budget_ignores_comma_decimal_locale
 test_send_text_submit_applies_herdr_minimum_confirm_budget
 test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
@@ -6150,6 +6213,7 @@ test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
 test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
 test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
+test_send_text_submit_claude_popup_below_composer_is_proven_and_submitted
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder

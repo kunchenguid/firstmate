@@ -13,7 +13,9 @@
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
-# "Herdr submit confirmation" entry.
+# "Herdr submit confirmation" entry. Claude draws the popup above or below the
+# composer depending on the account, so run it under each config directory the
+# fleet's workers use ("Claude slash-command popup below the composer").
 # Every Herdr call, including adapter calls, is routed through bin/fm-herdr-lab.sh.
 set -u
 
