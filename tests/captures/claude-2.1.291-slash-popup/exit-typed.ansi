@@ -1,0 +1,11 @@
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ [0m[38;2;177;185;249m/exit[0m
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;177;185;249m❯ /[0m[1m[38;2;177;185;249mexit[0m[38;2;177;185;249m                                [0m[1m[38;2;177;185;249mExit[0m[38;2;177;185;249m the CLI[0m
+  [0m[38;2;153;153;153m  /edit-article                        Edit and improve articles by restructuring[0m
+                                         [0m[38;2;153;153;153msections, improving clarity, and tightening prose.…[0m
+  [0m[38;2;153;153;153m  /context                             Visualize current context usage as a colored grid[0m
+  [0m[38;2;153;153;153m  /usage-credits                       Configure usage credits or request them from your[0m
+                                         [0m[38;2;153;153;153madmin when you hit a limit[0m
+  [0m[38;2;153;153;153m  /quiet                               Enter quiet supervision mode when the captain[0m
+                                         [0m[38;2;153;153;153minvokes /quiet or asks for quiet mode, quiet-while…[0m
