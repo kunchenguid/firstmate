@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pin the Pi/OpenCode recovery-loop fix: one announcement per generation, and a
-# handling successor that keeps supervising instead of going blind.
+# handling successor that keeps supervising instead of going blind, including
+# to captain inbox notes queued while it watches.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -222,5 +223,93 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# Start a handling successor on <state> writing to <out>, wait until it holds
+# the watcher lock, and print its pid.
+start_handling_successor() {  # <home> <state> <fakebin> <out>
+  local home=$1 state=$2 fakebin=$3 out=$4 child n=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  while [ "$n" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    n=$((n + 1))
+  done
+  printf '%s\n' "$child"
+}
+
+stop_successor() {  # <pid>
+  kill -TERM "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# Wait up to 10s for <pid> to exit; succeed only when it did.
+await_successor_close() {  # <pid>
+  local n=0
+  while [ "$n" -lt 20 ] && kill -0 "$1" 2>/dev/null; do
+    sleep 0.5
+    n=$((n + 1))
+  done
+  ! kill -0 "$1" 2>/dev/null
+}
+
+queue_inbox_note() {  # <home> <state> <text>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$2" FM_DATA_OVERRIDE="$1/data" FM_CONFIG_OVERRIDE="$1/config" \
+    "$ROOT/bin/fm-inbox.sh" note "$3" | sed -n 's/^queued \([^ ]*\).*/\1/p'
+}
+
+# T3: a captain note queued while a handling successor watches an idle primary
+# must close that watcher promptly: fm-inbox.sh only appends a queue row, and a
+# successor skips the generic recovery re-announce.
+# T4: that still-unacknowledged note must not wake the next successor again.
+test_handling_successor_surfaces_new_inbox_note_once() {
+  local dir home state fakebin child out id1 id2
+  dir=$(make_case inbox-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data" "$home/config"
+  : > "$state/crew.meta"
+  out="$dir/watch-1.out"
+  child=$(start_handling_successor "$home" "$state" "$fakebin" "$out")
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { stop_successor "$child"; fail "handling successor did not take the watcher lock"; }
+  sleep 1.5
+  id1=$(queue_inbox_note "$home" "$state" "first captain note")
+  [ -n "$id1" ] || { stop_successor "$child"; fail "fm-inbox.sh note did not queue a note"; }
+  if ! await_successor_close "$child"; then
+    stop_successor "$child"
+    fail "handling successor stayed parked 10s after inbox note $id1: $(cat "$out")"
+  fi
+  wait "$child" 2>/dev/null || true
+  grep -F "check: captain inbox note queued: inbox:$id1" "$out" >/dev/null \
+    || fail "handling successor did not close on inbox note $id1: $(cat "$out")"
+  pass "a handling successor closes promptly on a captain note queued while it watches"
+
+  out="$dir/watch-2.out"
+  child=$(start_handling_successor "$home" "$state" "$fakebin" "$out")
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { stop_successor "$child"; fail "second handling successor did not take the watcher lock"; }
+  sleep 5
+  if ! kill -0 "$child" 2>/dev/null; then
+    wait "$child" 2>/dev/null || true
+    fail "an already-presented inbox note woke the next successor again: $(cat "$out")"
+  fi
+  # Positive control, so the parked verdict above cannot be vacuous.
+  id2=$(queue_inbox_note "$home" "$state" "second captain note")
+  if ! await_successor_close "$child"; then
+    stop_successor "$child"
+    fail "second handling successor stayed parked 10s after inbox note $id2: $(cat "$out")"
+  fi
+  wait "$child" 2>/dev/null || true
+  grep -F "check: captain inbox note queued: inbox:$id2" "$out" >/dev/null \
+    || fail "second handling successor did not close on inbox note $id2: $(cat "$out")"
+  ! grep -F "inbox:$id1" "$out" >/dev/null \
+    || fail "second handling successor re-surfaced already-presented note $id1: $(cat "$out")"
+  pass "an already-presented inbox note does not wake the next successor again"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_surfaces_new_inbox_note_once
 test_unacknowledged_recovery_is_announced_once_per_generation
