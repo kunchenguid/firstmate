@@ -48,7 +48,7 @@ state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/wt   ! to run a shell command\n                     context: 0%% (0/256k)\n'
       ;;
     trust)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
@@ -71,10 +71,10 @@ fake_screen() {
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
     pointer-typed)
-      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/wt   ! to run a shell command\n                     context: 0%% (0/256k)\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/wt   ! to run a shell command\n                     context: 1%% (2k/256k)\n' "$FM_FAKE_BRIEF_REAL"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -88,9 +88,12 @@ fake_history() {
   fi
 }
 fake_cursor_y() {
+  # Kimi 2.1.1 draws its status and context rows under the composer box, so
+  # the cursor sits on the `│ >` row (ready, delivered) or, after an early
+  # Enter, on the empty second content row (pointer-typed).
   case "$state" in
-    pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    pointer-typed) printf '2\n' ;;
+    ready|delivered) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -1134,6 +1137,48 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+# The reported Herdr failure (issue 4306), replayed from real Kimi 2.1.1 Herdr
+# viewport reads: Kimi's status and context rows sit directly under its
+# composer, Herdr's native agent_status stays idle for the whole turn (as
+# measured live), and the first Enter is swallowed by Kimi's startup window.
+# Readiness must see an empty composer, and the submit path the spawn uses
+# must read the unsent pointer as pending, retry Enter, and confirm delivery.
+# shellcheck disable=SC2329 # the stubs are invoked through the Herdr adapter under test
+test_kimi_herdr_footer_readiness_and_delivery() (
+  local dir="$ROOT/tests/fixtures/kimi-code-v2.1.1" state="$TMP_ROOT/kimi-herdr-footer.state"
+  local enters="$TMP_ROOT/kimi-herdr-footer.enters" out
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/backends/herdr.sh"
+  printf 'idle\n' > "$state"
+  : > "$enters"
+  fm_backend_herdr_visible_capture_ansi() { cat "$dir/$(cat "$state").ansi"; }
+  fm_backend_herdr_visible_capture() { fm_backend_herdr_visible_capture_ansi | fm_composer_strip_ansi; }
+  fm_backend_herdr_capture() { fm_backend_herdr_visible_capture; }
+  fm_backend_herdr_agent_identity_raw() { printf 'kimi'; }
+  fm_backend_herdr_agent_status_raw() { printf 'idle'; }
+  fm_backend_herdr_wait_for_working() { printf 'idle'; }
+  fm_backend_herdr_send_literal() { printf 'typed\n' > "$state"; }
+  fm_backend_herdr_send_key() {
+    [ "$2" = Enter ] || return 0
+    printf 'enter\n' >> "$enters"
+    [ "$(wc -l < "$enters")" -lt 2 ] || printf 'working\n' > "$state"
+  }
+  out=$(fm_backend_herdr_composer_state 'lab:w1:p1')
+  [ "$out" = empty ] || fail "Kimi on Herdr: readiness should read the idle composer empty, got '$out'"
+  printf 'typed\n' > "$state"
+  out=$(fm_backend_herdr_composer_state 'lab:w1:p1')
+  [ "$out" = pending ] || fail "Kimi on Herdr: the unsent pointer should read pending, got '$out'"
+  printf 'idle\n' > "$state"
+  out=$(fm_backend_herdr_send_text_submit 'lab:w1:p1' 'Reply with exactly KIMIPONG and nothing else.' 3 0 0)
+  [ "$out" = empty ] || fail "Kimi on Herdr: delivery should confirm the cleared composer, got '$out'"
+  [ "$(wc -l < "$enters" | tr -d ' ')" = 2 ] \
+    || fail "Kimi on Herdr: the swallowed first Enter was not retried exactly once"
+  printf 'exited\n' > "$state"
+  out=$(fm_backend_herdr_composer_state 'lab:w1:p1')
+  [ "$out" = unknown ] || fail "Kimi on Herdr: a pane that exited to a shell must refuse, got '$out'"
+  pass "Kimi on Herdr: real 2.1.1 footer reads ready, a swallowed Enter is retried, and delivery confirms"
+)
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
@@ -1164,3 +1209,4 @@ test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
+test_kimi_herdr_footer_readiness_and_delivery
