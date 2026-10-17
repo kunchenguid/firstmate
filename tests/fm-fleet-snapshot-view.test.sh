@@ -1152,8 +1152,44 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# Perl randomizes hash order per process, so a decoder that re-encodes the
+# backlog without canonical key order republishes identical state as different
+# bytes. Pin the seed to several values and require byte-identical summaries.
+test_home_summary_bytes_ignore_perl_hash_seed() {
+  local home seed out first='' orders=''
+  for seed in $(seq 16); do
+    orders="$orders$(PERL_HASH_SEED=$seed perl -e 'my %h = (date => 1, verb => 1); print join(",", keys %h), "\n"')
+"
+  done
+  [ "$(printf '%s' "$orders" | sort -u | wc -l | tr -d ' ')" -gt 1 ] \
+    || fail "PERL_HASH_SEED did not vary Perl hash order, so this test would be vacuous"
+  home=$(make_home summary-key-order)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] shipped - Shipped https://github.com/kunchenguid/firstmate/pull/9 (repo: alpha) (kind: ship) (merged 2026-07-06)
+EOF
+  for seed in $(seq 16); do
+    out=$(PERL_HASH_SEED=$seed FM_HOME="$home" \
+      FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z "$SNAPSHOT" --secondmate-home-summary) \
+      || fail "home summary failed under PERL_HASH_SEED=$seed"
+    printf '%s' "$out" | jq -e '.landed[0].completion == {date:"2026-07-06",verb:"merged"}' >/dev/null \
+      || fail "home summary lost the landed completion: $out"
+    if [ -z "$first" ]; then
+      first=$out
+    elif [ "$out" != "$first" ]; then
+      fail "home summary bytes changed with PERL_HASH_SEED=$seed: $first != $out"
+    fi
+  done
+  pass "home summary bytes do not depend on Perl hash order"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_home_summary_bytes_ignore_perl_hash_seed
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
