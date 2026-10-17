@@ -87,7 +87,9 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    - **Captain's Call** - every unsuppressed open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   The report also carries the full `servers` table (project, port, PID, uptime, backing directory) behind the chat's compact lines.
    - **Charted Next** - queued or gated work, including deferred or aged captain-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
+   The report also carries the full `project_branches` table (project, branch, clean/dirty) behind the chat's compact line.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
    For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
 
@@ -156,8 +158,10 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
    Empty-state: "No recent completions are in the current baseline."
 3. **Underway** - live work progressing on its own, one line of current state per direct report.
+   When the snapshot carries a non-empty `servers` array, close the section with one compact line per row in `project:port (pid <pid>, <uptime>)` form, so the running fleet servers always ride the digest without becoming a fifth section.
    Empty-state: "Nothing is underway."
 4. **Charted Next** - queued or gated work waiting on the fleet or a date, deferred or aged captain-hold safety gates, plus action-free fleet-integrity warnings.
+   When the snapshot carries a non-empty `project_branches` array, close the section with one compact `Branches: <project>@<branch>[+dirty], ...` line, so every fleet clone's branch and clean/dirty state is visible without becoming a fifth section.
    Empty-state: "Nothing is queued."
 
 Rules that keep the contract unambiguous:
