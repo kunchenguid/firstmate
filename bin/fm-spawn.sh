@@ -181,7 +181,10 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
+#   could later be released out from under its successor. A Treehouse pool slot
+#   that belongs to another clone of the same origin (Treehouse before 3.0.0
+#   reuses any free slot of the shared pool) refuses the spawn, naming the
+#   Treehouse requirement, before any trust or task state is written. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it.
@@ -3708,6 +3711,29 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
+# Treehouse names a pool by repository name and origin, so two Firstmate homes
+# that each clone one origin (a root home and a secondmate home, say) share one
+# pool. Treehouse before 3.0.0 hands out any free slot of that pool, including a
+# linked worktree of the OTHER clone; 3.0.0 reuses a slot only for the clone that
+# owns it. A slot of another clone is never this task's copy: its commits land in
+# another home's repository and the slot claim and trust registration both key
+# on this clone. Refuse it here, naming the cause, rather than letting it reach a
+# later guard whose refusal says nothing about Treehouse.
+refuse_foreign_clone_pool_slot() { # <inspect-target>
+  local inspect_target=$1 proj_common slot_common th_version
+  fm_treehouse_pool_layout "$WT" || return 0
+  fm_treehouse_pool_slot "$PROJ_ABS" "$WT" && return 0
+  proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  slot_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -z "$proj_common" ] || [ -z "$slot_common" ]; then
+    echo "error: could not prove that pool slot '$WT' belongs to the spawning clone '$PROJ_ABS' (git common dirs '${slot_common:-unreadable}' and '${proj_common:-unreadable}'); refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  th_version=$(treehouse --version 2>/dev/null | head -n 1 || true)
+  echo "error: treehouse get handed out pool slot '$WT', which belongs to another clone (git common dir '$slot_common'), not the spawning clone '$PROJ_ABS' (git common dir '$proj_common'); Treehouse before 3.0.0 shares one pool among clones of the same origin and reuses any free slot, so upgrade Treehouse to 3.0.0 or later (installed: ${th_version:-unknown}); refusing to launch. Inspect target $inspect_target" >&2
+  exit 1
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -4753,6 +4779,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  refuse_foreign_clone_pool_slot "$T"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

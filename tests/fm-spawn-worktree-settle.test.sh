@@ -232,8 +232,130 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# make_two_clone_case <name> builds two Firstmate homes that each clone one
+# origin under the same repository name, the shape a root home and a secondmate
+# home take, plus one Treehouse-layout pool those clones share (Treehouse names a
+# pool by repository name and origin). Slot 1 is a linked worktree of the first
+# clone and slot 2 one of the second. The second home is the one that spawns.
+make_two_clone_case() {
+  local name=$1 case_dir seed origin pool
+  case_dir="$TMP_ROOT/$name"
+  seed="$case_dir/seed"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool/bodl-abc123"
+  fm_git_init_commit "$seed"
+  git clone --quiet --bare "$seed" "$origin"
+  TWO_CLONE_MAIN_HOME="$case_dir/main-home"
+  TWO_CLONE_MATE_HOME="$case_dir/mate-home"
+  fm_test_spawn_home "$TWO_CLONE_MAIN_HOME" codex
+  fm_test_spawn_home "$TWO_CLONE_MATE_HOME" codex
+  TWO_CLONE_MAIN="$TWO_CLONE_MAIN_HOME/projects/bodl"
+  TWO_CLONE_MATE="$TWO_CLONE_MATE_HOME/projects/bodl"
+  git clone --quiet "file://$origin" "$TWO_CLONE_MAIN"
+  git clone --quiet "file://$origin" "$TWO_CLONE_MATE"
+  mkdir -p "$pool/1" "$pool/2"
+  printf '{"worktrees":[]}\n' > "$pool/treehouse-state.json"
+  git -C "$TWO_CLONE_MAIN" worktree add --quiet --detach "$pool/1/bodl"
+  git -C "$TWO_CLONE_MATE" worktree add --quiet --detach "$pool/2/bodl"
+  TWO_CLONE_MAIN_SLOT="$pool/1/bodl"
+  TWO_CLONE_MATE_SLOT="$pool/2/bodl"
+  TWO_CLONE_FAKEBIN=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_fake_sleep_noop "$TWO_CLONE_FAKEBIN"
+}
+
+common_dir_of() {
+  (cd "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
+}
+
+# The incident: Treehouse before 3.0.0 hands the second clone's spawn a free
+# slot that is a worktree of the FIRST clone. That slot is never the task's own
+# copy, so the spawn refuses it and says why, instead of launching there or
+# failing later on a guard that says nothing about Treehouse.
+test_pool_slot_of_another_clone_is_refused() {
+  local id=pool-foreign-clone-z5 out status
+  make_two_clone_case pool-foreign-clone
+  fm_test_spawn_brief "$TWO_CLONE_MATE_HOME" "$id"
+
+  out=$(fm_test_run_spawn "$TWO_CLONE_MATE_HOME" "$TWO_CLONE_MAIN_SLOT" "$TWO_CLONE_FAKEBIN" \
+    "$id" "$TWO_CLONE_MATE" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched in a pool slot of another clone"$'\n'"$out"
+  assert_contains "$out" "belongs to another clone" \
+    "the refusal did not say the slot belongs to another clone"$'\n'"$out"
+  assert_contains "$out" "Treehouse to 3.0.0 or later" \
+    "the refusal did not name the Treehouse requirement"
+  [ ! -e "$TWO_CLONE_MATE_HOME/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ ! -e "$(dirname "$TWO_CLONE_MAIN_SLOT")/.fm-slot-owner" ] ||
+    fail "refused spawn claimed another clone's pool slot"
+  pass "a pool slot of another clone of the same origin is refused with its cause"
+}
+
+# The same shared pool, but the slot handed out is a worktree of the spawning
+# clone: the spawn records and claims it.
+test_pool_slot_of_the_spawning_clone_is_accepted() {
+  local id=pool-own-clone-z6 out status
+  make_two_clone_case pool-own-clone
+  fm_test_spawn_brief "$TWO_CLONE_MATE_HOME" "$id"
+
+  out=$(fm_test_run_spawn "$TWO_CLONE_MATE_HOME" "$TWO_CLONE_MATE_SLOT" "$TWO_CLONE_FAKEBIN" \
+    "$id" "$TWO_CLONE_MATE" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should accept its own clone's pool slot"$'\n'"$out"
+  assert_grep "worktree=$TWO_CLONE_MATE_SLOT" "$TWO_CLONE_MATE_HOME/state/$id.meta" \
+    "meta did not record the spawning clone's slot"
+  assert_grep "task=$id" "$(dirname "$TWO_CLONE_MATE_SLOT")/.fm-slot-owner" \
+    "spawn did not claim its own clone's pool slot"
+  pass "a pool slot of the spawning clone is recorded and claimed"
+}
+
+# Real Treehouse, when 3.0.0 or later is installed: with a free slot of the first
+# clone already in the shared pool, `treehouse get` from the second clone yields
+# a slot of the second clone, and the spawn launches in it. Runs in a throwaway
+# HOME so the pool, and any user config, stay out of the developer's own.
+test_real_treehouse_gives_the_spawning_clone_its_own_slot() {
+  local id=pool-real-treehouse-z7 out status th_home version main_slot mate_slot
+  if ! command -v treehouse >/dev/null 2>&1; then
+    echo "# skipped real-Treehouse case: treehouse is not installed"
+    return 0
+  fi
+  version=$(treehouse --version 2>/dev/null | head -n 1)
+  case "${version#v}" in
+    [0-2].*|'')
+      echo "# skipped real-Treehouse case: installed treehouse '${version:-unknown}' is older than 3.0.0"
+      return 0
+      ;;
+  esac
+  make_two_clone_case pool-real-treehouse
+  fm_test_spawn_brief "$TWO_CLONE_MATE_HOME" "$id"
+  th_home="$TMP_ROOT/pool-real-treehouse/treehouse-home"
+  mkdir -p "$th_home"
+
+  main_slot=$(cd "$TWO_CLONE_MAIN" && env -u TREEHOUSE_ROOT HOME="$th_home" \
+    TREEHOUSE_NO_UPDATE_CHECK=1 treehouse get --lease 2>/dev/null) ||
+    fail "real treehouse could not lease a slot for the first clone"
+  (cd "$TWO_CLONE_MAIN" && env -u TREEHOUSE_ROOT HOME="$th_home" \
+    TREEHOUSE_NO_UPDATE_CHECK=1 treehouse return --force "$main_slot" >/dev/null 2>&1) ||
+    fail "real treehouse could not return the first clone's slot"
+  mate_slot=$(cd "$TWO_CLONE_MATE" && env -u TREEHOUSE_ROOT HOME="$th_home" \
+    TREEHOUSE_NO_UPDATE_CHECK=1 treehouse get --lease 2>/dev/null) ||
+    fail "real treehouse could not lease a slot for the second clone"
+  [ "$(common_dir_of "$mate_slot")" = "$(common_dir_of "$TWO_CLONE_MATE")" ] ||
+    fail "real treehouse $version handed the second clone '$mate_slot', a slot of another clone"
+
+  out=$(fm_test_run_spawn "$TWO_CLONE_MATE_HOME" "$mate_slot" "$TWO_CLONE_FAKEBIN" \
+    "$id" "$TWO_CLONE_MATE" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch in the slot real treehouse gave its clone"$'\n'"$out"
+  assert_grep "worktree=$mate_slot" "$TWO_CLONE_MATE_HOME/state/$id.meta" \
+    "meta did not record the real treehouse slot"
+  pass "real treehouse $version gives the second clone its own slot, and the spawn launches there"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
+test_pool_slot_of_another_clone_is_refused
+test_pool_slot_of_the_spawning_clone_is_accepted
+test_real_treehouse_gives_the_spawning_clone_its_own_slot
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 

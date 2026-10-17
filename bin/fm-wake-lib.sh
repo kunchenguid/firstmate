@@ -1560,16 +1560,27 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
-# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout,
+# with the pool's own state file beside its slots. This says only that the path
+# sits in a managed pool, never which clone the slot belongs to: Treehouse names
+# a pool by repository name and origin, so separate clones of one origin share
+# one pool.
+fm_treehouse_pool_layout() {  # <worktree>
+  local slot state
+  [ -d "$1" ] || return 1
+  slot=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ]
+}
+
+# A Treehouse slot of the recorded project requires both the pool layout and the
+# same Git common directory as that project; an ordinary linked worktree is not
+# evidence that Treehouse owns it, and a slot of another clone is not its slot.
 fm_treehouse_pool_slot() {  # <project-dir> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
+  local project=$1 worktree=$2 slot project_common slot_common
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  fm_treehouse_pool_layout "$worktree" || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
-  pool=$(dirname "$(dirname "$slot")")
-  state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
   project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
