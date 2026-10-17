@@ -76,7 +76,10 @@
 # arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
 # Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
 # an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
-# Any other watcher, or one that outlives the stop,
+# A TERM'd watcher defers its exit until its foreground poll sleep or pane
+# capture ends, so the take-over waits for its death up to the stall bound
+# and the handover restore still runs after a slow capture.
+# Any other watcher, or one that outlives the stall bound,
 # is attached to exactly as a plain arm attaches.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
@@ -552,18 +555,22 @@ fi
 # to exit (header, --take-over). Returns 3 after printing the reason that cycle
 # delivered before the stop landed, 0 once it stopped without delivering, and
 # 1 when it was not stopped (its handover state was unreadable, or it outlived
-# the stop), which leaves it to the plain attach below.
+# the stall bound), which leaves it to the plain attach below.
 take_over_cycle() {  # <watcher-pid> <identity>
-  local pid=$1 i owner_signal
+  local pid=$1 i owner_signal deadline
   cycle_begin "$pid" attached "$2"
   fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
   if attached_holder_live "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  i=0
-  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+  # A TERM'd watcher exits only once its foreground poll sleep, event wait,
+  # or pane capture completes. Abandoning the stop before then skips the
+  # handover restore, and the dying watcher's downtime publication then
+  # re-announces an acknowledged episode, so wait up to the stall bound, the
+  # age at which an attached arm stops following a live holder.
+  deadline=$((SECONDS + STALL_BOUND))
+  while fm_pid_alive "$pid" && [ "$SECONDS" -lt "$deadline" ]; do
     sleep 0.1
-    i=$((i + 1))
   done
   if fm_pid_alive "$pid"; then
     return 1
