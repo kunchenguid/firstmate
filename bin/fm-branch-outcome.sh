@@ -57,6 +57,9 @@
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
+#     A historical row whose task key cannot name an index file, such as a
+#     legacy endpoint-shaped key, is skipped during rebuild rather than
+#     failing it; the append-only history is untouched.
 #   - Tail copy: $STATE/.branch-outcomes-tail.jsonl holds the newest
 #     OUTCOME_TAIL_ROWS store lines verbatim, and only as many of the newest
 #     as fit in OUTCOME_TAIL_MAX_BYTES (1 MiB): older rows leave first, a row
@@ -325,6 +328,10 @@ rebuild_outcome_indexes() {
   ' "$STORE") || return 1
   while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
     [ -n "$task" ] || continue
+    # A legacy endpoint-shaped key (e.g. "default:w0:p2") cannot name an index
+    # file and has no current task to cover, so skip it instead of failing
+    # the whole rebuild.
+    outcome_index_path "$task" >/dev/null || continue
     if [ -z "$endpoint" ] || [ -z "$ident" ]; then
       f="$STATE/$task.status"
       endpoint=0
