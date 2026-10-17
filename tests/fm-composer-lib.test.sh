@@ -189,6 +189,47 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_named_session_titled_rule() {
+  # Real claude 2.1.284 started as `claude -n <name>` (captured live through
+  # Herdr 0.9.1): the session name is right-aligned inside the rule ABOVE the
+  # composer, `───…─── <name> ─`, at the same width as the solid rule below.
+  # Herdr gives no cursor, so before the titled rule was recognized the
+  # cursorless path saw only the lower rule, read the idle composer `unknown`,
+  # and the away-mode injector deferred every escalation on a named primary.
+  local rule titled multi idle ghost typed out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  rule='────────────────────────────────'
+  titled='─────────────────────── Andrew ─'
+  idle="transcript line"$'\n'"$titled"$'\n'"❯$NBSP"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  assert_screen "named claude idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$claude_idle"
+  assert_screen "named claude idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "named claude idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "named claude idle on tmux" empty "$CAPS_TMUX" "$idle" 2 "$claude_idle"
+  # A multiword session name renders the same way, at the same width.
+  multi='────────────────── Andrew Chen ─'
+  assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
+    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
+  assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
+    "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
+  # Claude's prompt suggestion is dim ghost text, not input.
+  ghost="transcript line"$'\n'"$titled"$'\n'"❯$NBSP${ESC}[0m${ESC}[2mTry \"fix lint errors\"${ESC}[0m"$'\n'"$rule"
+  assert_screen "named claude ghost suggestion on herdr" empty "$CAPS_STYLED" "$ghost" '' "$claude_idle"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "${ghost/ Andrew ─/─────────}" '' "$claude_idle")
+  [ "$out" = empty ] || fail "unnamed claude ghost suggestion on herdr: expected empty, got '$out'"
+  # The protection that must not move: typed text in the named composer.
+  typed="transcript line"$'\n'"$titled"$'\n'"❯ fix the login bug"$'\n'"$rule"
+  assert_screen "named claude typed on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "named claude typed on tmux" pending "$CAPS_TMUX" "$typed" 2 "$claude_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = 'fix the login bug' ] \
+    || fail "named claude composer content should extract the typed text, got '$out'"
+  # Pi non-regression: a titled rule over a blank row never proves a pi
+  # composer, even with a live idle pi identity.
+  assert_screen "titled pair over a blank row is not pi" unknown "$CAPS_STYLED" \
+    "transcript"$'\n'"$titled"$'\n\n'"$rule"$'\n footer' '' "$pi_idle"
+  pass "matrix: a named claude session's titled top rule proves its composer; pi stays unchanged"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -1295,6 +1336,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_named_session_titled_rule
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
