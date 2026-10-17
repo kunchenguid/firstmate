@@ -1522,11 +1522,17 @@ spawn_abort_cleanup() {
     # its attempt journal because nothing is left to quarantine. The reclaim
     # path below still uses the pane-level primitive and keeps its journal.
     if [ -n "${HERDR_PROJECTION_ABORT_TASK_TAB:-}" ]; then
-      if fm_backend_herdr_projection_cleanup_tabs_exact \
+      fm_backend_herdr_projection_cleanup_tabs_exact \
         "$HERDR_PROJECTION_ABORT_SESSION" \
         "$HERDR_PROJECTION_ABORT_TASK_TAB" \
-        "$HERDR_PROJECTION_ABORT_SEEDED_TAB"; then
-        [ -z "${HERDR_PROJECTION_ABORT_JOURNAL:-}" ] || rm -f -- "$HERDR_PROJECTION_ABORT_JOURNAL" 2>/dev/null || true
+        "$HERDR_PROJECTION_ABORT_SEEDED_TAB" || true
+      # Remove the attempt journal only on a positive post-rollback read that
+      # the token-bearing disposable workspace is gone, so a silent close
+      # failure can never delete the journal while leaving the workspace.
+      if [ -n "${HERDR_PROJECTION_ABORT_JOURNAL:-}" ] &&
+        fm_backend_herdr_projection_token_workspace_gone \
+          "$HERDR_PROJECTION_ABORT_SESSION" "$HERDR_PROJECTION_ABORT_JOURNAL" "$ID"; then
+        rm -f -- "$HERDR_PROJECTION_ABORT_JOURNAL" 2>/dev/null || true
       fi
     else
       fm_backend_herdr_projection_cleanup_exact \

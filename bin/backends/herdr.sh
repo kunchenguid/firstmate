@@ -1132,9 +1132,12 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # foreground client is refused rather than changing focus, and the exact
 # pre-close focus is restored as the backstop. Return codes: 0 closed, 1 the
 # guard refused or the close was not confirmed, 2 focus could not be restored.
-fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
-  local session=$1 tab_id=$2 before active_tab skip_restore=0
+fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id> [pane-id required-agent-state]
+  local session=$1 tab_id=$2 pane_id=${3:-} required_agent_state=${4:-} before active_tab skip_restore=0 presence state
+  FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$tab_id" ] || return 0
+  presence=$(fm_backend_herdr_tab_presence_state "$session" "$tab_id")
+  [ "$presence" != dead ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe tab close" >&2
     return 1
@@ -1142,10 +1145,23 @@ fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
   active_tab=${before#*$'\t'}
   fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab_id" || return 1
   if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+    # The guard re-read focus and admitted the close with a fresh non-target
+    # focus; recompute the active-tab comparison from that fresh focus so a
+    # captain who moved off the target between the two reads still gets the
+    # exact-focus restore backstop instead of a stale skip_restore.
     before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+    active_tab=${before#*$'\t'}
     skip_restore=0
   fi
   [ "$tab_id" != "$active_tab" ] || skip_restore=1
+  if [ -n "$required_agent_state" ]; then
+    # Recheck the exact pane's agent state at the close boundary, mirroring the
+    # pane-level twin, so a husk that became live during reclaim is never
+    # closed out from under a real agent.
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
+    [ "$state" = "$required_agent_state" ] || return 1
+  fi
   fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
   if [ "$skip_restore" -eq 0 ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$before" "tab close" || return 2
@@ -2133,6 +2149,26 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
   esac
 }
 
+# fm_backend_herdr_tab_presence_state: dead|present|unknown for one exact
+# tab_id from a `tab get`, mirroring fm_backend_herdr_pane_presence_state.
+# A structured tab_not_found proves the tab gone; anything else unreadable is
+# unknown, never proof of absence. Used by the tab-level close to treat an
+# already-absent tab as an idempotent no-op rather than a failed close.
+fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 out code
+  out=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "tab_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  if printf '%s' "$out" | jq -e --arg tab "$tab_id" '.result.tab.tab_id == $tab' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'unknown'
+  fi
+}
+
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
@@ -2843,15 +2879,18 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
   [ "$root_pane" = "$pane" ]
 }
 
-fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
-  local session=$1 new_pane=$2 state
+fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pane>
+  local session=$1 new_tab=$2 new_pane=$3 state
   state=$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")
   case "$state" in
     dead) return 0 ;;
     no-agent) ;;
     live|stale-agent|unknown) return 1 ;;
   esac
-  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$new_pane" no-agent || return 1
+  # Close the replacement TAB (terminal plus any 0.9.x sidebar pane) so the
+  # rollback does not leave the replacement tab behind on releases where a
+  # pane close keeps it alive through its sidebar.
+  fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$new_tab" "$new_pane" no-agent || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
@@ -2933,7 +2972,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   if ! printf '%s' "$info" | jq -e --arg tab "$new_tab" --arg workspace "$meta_workspace" '
     .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace
   ' >/dev/null 2>&1; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id could not verify its replacement tab; spawning flat" >&2
     return 2
   fi
@@ -2943,7 +2982,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     and .result.pane.tab_id == $tab
     and .result.pane.workspace_id == $workspace
   ' >/dev/null 2>&1; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id could not verify its replacement pane; spawning flat" >&2
     return 2
   fi
@@ -2951,17 +2990,17 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   case "$state" in
     no-agent) ;;
     live|stale-agent|unknown)
-      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
       echo "error: herdr presentation pane for $id became $state during reclaim; refusing duplicate launch" >&2
       return 1
       ;;
     dead)
-      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
       echo "warning: herdr presentation pane for $id disappeared during reclaim; spawning flat" >&2
       return 2
       ;;
   esac
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent; then
+  if fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$meta_tab" "$meta_pane" no-agent; then
     close_status=0
   else
     close_status=$?
@@ -2971,7 +3010,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 1
     fi
     state=$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     case "$state" in
       live|stale-agent|unknown)
         echo "error: herdr presentation pane for $id became $state at the close boundary; refusing duplicate launch" >&2
@@ -2982,7 +3021,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     return 2
   fi
   if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")" != dead ]; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     return 1
   fi
   if ! fm_backend_herdr_projection_live_binding_matches \
@@ -2990,13 +3029,13 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     "$meta_workspace" "$new_tab" "$new_pane" \
     "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id did not converge exactly; spawning flat" >&2
     return 2
   fi
   if ! fm_backend_herdr_projection_journal_replace_endpoint \
     "$journal" "$id" "$meta_tab" "$meta_pane" "$new_tab" "$new_pane"; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_tab" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id could not publish its replacement binding; spawning flat" >&2
     return 2
   fi
@@ -3624,60 +3663,27 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
-# fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
-# tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
-# closes the tab too, so a separate tab close is unnecessary.
-# When the close would empty a non-focused workspace, Herdr 0.7.5's explicit
-# close moves focus to that workspace's neighbor with no restore anywhere in
-# this path, so the kill follows the same focus-safe removal plan as
-# projected cleanup (a verified pane-death removal with the doomed workspace
-# repositioned behind the focused one when needed), keeping the exact-tab
-# restore as the backstop. A close that empties the FOCUSED workspace moves
-# focus legitimately, and every in-lock planning ambiguity or failure falls
-# back to the plain close, matching the pre-hardening contract.
+# fm_backend_herdr_kill: remove the task's tab, best-effort (mirrors
+# tmux-kill-window's `|| true` contract). Herdr 0.9.x keeps a tab alive after
+# `pane close` removes only its terminal pane (the sidebar pane remains), so
+# the kill closes the exact tab, removing the terminal and sidebar panes
+# together and (when it empties a disposable workspace) the workspace itself.
+# A tab close is focus-safe at and above the floor, and below it the exact-tab
+# restore bounds the accepted downgrade exposure; a close of the FOCUSED
+# workspace's tab still moves focus legitimately without a restore. The pane
+# close remains only the fallback for a pane whose tab cannot be resolved.
 fm_backend_herdr_kill_serialized() {  # <session> <pane>
   local session=$1 pane=$2
-  local before active_tab info target_pane target_tab target_ws plan shell_pid plan_move_record close_failed workspace_presence
+  local before active_tab info target_pane target_tab
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
   if [ -n "$before" ]; then
     active_tab=${before#*$'\t'}
     info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || info=
     target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
     target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
-    target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
-    if [ "$target_pane" = "$pane" ] && [ -n "$target_tab" ] && [ "$target_tab" != "$active_tab" ]; then
-      plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane" "$target_ws" "$target_tab" "${before%%$'\t'*}")
-      plan_move_record=
-      case "$plan" in
-        moved$'\t'*)
-          plan_move_record=${plan%%$'\n'*}
-          plan=${plan##*$'\n'}
-          ;;
-      esac
-      close_failed=0
-      case "$plan" in
-        death\ *)
-          shell_pid=${plan#death }
-          if ! fm_backend_herdr_death_close_pane "$session" "$pane" "$shell_pid" \
-            && ! fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane"; then
-            close_failed=1
-          fi
-          ;;
-        *)
-          fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || close_failed=1
-          ;;
-      esac
-      if [ "$close_failed" = 0 ] && [ -n "$plan_move_record" ]; then
-        workspace_presence=$(fm_backend_herdr_workspace_presence_state "$session" "$target_ws")
-        if [ "$workspace_presence" != dead ]; then
-          echo "warning: herdr task kill did not confirm removal of the repositioned workspace" >&2
-          close_failed=1
-        fi
-      fi
-      if [ "$close_failed" = 1 ]; then
-        fm_backend_herdr_emptying_move_rollback "$plan_move_record" || true
-      fi
-      fm_backend_herdr_projection_focus_restore "$session" "$before" "task kill" || true
+    if [ "$target_pane" = "$pane" ] && [ -n "$target_tab" ]; then
+      fm_backend_herdr_cli "$session" tab close "$target_tab" >/dev/null 2>&1 || true
+      [ "$target_tab" = "$active_tab" ] || fm_backend_herdr_projection_focus_restore "$session" "$before" "task kill" || true
       return 0
     fi
   fi

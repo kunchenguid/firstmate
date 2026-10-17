@@ -11,13 +11,16 @@
 #
 # A visible title is discovery only. Cleanup requires the exact current
 # "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
-# the named-session snapshot, exactly one matching home-local journal, one tab,
-# one pane, absent task metadata, no registered agent, and a process proof that
-# the pane contains only one idle recognized shell with no child process. A
-# version 2 journal must also bind the exact workspace, tab, and pane.
+# the named-session snapshot, exactly one matching home-local journal, one tab
+# whose single terminal root pane is the bound pane (Herdr 0.9.x's per-tab
+# sidebar pane is excluded from that shape check), absent task metadata, no
+# registered agent, and a process proof that the pane contains only one idle
+# recognized shell with no child process. A version 2 journal must also bind
+# the exact workspace, tab, and pane.
 # Topology is first checked from one locked API snapshot, then every mutation
-# prerequisite is immediately rechecked before the existing exact-pane
-# focus-preserving close helper is called.
+# prerequisite is immediately rechecked before the exact-tab focus-preserving
+# close helper is called (the tab-level close removes the terminal and sidebar
+# panes together so the disposable workspace empties).
 # The script never closes a workspace. It removes only the matching journal,
 # and only after the exact pane is confirmed gone. Every error warns and returns
 # success so session startup continues conservatively.
@@ -123,15 +126,18 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     --arg workspace "$workspace" --arg title "$title" --arg token "$token" \
     --arg bound_workspace "$bound_workspace" --arg bound_tab "$bound_tab" \
     --arg bound_pane "$bound_pane" '
+    def is_root_pane:
+      ((.label // "") != "Sidebar")
+      and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0;
     .result.snapshot as $s
     | [$s.workspaces[]? | select(.workspace_id == $workspace)] as $workspaces
     | [$s.tabs[]? | select(.workspace_id == $workspace)] as $tabs
-    | [$s.panes[]? | select(.workspace_id == $workspace)] as $panes
+    | [$s.panes[]? | select(.workspace_id == $workspace and is_root_pane)] as $panes
     | ([ $s.workspaces[]?.label? // "" |
          ((split("p:" + $token) | length) - 1) ] | add // 0) as $token_count
     | select($workspaces | length == 1)
     | select($workspaces[0].label == $title)
-    | select($workspaces[0].tab_count == 1 and $workspaces[0].pane_count == 1)
+    | select($workspaces[0].tab_count == 1)
     | select($tabs | length == 1)
     | select($panes | length == 1)
     | select($panes[0].tab_id == $tabs[0].tab_id)
@@ -176,7 +182,6 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
     .result.workspace.workspace_id == $workspace
     and .result.workspace.label == $title
     and .result.workspace.tab_count == 1
-    and .result.workspace.pane_count == 1
   ' >/dev/null 2>&1 || return 1
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
@@ -187,11 +192,14 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
   ' >/dev/null 2>&1 || return 1
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    def is_root_pane:
+      ((.label // "") != "Sidebar")
+      and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0;
     (.result.panes | type) == "array"
-    and (.result.panes | length) == 1
-    and .result.panes[0].workspace_id == $workspace
-    and .result.panes[0].tab_id == $tab
-    and .result.panes[0].pane_id == $pane
+    and ([.result.panes[]? | select(is_root_pane)] | length) == 1
+    and ([.result.panes[]? | select(is_root_pane)][0].workspace_id == $workspace)
+    and ([.result.panes[]? | select(is_root_pane)][0].tab_id == $tab)
+    and ([.result.panes[]? | select(is_root_pane)][0].pane_id == $pane)
   ' >/dev/null 2>&1 || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
   fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null || return 1
@@ -264,9 +272,11 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
 
   # This unconditional retirement is the authorized containment documented
-  # with the presentation floor ownership in bin/backends/herdr.sh.
-  fm_backend_herdr_projection_close_pane_focus_preserving \
-    "$session" "$pane" no-agent || close_status=$?
+  # with the presentation floor ownership in bin/backends/herdr.sh. It closes
+  # the exact tab (terminal plus any 0.9.x sidebar pane) so the disposable
+  # workspace empties instead of surviving as a sidebar-only husk.
+  fm_backend_herdr_projection_close_tab_focus_preserving \
+    "$session" "$tab" "$pane" no-agent || close_status=$?
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
