@@ -242,7 +242,11 @@
 #      attempts. Retries key off the error text, not whether the lock file still
 #      exists after the failed attempt - a lock that self-clears mid-check still
 #      deserves a retry of the return.
-#   2. Other treehouse return failures still abort immediately and loudly (no retry).
+#   2. Other treehouse return failures still abort immediately and loudly (no retry),
+#      unless the pool already lists the slot as available with a clean copy: the
+#      return then took effect despite the reported failure (observed 2026-10-07: the
+#      slot was released and re-leased by the next spawn), and teardown continues
+#      records-only. Every unverifiable answer keeps the abort.
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
@@ -1836,6 +1840,27 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# After a reported `treehouse return` failure: did the return already take effect?
+# The pool's own state answers it - `treehouse status --json` lists the slot as
+# available (no lease, no process under it) - and a slot is only treated as
+# released when its copy is also readable and clean, so a return that genuinely
+# stopped short of resetting the copy still aborts. Any unreadable answer
+# (missing jq, failed status, slot not listed) is "not released".
+treehouse_return_already_released() {
+  local dir=$1 cd_dir=$2 label=$3 json slot_state canon=
+  command -v jq >/dev/null 2>&1 || return 1
+  json=$( ( cd "$cd_dir" && treehouse status --json ) 2>/dev/null ) || return 1
+  canon=$(canonical_existing_dir "$dir") || canon=$dir
+  slot_state=$(printf '%s\n' "$json" | jq -r --arg a "$dir" --arg b "$canon" '
+    [.[]? | select(.path == $a or .path == $b)][0]
+    | if . == null then "" else "\(.status)|\(.lease_id // "")" end' 2>/dev/null) || return 1
+  [ "$slot_state" = "available|" ] || return 1
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  [ -z "$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 1
+  echo "teardown: $label return reported a failure, but the pool already lists $dir as available and its copy is clean; the return took effect, so teardown continues records-only" >&2
+  return 0
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
@@ -1851,6 +1876,7 @@ teardown_treehouse_return() {
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
   if ! treehouse_return_is_index_lock_error "$out"; then
+    treehouse_return_already_released "$dir" "$cd_dir" "$label" && return 0
     return 1
   fi
 
@@ -1877,6 +1903,7 @@ teardown_treehouse_return() {
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
     if ! treehouse_return_is_index_lock_error "$out"; then
+      treehouse_return_already_released "$dir" "$cd_dir" "$label" && return 0
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
       return 1
     fi
@@ -1902,6 +1929,7 @@ teardown_treehouse_return() {
         return 0
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
+      treehouse_return_already_released "$dir" "$cd_dir" "$label" && return 0
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi
@@ -1910,6 +1938,7 @@ teardown_treehouse_return() {
     return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
   fi
 
+  treehouse_return_already_released "$dir" "$cd_dir" "$label" && return 0
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
 }

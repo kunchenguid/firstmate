@@ -2453,6 +2453,78 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
 }
 
+# `treehouse return --force <wt>` always reports a non-lock failure, while
+# `treehouse status --json` lists the case worktree with the status in
+# FM_TEST_SLOT_STATUS (available or in-use): the pool state after a return that
+# reported failure.
+add_failing_return_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  return)
+    echo "error: treehouse return failed" >&2
+    exit 1
+    ;;
+  status)
+    printf '[{"name":"31","path":"%s","status":"%s","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]\n' \
+      "${FM_TEST_SLOT_PATH:?}" "${FM_TEST_SLOT_STATUS:?}"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_failed_return_of_already_released_slot_finishes_records_only() {
+  local case_dir rc
+  case_dir=$(make_case released-slot-return-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_failing_return_treehouse "$case_dir"
+
+  set +e
+  FM_TEST_SLOT_PATH="$case_dir/wt" FM_TEST_SLOT_STATUS=available \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "released-slot-return-failure: teardown should finish when the pool already released the slot"
+  assert_grep "the return took effect" "$case_dir/stderr" \
+    "released-slot-return-failure: teardown did not report the verified release"
+  assert_not_contains "$(cat "$case_dir/stderr")" "teardown aborted" \
+    "released-slot-return-failure: teardown aborted despite the released slot"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "released-slot-return-failure: task records were not finished"
+  pass "a failed return of an already-released slot finishes teardown records-only"
+}
+
+test_failed_return_of_slot_still_in_use_aborts() {
+  local case_dir rc
+  case_dir=$(make_case in-use-slot-return-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_failing_return_treehouse "$case_dir"
+
+  set +e
+  FM_TEST_SLOT_PATH="$case_dir/wt" FM_TEST_SLOT_STATUS=in-use \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "in-use-slot-return-failure: teardown should abort when the slot is still in use"
+  assert_grep "teardown aborted" "$case_dir/stderr" \
+    "in-use-slot-return-failure: teardown did not report the failed return"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "in-use-slot-return-failure: records were removed despite the failed return"
+  pass "a failed return of a slot still in use keeps aborting teardown"
+}
+
 test_empty_retry_wait_uses_default_without_aborting() {
   local case_dir rc lock attempt_file
   case_dir=$(make_case empty-retry-wait)
@@ -5111,6 +5183,8 @@ test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_failed_return_of_already_released_slot_finishes_records_only
+test_failed_return_of_slot_still_in_use_aborts
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_teardown_records_the_task_pipeline_spend
