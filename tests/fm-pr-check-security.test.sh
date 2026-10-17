@@ -915,6 +915,28 @@ SH
   pass "one cross-repo forge-head receipt registers, merges, and reads done; the worktree HEAD and a later unpushed commit still refuse"
 }
 
+# The observed 17 Oct failure: a fork push left no remote-tracking ref in the
+# worker copy, so registration refused although the forge held the worker's
+# HEAD as the PR head - and with no pr= the merge-on-green watch never armed.
+# The gate's live forge-head read must record pr= and pr_head= and arm the poll.
+test_fork_head_without_tracking_ref_registers() {
+  local dir sha
+  dir=$(make_case fork-head-no-tracking)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  git -C "$dir/wt" commit -q --allow-empty -m 'pushed to the fork, no tracking ref'
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_TEST_GH_HEAD=$sha run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "a fork head the forge holds was not registered: $(cat "$dir/stderr")"
+  grep -Fq "pr=https://github.com/o/r/pull/4" "$dir/home/state/task-a.meta" \
+    || fail "registration did not record pr=: $(cat "$dir/home/state/task-a.meta")"
+  grep -Fq "pr_head=$sha" "$dir/home/state/task-a.meta" \
+    || fail "registration did not record the forge head: $(cat "$dir/home/state/task-a.meta")"
+  [ -e "$dir/home/state/task-a.check.sh" ] || fail "a registered fork head did not arm the merge poll"
+  pass "fm-pr-check registers a fork head the forge holds without any tracking ref"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3816,6 +3838,7 @@ test_retired_secondmate_merge_poll_keeps_signal_wake
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_cross_repo_receipt_candidate
+test_fork_head_without_tracking_ref_registers
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

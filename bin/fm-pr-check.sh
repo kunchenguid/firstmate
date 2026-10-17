@@ -7,7 +7,10 @@
 # that lives in a repository other than the worktree's origin (a cross-repo
 # lane's second PR) checks the completion receipt against its verified forge
 # head instead of the worktree's HEAD, because the merge binds to that forge
-# head and the worker's one receipt names it.
+# head and the worker's one receipt names it. The gate also
+# reads a pull request's live forge head itself when the worker copy holds no
+# remote-tracking ref for it, so a push that opened the PR from outside this
+# copy's ref sync still registers.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL

@@ -12,6 +12,12 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
 
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/suite-fakebin")
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FAKEBIN/gh"
+chmod +x "$FAKEBIN/gh"
+PATH="$FAKEBIN:$PATH"
+export PATH
+
 accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   fm_dod_accept_ship_done "$@"
 }
@@ -201,6 +207,109 @@ test_merge_marker_binds_to_the_named_pr() {
   accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" bind "$meta" >/dev/null \
     && fail "merge marker for another repository's PR 7 was accepted"
   pass "the merged-PR short-circuit applies only to the recorded PR the done line names"
+}
+
+# The observed 17 Oct failure: the push that opened the PR left no
+# remote-tracking ref in the worker copy - the no-mistakes pipeline pushes from
+# its own gate repository, and a push by URL writes none - while the forge held
+# the worker's HEAD as the PR head. A local bare repository stands in for the
+# forge, and a fake gh answers its head read from that stand-in, so the real
+# gate drives real git state end to end.
+fm_write_fork_fixture() {  # <repo> <wt> <state> <forge> <fakebin>
+  local repo=$1 wt=$2 state=$3 forge=$4 fakebin=$5
+  mkdir -p "$state" "$fakebin"
+  fm_git_worktree "$repo" "$wt" fm/forkpub
+  git -C "$wt" commit -q --allow-empty -m 'pushed to the forge without a tracking ref'
+  git init -q --bare "$forge"
+  git -C "$wt" push -q "$forge" fm/forkpub
+  # gh answers the live head read from the bare stand-in, as the forge would.
+  # shellcheck disable=SC2016  # runtime expansions must stay in the stub
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+[ "\$1 \${2:-}" = "pr view" ] || exit 1
+git --git-dir="$forge" rev-parse refs/heads/fm/forkpub
+SH
+  chmod +x "$fakebin/gh"
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\n' "$wt" "$repo" \
+    > "$state/forkpub.meta"
+}
+
+# A done whose PR head on the forge equals the worker HEAD is accepted for both
+# publishing modes, with no remote-tracking ref anywhere in the copy.
+test_forge_pr_head_equal_to_named_head_is_accepted() {
+  local repo wt sha state forge fakebin
+  repo="$TMP_ROOT/forkpub-repo" wt="$TMP_ROOT/forkpub-wt"
+  state="$TMP_ROOT/forkpub-state" forge="$TMP_ROOT/forkpub-forge.git"
+  fakebin="$TMP_ROOT/forkpub-fakebin"
+  fm_write_fork_fixture "$repo" "$wt" "$state" "$forge" "$fakebin"
+  sha=$(git -C "$wt" rev-parse HEAD)
+  [ -z "$(git -C "$wt" for-each-ref --format='%(refname)' --contains="$sha" refs/remotes)" ] \
+    || fail "fixture pushed a remote-tracking ref; the no-tracking-ref scenario is gone"
+  PATH="$fakebin:$PATH" accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/92" "$state" forkpub "$state/forkpub.meta" \
+    || fail "a done whose forge PR head is the worker HEAD was refused"
+  PATH="$fakebin:$PATH" accept_done ship no-mistakes "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/92 checks green" "$state" forkpub "$state/forkpub.meta" \
+    || fail "a no-mistakes CI-ready done whose forge head is the worker HEAD was refused"
+  pass "a done whose forge PR head equals the worker HEAD is accepted without a tracking ref"
+}
+
+# Every existing refusal survives the live read: a forge head that differs from
+# the worker HEAD, an unreadable forge, and a local-only done never accept
+# through a pull request.
+test_forge_head_mismatch_or_unreadable_is_still_refused() {
+  local repo wt sha later reason rc state forge fakebin wt2 repo2 sha2
+  repo="$TMP_ROOT/forkref-repo" wt="$TMP_ROOT/forkref-wt"
+  state="$TMP_ROOT/forkref-state" forge="$TMP_ROOT/forkref-forge.git"
+  fakebin="$TMP_ROOT/forkref-fakebin"
+  fm_write_fork_fixture "$repo" "$wt" "$state" "$forge" "$fakebin"
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" commit -q --allow-empty -m 'later commit, never pushed anywhere'
+  later=$(git -C "$wt" rev-parse HEAD)
+  reason=$(PATH="$fakebin:$PATH" accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/92" "$state" forkpub "$state/forkpub.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a differing forge head accepted the done"
+  case "$reason" in
+    *"named head $later is unreachable outside the worker copy") ;;
+    *) fail "mismatch refusal did not name the unpushed head: $reason" ;;
+  esac
+  # An unreadable forge read is an honest unknown, never an acceptance.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  reason=$(PATH="$fakebin:$PATH" accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/92" "$state" forkpub "$state/forkpub.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreadable forge read accepted the done"
+  case "$reason" in
+    *"named head $later is unreachable outside the worker copy") ;;
+    *) fail "unreadable-forge refusal did not name the head: $reason" ;;
+  esac
+  # local-only acceptance is the head on the project's shared local branch, so
+  # a matching forge PR head must not accept one whose branch is gone.
+  repo2="$TMP_ROOT/forklo-repo" wt2="$TMP_ROOT/forklo-wt"
+  fm_git_init_commit "$repo2"
+  git clone -q "$repo2" "$wt2"
+  git -C "$wt2" checkout -q -b fm/forklo
+  git -C "$wt2" commit -q --allow-empty -m 'local-only head that matches a PR'
+  git -C "$wt2" checkout -q --detach HEAD
+  git -C "$wt2" branch -q -D fm/forklo
+  sha2=$(git -C "$wt2" rev-parse HEAD)
+  # shellcheck disable=SC2016  # runtime expansions must stay in the stub
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+[ "\$1 \${2:-}" = "pr view" ] || exit 1
+printf '%s\n' "$sha2"
+SH
+  chmod +x "$fakebin/gh"
+  reason=$(PATH="$fakebin:$PATH" accept_done ship local-only "$wt2" "$repo2" \
+    "done: PR https://github.com/o/r/pull/92" "$state" forkpub "$state/forkpub.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a matching forge head accepted a local-only done"
+  case "$reason" in
+    *"named head $sha2 is unreachable outside the worker copy") ;;
+    *) fail "local-only refusal did not name the head: $reason" ;;
+  esac
+  pass "a differing or unreadable forge head and a local-only done are still refused"
 }
 
 test_forge_recorded_head_is_accepted_without_local_object() {
@@ -574,6 +683,8 @@ test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
+test_forge_pr_head_equal_to_named_head_is_accepted
+test_forge_head_mismatch_or_unreadable_is_still_refused
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated

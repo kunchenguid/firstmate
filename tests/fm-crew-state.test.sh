@@ -2548,6 +2548,45 @@ test_unpushed_ship_done_is_blocked() {
   pass "unpushed ship done: is current-state blocked"
 }
 
+# The observed 17 Oct failure: the push that opened the fork PR left no
+# remote-tracking ref in the worker copy, so current state read blocked while
+# the forge held the worker's HEAD as the PR head. The gate's live forge-head
+# read must turn this into current-state done. A local bare repository stands
+# in for the forge and the fake gh reads the head from it.
+test_fork_head_on_forge_reads_done() {
+  reset_fakes
+  local d sha out
+  d=$(new_case forkgreen)
+  make_repo_on_branch "$d/wt" fm/forkpub
+  git -C "$d/wt" commit -q --allow-empty -m 'pushed to the forge without a tracking ref'
+  sha=$(git -C "$d/wt" rev-parse HEAD)
+  git init -q --bare "$d/forge.git"
+  git -C "$d/wt" push -q "$d/forge.git" fm/forkpub
+  make_fakebin "$d" >/dev/null
+  # shellcheck disable=SC2016  # runtime expansions must stay in the stub
+  cat > "$d/fakebin/gh" <<SH
+#!/usr/bin/env bash
+[ "\$1 \${2:-}" = "pr view" ] || exit 1
+git --git-dir="$d/forge.git" rev-parse refs/heads/fm/forkpub
+SH
+  chmod +x "$d/fakebin/gh"
+  fm_write_meta "$d/state/forkgreen.meta" \
+    "window=fm:fm-forkgreen" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=direct-PR" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/92\n' > "$d/state/forkgreen.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" forkgreen
+  out=$(run_crew_state "$d" forkgreen)
+  assert_contains "$out" "state: done" \
+    "a done whose forge PR head is the worker HEAD must read done"
+  assert_contains "$out" "source: status-log" "forge-head acceptance stays status-log sourced"
+  assert_not_contains "$out" "unreachable outside the worker copy" \
+    "the forge-held head must not read as unreachable"
+  pass "a fork head the forge holds reads current-state done without a tracking ref"
+}
+
 # Fleet snapshot hands crew-state a captured meta copy outside state/. The
 # poll's merge marker stays in the live state dir, so a squash-merged PR whose
 # branch fleet sync pruned still reads done there.
@@ -5865,6 +5904,7 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
+test_fork_head_on_forge_reads_done
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked

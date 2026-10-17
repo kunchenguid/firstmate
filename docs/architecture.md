@@ -381,6 +381,7 @@ A ship brief records its mode as a fixed machine-readable line and the spawn ref
 It also owns the named-head reachability gate that refuses a ship `done:` while that head exists only in the worker's disposable copy, testing the named head rather than whether some branch moved.
 A cross-repository lane lands a pull request in a repository other than its worktree's origin, so registration checks that task's completion receipt against the pull request's verified forge head, which is also the head the merge binds to, instead of the worktree's HEAD.
 The gate then takes that recorded head as the receipt candidate for a cross-repository direct-PR, so every gate caller accepts the worker's one receipt from local state alone, while a same-repository direct-PR keeps the worktree HEAD.
+The gate's one exception is a done naming a pull request whose live forge head is exactly the worktree HEAD, because the push that opened the PR can leave no remote-tracking ref in the copy.
 `bin/fm-crew-state.sh`, `bin/fm-pr-check.sh`, and the secondmate ledger-first publisher call that same gate before treating a ship `done:` as ready.
 It is also the one owner of the no-mistakes `--intent` contract those workers follow.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.

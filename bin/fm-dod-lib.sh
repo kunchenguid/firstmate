@@ -25,7 +25,12 @@
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
-# accepted while the named head exists only in the worker's disposable copy.
+# accepted while the named head exists only in the worker's disposable copy,
+# except when the done names a pull request whose live forge head is exactly
+# that copy's HEAD: the push that opened the PR can leave no remote-tracking
+# ref in the copy (the pipeline pushes from its own gate repository, and a
+# push by URL writes none), so the gate reads the PR head live from the forge
+# through fm_dod_forge_pr_head_live before refusing.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
 # not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
@@ -816,10 +821,51 @@ fm_dod_pr_outside_origin() {  # <worktree> <pr-url>
     || [ "$(printf '%s' "$FM_PR_GIT_REPO" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$FM_PR_PATH" | tr '[:upper:]' '[:lower:]')" ]
 }
 
+# The live head commit of one pull request, read from the forge: GitHub through
+# gh - the same headRefOid read bin/fm-pr-check.sh records pr_head from -
+# GitLab through glab and jq, Forgejo through the tea REST record. A missing
+# CLI, an unreadable record, or a non-SHA answer is an honest unknown, and the
+# caller keeps its refusal rather than accepting on one. Each read is bounded
+# because it runs inside done-acceptance paths that supervision calls on every
+# poll. Sets FM_DOD_LIVE_HEAD on success.
+fm_dod_forge_pr_head_live() {  # <provider> <host> <path> <number> <url>
+  local provider=$1 host=$2 path=$3 number=$4 url=$5 json lib
+  FM_DOD_LIVE_HEAD=
+  case "$provider" in
+    github)
+      if ! command -v gh >/dev/null 2>&1; then
+        return 1
+      fi
+      FM_DOD_LIVE_HEAD=$(fm_run_timed 15 gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
+      ;;
+    gitlab)
+      if ! command -v glab >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        return 1
+      fi
+      json=$(fm_run_timed 15 env GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || return 1
+      FM_DOD_LIVE_HEAD=$(printf '%s' "$json" | jq -er 'if (type == "object") and (.sha | type == "string") then .sha else error("pull request record has no sha") end' 2>/dev/null) || return 1
+      ;;
+    forgejo)
+      lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+      # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+      FM_DOD_LIVE_HEAD=$(fm_run_timed 15 bash -c '
+        . "$1"
+        fm_pr_forgejo_read_record "$2" "$3" "$4" || exit 1
+        printf "%s\n" "$FM_PR_RECORD_HEAD"
+      ' _ "$lib" "$host" "$path" "$number" 2>/dev/null) || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  fm_pr_head_valid "$FM_DOD_LIVE_HEAD"
+}
+
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
-# patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy. A
+# patch set carries the worker copy's HEAD tree, when its named head - the
+# worker copy's HEAD - is reachable outside that disposable copy, or when it
+# names a pull request whose live forge head is exactly that HEAD. A
 # published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
@@ -907,6 +953,22 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     return 0
   fi
+  # A push can publish the head without leaving a remote-tracking ref in this
+  # copy: the no-mistakes pipeline pushes from its own gate repository, and a
+  # push by URL writes no tracking ref at all. When the done names a pull
+  # request whose live forge head is exactly this copy's HEAD, the head is on
+  # the forge and the done is accepted; an unreadable read or a different forge
+  # head keeps the refusal below. local-only stays out: its acceptance is the
+  # head on the project's shared local branch, never a pull request.
+  case "$mode" in
+    direct-PR|no-mistakes|'')
+      if [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" != gerrit ] \
+        && fm_dod_forge_pr_head_live "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$url" \
+        && [ "$FM_DOD_LIVE_HEAD" = "$sha" ]; then
+        return 0
+      fi
+      ;;
+  esac
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1
 }
