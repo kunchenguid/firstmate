@@ -4141,12 +4141,36 @@ hold_watch_launch() {  # <dir> <out> <capture>
   HOLD_WATCH_PID=$!
 }
 
+# Wait for an owned watcher to exit, budgeted in its own poll cycles instead of
+# wall time. Under CPU starvation one cycle can cost many seconds, so a wall
+# budget expires on a healthy watcher that is still deciding; a watcher that
+# keeps beating past <cycles> polls without exiting is the real "kept polling
+# instead of surfacing" failure. <stall-ticks> bounds one that stops beating.
+wait_exit_within_cycles() {  # <state> <pid> <cycles> [stall-ticks]
+  local beat="$1/.last-watcher-beat" pid=$2 cycles=$3 stall=${4:-600}
+  local seen now n=0 idle=0
+  seen=$(file_mtime "$beat")
+  while is_live_non_zombie "$pid"; do
+    now=$(file_mtime "$beat")
+    if [ "$now" != "$seen" ]; then
+      seen=$now; n=$((n + 1)); idle=0
+      [ "$n" -le "$cycles" ] || return 124
+    else
+      idle=$((idle + 1))
+      [ "$idle" -lt "$stall" ] || return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid"
+}
+
 # One sighting that must surface and exit the cycle.
 hold_watch_surface() {  # <dir> <out> <capture> <pane-text>
   local dir=$1 out=$2 capture=$3 text=$4
   printf '%s\n' "$text" > "$capture"
   hold_watch_launch "$dir" "$out" "$capture"
-  wait_for_exit "$HOLD_WATCH_PID" 100 || { reap "$HOLD_WATCH_PID"; return 1; }
+  wait_exit_within_cycles "$dir/state" "$HOLD_WATCH_PID" 10 \
+    || { reap "$HOLD_WATCH_PID"; return 1; }
   return 0
 }
 
