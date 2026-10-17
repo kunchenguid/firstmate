@@ -85,9 +85,20 @@ SH
 chmod +x "$FAKEBIN/fake-ssh"
 
 # The harness the remote pane would have started, replaced by a probe that
-# reports the one environment fact under test.
+# reports the environment and the actual arguments at the agent boundary.
 cat > "$PROBEBIN/codex" <<'SH'
 #!/bin/sh
+standalone=0
+hooks=on
+previous=
+for arg do
+  [ "$arg" != --no-daemon ] || standalone=1
+  [ "$previous:$arg" != --disable:hooks ] || hooks=off
+  previous=$arg
+done
+printf '%s\n' "standalone=$standalone" "hooks=$hooks" "home=${FM_HOME-unset}" \
+  "pane=${HERDR_PANE_ID-unset}" "session=${HERDR_SESSION-unset}" \
+  "socket=${HERDR_SOCKET_PATH-unset}" > "$(dirname "$0")/context"
 printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}"
 SH
 chmod +x "$PROBEBIN/codex"
@@ -153,9 +164,24 @@ replay_remote_launch() {  # <preamble|bare>
   [ -n "$launch" ] || fail "the remote pane received no launch command"
   [ "$shape" = bare ] || preamble=$(remote_pane_exports)
   env -i HOME="$TMP_ROOT/pane-home" PATH="$PROBEBIN:$PATH" TERM=xterm \
+    FM_HOME=/synthetic/sibling HERDR_ENV=1 HERDR_SESSION=fm-remote \
+    HERDR_PANE_ID="$(sed -n 's/^herdr_pane_id=//p' "$REMOTE_HOME/state/parent-route/ios.meta")" \
+    HERDR_SOCKET_PATH="$TMP_ROOT/herdr.sock" \
     COMPACT_ADVISER_DISABLE="$CONTRARY" \
     /bin/sh -c "$preamble
 $launch"
+}
+
+assert_remote_context() {
+  local context pane
+  context=$(cat "$PROBEBIN/context")
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+  assert_contains "$context" 'standalone=1' "a secondmate must not attach to a daemon holding a sibling's environment"
+  assert_contains "$context" 'hooks=on' "secondmate isolation must retain its real supervision hooks"
+  assert_contains "$context" "home=$REMOTE_HOME" "the agent must receive its own home despite a stale pane home"
+  assert_contains "$context" "pane=$pane" "the agent must preserve its receiving Herdr pane"
+  assert_contains "$context" 'session=fm-remote' "the agent must preserve its Herdr session"
+  assert_contains "$context" "socket=$TMP_ROOT/herdr.sock" "the agent must preserve its Herdr socket"
 }
 
 # --- the remote route delivers the switch, allowlist absent -----------------
@@ -166,10 +192,12 @@ SEEN=$(replay_remote_launch preamble) \
   || fail "the command the remote pane received failed to run"
 assert_equals 1 "$SEEN" \
   "a second mate launched on a remote host must start with the compact adviser disabled"
+assert_remote_context
 SEEN=$(replay_remote_launch bare) \
   || fail "the remote launch command failed to run on its own"
 assert_equals 1 "$SEEN" \
   "the remote launch command must set the compact-adviser switch on its own, overriding a contrary remote pane value"
+assert_remote_context
 pass "a remote-routed second mate starts with the compact adviser disabled, from the pane export and from the launch command alike"
 
 # --- the same holds through the cleared allowlisted environment -------------
@@ -187,6 +215,8 @@ SEEN=$(replay_remote_launch bare) \
   || fail "the cleared-environment remote launch failed to run"
 assert_equals 1 "$SEEN" \
   "a remote second mate launched under the cleared allowlisted environment must still start with the compact adviser disabled"
+assert_remote_context
 pass "the remote route keeps the compact-adviser switch through the cleared allowlisted environment"
+pass "remote Codex secondmates keep their own home and Herdr identity with hooks enabled and daemon attachment disabled"
 
 echo "ALL TESTS PASSED"

@@ -982,6 +982,10 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
+  assert_contains "$(cat "$dir/fake/literal")" 'codex --no-daemon ' \
+    "a relaunched Codex secondmate must keep its own execution environment instead of attaching to a shared daemon"
+  assert_not_contains "$(cat "$dir/fake/literal")" '--disable hooks' \
+    "a relaunched Codex secondmate must retain its supervision hooks"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
