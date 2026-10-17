@@ -1943,6 +1943,29 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 
+### Restored pane working directory
+
+Measured 2026-10-10 on Linux x86_64 (WSL2) against Herdr 0.9.3 and Treehouse 3.1.2 in an isolated `fm-lab-` session.
+
+Herdr saves each pane's `cwd` from `pane get`, which is the pane's top-level shell's live cwd, and a session restore starts the shell, and any agent Herdr resumes, in that saved directory.
+A `cd` the top-level shell runs moves it; a nested subshell, such as the one `treehouse get` opens in its slot, moves only `foreground_cwd`, and an OSC 7 report from that subshell moves neither.
+Exiting the `treehouse get` subshell returns its slot to the pool, unless the slot was first leased with `treehouse lease`, which leaves it exactly as it is.
+A process whose cwd is inside a slot keeps `treehouse status` reporting it in use.
+
+```sh
+tests/fm-spawn-herdr-restore-worktree-e2e.test.sh
+```
+
+```text
+ok - real herdr E2E: a spawned worker's top-level pane shell, which Herdr restores, is its leased slot
+ok - real herdr E2E: after a session restore the worker's pane comes back in its own slot, still leased
+ok - real herdr E2E: the next spawn after the restore gets another slot and leaves restA's claim alone
+ok - real herdr E2E: teardown returns the leased slot to the pool
+```
+
+Before the spawn leased the slot and left the subshell, the same test failed at its first assertion with the pane's top-level shell still in the scratch project.
+That command is the guard that refreshes this record; run it after every Herdr or Treehouse upgrade.
+
 ### Pane status authority across a relaunch
 
 Measured 2026-09-21 on Linux x86_64 against Herdr 0.9.1 (client protocol 22) and Pi 0.86.1, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the same freeze was observed live on a relaunched Pi crewmate whose pane read `idle` while its validation pipeline ran.

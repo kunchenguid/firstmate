@@ -3084,11 +3084,10 @@ fm_backend_herdr_target_ready() {  # <target>
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
 #
-# Verified pitfall: `pane get`'s `.result.pane.cwd` is the pane's cwd AT
-# CREATION TIME - the top-level shell's cwd - and does NOT update when that
-# shell `cd`s or enters a subshell (as `treehouse get` does). Reading it here
-# would make fm-spawn.sh's worktree-discovery poll never see the pane "leave"
-# the project directory, since `cwd` stays frozen at the original path forever.
+# Verified pitfall: `pane get`'s `.result.pane.cwd` is the pane's TOP-LEVEL
+# shell's cwd. It follows a `cd` that shell runs itself, but not a subshell such
+# as the one `treehouse get` opens. Reading it here would make fm-spawn.sh's
+# worktree-discovery poll never see the pane "leave" the project directory.
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
@@ -3096,6 +3095,16 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_root_path: the pane's top-level shell cwd (`.result.pane.cwd`),
+# or empty on any error. Herdr saves this path in the session layout and starts
+# the restored shell, and any agent it resumes, there after a server restart
+# (measured: herdr 0.9.3), so it is the cwd a restored worker inherits.
+fm_backend_herdr_root_path() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 0
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane.cwd // empty' 2>/dev/null
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

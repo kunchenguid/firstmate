@@ -483,6 +483,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
+| `tests/fm-spawn-herdr-restore-worktree-e2e.test.sh` | A worker restored by a session restart comes back in its own leased slot, the next spawn gets another slot, and teardown releases the lease. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
 | `tests/fm-herdr-attached-viewer-live-e2e.test.sh` | Proves the other half against a real attached viewer, which `bin/fm-herdr-lab.sh viewer start` supplies over a pty sized before the fork. |
@@ -796,12 +797,19 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
+A restored pane's shell starts in the working directory Herdr last saw for the pane's top-level shell, and an agent Herdr resumes runs there ([verification](verification/runtime-backends.md) "Restored pane working directory").
+`treehouse get` enters its slot in a nested subshell, which never moves that directory.
+So after acquiring a Treehouse pool slot, a Herdr spawn leases the slot durably to its task, leaves the subshell, and moves the top-level shell into the slot before launch.
+A restored worker therefore resumes in its own copy, and the slot stays its own until teardown's `treehouse return` releases the lease.
+A slot of a task spawned without that lease reads available once its restored worker leaves it.
+Before any spawn runs `treehouse get`, it leases each unleased slot that a task with an existing record still claims to that task, and Treehouse does not hand that slot out.
+
 ### Stale agent registrations
 
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the crew shape `treehouse get` leaves behind wherever the spawn did not lease the slot and leave its subshell, as in a task spawned before that change (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
