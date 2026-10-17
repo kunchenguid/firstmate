@@ -6588,6 +6588,93 @@ test_heartbeat_wakes_an_idle_lead_with_ready_work() {
   pass "an idle lead with ready work is woken once per ready set, and never while a worker is working"
 }
 
+# The ask-default hook (ask_default_tick): with the firstmate-addons add-on
+# installed, every ask it recorded and has not defaulted is decided on the check
+# cadence, a fresh default wakes once, and the probe reads the away record; with
+# the add-on absent the cycle writes and prints nothing new.
+make_fake_ask_default() {  # <addons-dir>: a decide that follows the add-on's exit-code contract
+  mkdir -p "$1/ask-default"
+  cat > "$1/ask-default/ask-default" <<'SH'
+#!/usr/bin/env bash
+id=$2 probe=$4 rec="$FM_HOME/data/ask-default/asks/$2"
+rc=0; bash -c "$probe" || rc=$?
+printf '%s probe=%s\n' "$id" "$rc" >> "$FM_HOME/decide.log"
+case "$(cat "$rec")" in
+  *fake=defaulted*) printf 'defaulted_at=now\n' >> "$rec"; printf 'decision: defaulted\n' ;;
+  *fake=held*) printf 'decision: held\n'; exit 10 ;;
+  *) echo "ask $id has an incomplete record" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$1/ask-default/ask-default"
+}
+
+test_ask_default_hook_applies_safe_defaults_through_the_addon() {
+  local dir state fakebin out pid asks expected
+  dir=$(make_case ask-default-hook); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  asks="$dir/data/ask-default/asks"
+  mkdir -p "$asks"
+  printf 'fake=defaulted\n' > "$asks/a1"
+  printf 'fake=held\n' > "$asks/a2"
+  printf 'fake=defaulted\ndefaulted_at=earlier\n' > "$asks/a3"
+  printf 'broken\n' > "$asks/a4"
+  : > "$asks/a1.lock"
+  cp "$asks/a2" "$asks/a2.4242"
+
+  # Absent add-on: one whole cycle with nothing decided, printed, or recorded.
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_ADDONS_DIR="$dir/no-addons" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited with the ask-default add-on absent: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "an absent ask-default add-on printed a wake: $(cat "$out")"
+  [ ! -e "$state/.last-ask-default-check" ] || fail "an absent ask-default add-on still wrote its cadence marker"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the absent-add-on cycle"
+
+  # Present add-on, captain away (away record): the probe reads unreachable.
+  make_fake_ask_default "$dir/addons"
+  write_away_record "$state"
+  expected="check: ask-default safe default applied while the captain was unreachable: a1 (recorded in data/ask-default/applied.log)"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_ADDONS_DIR="$dir/addons" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a defaulted ask did not wake the watcher"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the ask-default wake did not name the defaulted ask: $(cat "$out")"
+  [ "$(sort "$dir/decide.log")" = "a1 probe=1
+a2 probe=1
+a4 probe=1" ] || fail "decide ran on the wrong asks or the away record read reachable: $(cat "$dir/decide.log")"
+  grep -F 'ask-default decide a4 failed (rc=1): ask a4 has an incomplete record' "$state/.watch-triage.log" >/dev/null \
+    || fail "a decide error was not logged with its cause"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the ask-default wake"
+
+  # Next cycle: a1 is settled and a2 stays held, so nothing wakes; with the away
+  # record archived the default probe reads the captain reachable.
+  archive_away_record "$state"
+  rm -f "$dir/decide.log"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_ADDONS_DIR="$dir/addons" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a held ask woke the watcher: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a held or settled ask printed a wake: $(cat "$out")"
+  grep -Fx 'a2 probe=0' "$dir/decide.log" >/dev/null || fail "the default probe did not read a present captain: $(cat "$dir/decide.log")"
+  grep -F 'a1 ' "$dir/decide.log" >/dev/null && fail "a defaulted ask was decided again"
+
+  # A dot-free ask id (all digits) on a dot-free home is a real ask, never the
+  # add-on's <id>.<pid> in-flight staging, however the home is named.
+  dotfree=$(mktemp -d /tmp/fm-askdotfree-XXXXXX) || fail "fixture: could not create a dot-free home"
+  case "$dotfree" in *.*) fail "fixture: the dot-free home has a dot: $dotfree" ;; esac
+  printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$dotfree/.fm-test-fixture"
+  printf '%s\n' "$dotfree" >> "$FM_TEST_CLEANUP_REGISTRY"
+  mkdir -p "$dotfree/data/ask-default/asks" "$dotfree/state"
+  printf 'fake=defaulted\n' > "$dotfree/data/ask-default/asks/1730000000"
+  make_fake_ask_default "$dotfree/addons"
+  write_away_record "$dotfree/state"
+  expected="check: ask-default safe default applied while the captain was unreachable: 1730000000 (recorded in data/ask-default/applied.log)"
+  watch_bg "$dotfree/state" "$fakebin" "$out" env FM_HOME="$dotfree" FM_ADDONS_DIR="$dotfree/addons" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a dot-free ask id was not decided: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the dot-free ask id did not wake: $(cat "$out")"
+  grep -Fx '1730000000 probe=1' "$dotfree/decide.log" >/dev/null || fail "a dot-free ask id was skipped as staging: $(cat "$dotfree/decide.log")"
+  pass "the ask-default hook decides open asks through the add-on and is inert without it"
+}
+
 # The lane floor (config/lane-target): a home below its target with ready work
 # must wake even when its working lanes still have free slots - the 5 Oct
 # Crewhouse stall, where two working lanes and 29 ready items surfaced nothing
@@ -7732,6 +7819,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_heartbeat_wakes_an_idle_lead_with_ready_work
+test_ask_default_hook_applies_safe_defaults_through_the_addon
 test_heartbeat_lane_floor_wakes_with_free_lane_slots
 test_ready_work_check_absorbs_a_transient_empty_inside_the_window
 test_ready_work_check_withdraws_a_stale_row_and_never_names_a_held_item

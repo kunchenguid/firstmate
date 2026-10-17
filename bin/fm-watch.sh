@@ -135,6 +135,11 @@
 #                          Re-raised while the condition holds, once per
 #                          new ready set and then every READY_WORK_RESURFACE_SECS;
 #                          intake uses HEARTBEAT's base interval, never its backoff
+#   check: ask-default safe default applied while the captain was unreachable: <ids> ...
+#                          the firstmate-addons ask-default add-on, when installed,
+#                          applied the recorded safe default of each named ask
+#                          (ask_default_tick owns the hook; the add-on owns the
+#                          decision and its applied.log record)
 # Local queue reminder semantics, including decision-signal normalization:
 # docs/watcher-continuity.md, "Durable queue and turn-end backstop".
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -321,7 +326,7 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps and ask-default decide ticks
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
@@ -2712,6 +2717,46 @@ record_ready_work_surfaced() {
   printf '%s\t%s\n' "$now" "$READY_WORK_IDS" > "$STATE/.ready-work-surfaced"
 }
 
+# Thin hook for the firstmate-addons ask-default add-on, which owns every
+# decision: for each ask it recorded that has not been defaulted yet, run
+# `ask-default decide` and let it apply the ask's safe default when the captain
+# is unreachable and the ask's clock has run out. Located like the other add-on
+# shims (FM_ADDONS_DIR, default $FM_HOME/projects/firstmate-addons); with the
+# add-on absent this returns at once, writing nothing, and the loop is unchanged.
+# Runs once per CHECK_INTERVAL. The probe reads the away record: the captain is
+# reachable unless an away record (never quiet mode's) exists. Held, waiting, and
+# reachable asks stay exactly as they are; a decide error is logged, never a wake.
+# Sets ASK_DEFAULT_REASON and returns 0 when at least one ask was just defaulted.
+ask_default_tick() {
+  local tool rec id out rc ids='' probe
+  tool="${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/ask-default/ask-default"
+  [ -x "$tool" ] || return 1
+  [ "$(age_of "$STATE/.last-ask-default-check")" -ge "$CHECK_INTERVAL" ] || return 1
+  touch "$STATE/.last-ask-default-check"
+  # shellcheck disable=SC2016 # the probe's own command substitution runs inside decide
+  probe=$(printf '[ "$(%q mode --path %q 2>/dev/null)" != away ]' \
+    "$SCRIPT_DIR/fm-afk-contract.sh" "$STATE/.afk-contract")
+  for rec in "$FM_HOME/data/ask-default/asks"/*; do
+    [ -f "$rec" ] || continue
+    id=${rec##*/}
+    # Skip the add-on's apply locks and its in-flight <id>.<pid> record staging.
+    case "$id" in
+      *.lock) continue ;;
+      *.*) case "${id##*.}" in *[!0-9]*) ;; *) [ ! -f "${rec%.*}" ] || continue ;; esac ;;
+    esac
+    grep -q '^defaulted_at=' "$rec" && continue
+    rc=0
+    out=$(FM_HOME="$FM_HOME" "$tool" decide "$id" --probe-cmd "$probe" 2>&1) || rc=$?
+    case "$rc" in
+      0) case "$out" in *'decision: defaulted'*) ids="$ids $id" ;; esac ;;
+      10|11|12) ;;
+      *) triage_log "ask-default decide $id failed (rc=$rc): $(printf '%s' "$out" | tail -n 1)" ;;
+    esac
+  done
+  [ -n "$ids" ] || return 1
+  ASK_DEFAULT_REASON="check: ask-default safe default applied while the captain was unreachable:$ids (recorded in data/ask-default/applied.log)"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -3724,6 +3769,12 @@ EOF
       record_ready_work_surfaced
       wake "$reason"
     fi
+  fi
+
+  # Asks the ask-default add-on recorded are decided on the check cadence.
+  if ask_default_tick; then
+    fm_wake_append check ask-default "$ASK_DEFAULT_REASON" || exit 1
+    wake "$ASK_DEFAULT_REASON"
   fi
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
