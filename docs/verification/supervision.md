@@ -672,6 +672,23 @@ Observed output without the checkpoint distinction:
 not ok - announced recovery checkpoint exit: expected exit 124, got 0
 ```
 
+### Interrupted turns and the turn-end acknowledgement
+
+The pre-drained wake's turn-end acknowledgement ([watcher-continuity.md](../watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)) relies on an interrupted Claude turn firing no `Stop`.
+On 2026-10-17, Claude Code 2.1.302 ran in a throwaway trusted project whose `.claude/settings.json` registered `Stop`, `StopFailure`, and `UserPromptSubmit` hooks that each appended one line to a log.
+A prompt asking for a long reply was submitted, and Escape interrupted the turn mid-stream (the pane printed `Interrupted · What should Claude do instead?`); after 15 seconds a short prompt was submitted.
+The log, with `esc2-sent` written by the probe when it sent the interrupting Escape:
+
+```text
+prompt 1792271581
+esc2-sent 1792271602
+prompt 1792271636
+stop 1792271638
+```
+
+The interrupted turn fired neither `Stop` nor `StopFailure`, and the next prompt's `UserPromptSubmit` arrived before any later `Stop`, which is the order `bin/fm-wake-ack.sh void` depends on.
+With vim editing mode on, the first Escape only leaves insert mode, so the interrupt needs a second one.
+
 Deterministic entry points:
 
 ```sh
@@ -684,6 +701,8 @@ tests/fm-watch-checkpoint.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
+tests/fm-wake-ack.test.sh
+tests/fm-wake-drain-stage.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 

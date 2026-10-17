@@ -1,14 +1,17 @@
 Mode: Claude Stop-hook-owned supervision.
 
 When this session owns supervision and away mode is not active:
-1. Drain first with `bin/fm-wake-drain.sh`.
+1. Drain first with `bin/fm-wake-drain.sh`, unless the wake arrived pre-drained (step 3).
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
    An actionable close wakes you through the hook's exit-2 rewake, delivered as a `Stop hook feedback` message.
-3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
+3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), handle the wake from the `WAKE PRESENTATION` the banner carries: the hook already ran `bin/fm-wake-drain.sh` for you, and running it again is needed only when the banner says the presentation was cut.
+   Its acknowledgement, including the mark-processed of any presented branch outcome, runs automatically when the turn ends, so end the turn only once the wake is handled; `bin/fm-wake-ack.sh hold` keeps the wake open past this turn, and an interrupted or errored turn leaves it queued for the next drain ([`watcher-continuity.md`](../watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)).
+   A banner without a `WAKE PRESENTATION` asks you to run `bin/fm-wake-drain.sh` first and run its `WAKE_ACK_REQUIRED` command yourself, as step 1 says.
+   Empty plumbing closes (`check: rearm-resurface`, `check: inactive-outcome` with nothing to present) are acknowledged by the hook and never reach you.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
-   Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
+   Do not invent a wake from an attach-status line alone; act only on real wake records, the presentation's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.
