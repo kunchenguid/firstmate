@@ -571,6 +571,85 @@ test_explicit_path_bypasses_changed_logic() {
   pass "fm-lint.sh explicit paths bypass changed-file mode selection"
 }
 
+# Prints the given pid and every live descendant of it, one per line.
+fm_lint_process_tree() {
+  ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+    { parent[$1] = $2; pids[NR] = $1 }
+    END {
+      keep[root] = 1
+      do {
+        grew = 0
+        for (i = 1; i in pids; i++) {
+          p = pids[i]
+          if (!(p in keep) && (parent[p] in keep)) { keep[p] = 1; grew = 1 }
+        }
+      } while (grew)
+      for (p in keep) print p
+    }'
+}
+
+# A locale whose decimal separator is not "." (the Arabic "٫" is multibyte)
+# changes how bash renders EPOCHREALTIME. The run must finish normally there:
+# a clock that cannot parse it once aborted each private worker into a full
+# owner run that spawned workers of its own until the host ran out of
+# processes, so this run is watched and torn down at a small process bound.
+test_non_dot_decimal_locale_finishes() {
+  local tmp fakebin log out_file pid loc chosen='' count tree rc=0 target
+  for loc in ar_EG.UTF-8 ar_SA.UTF-8 de_DE.UTF-8 fr_FR.UTF-8; do
+    case "$(LC_ALL=$loc bash -c 'printf %s "${EPOCHREALTIME:-}"' 2>/dev/null)" in
+      *[0-9].[0-9]*|'') ;;
+      *) chosen=$loc; break ;;
+    esac
+  done
+  if [ -z "$chosen" ]; then
+    pass "fm-lint.sh non-dot decimal locale check has no such locale installed here"
+    return 0
+  fi
+  tmp=$(fm_test_tmproot fm-lint-decimal-locale)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  out_file="$tmp/out"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  target="bin/fm-install-shellcheck.sh"
+  PATH="$fakebin:$PATH" LC_ALL=$chosen GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=2 \
+    "$LINT" "$target" > "$out_file" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    tree=$(fm_lint_process_tree "$pid")
+    count=$(printf '%s\n' "$tree" | grep -c .)
+    if [ "${count:-0}" -gt 12 ]; then
+      printf '%s\n' "$tree" | xargs kill -KILL 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "fm-lint.sh multiplied its own processes under LC_ALL=$chosen ($count running)"
+    fi
+    sleep 0.2
+  done
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-lint.sh failed under LC_ALL=$chosen"$'\n'"$(cat "$out_file")"
+  assert_not_contains "$(cat "$out_file")" "arithmetic" \
+    "fm-lint.sh could not read its clock under LC_ALL=$chosen"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "fm-lint.sh under LC_ALL=$chosen did not lint exactly the requested root"$'\n'"logged: $(cat "$log")"
+  # Telemetry reads decimal timings and CPU samples that the same locale formats.
+  local plain telemetry_out field value
+  plain=$(cat "$out_file")
+  telemetry_out=$(PATH="$fakebin:$PATH" LC_ALL=$chosen GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=2 \
+    FM_LINT_TELEMETRY="$tmp/telemetry.tsv" "$LINT" "$target" 2>&1) \
+    || fail "telemetry-enabled lint failed under LC_ALL=$chosen"$'\n'"$telemetry_out"
+  [ "$telemetry_out" = "$plain" ] \
+    || fail "telemetry changed routine lint output under LC_ALL=$chosen"$'\n'"$telemetry_out"
+  for field in worker_wall_sum_seconds max_worker_wall_seconds user_seconds system_seconds \
+    aggregate_cpu_percent_start aggregate_cpu_percent_end; do
+    value=$(awk -F '\t' -v f="$field" '$1 == f { print $2; exit }' "$tmp/telemetry.tsv")
+    case "$value" in
+      unavailable) ;;
+      *[0-9].[0-9]*) case "$value" in *[!0-9.]*) fail "telemetry $field is not a number under LC_ALL=$chosen: $value" ;; esac ;;
+      *) fail "telemetry $field is not a number under LC_ALL=$chosen: $value" ;;
+    esac
+  done
+  pass "fm-lint.sh finishes normally under a non-dot decimal locale ($chosen)"
+}
+
 test_zero_changed_files_exits_clean() {
   local tmp fakebin diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
@@ -2064,6 +2143,7 @@ test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
+test_non_dot_decimal_locale_finishes
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
 test_changed_mode_drops_external_sources_and_excludes_cross_file_codes

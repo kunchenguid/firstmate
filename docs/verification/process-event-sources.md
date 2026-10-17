@@ -27,6 +27,44 @@ Usage: lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply
 The adapter uses `lavish-axi reply` under the source lock after arm eligibility and before listener registration on 0.1.80 and newer, and preserves poll-with-reply for older compatible versions.
 Its separate routing lookup reads the board's saved Lavish session; the adapter header owns that contract.
 
+## The two shapes of a captured prompt array
+
+Verified on 2026-10-14 on macOS (Darwin 25.6.0) with `lavish-axi` 0.1.87, which encodes its output with the bundled `@toon-format/toon` 2.3.1.
+A scratch board under an isolated `LAVISH_AXI_STATE_DIR` queued one versioned choice, one comment passing a `target`, and a typed message, then used `Send & End`:
+
+```text
+$ lavish-axi poll board.html --timeout-ms 20000
+session:
+  file: .../board.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[3]:
+  - uid: "1"
+    prompt: "Captain's Call answer - Repro one: alpha\n\nContext data:\n{...}"
+    selector: div#q1 > form
+    tag: choice
+    text: Repro one -> alpha
+  - uid: "2"
+    prompt: "Comment on a selection, with comma"
+    selector: button#s3
+    tag: annotation
+    text: Selected words
+    target:
+      type: text-range
+      quote: Selected words
+  - uid: ""
+    prompt: "Final note, after the picks"
+    selector: ""
+    tag: message
+    text: Freeform message
+```
+
+The same board's earlier round, whose prompts all carried only `uid`, `prompt`, `selector`, `tag`, and `text`, came back in the tabular `prompts[4]{uid,prompt,selector,tag,text}:` shape.
+TOON uses the tabular shape only when every object has identical keys and only primitive values, so one prompt carrying a `target` or image `attachments` switches the whole array to the list shape.
+An array with no items is written inline as `prompts: []`, confirmed by encoding one with that bundled TOON 2.3.1 encoder.
+The adapter header owns how both shapes are read, and `tests/fm-procevent.test.sh` replays a sanitized copy of this capture.
+
 ## Why an ended Lavish review is terminal
 
 Re-verified on 2026-08-01 against the same installed build.
@@ -56,7 +94,7 @@ A `browser_disconnected` response likewise carries no answer while its session r
 The verdict is confined to those two shapes and fails closed everywhere else.
 A `Send & End` close carrying the captain's own answer classifies `feedback`, never `ended`, so it is announced unchanged; so is any `ended` result that still carries a `prompts` or `feedback` block, which this lifecycle is not expected to produce but which must never be dropped on that expectation.
 A `waiting` session, a `missing` one, an `unknown` or unreadable result, and every error stay announced, because none of them positively proves nothing was said.
-The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
+The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows or list items are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
 Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore announced.
 
 ## The loss limitation this runner cannot close
