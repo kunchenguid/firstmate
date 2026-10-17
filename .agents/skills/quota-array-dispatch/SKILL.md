@@ -90,6 +90,11 @@ When a credential's local classification is the only thing standing between a ca
 `bin/fm-vendor-auth-probe.sh` is the only approved vendor-credential probe; its `--help` owns the registered probes and mechanics.
 It takes no harness, model, or provider and returns a fact, not a route: only `authenticated` and `unauthenticated` are ground truth, while `indeterminate`, `timeout`, and `unavailable` establish nothing and must never be read as either outcome.
 Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
+
+Quota and credentials say nothing about whether an upstream endpoint is currently reachable, and a provider can report ample remaining quota while its address resolves to nothing.
+When that specific gap would change a selection, collect it with `bin/fm-provider-reach-probe.sh --help`: one bounded, unauthenticated DNS-plus-HTTP finding per call, with its own exit status per class.
+It is a fact collector, not a router - it reads no dispatch configuration, holds no provider table, and decides no eligibility - and `docs/verification/provider-reach.md` owns what each class proves.
+A `2xx` there means routable, never usable: this fleet has recorded endpoints answering small requests successfully while long-output requests hung, so never record a probe success as "channel available".
 Grok prepaid `credits` are unrelated to paid-window headroom; never read them as exhaustion.
 
 Malformed configuration is an actionable error, not a candidate to rank around.
