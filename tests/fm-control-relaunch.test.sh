@@ -3411,6 +3411,7 @@ test_existing_host_generations_recover_through_observing_operations() {
     out=$(run_existing_host "$dir" launch sm67 claude pool-model-a medium herdr --operation observing.old); rc=$?
     expect_code 0 "$rc" "host import of the running generation: $out"
     disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_present "$dir/host-root/state/remote-secondmate-history/sm67.operation.observing.old" "host did not retain operation history in its disposable root"
     assert_equals 'existing actual.old' "$(printf '%s\n' "$disp" | jq -r '.disposition + " " + .actual_generation')" "host did not persist its existing-generation binding"
     assert_absent "$st/sm67.seat-operation.actual.old" "import invented a generation-named receipt"
     receipt="$st/sm67.seat-operation.observing.old"
@@ -3469,8 +3470,12 @@ test_existing_host_generations_recover_through_observing_operations() {
 }
 
 run_existing_host() {
-  local dir=$1 operation='' previous=- arg prior='' record=''
+  local dir=$1 operation='' previous=- arg prior='' record='' link
   shift
+  mkdir -p "$dir/host-root"
+  for link in bin .agents skills AGENTS.md; do
+    [ -e "$dir/host-root/$link" ] || ln -s "$ROOT/$link" "$dir/host-root/$link"
+  done
   case "$1" in
     launch|relaunch)
       for arg in "$@"; do
@@ -3487,7 +3492,7 @@ run_existing_host() {
   esac
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-    PATH="$dir/herdr/bin:$dir/fakebin:$PATH" FM_HOME="$dir/smhome" FM_FAKE_DIR="$dir/fake" \
+    PATH="$dir/herdr/bin:$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/host-root" FM_HOME="$dir/smhome" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
     FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_POLL=0.01 \
     "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" <<< "$record" 2>&1
@@ -3518,7 +3523,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
