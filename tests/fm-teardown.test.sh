@@ -2869,6 +2869,9 @@ case "\${1:-} \${2:-}" in
   "pane close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
     ;;
+  "tab close")
+    : > "\${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
   "pane get")
     if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
       printf '%s\n' 'not-json'
@@ -3512,6 +3515,12 @@ case "${1:-} ${2:-}" in
     fi
     : > "${FM_FAKE_HERDR_CLOSED:?}"
     ;;
+  "tab close")
+    if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
+    : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       if [ "${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
@@ -3524,7 +3533,10 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
     ;;
   "tab get")
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
+    case "${3:-}" in
+      "w1:t2") printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1"}}}' ;;
+      *) printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' ;;
+    esac
     ;;
   "tab focus")
     if [ "${FM_FAKE_HERDR_RESTORE_FAIL:-0}" = 1 ]; then

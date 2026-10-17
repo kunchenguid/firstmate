@@ -674,14 +674,16 @@ PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
   || fail "projected workspace retained a seeded or placeholder tab"
-[ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
+# A 0.9.x projection holds one terminal root pane plus a chrome Sidebar pane,
+# so count only the root panes rather than asserting a single pane.
+[ "$(printf '%s' "$PROJECTED_PANES" | jq -r '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)] | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
 printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
   '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
   || fail "projected workspace's only tab was not the normal fm-shape task tab"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
-  '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
-  || fail "projected workspace's only pane was not the exact recorded task pane"
+  '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)][0].pane_id == $pane' >/dev/null 2>&1 \
+  || fail "projected workspace's only task pane was not the exact recorded task pane"
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
@@ -699,13 +701,14 @@ if grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/
 fi
 ACTIVE_SEEDED_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")
 ACTIVE_SEEDED_TASK_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/task-pane")
+ACTIVE_SEEDED_TAB=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
 if lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
   fail "detached persisted-focus seeded prune left the seeded pane behind"
 fi
 lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1 \
   || fail "detached persisted-focus seeded prune lost the task pane"
-sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
-  || fail "detached persisted-focus seeded prune did not close the seeded pane"
+sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'tab\tclose\t'"$ACTIVE_SEEDED_TAB" >/dev/null 2>&1 \
+  || fail "detached persisted-focus seeded prune did not close the seeded tab"
 lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after the active seeded-tab fixture"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture restoration"
 rm -rf "$ACTIVE_SEEDED_CONTROL"
@@ -842,16 +845,17 @@ ORDER_FAIL_META="$HOME_DIR/state/order-fail.meta"
 remember_meta_worktree "$ORDER_FAIL_META" >/dev/null
 ORDER_FAIL_WSID=$(grep '^herdr_workspace_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
 ORDER_FAIL_PANE=$(grep '^herdr_pane_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
+ORDER_FAIL_TAB=$(grep '^herdr_tab_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
 FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fallback"
 [ "$(printf '%s' "$FAIL_LIST" | jq -r '.result.workspaces[-1].workspace_id')" = "$ORDER_FAIL_WSID" ] \
   || fail "workspace.move failure did not leave the safe worker in Herdr's default appended order"
 lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
   || fail "workspace.move failure cleaned up the safely-created task pane"
-FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "pane" && $2 == "close" { print $3 }')
-[ "$(printf '%s\n' "$FAIL_CLOSED_PANES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
-  || fail "move-failure spawn performed a pane close beyond the normal seeded-pane prune"
-[ "$FAIL_CLOSED_PANES" != "$ORDER_FAIL_PANE" ] \
-  || fail "move-failure spawn closed its exact task pane"
+FAIL_CLOSED_TABS=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "tab" && $2 == "close" { print $3 }')
+[ "$(printf '%s\n' "$FAIL_CLOSED_TABS" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
+  || fail "move-failure spawn performed a tab close beyond the normal seeded-tab prune"
+[ "$FAIL_CLOSED_TABS" != "$ORDER_FAIL_TAB" ] \
+  || fail "move-failure spawn closed its exact task tab"
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
@@ -905,8 +909,19 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
 done
 [ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
   || fail "post-create abort fixtures published task metadata before launch"
+# The rollback must retire both attempt journals and remove both disposable
+# workspaces, so assert the observable outcome instead of deleting the journals
+# by hand.
+[ ! -e "$HOME_DIR/state/abort-a.herdr-presentation" ] \
+  || fail "post-create abort cleanup left the abort-a attempt journal behind"
+[ ! -e "$HOME_DIR/state/abort-b.herdr-presentation" ] \
+  || fail "post-create abort cleanup left the abort-b attempt journal behind"
+for ABORT_TASK in abort-a abort-b; do
+  if lab workspace get "$(cat "$POST_CREATE_ABORT_CONTROL/$ABORT_TASK/workspace")" >/dev/null 2>&1; then
+    fail "post-create abort cleanup left the $ABORT_TASK disposable workspace behind"
+  fi
+done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
-rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)

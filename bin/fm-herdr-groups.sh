@@ -361,7 +361,7 @@ agent_view() { # <session> set|clear
 }
 
 cmd_sync() {
-  local only=${1:-} record session workspaces panes live_pane live_ws pane_count changed pair diff rc=0
+  local only=${1:-} record session workspaces panes live_pane live_ws tab_count changed pair diff rc=0
   local -a args=()
   collect_tasks "$only"
   [ "${#TASKS[@]}" -gt 0 ] || return 0
@@ -397,10 +397,14 @@ EOF
         fi
       fi
       projected_workspace "$P_TASK" "$P_SESSION" "$P_WORKSPACE" "$P_PANE" || continue
-      pane_count=$(printf '%s' "$workspaces" | jq -r --arg w "$P_WORKSPACE" '
+      # A projected workspace holds exactly one task TAB on every release; its
+      # 0.9.x sidebar pane is a second pane but not a second tab, so tab_count
+      # is the version-tolerant "single task" gate where pane_count == 1 would
+      # silently skip 0.9.x projections.
+      tab_count=$(printf '%s' "$workspaces" | jq -r --arg w "$P_WORKSPACE" '
         [.result.workspaces[]? | select(.workspace_id == $w)]
-        | if length == 1 then .[0].pane_count else empty end' 2>/dev/null) || pane_count=
-      [ "$pane_count" = 1 ] || continue
+        | if length == 1 then .[0].tab_count else empty end' 2>/dev/null) || tab_count=
+      [ "$tab_count" = 1 ] || continue
       live_ws=$(printf '%s' "$workspaces" | jq -c --arg w "$P_WORKSPACE" '
         [.result.workspaces[]? | select(.workspace_id == $w)][0].tokens // {}' 2>/dev/null) || live_ws='{}'
       diff=$(changed_tokens "$live_ws" \

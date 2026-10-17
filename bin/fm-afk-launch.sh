@@ -569,13 +569,16 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
       '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || return 1
     [ -n "$wsid" ] || return 1
     panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || { sleep 0.05; continue; }
-    pane_count=$(printf '%s' "$panes" | jq '[.result.panes[]?] | length' 2>/dev/null) || { sleep 0.05; continue; }
+    # Count only terminal root panes, excluding the 0.9.x per-tab Sidebar pane
+    # (same signals as fm_backend_herdr_pane_for_tab), so a workspace with a
+    # terminal plus a sidebar still resolves to its one root pane.
+    pane_count=$(printf '%s' "$panes" | jq '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)] | length' 2>/dev/null) || { sleep 0.05; continue; }
     if [ "$pane_count" = 0 ]; then
       sleep 0.05
       continue
     fi
     [ "$pane_count" = 1 ] || return 1
-    pane=$(printf '%s' "$panes" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null) || return 1
+    pane=$(printf '%s' "$panes" | jq -r '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)][0].pane_id // empty' 2>/dev/null) || return 1
     [ -n "$pane" ] || return 1
     printf '%s\t%s' "$wsid" "$pane"
     return 0

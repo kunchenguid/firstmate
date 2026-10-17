@@ -2880,17 +2880,19 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
 }
 
 fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pane>
-  local session=$1 new_tab=$2 new_pane=$3 state
+  local session=$1 new_tab=$2 new_pane=$3 state required_state=no-agent
   state=$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")
   case "$state" in
-    dead) return 0 ;;
+    dead) required_state= ;;
     no-agent) ;;
     live|stale-agent|unknown) return 1 ;;
   esac
   # Close the replacement TAB (terminal plus any 0.9.x sidebar pane) so the
   # rollback does not leave the replacement tab behind on releases where a
-  # pane close keeps it alive through its sidebar.
-  fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$new_tab" "$new_pane" no-agent || return 1
+  # pane close keeps it alive through its sidebar. A dead root pane still
+  # attempts the tab close with no agent recheck, because the sidebar can keep
+  # the tab alive after the terminal pane is reaped.
+  fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$new_tab" "$new_pane" "$required_state" || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
@@ -3866,14 +3868,20 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
 # pane, and `pane list` sorts the sidebar first, so the filter below excludes
 # it and returns the terminal pane an agent actually runs in. The sidebar is
 # identified structurally by its `herdr-sidebar-*` token namespace with the
-# rendered "Sidebar" label as a second independent signal; on releases without
-# the sidebar neither signal fires and the sole pane is returned unchanged, so
-# this is version-tolerant rather than gated on 0.9.1.
+# rendered "Sidebar" label as a second independent signal. On releases without
+# the sidebar neither signal fires and the sole pane is the single root pane.
+# The resolver fails closed: it returns a pane only when the filter collapses
+# to EXACTLY one root pane, so a release whose sidebar shape neither signal
+# recognizes (two panes, no excludable chrome) never yields a loose first-pane
+# match - callers fall back to the flat layout instead of tolerating extra
+# panes as a normal one-tab shape.
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '.result.panes[]? | select(.tab_id == $tab) | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0) | .pane_id' 2>/dev/null | head -1
+  printf '%s' "$panes" | jq -er --arg tab "$tab_id" \
+    '[.result.panes[]? | select(.tab_id == $tab) | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)]
+     | select(length == 1)
+     | .[0].pane_id' 2>/dev/null
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
