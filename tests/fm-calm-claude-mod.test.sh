@@ -597,10 +597,132 @@ JS
   pass "the mod's doorbell port agrees with bin/fm-operational-input.sh doorbell-kind on all $count cases: every record the owner writes and every unbacked or malformed near miss"
 }
 
+test_effort_level_policy() {
+  local out
+  cat >"$TMP_ROOT/effort.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const effort = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-effort-level.ts").href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+
+// The levels Claude Code accepts, and the subset one keystroke visits.
+check(JSON.stringify(effort.EFFORT_LEVELS) === JSON.stringify(["low", "medium", "high", "xhigh", "max", "ultracode"]), "the level list");
+check(JSON.stringify(effort.EFFORT_CYCLE) === JSON.stringify(["low", "medium", "high", "xhigh", "max"]), "the cycle list");
+check(!effort.EFFORT_CYCLE.includes("ultracode"), "ultracode turns workflows on, so a blind cycle must not reach it");
+
+// The cycle steps up one and wraps at the top.
+const walked = [];
+let at = "low";
+for (let step = 0; step < 6; step += 1) { at = effort.cycleEffortLevel(at); walked.push(at); }
+check(JSON.stringify(walked) === JSON.stringify(["medium", "high", "xhigh", "max", "low", "medium"]), \`cycle walked \${walked.join(",")}\`);
+
+// A level the cycle does not visit is a known place off the ramp, and the ramp resumes at its first entry.
+check(effort.cycleEffortLevel("ultracode") === "low", "ultracode starts the ramp");
+
+// Every level on the cycle is reachable by stepping, so the ramp climbs without stalling or skipping.
+const reached = new Set();
+let climbing = "low";
+for (let step = 0; step < effort.EFFORT_CYCLE.length; step += 1) { climbing = effort.cycleEffortLevel(climbing); reached.add(climbing); }
+check(reached.size === effort.EFFORT_CYCLE.length, \`the ramp reached \${[...reached].join(",")}\`);
+for (const level of effort.EFFORT_CYCLE) {
+  check(effort.cycleEffortLevel(level) !== level, \`\${level} must not step onto itself\`);
+}
+
+// The saved level a first step climbs from: this model's own entry, then the saved default.
+const model = "claude-sonnet-5";
+check(effort.savedEffortLevel({ modelSettings: { [model]: { effortLevel: "high" } } }, model) === "high", "the model's own saved level");
+check(effort.savedEffortLevel({ effortLevel: "low", modelSettings: { [model]: { effortLevel: "max" } } }, model) === "max", "the model's own saved level wins");
+check(effort.savedEffortLevel({ effortLevel: "xhigh" }, model) === "xhigh", "the saved default is read when the model has none");
+check(effort.savedEffortLevel({ effortLevel: "xhigh", modelSettings: { other: { effortLevel: "low" } } }, model) === "xhigh", "another model's saved level is not this one's");
+check(effort.savedEffortLevel({ modelSettings: { [model]: { effortLevel: "nonsense" } } }, model) === undefined, "an unreadable saved value names no level");
+// An entry this model has, naming something off the ramp, is unknown rather than another model's default.
+check(effort.savedEffortLevel({ effortLevel: "low", modelSettings: { [model]: { effortLevel: "auto" } } }, model) === undefined, "auto saved for this model is not the saved default");
+check(effort.savedEffortLevel({ effortLevel: "low", modelSettings: { [model]: { effortLevel: 32000 } } }, model) === undefined, "a token budget saved for this model is not the saved default");
+check(effort.savedEffortLevel({ effortLevel: "low", modelSettings: { [model]: {} } }, model) === "low", "a model with no level of its own reads the saved default");
+for (const settings of [undefined, null, {}, { modelSettings: {} }, { modelSettings: { [model]: {} } }, "text", 7]) {
+  check(effort.savedEffortLevel(settings, model) === undefined, \`nothing saved in \${JSON.stringify(settings) ?? "undefined"}\`);
+}
+check(effort.savedEffortLevel({ effortLevel: "high" }, undefined) === "high", "an unnamed model still reads the saved default");
+
+// What an /effort run selects: a level, auto which is no level at all, or nothing to act on.
+check(effort.parseEffortSelection("xhigh").level === "xhigh", "/effort xhigh selects a level");
+check(effort.parseEffortSelection(" MAX ").level === "max", "/effort spelled loudly selects a level");
+check(effort.parseEffortSelection("auto").level === undefined, "/effort auto selects no level");
+check(effort.parseEffortSelection(" Auto ").level === undefined, "/effort Auto selects no level");
+for (const args of ["", "  ", "bogus", 7, null, undefined, {}]) {
+  check(effort.parseEffortSelection(args) === undefined, \`\${JSON.stringify(args) ?? "undefined"} names nothing to act on\`);
+}
+
+// Every level reads back as itself, and nothing else does.
+for (const level of effort.EFFORT_LEVELS) {
+  check(effort.normalizeEffortLevel(level) === level, \`normalize \${level}\`);
+  check(effort.normalizeEffortLevel(\` \${level.toUpperCase()} \`) === level, \`normalize spelled loudly: \${level}\`);
+}
+for (const value of ["", "  ", "auto", "none", "xxhigh", "highest", 32000, 0, null, undefined, {}, ["high"], true]) {
+  check(effort.normalizeEffortLevel(value) === undefined, \`normalize rejects \${JSON.stringify(value) ?? "undefined"}\`);
+}
+
+// One color per level, all of them Claude Code theme keys rather than raw ANSI or hex values.
+const colors = effort.EFFORT_LEVELS.map((level) => effort.effortLevelColor(level));
+check(new Set(colors).size === colors.length, \`two levels share a color: \${colors.join(",")}\`);
+check(!colors.includes(effort.EFFORT_UNKNOWN_COLOR), "an established level must not borrow the unknown color");
+for (const color of [...colors, effort.EFFORT_UNKNOWN_COLOR]) {
+  check(/^[a-z][A-Za-z]+\$/.test(color), \`\${color} is not a theme key\`);
+  check(!color.startsWith("#") && !color.startsWith("rgb"), \`\${color} is a raw color, not a theme key\`);
+}
+check(effort.effortLevelColor(undefined) === effort.EFFORT_UNKNOWN_COLOR, "an unestablished level takes the unknown color");
+check(effort.effortLevelColor("ultracode") === "effortUltra", "ultracode takes Claude Code's own effort key");
+
+// One glyph per level, and a distinct one for a level the mod has not established.
+const glyphs = effort.EFFORT_LEVELS.map((level) => effort.effortLevelGlyph(level));
+check(new Set(glyphs).size === glyphs.length, "two levels share a glyph");
+check(!glyphs.includes(effort.EFFORT_UNKNOWN_GLYPH), "an established level must not borrow the unknown glyph");
+check(effort.effortLevelGlyph(undefined) === effort.EFFORT_UNKNOWN_GLYPH, "unknown glyph");
+
+// The label names the level, and never invents one.
+for (const level of effort.EFFORT_LEVELS) check(effort.effortCueLabel(level).endsWith(\` \${level}\`), \`label for \${level}\`);
+check(effort.effortCueLabel(undefined).includes(effort.EFFORT_UNKNOWN_LABEL), "the unestablished label");
+for (const level of effort.EFFORT_LEVELS) check(!effort.effortCueLabel(undefined).includes(level), "the unestablished label names no level");
+
+// The rule fills the row, leaves the engine's handle room, and never goes negative.
+check(effort.effortRuleColumns(40, 6) === 30, "rule on a 40-cell row");
+check(effort.effortRuleColumns(80, 6) === 70, "rule on an 80-cell row");
+for (const narrow of [10, 6, 4, 1, 0, -5]) check(effort.effortRuleColumns(narrow, 6) >= 0, \`rule never negative at \${narrow}\`);
+check(effort.effortRuleColumns(4, 6) === 0, "a row with no room draws no rule");
+for (const unmeasured of [undefined, null, "80", NaN, Infinity]) {
+  check(effort.effortRuleColumns(unmeasured, 6) === 0, \`unmeasured width \${String(unmeasured)} draws no rule\`);
+}
+
+// What a request proves: the level it carries, unless a level no request can report was selected.
+check(!effort.TURN_STEP_LEVELS.includes("ultracode"), "a request cannot report ultracode");
+for (const level of effort.TURN_STEP_LEVELS) {
+  check(effort.EFFORT_LEVELS.includes(level), \`\${level} is not a level at all\`);
+  check(effort.confirmedEffortLevel(undefined, level) === level, \`a request proves \${level} when nothing was selected\`);
+  check(effort.confirmedEffortLevel(level, level) === level, \`a request proves the selected \${level}\`);
+}
+check(effort.confirmedEffortLevel("high", "medium") === "medium", "the request outranks the level selected before it");
+check(effort.confirmedEffortLevel("ultracode", "xhigh") === undefined, "a request proves nothing once ultracode was selected");
+check(effort.confirmedEffortLevel("ultracode", undefined) === undefined, "ultracode plus a request without a level proves nothing");
+check(effort.confirmedEffortLevel(undefined, undefined) === undefined, "a request carrying no level proves nothing");
+check(effort.confirmedEffortLevel("low", undefined) === undefined, "a request carrying no level proves nothing even after a selection");
+
+// A model switch forgets where a step starts, except a selection no request can report.
+for (const level of effort.TURN_STEP_LEVELS) {
+  check(effort.selectionAfterModelSwitch(level) === undefined, \`a model switch forgets the selected \${level}\`);
+}
+check(effort.selectionAfterModelSwitch(undefined) === undefined, "a model switch leaves no selection as none");
+check(effort.selectionAfterModelSwitch("ultracode") === "ultracode", "ultracode survives a model switch, so no request can be read as proof");
+console.log("effort-ok");
+JS
+  out=$(run_node "$TMP_ROOT/effort.mjs" 2>&1) || fail "effort-level policy: $out"
+  assert_contains "$out" "effort-ok" "the effort-level policy check did not complete"
+  pass "the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, keeps an ultracode selection across a model switch, and treats only a request that can report the selected level as proof of what is in force"
+}
+
 test_plugin_shape
 test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy
 test_branch_notes_over_the_store_owner
+test_effort_level_policy
 test_classifier_parity_with_shell_owner
 test_doorbell_parity_with_shell_owner
