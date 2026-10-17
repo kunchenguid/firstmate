@@ -2979,8 +2979,7 @@ test_main_owned_wait_escalation_reaches_main_as_a_check_wake() {
   prime_status_seen "$home/state" "$home/state/demo.status"
   FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_HOME_SUMMARY_INTERVAL=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
-    FM_BUSY_TURN_MAX_SECS=999999 FM_STALE_ESCALATE_SECS=999999 \
-    FM_ARM_CONFIRM_TIMEOUT=1 start_hook_session "$home"
+    FM_BUSY_TURN_MAX_SECS=999999 FM_STALE_ESCALATE_SECS=999999 start_hook_session "$home"
   turn_end "$home"
   wait_until 200 watcher_live "$home" \
     || fail "wait escalation: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
