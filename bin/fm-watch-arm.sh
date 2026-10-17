@@ -680,6 +680,8 @@ fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
+# Set once the child has published its home-bound lock identity.
+lock_claimed=0
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
@@ -780,6 +782,16 @@ while :; do
     child_done=1
     owned_child_finished "$rc"
     exit $?
+  fi
+  # A child that already holds the lock under its own identity is progressing
+  # through startup, not stuck: a loaded host can take far longer than the fixed
+  # confirmation budget to finish its pre-beacon steps. Extend the deadline once,
+  # bounded by the stall bound where the watcher's own re-arm evicts a holder.
+  if [ "$lock_claimed" -eq 0 ] && fm_pid_alive "$child" \
+    && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$child" "$FM_HOME"; then
+    lock_claimed=1
+    claimed_deadline=$(( $(date +%s) + STALL_BOUND + 1 ))
+    [ "$claimed_deadline" -le "$deadline" ] || deadline=$claimed_deadline
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 0.2
