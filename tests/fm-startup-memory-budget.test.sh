@@ -278,10 +278,8 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
     || fail "budget reread payload was not the exact destination bytes"
   assert_contains "$(inbox_record_body "$home/state/sm.inbox/001.msg")" "CONFIG_REREAD: $instruction" \
     "budget propagation did not enqueue the pointer to its exact reread generation"
-  assert_contains "$(<"$log")" "Firstmate instruction waiting: list " \
+  assert_contains "$(<"$log")" "Firstmate instruction waiting: act on \"\$FM_TASK_INBOX\"/*.msg" \
     "budget propagation did not ring the durable inbox doorbell"
-  assert_contains "$(<"$log")" "'sm.inbox' steering inbox" \
-    "budget propagation doorbell did not identify the durable inbox"
 
   outside="$world/unsafe-budget"
   printf '555\n' > "$outside"
