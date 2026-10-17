@@ -2256,6 +2256,80 @@ test_projection_create_focus_restore_failure_keeps_its_rollback_scope() {
   pass "herdr presentation create: a failing create-time focus restore still rolls back its exact workspace and seeded tab"
 }
 
+test_projection_reclaim_create_restore_failure_rolls_back_its_replacement() {
+  local dir state home home_real journal token label log out status
+  dir="$TMP_ROOT/projection-reclaim-restore-failure"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" reclaim-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label reclaim-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/reclaim-r1.herdr-presentation" reclaim-r1 "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-reclaim-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create the reclaim restore-failure journal fixture"
+  journal="$state/reclaim-r1.herdr-presentation"
+  label="└ reclaim-r1 · p:$token"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_A="$home" LOG="$log" CLOSED="$state/closed" \
+    bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_cli() {
+        local session=$1
+        shift
+        printf "%s\n" "$*" >> "$LOG"
+        case "$1 $2" in
+          "tab create")
+            printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t3\"},\"root_pane\":{\"pane_id\":\"w2:p3\"}}}\n" ;;
+          "tab get")
+            if [ "$3" = w2:t3 ] && [ ! -e "$CLOSED" ]; then
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t3\",\"workspace_id\":\"w2\"}}}\n"
+            elif [ "$3" = w2:t2 ]; then
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t2\",\"workspace_id\":\"w2\"}}}\n"
+            else
+              printf "{\"error\":{\"code\":\"tab_not_found\"}}\n"
+            fi
+            ;;
+          "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+          "tab close") : > "$CLOSED" ;;
+          *) return 1 ;;
+        esac
+      }
+      fm_backend_herdr_projection_live_binding_matches() { return 0; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+      fm_backend_herdr_projection_focus_restore() { [ "${3:-}" != "husk replacement create" ]; }
+      fm_backend_herdr_pane_agent_state() {
+        case "$2" in
+          w2:p3) [ -e "$CLOSED" ] && printf dead || printf no-agent ;;
+          *) printf no-agent ;;
+        esac
+      }
+      set +e
+      fm_backend_herdr_projection_reclaim_task \
+        fmtest "$JOURNAL" reclaim-r1 "$HOME_A" w2 w2:t2 w2:p2 firstmate fm-reclaim-r1 /tmp/project
+      rc=$?
+      set -e
+      printf "rc=%s safe=%s tab=%s pane=%s\n" "$rc" \
+        "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-}" \
+        "${FM_BACKEND_HERDR_PROJECTION_TAB_ID:-}" \
+        "${FM_BACKEND_HERDR_PROJECTION_PANE_ID:-}"
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the failing reclaim did not reach its rollback probe: $out"
+  assert_contains "$out" "rc=1 safe=1 tab=w2:t3 pane=w2:p3" \
+    "a failing reclaim create-time focus restore did not record its exact rollback scope: $out"
+  assert_contains "$(cat "$log")" "tab close w2:t3" \
+    "a failing reclaim create-time focus restore did not close the exact replacement tab: $(cat "$log")"
+  assert_not_contains "$(cat "$log")" "tab close w2:t2" \
+    "a failing reclaim create-time focus restore closed the recorded husk instead of its replacement"
+  [ "$(sed -n 's/^tab_id=//p' "$journal")" = w2:t2 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w2:p2 ] \
+    || fail "the rolled-back reclaim rewrote the journal away from its still-recorded husk"
+  pass "herdr presentation reclaim: a failing create-time focus restore closes only its replacement tab"
+}
+
 test_projection_close_is_idempotent_when_the_tab_vanished_mid_close() {
   local vanished out reads
   reads="$TMP_ROOT/projection-close-vanish-reads"
@@ -6284,6 +6358,7 @@ test_projection_cleanup_tabs_exact_closes_both_tabs
 test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab
 test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace
 test_projection_create_focus_restore_failure_keeps_its_rollback_scope
+test_projection_reclaim_create_restore_failure_rolls_back_its_replacement
 test_projection_close_is_idempotent_when_the_tab_vanished_mid_close
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus

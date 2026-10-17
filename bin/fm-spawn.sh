@@ -4334,7 +4334,16 @@ else
           2)
             spawn_herdr_presentation_order_lock_release
             ;;
-          *) exit 1 ;;
+          *)
+            if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+              HERDR_PROJECTION_ABORT_CLEANUP=1
+              HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+              HERDR_PROJECTION_ABORT_TASK_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+              HERDR_PROJECTION_ABORT_OWNED_WORKSPACE=$HERDR_RECOVERY_WORKSPACE_ID
+              HERDR_PROJECTION_ABORT_PRIOR_FOCUS=$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS
+              HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
+            fi
+            exit 1 ;;
           esac
         else
           spawn_herdr_presentation_order_lock_release

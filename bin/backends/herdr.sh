@@ -1123,16 +1123,17 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 }
 
 # fm_backend_herdr_projection_owned_tab_focus_restore: re-establish the exact
-# pre-spawn focus before the same-process rollback closes a tab of the
-# disposable workspace that spawn itself created.
+# pre-spawn focus before the same-process rollback closes a tab in the
+# disposable presentation workspace that spawn itself created or whose husk it
+# is replacing.
 # Herdr 0.9.x create is not focus-authoritative, so that workspace's own tab can
 # be the persisted active tab under a live foreground client, and its create-time
 # focus restore can fail. The rollback keeps the live-viewer guard authoritative
 # instead of bypassing it: it restores the recorded prior focus first, so the
 # guard admits the close only because the client is no longer viewing the doomed
-# tab. The scope is strictly that response-derived workspace - the tab must still
-# report that exact workspace id, and an empty or unresolvable prior focus fails -
-# so a user workspace's active tab is never closed this way.
+# tab. The scope is strictly the exact owned workspace id - the tab must still
+# report it, and an empty or unresolvable prior focus fails - so a user
+# workspace's active tab is never closed this way.
 fm_backend_herdr_projection_owned_tab_focus_restore() {  # <session> <tab-id> <owned-workspace> <prior-focus>
   local session=$1 tab_id=$2 owned_workspace=${3:-} prior_focus=${4:-} info tab_workspace
   [ -n "$owned_workspace" ] && [ -n "$prior_focus" ] || return 1
@@ -2931,8 +2932,8 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
   [ "$root_pane" = "$pane" ]
 }
 
-fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pane>
-  local session=$1 new_tab=$2 new_pane=$3 state required_state=no-agent
+fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pane> [owned-workspace prior-focus]
+  local session=$1 new_tab=$2 new_pane=$3 owned_workspace=${4:-} prior_focus=${5:-} state required_state=no-agent
   state=$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")
   case "$state" in
     dead) required_state= ;;
@@ -2944,7 +2945,8 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
   # pane close keeps it alive through its sidebar. A dead root pane still
   # attempts the tab close with no agent recheck, because the sidebar can keep
   # the tab alive after the terminal pane is reaped.
-  fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$new_tab" "$new_pane" "$required_state" || return 1
+  fm_backend_herdr_projection_close_tab_focus_preserving \
+    "$session" "$new_tab" "$new_pane" "$required_state" "$owned_workspace" "$prior_focus" || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
@@ -2955,12 +2957,17 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
+# A completed replacement create records its exact tab and pane plus the
+# same-process rollback gate (FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE) before
+# the create-time focus restore, so that failure rolls the tab back here and a
+# refused rollback still hands the exact tab to the caller's abort cleanup.
 fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
   local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS=""
+  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
     echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
@@ -3024,7 +3031,19 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id returned ambiguous replacement ids; spawning flat" >&2
     return 2
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
+  # The replacement's exact ids and the same-process rollback authority are
+  # recorded before the create-time focus restore can fail, so a failed reclaim
+  # closes that exact tab (or hands it to the caller's abort cleanup) instead of
+  # leaving the projection workspace holding a second tab.
+  # shellcheck disable=SC2034  # caller consumes the response-derived globals
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$new_tab
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$new_pane
+  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+  if ! fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create"; then
+    fm_backend_herdr_projection_reclaim_rollback \
+      "$session" "$new_tab" "$new_pane" "$meta_workspace" "$focus_before" || true
+    return 1
+  fi
   info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || info=
   if ! printf '%s' "$info" | jq -e --arg tab "$new_tab" --arg workspace "$meta_workspace" '
     .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace

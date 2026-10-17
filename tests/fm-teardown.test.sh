@@ -2949,7 +2949,7 @@ SH
   if grep -q "teardown task-x1 complete" "$case_dir/stdout"; then
     : > "$release"; fail "herdr-orphan-refusal: refusal still reported cleanup complete"
   fi
-  if grep -q "^pane close" "$log"; then
+  if grep -qE "^(pane|tab) close" "$log"; then
     : > "$release"; fail "herdr-orphan-refusal: an unlocked pane close was attempted under contention"
   fi
 
