@@ -2,6 +2,10 @@
 
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
+# Diagnostic class for the last rejected custom-check read. This is evidence
+# for operator wording only; fm_custom_check_snapshot_prepare remains the sole
+# execution authorization boundary.
+FM_CUSTOM_CHECK_REJECTION_CLASS=
 
 fm_custom_check_sha256() {
   local file=$1
@@ -17,11 +21,16 @@ fm_custom_check_sha256() {
 fm_custom_check_trust_read() {
   local state=$1 id=$2 trust state_device version hash
   FM_CUSTOM_CHECK_HASH=
+  FM_CUSTOM_CHECK_REJECTION_CLASS=malformed-or-unsupported
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   trust="$state/$id.check-trust"
-  fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
+  [ -e "$trust" ] && [ ! -L "$trust" ] || return 1
+  if ! fm_pr_private_file_valid "$trust" 600 "$state_device"; then
+    FM_CUSTOM_CHECK_REJECTION_CLASS=authentication-failed
+    return 1
+  fi
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
   IFS= read -r hash <&9 || { exec 9<&-; return 1; }
@@ -33,6 +42,7 @@ fm_custom_check_trust_read() {
   [ "$version" = fm-custom-check-v1 ] || return 1
   [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   FM_CUSTOM_CHECK_HASH=$hash
+  FM_CUSTOM_CHECK_REJECTION_CLASS=
 }
 
 fm_custom_check_registered() {
@@ -48,10 +58,14 @@ fm_custom_check_registered() {
 fm_custom_check_snapshot_prepare() {
   local state=$1 id=$2 check hash state_device
   fm_custom_check_snapshot_cleanup
+  FM_CUSTOM_CHECK_REJECTION_CLASS=malformed-or-unsupported
   check="$state/$id.check.sh"
   fm_custom_check_trust_read "$state" "$id" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
+  if ! fm_pr_private_file_valid "$check" 700 "$state_device"; then
+    FM_CUSTOM_CHECK_REJECTION_CLASS=authentication-failed
+    return 1
+  fi
   FM_CUSTOM_CHECK_SNAPSHOT=$(mktemp "$state/.fm-custom-check.XXXXXX") || return 1
   cp "$check" "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
   chmod 0600 "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
@@ -65,7 +79,13 @@ fm_custom_check_snapshot_prepare() {
     || { fm_custom_check_snapshot_cleanup; return 1; }
   hash=$(fm_custom_check_sha256 "$FM_CUSTOM_CHECK_SNAPSHOT") \
     || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$hash" = "$FM_CUSTOM_CHECK_HASH" ] || { fm_custom_check_snapshot_cleanup; return 1; }
+  if [ "$hash" != "$FM_CUSTOM_CHECK_HASH" ]; then
+    FM_CUSTOM_CHECK_REJECTION_CLASS=authentication-failed
+    fm_custom_check_snapshot_cleanup
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Read by the watcher after this sourced function returns.
+  FM_CUSTOM_CHECK_REJECTION_CLASS=
 }
 
 fm_custom_check_snapshot_cleanup() {
