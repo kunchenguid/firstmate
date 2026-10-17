@@ -9,6 +9,8 @@ FAKEBIN=$(fm_fakebin "$TMP")
 REAL_MV=$(command -v mv)
 HOST="$TMP/host"
 PARENT="$TMP/parent"
+HOST_ROOT="$TMP/host-root"
+mkdir -p "$HOST_ROOT/state"
 mkdir -p "$HOST/state/parent-route" "$HOST/data" "$HOST/config" "$HOST/bin" \
   "$PARENT/state" "$PARENT/data" "$PARENT/config"
 printf 'ios\n' > "$HOST/.fm-secondmate-home"
@@ -58,7 +60,7 @@ fm_write_meta "$HOST/state/parent-route/ios.meta" \
 
 host() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    FM_HOME="$HOST" PATH="$FAKEBIN:$PATH" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_HOME="$HOST" FM_ROOT_OVERRIDE="$HOST_ROOT" PATH="$FAKEBIN:$PATH" FM_TEST_REAL_MV="$REAL_MV" \
     FM_TEST_BINDING_FAIL="${FM_TEST_BINDING_FAIL:-0}" FM_TEST_BINDING_CRASH="${FM_TEST_BINDING_CRASH:-0}" \
     FM_TEST_ENDPOINT_STATE="$TMP/endpoint-state" \
     FM_TEST_ENDPOINT_LOG="$TMP/endpoint-log" FM_TEST_EFFECT_LOG="$TMP/effect-log" \
@@ -168,6 +170,32 @@ assert_equals unknown "$(host disposition ios --operation adoption.success | dis
 cp "$TMP/original-receipt" "$HOST/state/parent-route/ios.seat-operation.adoption.success"
 pass "foreign operations and stale generation evidence stay unknown"
 
+# A captured dispatched request still names the predecessor after its home is
+# reused. Both host lifecycle entrypoints must reject it before endpoint effects.
+for VERB in launch relaunch; do
+  OP="stale.$VERB"
+  ARGS=("$VERB" ios claude pool-model-a medium)
+  [ "$VERB" != launch ] || ARGS+=(herdr)
+  RECORD=$(payload "$OP" | jq '.incarnations[0].previous_generation = "predecessor"')
+  OUT=$(host "${ARGS[@]}" --operation "$OP" --previous predecessor <<< "$RECORD"); RC=$?
+  expect_code 6 "$RC" "captured stale $VERB reached its successor: $OUT"
+  assert_equals unknown "$(printf '%s\n' "$OUT" | disposition | jq -r .disposition)" "a stale predecessor freed its candidate"
+  assert_grep 'spawn_gen=legacy' "$HOST/state/parent-route/ios.meta" "a stale predecessor changed the successor"
+done
+assert_absent "$TMP/effect-log" "a stale predecessor changed an endpoint"
+pass "captured stale launch and relaunch operations cannot control a successor"
+
+# Erasing a removable home's receipt cannot erase the host's consumed token.
+rm -f "$HOST/state/parent-route/ios.seat-operation.stale.relaunch" \
+  "$HOST/state/parent-route/ios.seat-reservation.stale.relaunch"
+OUT=$(host relaunch ios claude pool-model-a medium --operation stale.relaunch --previous legacy \
+  <<< "$(payload stale.relaunch | jq '.incarnations[0].previous_generation = "legacy"')"); RC=$?
+[ "$RC" -ne 0 ] || fail "a consumed operation became fresh after home receipt removal"
+assert_contains "$OUT" 'earlier host lifecycle' "lost home receipt did not consult durable history"
+assert_absent "$HOST/state/parent-route/ios.seat-operation.stale.relaunch" "a consumed token opened another receipt"
+assert_absent "$TMP/effect-log" "a consumed token changed an endpoint"
+pass "host operation fences survive removal of home-local receipts"
+
 perl -pi -e 's/^phase=.*/phase=started/' "$HOST/state/parent-route/ios.seat-operation.adoption.success"
 cp "$HOST/state/parent-route/ios.seat-operation.adoption.success" "$TMP/started-receipt"
 printf 'foreign\n' > "$HOST/.fm-secondmate-home"
@@ -200,3 +228,31 @@ OUT=$(host launch ios claude pool-model-a medium herdr --operation fresh.refusal
 assert_equals prelaunch "$(printf '%s\n' "$OUT" | disposition | jq -r .disposition)" "a verified fresh refusal was no longer prelaunch"
 assert_absent "$HOST/state/parent-route/ios.seat-operation.fresh.refusal" "a fresh home refusal opened an operation"
 pass "verified fresh refusals remain prelaunch before opening a receipt"
+
+# The persisted host retirement record is a public retry contract: replay does
+# not depend on the retired home, nor act on a successor now using that path.
+for RETIRE_RC in 0 4; do
+  RETIRE_GEN="retired.$RETIRE_RC"
+  jq -cn --arg h "$HOST" --arg g "$RETIRE_GEN" --argjson rc "$RETIRE_RC" \
+    '{task:"ios",generation:$g,home:$h,backend:"herdr",target:"fm-remote:w1:p1",destroyed:true,exit_code:$rc}' \
+    > "$HOST_ROOT/state/remote-secondmate-history/ios.retirement.$RETIRE_GEN.json"
+  [ "$RETIRE_RC" != 0 ] || mv "$HOST" "$TMP/retired-home"
+  OUT=$(host retire ios --force --expect-generation "$RETIRE_GEN"); RC=$?
+  expect_code "$RETIRE_RC" "$RC" "retirement retry lost its original exit: $OUT"
+  assert_equals "$RETIRE_GEN" "$(printf '%s\n' "$OUT" | sed -n 's/^seat_retirement=//p' | jq -r .generation)" "retirement retry lost its generation"
+  if [ "$RETIRE_RC" = 0 ]; then
+    assert_absent "$HOST" "retirement replay recreated a deleted home"
+    mv "$TMP/retired-home" "$HOST"
+  fi
+  assert_equals foreign "$(cat "$HOST/.fm-secondmate-home")" "retirement replay changed a reused home"
+done
+assert_absent "$TMP/effect-log" "retirement replay changed a live endpoint"
+OUT=$(host retire ios --force --expect-generation unrelated); RC=$?
+[ "$RC" -ne 0 ] || fail "retirement evidence replayed for an unrelated generation"
+cp "$HOST_ROOT/state/remote-secondmate-history/ios.retirement.retired.0.json" "$TMP/retirement-proof"
+for DAMAGE in '.home = "/unrelated"' '.target = "foreign:pane"' '.backend = "tmux"' '.destroyed = false'; do
+  jq "$DAMAGE" "$TMP/retirement-proof" > "$HOST_ROOT/state/remote-secondmate-history/ios.retirement.retired.0.json"
+  OUT=$(host retire ios --force --expect-generation retired.0); RC=$?
+  [ "$RC" -ne 0 ] || fail "retirement replay accepted foreign destruction evidence ($DAMAGE)"
+done
+pass "retirement retries preserve exact generation and clean/residue exits without touching reused homes"

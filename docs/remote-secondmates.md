@@ -705,6 +705,8 @@ Rex retirement follows the [recorded-block and empty-session cleanup contract](r
 SSH exit 255 preserves both the route and local records because completion is unknown.
 The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
 If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
+A retry for the same generation replays the host's retained destruction result, including a lost-slot exit, without touching a successor at the reused home path.
+The primary retains matching evidence before local cleanup so cleanup or accounting failures can resume without another host retirement.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:

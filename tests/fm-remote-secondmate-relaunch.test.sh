@@ -582,13 +582,15 @@ pass "legacy remote routes reconcile only through matching registry and generati
 # from its durable receipt and control journal; an absent or foreign receipt
 # or a busy episode is unknown, never a refusal.
 HOST_HOME="$TMP/host-home"
+HOST_ROOT="$TMP/host-root"
+mkdir -p "$HOST_ROOT/state"
 mkdir -p "$HOST_HOME/state/parent-route" "$HOST_HOME/bin" "$HOST_HOME/data" "$HOST_HOME/config"
 printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
 : > "$HOST_HOME/AGENTS.md"
 
 host_control() {  # <args...>
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    FM_HOME="$HOST_HOME" PATH="$FAKEBIN:$PATH" FM_TEST_HERDR_STATE="$TMP/herdr-state" \
+    FM_HOME="$HOST_HOME" FM_ROOT_OVERRIDE="$HOST_ROOT" PATH="$FAKEBIN:$PATH" FM_TEST_HERDR_STATE="$TMP/herdr-state" \
     "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
 }
 

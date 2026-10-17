@@ -14,7 +14,7 @@
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
-#   fm-remote-secondmate-control.sh retire <id> [--force]
+#   fm-remote-secondmate-control.sh retire <id> [--force] [--expect-generation <gen>]
 #
 # Remote placement ends here, but the second-mate agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
@@ -125,8 +125,6 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-task-inbox-lib.sh
-. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-secondmate-liveness-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -142,6 +140,8 @@ prelaunch_die() {
     if [ -e "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] \
       || [ -e "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
       || [ -L "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
+      || [ -e "$FM_ROOT/state/remote-secondmate-history/$SEAT_LIFECYCLE_ID.operation.$SEAT_OP" ] \
+      || [ -L "$FM_ROOT/state/remote-secondmate-history/$SEAT_LIFECYCLE_ID.operation.$SEAT_OP" ] \
       || [ -e "$(meta_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(meta_path "$SEAT_LIFECYCLE_ID")" ]; then
       seat_emit unknown false false
     else
@@ -170,6 +170,18 @@ meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 receipt_path() { printf '%s/%s.seat-operation.%s\n' "$CONTROL_STATE" "$1" "${2:-$SEAT_OP}"; }
 
 receipt_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+# History belongs to the host code root, so home retirement cannot erase an
+# operation fence or the destruction result needed after a lost SSH reply.
+host_history_require() {
+  local dir
+  for dir in "$FM_ROOT/state" "$FM_ROOT/state/remote-secondmate-history"; do
+    [ ! -L "$dir" ] || die "remote lifecycle history directory is unsafe"
+    (umask 077; mkdir -p "$dir") || die "remote lifecycle history is unavailable"
+    [ -d "$dir" ] || die "remote lifecycle history directory is unsafe"
+  done
+  HOST_HISTORY="$FM_ROOT/state/remote-secondmate-history"
+}
 
 host_pools_enabled() {
   local delivered="$TARGET_HOME/state/fleet-seats/policy.json"
@@ -412,6 +424,11 @@ seat_enter() {
     seat_decide "$id"
     return 3
   fi
+  host_history_require
+  if [ -e "$HOST_HISTORY/$id.operation.$SEAT_OP" ] || [ -L "$HOST_HISTORY/$id.operation.$SEAT_OP" ]; then
+    seat_emit unknown false false
+    die "seat operation $SEAT_OP belongs to an earlier host lifecycle; nothing was changed"
+  fi
   record=$(cat) || prelaunch_die "the parent seat reservation could not be read"
   if ! printf '%s\n' "$record" | jq -e --arg t "$id" --arg g "$SEAT_OP" \
     --arg p "$SEAT_PREV" --arg home "$TARGET_HOME" --arg m "$model" '
@@ -428,7 +445,14 @@ seat_enter() {
   fi
   (umask 077; set -C; printf '%s\n' "$record" > "$reservation") \
     || { seat_emit unknown false false; die "the seat operation was already claimed or could not be retained"; }
+  (umask 077; set -C; printf '%s\n' "$record" > "$HOST_HISTORY/$id.operation.$SEAT_OP") \
+    || { seat_emit unknown false false; die "the seat operation history could not be retained"; }
   seat_receipt_open "$id" "$verb" || prelaunch_die "the seat operation receipt could not be written"
+  if [ "$SEAT_PREV" != - ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$SEAT_PREV" ]; then
+    seat_emit unknown false false
+    echo "error: generation-mismatch: the host incarnation is not the reserved predecessor; nothing was changed" >&2
+    exit 6
+  fi
   return 0
 }
 
@@ -724,6 +748,15 @@ cmd_relaunch() {
     echo "error: generation-mismatch: the host incarnation is not $EXPECT_GENERATION; nothing was changed" >&2
     exit 6
   fi
+  if [ -n "$SEAT_OP" ]; then
+    if [ "$SEAT_PREV" = - ] || [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$SEAT_PREV" ] \
+      || { [ -n "$EXPECT_GENERATION" ] && [ "$EXPECT_GENERATION" != "$SEAT_PREV" ]; }; then
+      seat_emit unknown false false
+      echo "error: generation-mismatch: the host incarnation is not the reserved predecessor; nothing was changed" >&2
+      exit 6
+    fi
+    EXPECT_GENERATION=$SEAT_PREV
+  fi
   remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
   seat_predecessor_ready
   [ "$model" != - ] || model=default
@@ -776,6 +809,10 @@ cmd_send_body() {
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
   validate_home "$id"
+  # Inbox initialization creates the selected state directory; retirement
+  # replay must remain able to read history without recreating a removed home.
+  # shellcheck source=bin/fm-task-inbox-lib.sh
+  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
   meta=$(meta_path "$id")
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
   fm_task_inbox_lock_acquire "$meta_lock" \
@@ -929,8 +966,37 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force=${2:-} rc=0 recorded_server current_server generation target verdict
+  local id=$1 force='' rc=0 recorded_server current_server generation target verdict
+  local proof tmp expected='' replay record operation
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) force=--force; shift ;;
+      --expect-generation)
+        [ "$#" -ge 2 ] || usage
+        expected=$2
+        case "$expected" in ''|*[!A-Za-z0-9._-]*) die "invalid expected generation" ;; esac
+        shift 2 ;;
+      *) usage ;;
+    esac
+  done
   validate_id "$id"
+  host_history_require
+  if [ -n "$expected" ]; then
+    proof="$HOST_HISTORY/$id.retirement.$expected.json"
+    if [ -e "$proof" ] || [ -L "$proof" ]; then
+      [ -f "$proof" ] && [ ! -L "$proof" ] || die "remote retirement history is unsafe"
+      replay=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" '
+        select(.task == $t and .home == $h and .generation == $g
+          and ((.backend == "herdr" and (.target | type == "string" and startswith("fm-remote:")))
+            or (.backend == "rex" and (.target | type == "string" and test("^[0-9a-f-]+:[0-9a-f-]+$"))))
+          and .destroyed == true
+          and (.exit_code == 0 or .exit_code == 4))' "$proof") \
+        || die "remote retirement history does not match this route"
+      printf 'seat_retirement=%s\n' "$replay"
+      return "$(printf '%s\n' "$replay" | jq -r .exit_code)"
+    fi
+  fi
   validate_home "$id" yes || rc=$?
   if [ "$rc" -eq 2 ]; then
     printf 'already-retired: %s\n' "$id"
@@ -946,7 +1012,27 @@ cmd_retire() {
     fi
   fi
   generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
+  case "$generation" in *[!A-Za-z0-9._-]*) die "remote generation is unsafe" ;; esac
+  [ -z "$expected" ] || [ "$generation" = "$expected" ] \
+    || die "generation-mismatch: refusing to retire a successor"
   target=$REMOTE_ENDPOINT_TARGET
+  # Keep the endpoint binding fixed through teardown and the final absence read.
+  fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 30 || die "remote retirement lifecycle is busy"
+  SEAT_LIFECYCLE_ID=$id
+  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" = "$generation" ] \
+    || die "generation-mismatch: refusing to retire a successor"
+  # Include operations claimed before durable host history was introduced.
+  for record in "$CONTROL_STATE/$id.seat-operation."* "$CONTROL_STATE/$id.seat-reservation."*; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    [ -f "$record" ] && [ ! -L "$record" ] || die "remote operation history is unsafe"
+    operation=${record#"$CONTROL_STATE/$id.seat-operation."}
+    [ "$operation" != "$record" ] || operation=${record#"$CONTROL_STATE/$id.seat-reservation."}
+    case "$operation" in ''|*[!A-Za-z0-9.]*) die "remote operation token is unsafe" ;; esac
+    [ ! -e "$HOST_HISTORY/$id.operation.$operation" ] || continue
+    (umask 077; set -C; cat "$record" > "$HOST_HISTORY/$id.operation.$operation") \
+      || die "remote operation history could not be retained before retirement"
+  done
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then
@@ -964,9 +1050,13 @@ cmd_retire() {
   fm_backend_source "$REMOTE_ENDPOINT_BACKEND" || return 1
   verdict=$(fm_control_endpoint_absence_verdict "$REMOTE_ENDPOINT_BACKEND" "$target" "$REMOTE_ENDPOINT_META")
   [ "${verdict%%$'\t'*}" = gone ] || return 1
-  printf 'seat_retirement={"task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"destroyed":true}\n' \
+  proof="$HOST_HISTORY/$id.retirement.$generation.json"
+  tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1
+  printf '{"task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"destroyed":true,"exit_code":%s}\n' \
     "$(json_str "$id")" "$(json_str "$generation")" "$(json_str "$TARGET_HOME")" \
-    "$(json_str "$REMOTE_ENDPOINT_BACKEND")" "$(json_str "$target")"
+    "$(json_str "$REMOTE_ENDPOINT_BACKEND")" "$(json_str "$target")" "$rc" > "$tmp"
+  mv -f -- "$tmp" "$proof" || return 1
+  printf 'seat_retirement=%s\n' "$(cat "$proof")"
   return "$rc"
 }
 
@@ -993,7 +1083,7 @@ case "${1:-}" in
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
-  retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
+  retire) shift; [ "$#" -ge 1 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac
