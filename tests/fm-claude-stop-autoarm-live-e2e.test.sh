@@ -74,7 +74,7 @@ from pathlib import Path
 source=Path(os.environ.get('CLAUDE_CONFIG_DIR',os.environ['HOME']))/'.claude.json'
 doc=json.loads(source.read_text()) if source.exists() else {}
 json.dump(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',
-               cachedGrowthBookFeatures=doc.get('cachedGrowthBookFeatures',{}),oauthAccount=doc.get('oauthAccount')),open(sys.argv[1],'w'))
+               cachedGrowthBookFeatures=doc.get('cachedGrowthBookFeatures',{})),open(sys.argv[1],'w'))
 PY
   cp -R "$ROOT/bin" "$PROJECT/bin"
   : > "$PROJECT/AGENTS.md"
