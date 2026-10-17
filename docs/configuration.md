@@ -926,8 +926,8 @@ Every Claude launch, in both modes, also passes `--add-dir` for exactly this tas
 The grant exists because Claude Code path-checks the Read/Glob/Grep file tools against cwd plus `--add-dir`, and since 2.1.257 the first outside read in `auto` mode parks the pane on a one-time interactive question, while a "Block" answer there writes `permissions.blockReadsOutsideWorkingDirectories` into user settings and then refuses the same reads under bypass too.
 It never covers the whole `state/` or anything wider.
 
-Any other value or an unreadable file refuses every spawn from that home, whichever harness it would launch.
-This happens before any endpoint, worktree, or task record exists.
+Any other value, an unreadable file, or a path that is not a regular file refuses every spawn and control-plane relaunch from that home, whichever harness it would launch.
+A fresh spawn refuses before any endpoint, worktree, or task record exists; a control-plane relaunch refuses before stopping the running agent, preserving its task record and instructions.
 The diagnostic names the accepted values; Firstmate never falls back to a permission posture the captain did not choose.
 
 ### When changes apply and inheritance
