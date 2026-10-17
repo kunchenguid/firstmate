@@ -52,9 +52,11 @@
 #     that is unsafe or holds nothing for the branch) stay main's. That
 #     pass-through starts the successor watcher cycle and leaves it running
 #     before the close is printed, so supervision continues when the session
-#     drops the handoff. It confirms no handling handoff, so the recovery
-#     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The host records that successor's arm before relinquishing it
+#     drops the handoff. It confirms no handling handoff, and like every
+#     hand-back (hand_back owns it) it first republishes downtime, so the
+#     re-arm owner delivers the close to main even when the branch's own
+#     drain moved the episode to handling after this close was published.
+#     The host records that successor's arm before relinquishing it
 #     (detach_successor owns the persistence check and failure path). The
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
@@ -512,9 +514,8 @@ boundary_exit() {
   SUCCESSOR_OUT=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   park_elapsed
-  log_line "boundary	after ${PARK_ELAPSED}s"
-  emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
-  exit 0
+  hand_back "boundary	after ${PARK_ELAPSED}s" '' \
+    'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
 }
 
 # Print the first cycle's status line once the arm has written it in full.
@@ -582,20 +583,38 @@ retire_successor() {
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
 }
 
+# Give main a wake and exit: every exit that hands main a wake comes through
+# here. The re-arm owner delivers a close only while the recovery marker reads
+# downtime, and a close the host read after an engine turn can find its episode
+# moved to handling since it was published (the branch's own drain does that
+# when the close lands before it), so the hand-back first republishes downtime
+# exactly as a watcher close does, whichever path led here. Only after that may
+# a successor stay up for main: <leave> names the function that leaves it, or
+# is empty. When the publication fails the successor is stopped instead, so no
+# live watcher hides the lost hand-back from the owner, and the exit adds one
+# line and is nonzero. <ledger> is the log entry, a kind and a tab-separated
+# detail.
+hand_back() {  # <ledger> <leave> [line...]
+  local ledger=$1 leave=$2 failure='' rc=0
+  shift 2
+  if fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    [ -z "$leave" ] || "$leave" || true
+  else
+    retire_successor
+    log_line "${ledger%%	*}	downtime-unrestored	${ledger#*	}"
+    failure="supervision-host: watcher downtime could not be restored for the main hand-back"
+    rc=1
+  fi
+  log_line "$ledger"
+  emit "$@" "$failure"
+  exit "$rc"
+}
+
 # Hand the close to main: stop the successor cycle, print the close, why, and
 # any further "supervision-host:" lines, and exit.
 exit_to_main() {  # <why> [further lines]
-  local lines=${2:-} rc=0
   retire_successor
-  if [ -n "$SUCCESSOR_GENERATION" ] \
-    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
-    log_line "to-main	downtime-unrestored	$1"
-    lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
-    rc=1
-  fi
-  log_line "to-main	$1"
-  emit "supervision-host: $1" "$lines"
-  exit "$rc"
+  hand_back "to-main	$1" '' "supervision-host: $1" "${2:-}"
 }
 
 # The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.
@@ -704,9 +723,10 @@ detach_successor() {
 
 # Start the same successor a handled wake starts and leave it running. It
 # confirms no handling handoff: main, not the engine, handles this close, and
-# the re-arm owner delivers it only while the recovery marker still reads
-# downtime (autoarm_commit in bin/fm-claude-stop-autoarm.sh). A failed start
-# returns 1; the caller still prints the close unchanged.
+# the re-arm owner delivers it only while the recovery marker reads downtime
+# (autoarm_commit in bin/fm-claude-stop-autoarm.sh), which hand_back
+# republishes before calling this. A failed start returns 1; the caller still
+# prints the close unchanged.
 leave_successor_for_main() {
   if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
@@ -1093,12 +1113,9 @@ while :; do
   # unless the supervision session may take it (attended_acceptor).
   if ! fm_afk_contract_away_present "$STATE"; then
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
-      log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
-      if [ "$ATTENDED_WHY" = main-only ]; then
-        leave_successor_for_main || true
-      fi
-      emit
-      exit 0
+      LEAVE=
+      [ "$ATTENDED_WHY" != main-only ] || LEAVE=leave_successor_for_main
+      hand_back "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)" "$LEAVE"
     fi
     host_still_owner || stand_down "this session no longer owns supervision"
   else
@@ -1135,20 +1152,11 @@ while :; do
   handle_wake "$REASON"
   HANDLE_RC=$?
   if [ "$HANDLE_RC" -eq 2 ]; then
-    log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
-    # The successor this turn already started and confirmed stays up. Retiring
-    # it is what left no watcher after a close that became main-only.
-    detach_successor
-    # Main handles this close after all, so hand back the downtime the handoff
-    # above consumed: the re-arm owner delivers the close only while the
-    # recovery marker reads downtime (leave_successor_for_main).
-    if [ -n "$SUCCESSOR_GENERATION" ] \
-      && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
-      log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
-      exit 1
-    fi
-    emit
-    exit 0
+    # Main handles this close after all, so the hand-back gives back the
+    # downtime the handoff above consumed, and the successor this turn already
+    # started and confirmed stays up. Retiring it is what left no watcher after
+    # a close that became main-only.
+    hand_back "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)" detach_successor
   fi
   if [ "$HANDLE_RC" -ne 0 ]; then
     if returned_during_turn; then

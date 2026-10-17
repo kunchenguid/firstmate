@@ -109,7 +109,7 @@ The host asks the Pi branch's offer rule (`branchOfferForWake`, through `bin/fm-
 So a close reaches main off Pi exactly when it would on Pi: a check trigger, a decision-owned signal or stale trigger, and a scan that is unsafe or holds nothing for the branch stay main's.
 On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
-The host leaves the watcher's recovery marker reading downtime, confirming no handling handoff, because the re-arm owner delivers a close to main only while that marker reads downtime.
+The host confirms no handling handoff for that close and follows the recovery contract in [Failure direction](#failure-direction).
 The session's next park without `--restart` requests a take-over to restore a single host-owned arm; the [host header](../bin/fm-supervision-host.sh) owns successor persistence and cleanup, and the [arm header](../bin/fm-watch-arm.sh) owns take-over eligibility and fallback.
 OpenCode and omp still launch the host with `--restart`, which takes precedence over recorded take-over and lacks its acknowledgement-preserving handover; changing that first-cycle path remains a follow-up.
 The host-off Claude Stop hook's detached handling successor is also unchanged; see [Claude handling successor](watcher-continuity.md#claude-handling-successor).
@@ -228,9 +228,12 @@ The captain row is still durable, and the next drain presents it until it is ack
 ## Failure direction
 
 Every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
-Before handing it back, the host stops its successor cycle, and whenever a successor generation was recorded (confirmed or not), it explicitly republishes downtime for that generation.
-That publication is required even when the successor already exited, because no watcher cleanup remains to make the close deliverable to the arm owner.
-If that publication fails, the hand-back adds a `supervision-host: watcher downtime could not be restored` line and the host exits nonzero.
+Every hand-back of a wake to main, including an attended pass-through, a captain outcome, or the park boundary, goes through `hand_back`, which republishes downtime before emitting the wake to main or leaving a successor cycle running.
+Failure and boundary paths stop their successor before that publication.
+The re-arm owner delivers a close to main only while the watcher's recovery marker reads downtime.
+An engine drain can move the episode to handling after a successor close published downtime, so the host must restore downtime even when that close has already arrived.
+Publication is also required after the successor exits, when no watcher cleanup remains to make the close deliverable to the arm owner.
+If that publication fails, no successor is left running, the hand-back adds a `supervision-host: watcher downtime could not be restored` line, and the host exits nonzero.
 On Claude, a Stop hook whose rewake is refused while the recovery marker is still `pending:handling` and no watcher is live commits the auto-arm failure notice once per failure episode (`failed-suppressed` after that) and still exits 2, so the hand-back reaches main; every other refused rewake stays silent as before.
 So the owner's next arm starts from the same state as without the host, and the wake stays durable in the queue.
 
