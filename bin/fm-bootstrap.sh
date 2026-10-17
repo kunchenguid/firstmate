@@ -17,6 +17,9 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "PROCEVENT: process-event state root is not a private
+#                 directory - chmod 750 <state> to resume polling its
+#                 registered sources",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -53,6 +56,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A PROCEVENT line means this home has registered process-event sources
+#          (state/procevent exists) but its state root fails fm-procevent.sh's
+#          own private-directory check, which otherwise leaves every registered
+#          source silently unpolled with no wake at all; the fix is the printed
+#          chmod.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -1472,6 +1480,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_code_root_backlog_fork
+  detect_procevent_state_root
   detect_home_summary_publication
 }
 
@@ -1490,6 +1499,43 @@ detect_code_root_backlog_fork() {
     [ "$root_copy" -ef "$DATA/$name" ] && continue
     echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
   done
+}
+
+# fm-procevent.sh's own private-directory check is otherwise only observed by
+# a caller that inspects its exit status, and the watcher's reconcile call
+# (bin/fm-watch.sh) deliberately treats every failure as bounded liveness
+# noise rather than a session-start-visible problem. Surface it here, once,
+# in the same actionable-diagnostic style as every other line above, so a
+# state root that regressed to group/world-writable (022) is visible before
+# it silently stops every registered source from ever being polled again.
+# The check is the read-only diagnosis fm-procevent.sh applies to itself
+# (fm_procevent_private_directory_diagnose), run in a subshell so the library
+# globals stay out of bootstrap. It must stay read-only: this runs in
+# FM_BOOTSTRAP_DETECT_ONLY sessions, which never touch state or wait on locks.
+#
+# "chmod 750" only actually fixes the mode-bits case; the same check also
+# fails when state/ is owned by another user, and an operator running the
+# printed chmod there would see the problem persist with no hint why, so the
+# diagnosis picks the message.
+detect_procevent_state_root() {
+  [ -d "$STATE/procevent" ] || return 0
+  local reason
+  reason=$(
+    # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+    . "$SCRIPT_DIR/fm-pr-lib.sh"
+    # shellcheck source=bin/fm-procevent-lib.sh disable=SC1091
+    . "$SCRIPT_DIR/fm-procevent-lib.sh"
+    fm_procevent_private_directory_diagnose "$STATE" 0 1
+  ) || return 0
+  case "$reason" in
+    ok|'') ;;
+    bad-mode)
+      echo "PROCEVENT: process-event state root is not a private directory - chmod 750 $STATE to resume polling its registered sources" ;;
+    not-owned)
+      echo "PROCEVENT: process-event state root ($STATE) is not owned by the current user - chmod will not fix this; fix ownership to resume polling its registered sources" ;;
+    *)
+      echo "PROCEVENT: process-event state root is not usable ($reason), so its registered sources are not being polled" ;;
+  esac
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle
