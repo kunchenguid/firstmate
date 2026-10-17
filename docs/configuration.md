@@ -619,6 +619,19 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## No-mistakes home resolver (config/nm-home-resolver)
+
+The optional local, gitignored `config/nm-home-resolver` file opts this home into finding each task's no-mistakes home through a site-provided resolver, for sites that run one no-mistakes daemon per isolated workspace, each against its own `NM_HOME`.
+The home cannot be derived from a task copy's `no-mistakes` remote, because every workspace of a project shares one gate URL.
+The file's first line is the absolute path of an executable the site provides; Firstmate calls it with the task copy's path as its only argument and never interprets the layout itself.
+When the resolver exits successfully within 5 seconds and prints exactly one line naming an existing directory by absolute path, that directory is exported as `NM_HOME` for that one call.
+
+Only host-side reads use it: current-state reads, pipeline-spend recording, the custody check, and teardown's parked-run lookup and `axi abort --run`, which read `axi status`, the `axi` overview, `axi logs`, `runs`, `daemon status`, and the state database.
+It never starts a daemon and never changes how runs are launched or driven, account routing, or no-mistakes' own `config.yaml`.
+An explicit non-empty `NM_HOME` always wins and the resolver is not called.
+With the file absent, a first line that is not an absolute executable path, or a resolver that fails, times out, or prints anything else, every read uses the ambient home exactly as without the file.
+The file is a home-local site choice and is not inherited by secondmate homes; `bin/fm-nm-run-lib.sh` owns the exact resolution.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
