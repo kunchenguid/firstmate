@@ -91,6 +91,10 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/primary-home"
+  ln -s "$case_dir/state" "$case_dir/primary-home/state"
+  ln -s "$case_dir/config" "$case_dir/primary-home/config"
+  ln -s "$case_dir/data" "$case_dir/primary-home/data"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -646,7 +650,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/primary-home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -1836,8 +1840,7 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$case_dir" > "$home/.fm-secondmate-parent"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/child-scout-wt"
   git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
@@ -1888,8 +1891,7 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$case_dir" > "$home/.fm-secondmate-parent"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/pool/6/repo"
   mkdir -p "$case_dir/pool/6"
@@ -3521,10 +3523,16 @@ test_herdr_teardown_presentation_lock_namespace_is_per_account() {
   fi
 }
 
+bind_fixture_secondmate_home() {
+  local home=$1 parent=$2 id=$3
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$home/.fm-secondmate-parent"
+}
+
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
@@ -3641,7 +3649,7 @@ SH
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   for child in child-a child-b; do
     child_wt="$case_dir/$child-wt"
@@ -3753,8 +3761,8 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   configure_stoppable_child_tmux "$case_dir"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
-  printf '%s\n' nested-sm > "$nested_home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
+  bind_fixture_secondmate_home "$nested_home" "$home" nested-sm
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   fm_write_meta "$home/state/nested-sm.meta" \
     "window=firstmate:fm-nested-sm" \
@@ -3813,7 +3821,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   [ "$rc" -ne 0 ] \
     || fail "herdr-grandchild-unconfirmed-close: teardown erased records after an ambiguous grandchild close"
   [ -e "$closed" ] \
-    || fail "herdr-grandchild-unconfirmed-close: fixture did not attempt the grandchild close"
+    || fail "herdr-grandchild-unconfirmed-close: fixture did not attempt the grandchild close: $(cat "$case_dir/stderr")"
   [ -d "$nested_home" ] \
     || fail "herdr-grandchild-unconfirmed-close: the recursive failure still removed the nested secondmate home"
   [ -e "$nested_home/state/grandchild-herdr.meta" ] \
@@ -5550,19 +5558,43 @@ test_descendant_episode_refuses_before_coordination() {
 }
 
 test_accounting_failure_preserves_the_containing_home() {
-  local case_dir home rc holder ready
+  local case_dir home rc holder ready route orphan holder_file
   case_dir=$(make_case accounting-retention)
   write_meta "$case_dir" local-only secondmate
   configure_secondmate_with_tmux_children "$case_dir"
   home="$case_dir/secondmate-home"
-  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["other-model"]}]}\n' > "$home/config/fleet-seats"
+  orphan="$case_dir/orphan-home"
+  mkdir -p "$orphan/state" "$orphan/config" "$orphan/data"
+  printf 'orphan\n' > "$orphan/.fm-secondmate-home"
+  rc=0
+  FM_HOME="$orphan" FM_STATE_OVERRIDE="$orphan/state" FM_CONFIG_OVERRIDE="$orphan/config" \
+    FM_DATA_OVERRIDE="$orphan/data" "$ROOT/bin/fm-fleet-seats.sh" reserve orphan-child \
+    --generation orphan-child --kind ship --harness claude --model child-model --holder-pid "$$" \
+    > "$case_dir/orphan.stdout" 2> "$case_dir/orphan.stderr" || rc=$?
+  expect_code 5 "$rc" "an orphan fixture must refuse before accounting"
+  assert_absent "$orphan/state/fleet-seats" "orphan authority created an independent ledger"
+  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["other-model"]}]}\n' > "$case_dir/config/fleet-seats"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-fleet-seats.sh" reserve child-a \
     --generation g-child --kind ship --harness claude --model child-model --holder-pid "$$" >/dev/null \
     || fail "could not seed the child's holder"
+  route="$case_dir/child-route.json"
+  printf '{"placement":"local","backend":"tmux","target":"firstmate:fm-child-a","spawn_gen":"g-child"}\n' > "$route"
+  chmod 0600 "$route"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-seats.sh" dispatch child-a --generation g-child --route-file "$route" >/dev/null \
+    || fail "could not dispatch the child's socket-bound route"
+  holder_file=
+  for route in "$case_dir/state/fleet-seats/holders/"*.json; do
+    [ "$(jq -r .task "$route")" != child-a ] || holder_file=$route
+  done
+  [ -n "$holder_file" ] || fail "child reservation was not stored at its authoritative root"
+  assert_equals "$case_dir/tmux.sock" "$(jq -r '.incarnations[0].route.socket_path' "$holder_file")" "child route did not bind the fixture socket"
   printf 'spawn_gen=g-child\nmodel=child-model\n' >> "$home/state/child-a.meta"
+  cp "$holder_file" "$case_dir/holder-before.json"
   ready="$case_dir/fleet-lock-ready"
-  ROOT="$ROOT" HOME_STATE="$home/state" READY="$ready" bash -c '
+  ROOT="$ROOT" HOME_STATE="$case_dir/state" READY="$ready" bash -c '
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$HOME_STATE/.fleet-seats.lock" || exit 1
     : > "$READY"
@@ -5576,6 +5608,10 @@ test_accounting_failure_preserves_the_containing_home() {
   kill "$holder"
   wait "$holder" 2>/dev/null || true
   [ "$rc" -ne 0 ] || fail "cleanup discarded a home after accounting failed"
+  assert_grep "child-a's fleet seat generation g-child stays counted" "$case_dir/stderr" "refusal did not reach child generation accounting: $(cat "$case_dir/stderr")"
+  cmp -s "$holder_file" "$case_dir/holder-before.json" || fail "failed accounting changed the child's authoritative route or count"
+  assert_present "$case_dir/fm-child-a.stopped" "accounting failure never reached the child close"
+  assert_absent "$case_dir/fm-child-b.stopped" "accounting refusal continued closing sibling endpoints"
   assert_present "$home" "failed accounting discarded the containing home"
   assert_present "$home/state/child-a.meta" "failed accounting discarded the child's route"
   assert_present "$case_dir/state/task-x1.meta" "failed accounting discarded the parent's route"
@@ -5585,6 +5621,7 @@ test_accounting_failure_preserves_the_containing_home() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
   expect_code 0 "$rc" "cleanup retry after accounting unlock: $(cat "$case_dir/retry.stderr")"
+  assert_equals released "$(jq -r ' .incarnations[] | select(.generation == "g-child") | .lifecycle' "$holder_file")" "successful cleanup did not release the authoritative child generation"
   assert_absent "$home" "a successful cleanup retry retained the retired home"
   assert_absent "$case_dir/state/task-x1.meta" "a successful cleanup retry retained its parent route"
   pass "cleanup restores generation bindings and retains homes after release failure, then completes on retry"
@@ -5612,7 +5649,7 @@ test_retirement_adopts_ancestor_episode() {
 }
 
 test_retirement_refuses_invalid_inherited_episode() {
-  local case_dir carrier damage rc holder attempt
+  local case_dir carrier damage rc holder _attempt
   . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
   case_dir=$(make_case invalid-retirement-episode)
   write_meta "$case_dir" local-only secondmate
@@ -5640,7 +5677,7 @@ test_retirement_refuses_invalid_inherited_episode() {
     exit 1
   ' &
   holder=$!
-  for attempt in $(seq 1 100); do
+  for _attempt in $(seq 1 100); do
     [ ! -s "$case_dir/carrier" ] || break
     sleep 0.1
   done
@@ -5659,7 +5696,7 @@ test_retirement_refuses_invalid_inherited_episode() {
 if [ "$#" -gt 0 ]; then
   for selected_test in "$@"; do
     case "$selected_test" in
-      test_retirement_adopts_ancestor_episode|test_retirement_refuses_invalid_inherited_episode|test_descendant_episode_refuses_before_coordination) "$selected_test" ;;
+      test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed|test_accounting_failure_preserves_the_containing_home|test_forced_secondmate_teardown_holds_descendant_lifecycle_locks|test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed|test_retirement_adopts_ancestor_episode|test_retirement_refuses_invalid_inherited_episode|test_descendant_episode_refuses_before_coordination) "$selected_test" ;;
       *) fail "unknown focused test: $selected_test" ;;
     esac
   done
