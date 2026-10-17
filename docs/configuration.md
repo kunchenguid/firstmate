@@ -1405,9 +1405,9 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 Every home requires:
 
 - node and git.
-- gh, with GitHub authentication through `gh auth login`.
+- gh, authenticated through `gh auth login`, only in a home that uses GitHub.
 - no-mistakes v1.46.0 or newer.
-- Compatible gh-axi.
+- Compatible gh-axi, only in a home that uses GitHub.
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
@@ -1416,6 +1416,10 @@ Every home requires:
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s `github_in_use` owns when a home needs GitHub tooling and authentication checks.
+GitLab projects use an explicit `forge=gitlab` registry binding, as described by [`project-management`](../.agents/skills/project-management/SKILL.md), and need `glab` authenticated for their instance plus `jq` for merge-request readiness, guarded merges, and cleanup.
+Bootstrap reports missing `glab` and `jq` for registered GitLab project clones and checks each bound origin host's authentication in its deferred network phase; [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns those diagnostics.
+Evidence media on a GitLab merge request comes from the no-mistakes pipeline's own upload support; the `forge=gitlab` binding uploads nothing itself.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
@@ -1450,7 +1454,7 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 `tasks-axi` and `quota-axi` are essential bootstrap tools in every profile.
 
 - An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
-- An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
+- In a home that uses GitHub, an absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 
@@ -1503,7 +1507,7 @@ Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+A GitLab project is registered with `forge=gitlab`; the [Toolchain](#toolchain) section owns its `glab` and `jq` prerequisites.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
