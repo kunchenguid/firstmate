@@ -1478,6 +1478,36 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   pass "a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains"
 }
 
+# The supervision host's repeat bound consumes a skipped wake's granted rows
+# through the same branch drain and acknowledgement, printing nothing, so no
+# row, status section, or outcome is presented, and main's rows stay queued.
+test_branch_consume_granted_presents_nothing_and_consumes_only_the_grant() {
+  local dir state out err
+  dir=$(make_case consume-granted)
+  state="$dir/state"
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" || fail "main-only append failed"
+  append_wake "$state" stale "fm-window" "stale: fm-window" || fail "stale append failed"
+  printf 'note [at=1]: another task said something main has not read\n' > "$state/other.status"
+  out="$dir/consume.out"
+  err="$dir/consume.err"
+  if FM_STATE_OVERRIDE="$state" "$DRAIN" --consume-granted > "$out" 2> "$err"; then
+    fail "main's drain accepted --consume-granted"
+  fi
+  [ "$(awk 'END { print NR }' "$state/.wake-queue")" -eq 2 ] || fail "a refused consume touched the queue"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" consume-granted || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish consume-granted 2 || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --consume-granted > "$out" 2> "$err" \
+    || fail "branch consume failed: $(cat "$err")"
+  [ ! -s "$out" ] || fail "a consume printed what a drain presents: $(cat "$out")"
+  [ ! -s "$err" ] || fail "a consume printed an acknowledgement request or warning: $(cat "$err")"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$state/.wake-queue" && fail "the granted stale row was not consumed"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$state/.wake-queue" || fail "a consume swallowed main's row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  grep -Fq 'another task said something main has not read' "$out" \
+    || fail "a consume marked another task's unread status as seen: $(cat "$out")"
+  pass "a branch consume of its grant presents nothing, consumes only the granted rows, and leaves unread status for main"
+}
+
 test_main_drain_excludes_rows_already_granted_to_branch() {
   local dir state out err sequence generation
   dir=$(make_case main-excludes-branch-grant)
@@ -3549,6 +3579,7 @@ test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
+test_branch_consume_granted_presents_nothing_and_consumes_only_the_grant
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_ack_commits_secondmate_stall_receipts
 test_main_is_never_told_to_drain_rows_only_the_branch_owns
