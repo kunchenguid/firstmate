@@ -97,6 +97,8 @@ MAIN_BACKLOG="$DATA/backlog.md"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-home-summary-refresh-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-home-summary-refresh-lib.sh"
 
 RECEIVER_WAKE_MESSAGE='New routed work is in your backlog. Run bin/fm-session-start.sh now, then act on the routed task.'
 
@@ -745,6 +747,7 @@ remove_interrupted_source_duplicates() { # <outbox> <keys...>
         remaining=$((remaining + 1))
         if tasks-axi rm "$key" --file "$MAIN_BACKLOG" --backend markdown >/dev/null 2>&1; then
           progress=$((progress + 1))
+          fm_home_summary_refresh_on_backlog_write_detached
         fi
       fi
     done
@@ -832,6 +835,7 @@ remote_handoff() { # <secondmate-id> <keys...>
       echo "error: atomic outbox staging failed; nothing new was handed off" >&2
       return 1
     fi
+    fm_home_summary_refresh_on_backlog_write_detached
   fi
   # A hard local kill can land tasks-axi's target persist before its source
   # persist. The outbox is already authoritative in that state, so converge by
@@ -1086,6 +1090,10 @@ if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BAC
   echo "error: tasks-axi mv failed; nothing was moved." >&2
   exit 1
 fi
+fm_home_summary_refresh_on_backlog_write_detached
+FM_HOME="$SUB_HOME" FM_ROOT_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+  FM_CONFIG_OVERRIDE='' FM_PROJECTS_OVERRIDE='' \
+  fm_home_summary_refresh_on_backlog_write_detached "$SUB_HOME/bin/fm-home-summary-refresh.sh"
 
 echo "handed off ${#TO_MOVE[@]} item(s) to $ID: ${TO_MOVE[*]}"
 echo "  into $SUB_BACKLOG"
