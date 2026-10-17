@@ -316,7 +316,7 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   [ -n "$gl" ] && [ -n "$tl" ] && [ -n "$ll" ] || fail "launch log missing GOTMPDIR/TRACEPARENT/launch lines"
   [ "$tl" -gt "$gl" ] || fail "TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$gl tp=$tl)"
   [ "$tl" -lt "$ll" ] || fail "TRACEPARENT export must be sent before the launch literal (tp=$tl launch=$ll)"
-  ! grep -q '^unset TRACEPARENT;' "$LAUNCH_LOG" \
+  ! grep -q 'unset TRACEPARENT;' "$LAUNCH_LOG" \
     || fail "enabled spawn must not scrub TRACEPARENT from the launch command"
   pass "enabled: one resolved carrier is recorded in meta and the identical TRACEPARENT is exported before launch"
 }
