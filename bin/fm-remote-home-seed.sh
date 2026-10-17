@@ -32,6 +32,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
+EXISTING_ICON=
 MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -120,6 +121,7 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
       && [ "$SECONDMATE_REGISTRY_ROOT" = "$REMOTE_ROOT" ] \
       && [ "$SECONDMATE_REGISTRY_HOME" = "$REMOTE_HOME" ] \
       || die "secondmate $ID is already registered to a different local or remote home"
+    EXISTING_ICON=$SECONDMATE_REGISTRY_ICON
   fi
 fi
 
@@ -223,8 +225,9 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
 if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
-printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
-  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; %sadded %s)\n' \
+  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" \
+  "$(secondmate_registry_icon_field "$EXISTING_ICON")" "$TODAY" >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
