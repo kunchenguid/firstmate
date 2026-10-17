@@ -209,7 +209,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -238,6 +238,18 @@
 #   task's generation in --mod-option values; no global or project config is
 #   edited. Its --effort is passed only where the model's accepted set is
 #   verified, because an unknown value exits the launch.
+#   Cortex Code (cortex) is worker-only and tmux/herdr-only too (see the
+#   backend refusal below): --dangerously-allow-all-tool-calls
+#   (the --bypass alias) approves tool calls and also skips its project-trust
+#   dialog, so a fresh worktree needs no pre-registration and no entry is
+#   written to ~/.snowflake/cortex/cortex.json. --plugin-dir points at a
+#   private per-task plugin (bin/fm-cortex-plugin.sh) carrying the busy-state
+#   hooks, because Cortex's own settings file takes no hooks through --config.
+#   The launch does not pass --sql-read-only: SQL write policy stays the
+#   captain's own Cortex configuration. config/claude-permission-mode is not
+#   mapped. --effort maps low|medium|high|max; xhigh is omitted (cortex has
+#   no such level). A bad --model is not refused at launch: Cortex starts,
+#   then answers the first prompt with the account's available model ids.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -467,6 +479,8 @@
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __COMMANDCODEBIN__ resolved Command Code executable
 #     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
+#     __CORTEXBIN__ resolved Cortex Code executable
+#     __CORTEXPLUGIN__ private per-task Cortex plugin directory with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
@@ -475,7 +489,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, agy, devin, and rovo are refused as secondmates.
+# as for a crewmate. Muse, gemini, agy, devin, cortex, and rovo are refused as secondmates.
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
@@ -497,7 +511,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, devin, and commandcode are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, commandcode, and cortex are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -2101,7 +2115,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2436,6 +2450,13 @@ launch_template() {
   # NO_COLOR is cleared and COLORTERM pinned so the composer placeholder keeps
   # the truecolor styling the shared composer guard reads.
   commandcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __COMMANDCODEBIN__ --yolo --trust --skip-onboarding --no-auto-update __MODELFLAG____EFFORTFLAG____COMMANDCODEMOD__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Cortex Code receives the typed launch envelope as its positional prompt
+  # after --. --dangerously-allow-all-tool-calls approves tool calls and skips
+  # the project-trust dialog (verified, cortex 1.1.104); --plugin-dir loads the
+  # private per-task plugin with the lifecycle hooks. CLAUDECODE is cleared
+  # because Cortex loads Claude-compatible hooks, and Herdr's claude integration
+  # hook claims a pane as a claude session whenever that variable is set.
+  cortex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI __CORTEXBIN__ --dangerously-allow-all-tool-calls --plugin-dir __CORTEXPLUGIN__ __MODELFLAG____EFFORTFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2546,7 +2567,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, and commandcode are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, commandcode, and cortex are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2562,7 +2583,9 @@ esac
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 # commandcode has none either: only its worker busy mod is verified, and
 # docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ]; }; then
+# cortex has none either: only its worker lifecycle hooks are verified, and
+# docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = cortex ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2584,6 +2607,14 @@ if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != her
   exit 1
 fi
 
+# Cortex's titled composer box is proven only with a Cortex pane identity,
+# which tmux and Herdr supply and zellij, cmux, and orca do not, so there the
+# composer would never read empty and steering would stall.
+if [ "$HARNESS" = cortex ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+  echo "error: cortex is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
+  exit 1
+fi
+
 # config/crew-exclude-tools (header above): refuse before worker provisioning
 # if this launch cannot honor the list. Secondmate agents are not covered.
 EXCLUDE_TOOLS=
@@ -2601,6 +2632,12 @@ devin)
 commandcode)
   COMMANDCODE_BIN=$(command -v commandcode) || {
     echo "error: commandcode executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
+cortex)
+  CORTEX_BIN=$(command -v cortex) || {
+    echo "error: cortex executable not found on PATH" >&2
     exit 1
   }
   ;;
@@ -2881,7 +2918,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2915,6 +2952,14 @@ effort_flag_for_harness() {
     # than passing a known-bad value.
     case "$effort" in
     low | medium | high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  cortex)
+    # cortex 1.1.104 --effort accepts minimal|low|medium|high|max (verified
+    # from --help), so xhigh is omitted rather than passed as a known-bad
+    # value (record-and-omit).
+    case "$effort" in
+    low | medium | high | max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   agy)
@@ -4944,7 +4989,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode)
+  gemini | devin | commandcode | cortex)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -5036,6 +5081,11 @@ BUSY_GEN=
     # .commandcode/taste/ in the project on every start (verified, 1.74.1) and
     # learns into it, so that vendor runtime state stays out of worker commits.
     exclude_path '.commandcode/taste/'
+    ;;
+  cortex)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      "$SCRIPT_DIR/fm-cortex-plugin.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -5692,6 +5742,10 @@ commandcode)
   fi
   LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
   ;;
+cortex)
+  LAUNCH=${LAUNCH//__CORTEXBIN__/"$(shell_quote "$CORTEX_BIN")"}
+  LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
+  ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
@@ -5720,7 +5774,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

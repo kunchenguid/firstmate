@@ -38,6 +38,9 @@
 #                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   cortex-hook      Cortex Code per-task plugin hooks (UserPromptSubmit opens;
+#                    Stop, which also fires on an Escape interrupt, and
+#                    SessionEnd close)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -234,6 +237,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    cortex) adapter=cortex-hook ;;
     commandcode) adapter=commandcode-mod ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;

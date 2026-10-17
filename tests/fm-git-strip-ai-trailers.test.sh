@@ -430,6 +430,31 @@ SH
   pass "env-file writes the canonical hooks path so wrappers still chain the repository hook"
 }
 
+test_cortex_attribution_does_not_reach_the_commit_object() {
+  local repo hooks body
+  repo="$TMP_ROOT/cortex-object"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-cortex"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  # The exact message Cortex Code 1.1.104 produced live: its typed -m body,
+  # a Generated with link line, then the Co-authored-by trailer.
+  with_hooks_env "$hooks" git -C "$repo" commit -q \
+    -m 'probe commit' \
+    -m 'Generated with [Snowflake CoCo](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)' \
+    -m 'Co-authored-by: Snowflake CoCo <noreply@snowflake.com>' \
+    -m 'Co-authored-by: Jane Doe <jane@snowflake.com>' \
+    -m 'Generated with care by a human, no link'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "Snowflake CoCo" "Cortex attribution reached the commit object"
+  assert_not_contains "$body" "noreply@snowflake.com" "Cortex bot address reached the commit object"
+  assert_contains "$body" "probe commit" "subject was rewritten"
+  assert_contains "$body" "Co-authored-by: Jane Doe <jane@snowflake.com>" "a human at the vendor domain was stripped"
+  assert_contains "$body" "Generated with care by a human, no link" "an unrelated Generated with line was stripped"
+  pass "Cortex Code's Generated with line and co-author trailer are stripped; a human at its vendor domain is kept"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -512,6 +537,7 @@ test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
+test_cortex_attribution_does_not_reach_the_commit_object
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
 test_push_guard_install_runs_the_guard_before_chaining
