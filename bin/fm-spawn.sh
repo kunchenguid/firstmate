@@ -3920,7 +3920,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     exit 1
   fi
   spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  if [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
+  if [ "$RELAUNCH" -ne 1 ] && [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
     if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1

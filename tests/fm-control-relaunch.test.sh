@@ -2480,6 +2480,37 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_away_branch_relaunch_accepts_existing_dispatchable_items() {
+  local dir id out rc state
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+
+  for state in in_flight queued; do
+    id="rl-away-$state"
+    dir=$(new_case "away-$state" "$id")
+    add_ship_task "$dir" "$id" claude
+    seed_backlog "$dir" "$id" "$state"
+    FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+      || fail "away entry failed for a $state relaunch"
+
+    rc=0
+    out=$(FM_SUPERVISION_ACTOR=branch run_control "$dir" "$id" relaunch \
+      --note "continue the existing task under away supervision") || rc=$?
+    expect_code 0 "$rc" "the away branch must relaunch an existing $state item"$'\n'"$out"
+    assert_contains "$out" "relaunched $id" \
+      "the away branch did not complete the existing $state task's relaunch"
+    [ "$(backlog_state "$dir" "$id")" = in_flight ] \
+      || fail "the away branch left a relaunched $state item at $(backlog_state "$dir" "$id")"
+  done
+  pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -2606,3 +2637,4 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_away_branch_relaunch_accepts_existing_dispatchable_items
