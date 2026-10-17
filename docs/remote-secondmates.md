@@ -79,6 +79,8 @@ Each such command takes these steps:
 4. It relays stdout, stderr, and the exit status separately.
 
 On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at `~/Library/LaunchAgents/dev.firstmate.remote-job.plist` with logs under `~/Library/Logs/`.
+The LaunchAgent runs the worker through a bash 4 or newer, preferring Homebrew's, because macOS privacy protection can refuse Apple's `/bin/bash` access to a code root under `~/Documents`.
+Without one the doctor reports a human gap and writes no agent; `brew install bash` closes it.
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.

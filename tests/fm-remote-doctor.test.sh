@@ -37,6 +37,23 @@ ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Stand-in interpreters that only answer the version probe, so the fixture
+# does not depend on which bash the host installs. The worker LaunchAgent runs
+# the worker through FM_TEST_REMOTE_JOB_BASH; CASE_JOB_BASH swaps it per case.
+JOB_BASH5="$TOOLS/bash5"
+JOB_BASH3="$TOOLS/bash3"
+cat > "$JOB_BASH5" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -c ] && { printf 5; exit 0; }
+exit 64
+SH
+cat > "$JOB_BASH3" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -c ] && { printf 3; exit 0; }
+exit 64
+SH
+chmod +x "$JOB_BASH5" "$JOB_BASH3"
+
 # Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
 # this test keeps open, with exactly the marker environment each birth needs.
 JQ=$(command -v jq)
@@ -76,6 +93,7 @@ new_case() {
   unset CASE_SECOND_LOGIN_SHELL
   unset CASE_ENV_SHELL
   unset CASE_RESOLVE_DSCL
+  unset CASE_JOB_BASH
   CASE_N=$((CASE_N + 1))
   CASE_LOGIN_SHELL=${4:-/bin/sh}
   CASE_DIR="$TMP_ROOT/case$CASE_N"
@@ -320,6 +338,7 @@ doctor() {
     FM_FAKE_DSCL_HANG="${CASE_DSCL_HANG:-0}" \
     FM_LAUNCH_AGENT_SHELL="$([ "${CASE_RESOLVE_DSCL:-0}" = 1 ] || printf '%s' "$CASE_LOGIN_SHELL")" \
     SHELL="${CASE_ENV_SHELL-${SHELL-}}" \
+    FM_TEST_REMOTE_JOB_BASH="${CASE_JOB_BASH-$JOB_BASH5}" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
@@ -358,6 +377,9 @@ plist_value() { # <plist> <key>
 
 plist_first_value() { # <plist> <array-key>
   python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))[sys.argv[2]][0])' "$1" "$2"
+}
+plist_array_value() { # <plist> <array-key> <index>
+  python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))[sys.argv[2]][int(sys.argv[3])])' "$1" "$2" "$3"
 }
 
 assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
@@ -462,7 +484,9 @@ assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
   || fail "the worker plist does not carry the Firstmate label"
 [ "$(plist_value "$CASE_JOB_PLIST" LimitLoadToSessionType)" = Aqua ] \
   || fail "the worker plist is not Aqua-scoped"
-[ "$(plist_first_value "$CASE_JOB_PLIST" ProgramArguments)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
+[ "$(plist_array_value "$CASE_JOB_PLIST" ProgramArguments 0)" = "$JOB_BASH5" ] \
+  || fail "the worker plist does not launch through the resolved bash"
+[ "$(plist_array_value "$CASE_JOB_PLIST" ProgramArguments 1)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
   || fail "the worker plist does not use the configured code root"
 assert_absent "$CASE_STATE/dscl-count" "the injected login shell still consulted Directory Services"
 assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not bootstrapped into the GUI domain"
@@ -484,6 +508,65 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+# --- a worker agent that runs the script directly is repaired ----------------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_JOB_PLIST")"
+cat > "$CASE_JOB_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$JOB_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$ROOT/bin/fm-remote-job-worker.sh</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>$CASE_HOME</string>
+		<key>FM_ROOT_OVERRIDE</key>
+		<string>$ROOT</string>
+	</dict>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$CASE_HOME/Library/Logs/$JOB_LABEL.log</string>
+	<key>StandardErrorPath</key>
+	<string>$CASE_HOME/Library/Logs/$JOB_LABEL.log</string>
+</dict>
+</plist>
+XML
+doctor
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable:' "an old-shape worker agent was not tagged fixable"
+[ "$(plist_array_value "$CASE_JOB_PLIST" ProgramArguments 0)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
+  || fail "a read-only doctor run rewrote the old-shape worker agent"
+doctor --fix
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the rewritten worker agent was not confirmed"
+[ "$(plist_array_value "$CASE_JOB_PLIST" ProgramArguments 0)" = "$JOB_BASH5" ] \
+  || fail "--fix did not rewrite the worker agent to launch through bash"
+pass "a worker agent that runs the script directly is fixable and --fix rewrites it"
+
+# --- no bash 4 or newer is a human gap, not a worker that cannot run ---------
+
+new_case Darwin with-herdr gui
+CASE_JOB_BASH="$JOB_BASH3"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host with no bash >= 4 was reported ready"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=human:' "a missing bash >= 4 was not tagged as a human gap"
+assert_contains "$DOCTOR_OUT" 'action: remote-job-worker:' "a missing bash >= 4 came with no operator action"
+assert_contains "$DOCTOR_OUT" 'brew install bash' "the bash gap did not name the install action"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported a host with no bash >= 4 as ready"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=human:' "--fix stopped reporting the missing bash"
+assert_absent "$CASE_JOB_PLIST" "--fix wrote a worker agent that cannot run"
+pass "a missing bash >= 4 is a human gap and --fix writes no worker agent"
 
 # --- a loaded, running launch agent with contract drift is repaired ----------
 
