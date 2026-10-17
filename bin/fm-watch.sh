@@ -51,7 +51,9 @@
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, a backlog captain hold on its task, or,
-#                          where config/wedge-defer-parked-gate
+#                          where config/wedge-defer-worker-wait arms it, its own
+#                          still-open newest `blocked:` or `needs-decision:`
+#                          line, or, where config/wedge-defer-parked-gate
 #                          arms it, a validation gate of its own awaiting a
 #                          supervisor decision nobody has answered yet - is
 #                          deferred to that same long recheck cadence instead
@@ -1264,6 +1266,14 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # timer only through pause_state_class answering `working`, so its crew state is
 # a running step, never a parked gate.
 #
+# Where the home creates config/wedge-defer-worker-wait, the status line also
+# explains the quiet when its newest event is the worker's own still-open
+# `blocked:` or `needs-decision:` line (status_worker_wait_verb in
+# fm-classify-lib.sh owns which lines count and what ends them). That line
+# already woke firstmate, so the lane is owed firstmate's answer rather than a
+# wedge alarm, and the recheck names the verb's own clearing action. Absent the
+# flag no read is spent and the lane keeps the unchanged ladder.
+#
 # The second record is OFF unless the home creates config/wedge-defer-parked-gate,
 # and that one guard is what makes an unconfigured home's behaviour identical to
 # having no second record at all: it is read before the fold, so no fold or
@@ -1299,8 +1309,8 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #     crewmate's OWN next move;
 #   - the crewmate parked at a human-owed gate and went quiet before escalating
 #     it at all: nobody was ever told, so there is no wait to defer to.
-# A `blocked` record does not count: a blocker is not an unanswered gate decision
-# and a different action clears it. A gate awaiting the CREWMATE's own answer is
+# A `blocked` record does not count here: a blocker is not an unanswered gate
+# decision and a different action clears it. A gate awaiting the CREWMATE's own answer is
 # deliberately NOT evidence either: a crewmate that goes quiet before answering
 # its own gate is exactly the wedge this ladder exists to catch, so those keep
 # the unchanged schedule, reason and demand-deep-inspection wording.
@@ -1315,7 +1325,7 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
 WEDGE_BACKLOG_HOLD_KIND='captain hold'
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+  local task=$1 last until statusf run verb
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -1333,6 +1343,16 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   if task_captain_call_open "$task"; then
     wait_record "$WEDGE_BACKLOG_HOLD_KIND" 'awaiting the captain - held in the backlog' \
       captain 'answer the held decision or release the hold' ''
+    return 0
+  fi
+  if [ -e "$CONFIG/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
+    if [ "$verb" = blocked ]; then
+      wait_record 'declared blocker' 'awaiting firstmate - its own newest line reports a blocker' \
+        supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
+    else
+      wait_record 'declared decision' 'awaiting firstmate - its own newest line asks for a decision' \
+        supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
+    fi
     return 0
   fi
   [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1

@@ -3653,6 +3653,121 @@ resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
   pass "a parked human-owed gate is deferred only while its decision is still open, so an answered-but-unrelayed gate, an unescalated one, and one holding only a blocker all keep the unchanged ladder"
 }
 
+# --- a worker's own newest blocker or decision, behind its opt-in flag -------
+# Upstream kunchenguid/firstmate#6899: a lane whose newest line is the worker's
+# own `blocked:` or `needs-decision:` already woke firstmate, so in a home that
+# armed config/wedge-defer-worker-wait the wedge timer defers it to the bounded
+# recheck instead of climbing the ladder. `blocked:` is the verb pinned here
+# because the parked-gate evidence above deliberately refuses it. A `blocked:`
+# last line is captain-relevant, so every fixture arms the wedge timer (the
+# fourth argument) to reach it through the overridden-terminal-status branch.
+arm_worker_wait() {  # <case-dir>
+  : > "$1/config/wedge-defer-worker-wait"
+}
+
+test_wedge_threshold_defers_to_a_worker_blocker() {
+  local dir state fakebin out capture window key n reported case_log
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  dir=$(wedge_threshold_fixture worker-blocker-fresh \
+    'working: wiring the client
+blocked: need the API key for the staging account' 0 600)
+  arm_worker_wait "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a worker blocker wedge-escalated at threshold $n in an armed home: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a worker blocker queued a wake inside the recheck cadence: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a worker blocker counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # The deferral is bounded: once the blocker is older than the cadence it
+  # re-surfaces once, aged from the line, naming firstmate and the clearing action.
+  dir=$(wedge_threshold_fixture worker-blocker-aged 'blocked: need the API key for the staging account' 2000 600)
+  arm_worker_wait "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a worker blocker older than the recheck cadence was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the worker-blocker recheck"
+  reported=$(wedge_reported_wait_secs "$out")
+  [ -n "$reported" ] && [ "$reported" -ge 1900 ] \
+    || fail "the worker-blocker recheck reported '${reported}'s rather than the blocker's age: $(cat "$out")"
+  grep -F 'declared blocker, awaiting firstmate' "$out" >/dev/null \
+    || fail "the worker-blocker recheck did not name its evidence and firstmate: $(cat "$out")"
+  grep -F 'clear the reported blocker' "$out" >/dev/null \
+    || fail "the worker-blocker recheck lost its blocker-specific action: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the worker-blocker recheck was worded as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the worker-blocker recheck raised the escalation count"
+
+  dir=$(wedge_threshold_fixture worker-decision-aged 'needs-decision [key=scope]: ship the narrow fix or the broad one' 2000 600)
+  arm_worker_wait "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a worker decision older than the recheck cadence was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the worker-decision recheck"
+  grep -F 'declared decision, awaiting firstmate' "$out" >/dev/null \
+    || fail "the worker-decision recheck did not name its evidence and firstmate: $(cat "$out")"
+  grep -F 'answer the reported decision' "$out" >/dev/null \
+    || fail "the worker-decision recheck lost its decision-specific action: $(cat "$out")"
+
+  # Each of these ends or never starts the deferral, so the lane keeps the ladder:
+  # a newer worker line, a resolved line, a supervisor-reserved key, and an inbox
+  # record the worker acknowledged after writing the blocker.
+  for case_log in \
+    'blocked: need the API key for the staging account
+working: resumed without it' \
+    'blocked: need the API key for the staging account
+resolved: firstmate supplied the key' \
+    'blocked [key=remote-reply-continuity-mate1]: the remote reply mirror stopped' \
+    'blocked: need the API key for the staging account|handled'; do
+    dir=$(wedge_threshold_fixture worker-blocker-ended "${case_log%|handled}" 2000 600)
+    arm_worker_wait "$dir"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    case "$case_log" in
+      *'|handled')
+        mkdir -p "$state/wedge.inbox/handled"
+        printf 'schema=fm-task-inbox.v1\n--\nthe key is in the vault\n' > "$state/wedge.inbox/handled/001.msg"
+        ;;
+    esac
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an ended or supervisor-owned blocker never escalated: ${case_log}: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the ended-blocker escalation"
+    grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+      || fail "an ended or supervisor-owned blocker did not keep the ladder: ${case_log}: $(cat "$out")"
+  done
+  pass "in an armed home a worker's own open newest blocker or decision is deferred to the bounded recheck, and a newer line, a resolved line, a reserved key, or a newer acknowledged inbox record keeps the ladder"
+}
+
+# Absent config/wedge-defer-worker-wait the same aged blocker escalates with the
+# byte-identical reason it had before this evidence existed, and writes no
+# recheck throttle.
+test_wedge_threshold_worker_wait_is_off_until_armed() {
+  local dir state fakebin out capture window key
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture worker-blocker-unarmed 'blocked: need the API key for the staging account' 2000 600)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  [ ! -e "$dir/config/wedge-defer-worker-wait" ] \
+    || fail "the unarmed fixture armed the flag, so it proves nothing"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "an unarmed home stopped escalating a worker blocker: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unarmed worker-blocker escalation"
+  grep -Ex 'stale: test:fm-wedge \(idle [0-9]+s, possible wedge, escalation 1\)' "$out" >/dev/null \
+    || fail "an unarmed home changed the wedge reason for a worker blocker: $(cat "$out")"
+  grep -F 'declared blocker' "$out" >/dev/null \
+    && fail "an unarmed home deferred a worker blocker: $(cat "$out")"
+  [ ! -e "$state/.waiting-resurfaced-$key" ] \
+    || fail "an unarmed home wrote the worker-wait recheck throttle"
+  pass "with config/wedge-defer-worker-wait absent a worker blocker keeps the byte-identical wedge reason"
+}
+
 # --- a wait record that does not carry every field is refused ----------------
 # wait_record joins its five fields with US and wedge_defer_wait parses them with
 # `IFS=<us> read`, so consecutive delimiters yield genuinely EMPTY fields and no
@@ -6877,6 +6992,8 @@ test_wedge_threshold_defers_to_a_backlog_captain_hold
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
+test_wedge_threshold_defers_to_a_worker_blocker
+test_wedge_threshold_worker_wait_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms

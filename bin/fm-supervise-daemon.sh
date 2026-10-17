@@ -1631,12 +1631,17 @@ handle_wake() {  # <reason> <state>
               # once per STALE_ESCALATE_SECS for as long as the wait lasted.
               # Housekeeping (2b) then owns the re-surface, so the wait is still
               # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
+              # Where config/wedge-defer-worker-wait arms it, the worker's own
+              # still-open newest blocked: or needs-decision: line is the same
+              # kind of declaration, and that line's own signal already escalated it.
               case "${decision%%|*}" in
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
+                         || { [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-defer-worker-wait" ] \
+                                && status_worker_wait_verb "$state/$task.status" >/dev/null; } \
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;
