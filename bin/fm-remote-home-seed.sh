@@ -152,7 +152,9 @@ REG_EXISTED=0
 # is the host-local parent-route inbox the remote control plane writes to,
 # rather than local Mac paths. The two parents differ only by suffix, so the
 # two whole-string rewrites are order-independent and every mention - bare
-# path, /*.msg listing, and handled/ acknowledgement - lands host-local.
+# path, /*.msg listing, and handled/ acknowledgement - lands host-local. The
+# read-receipt command is rewritten to the remote code root's copy, which
+# exists on that host.
 # Each rewrite stays its own plain assignment: on stock macOS bash a quoted
 # substitution nested inside a double-quoted argument leaks literal quotes
 # into the replacement text.
@@ -160,9 +162,12 @@ PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
 PARENT_INBOX="$STATE/$ID.inbox"
 REMOTE_INBOX="$REMOTE_HOME/state/parent-route/$ID.inbox"
+PARENT_READ_CMD="$FM_ROOT/bin/fm-task-inbox-read.sh"
+REMOTE_READ_CMD="$REMOTE_ROOT/bin/fm-task-inbox-read.sh"
 while IFS= read -r line || [ -n "$line" ]; do
   line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
   line=${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}
+  line=${line//"$PARENT_READ_CMD"/"$REMOTE_READ_CMD"}
   printf '%s\n' "$line"
 done < "$BRIEF" > "$TMP/charter.remote"
 
