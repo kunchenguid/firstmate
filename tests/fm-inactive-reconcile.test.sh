@@ -966,6 +966,20 @@ test_full_scan_budget_includes_wake_lock_wait() {
   pass "aggregate scan budget includes durable wake operations"
 }
 
+test_failed_queue_snapshot_does_not_publish_duplicate() {
+  local out rc=0 record
+  make_world queue-read-refusal
+  write_child "$MAIN" child 'working: quiet since'
+  out=$(FM_WAKE_QUEUE_LOCK_WAIT=invalid FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "queue-read refusal should leave the terminal outcome retriable: $out"
+  assert_contains "$out" "queued-key read failed; actionable wake was not queued" "reconcile reports its failed queued-key read"
+  [ ! -s "$MAIN/state/.wake-queue" ] || fail "failed queued-key read published from an empty snapshot: $(cat "$MAIN/state/.wake-queue")"
+  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
+  [ -n "$record" ] || fail "queue-read refusal discarded the pending terminal outcome"
+  assert_grep 'phase=presentation' "$record" "queue-read refusal did not preserve the pending presentation receipt"
+  pass "inactive reconciliation: failed queued-key reads preserve pending work without publishing"
+}
+
 # A secondmate home seeded without its parent binding cannot report ANY terminal
 # outcome upward, and every later one fails for the same reason. The diagnostic
 # has to name the binding, or three weeks of identical failures read as three
@@ -1071,6 +1085,7 @@ test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
+test_failed_queue_snapshot_does_not_publish_duplicate
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge

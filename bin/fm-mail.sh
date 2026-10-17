@@ -433,7 +433,11 @@ mail_heal() {
   # Both are generation-scoped: only evidence matching the CURRENT mailbox
   # generation is healed, so a legacy key or a stale prior-generation wake can
   # never mark a reused numeric uid as surfaced in the new mailbox.
-  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0
+  local generation=$1 jgen juid jtag keyrest keygen keyuid queued heal_ok=0
+  if ! queued=$(fm_wake_queued_keys check 2>/dev/null); then
+    echo "fm-mail: queued-key read failed; mail heal was skipped" >&2
+    return 1
+  fi
   if [ -s "$WOKEN" ]; then
     while IFS=$'\t' read -r jgen juid jtag; do
       [ -n "$juid" ] || continue
@@ -472,7 +476,7 @@ mail_heal() {
         heal_ok=1
       fi
     fi
-  done < <(fm_wake_queued_keys check 2>/dev/null || true)
+  done <<< "$queued"
   return "$heal_ok"
 }
 

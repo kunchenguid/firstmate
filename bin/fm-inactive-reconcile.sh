@@ -238,13 +238,22 @@ mark_reported() { # <record>
 
 queue_key_exists() { # <key>
   local key=$1 queued
-  queued=$(fm_wake_queued_keys check 2>/dev/null || true)
+  queued=$(fm_wake_queued_keys check 2>/dev/null) || {
+    echo "fm-inactive-reconcile: queued-key read failed; actionable wake was not queued" >&2
+    return 2
+  }
   printf '%s\n' "$queued" | grep -Fx -- "$key" >/dev/null 2>&1
 }
 
 publish_actionable() { # <key> <payload>
-  local key=$1 payload=$2
-  queue_key_exists "$key" && return 1
+  local key=$1 payload=$2 rc
+  queue_key_exists "$key"
+  rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
   fm_wake_append check "$key" "$payload" || return 2
   printf 'actionable: %s\n' "$payload"
 }

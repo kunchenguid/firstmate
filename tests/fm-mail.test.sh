@@ -266,6 +266,31 @@ SH
   pass "fm-mail: poll heals a wake whose cursor record was interrupted"
 }
 
+test_poll_heal_refuses_failed_queue_snapshot() {
+  local fakebin heal_home out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  heal_home="$TMP_ROOT/heal-queue-read-home"
+  mkdir -p "$heal_home/bin" "$heal_home/state"
+  [ -e "$heal_home/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$heal_home/bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t61006\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=61006\n' > "$heal_home/state/.mail-seen"
+  printf '100\t1\tcheck\tmail:61006/99\tcheck: mail 99\n' > "$heal_home/state/.wake-queue"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$heal_home" PATH="$fakebin:$PATH" FM_WAKE_QUEUE_LOCK_WAIT=invalid \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when its authoritative queued-key read fails"
+  assert_contains "$out" "queued-key read failed; mail heal was skipped" "poll reports the failed queued-key read"
+  assert_not_contains "$(cat "$heal_home/state/.mail-seen")" "99" "failed queue read must not heal a uid from an empty snapshot"
+  expect_code 1 "$(grep -c 'mail:61006/99' "$heal_home/state/.wake-queue")" "failed heal leaves the queued wake untouched"
+  pass "fm-mail: failed queued-key reads skip healing without cursor mutation"
+}
+
 test_poll_serializes_overlapping_invocations() {
 local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -2611,6 +2636,7 @@ test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
 test_poll_heals_wake_without_cursor_record
+test_poll_heal_refuses_failed_queue_snapshot
 test_poll_duplicate_wakes_on_interrupted_poll
 test_poll_serializes_overlapping_invocations
 test_poll_recovers_journaled_wake_after_ack
