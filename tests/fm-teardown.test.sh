@@ -5492,34 +5492,8 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
-test_status_archive_retention_override() {
-  local case_dir rc days
-  for days in 1 99999 invalid; do
-    case_dir=$(make_case "status-archive-retention-$days")
-    write_meta "$case_dir" local-only ship
-    touch "$case_dir/config/status-archive"
-    printf 'done: current\n' > "$case_dir/state/task-x1.status"
-    mkdir -p "$case_dir/data/old"
-    printf 'old\n' > "$case_dir/data/old/status.log"
-    touch -t 200001010000 "$case_dir/data/old/status.log"
-    rc=0
-    FM_STATUS_ARCHIVE_RETENTION_DAYS="$days" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-    expect_code 0 "$rc" "retention override $days"
-    if [ "$days" = 1 ]; then
-      assert_absent "$case_dir/data/old/status.log" "retention override did not prune"
-    else
-      assert_present "$case_dir/data/old/status.log" "retention override removed history"
-    fi
-    if [ "$days" = invalid ]; then
-      assert_grep 'warning: invalid FM_STATUS_ARCHIVE_RETENTION_DAYS' "$case_dir/stderr" "invalid retention did not warn"
-    fi
-  done
-  pass "retention accepts an age override and skips invalid settings with a warning"
-}
-
 test_status_archive_opt_in
 test_status_archive_nested_secondmate_children
-test_status_archive_retention_override
 test_status_archive_missing_status_noop
 test_status_archive_reuse_and_retention
 test_status_archive_unsafe_paths_refuse

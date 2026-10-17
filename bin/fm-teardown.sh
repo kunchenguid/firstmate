@@ -327,9 +327,9 @@
 # no-op. Symlinked/non-regular sources and symlinked archive directories refuse
 # cleanup rather than following them; the configured data root may be a symlink.
 # Existing archive filenames are never overwritten. Each archival prunes owned
-# logs and orphaned staging files older than FM_STATUS_ARCHIVE_RETENTION_DAYS
-# completed days by mtime. Invalid retention values or pruning failures warn,
-# never abort teardown, and leave other task data and symlinks alone.
+# logs and orphaned staging files older than 30 completed days by mtime.
+# Pruning failures warn, never abort teardown, and leave other task data and
+# symlinks alone.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -422,8 +422,8 @@ teardown_archive_directory() {  # <directory>
   mkdir -p -- "$1"
 }
 
-teardown_prune_status_archives() {  # <task-directory> <retention-days>
-  local dir=$1 days=$2 child file suffix
+teardown_prune_status_archives() {  # <task-directory>
+  local dir=$1 child file suffix
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   while IFS= read -r -d '' file; do
     suffix=${file##*/}
@@ -435,16 +435,16 @@ teardown_prune_status_archives() {  # <task-directory> <retention-days>
     rm -f -- "$file" || echo "warning: could not prune status archive: $file" >&2
   done < <(find "$dir" -maxdepth 1 -type f \
     \( -name status.log -o -name 'status.[0-9]*.log' -o -name '.status-archive.*' \) \
-    -mtime "+$days" -print0 || echo "warning: could not scan status archives: $dir" >&2)
+    -mtime +30 -print0 || echo "warning: could not scan status archives: $dir" >&2)
   [ ! -L "$dir/children" ] || return 0
   for child in "$dir/children"/*; do
-    teardown_prune_status_archives "$child" "$days"
+    teardown_prune_status_archives "$child"
   done
   return 0
 }
 
 teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
-  local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry days
+  local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry
   if [ ! -e "$CONFIG/status-archive" ]; then
     status_retire_presentation_task "$state" "$task"
     return $?
@@ -481,12 +481,8 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
     echo "error: status archival failed for $task; retaining live status for retry" >&2
     return 1
   }
-  days=${FM_STATUS_ARCHIVE_RETENTION_DAYS:-30}
-  case "$days" in
-    ''|*[!0-9]*) echo "warning: invalid FM_STATUS_ARCHIVE_RETENTION_DAYS; skipping status archive pruning" >&2; return 0 ;;
-  esac
   for entry in "$DATA"/*; do
-    teardown_prune_status_archives "$entry" "$days"
+    teardown_prune_status_archives "$entry"
   done
 }
 
