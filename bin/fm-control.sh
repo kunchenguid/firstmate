@@ -954,6 +954,9 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  if [ "$TARGET_HARNESS" = codex ] && [ "$TARGET_EFFORT" != default ]; then
+    "$SCRIPT_DIR/fm-harness.sh" validate-codex-effort "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
+  fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
