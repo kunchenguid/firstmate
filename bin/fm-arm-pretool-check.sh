@@ -44,7 +44,6 @@ set -u
 
 CMD=""
 CMD_SET=0
-BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
 
@@ -77,12 +76,11 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --background)
+      # Accepted for transport parity only; the value is never consulted.
       [ "$#" -gt 1 ] || { echo "error: --background requires a value" >&2; exit 2; }
-      BACKGROUND=$2
       shift 2
       ;;
     --background=*)
-      BACKGROUND=${1#--background=}
       shift
       ;;
     --claude)
@@ -109,8 +107,18 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
+  # Resolve this script's directory without forking `dirname` on the common
+  # path: Claude always invokes hooks with the absolute
+  # "$CLAUDE_PROJECT_DIR"/bin/... path, so a leading "/" lets a pure
+  # parameter expansion stand in for it. A relative invocation (manual runs,
+  # tests) falls back to the original dirname-based resolution unchanged.
+  case "${BASH_SOURCE[0]}" in
+    /*) _HOOK_LIB_DIR=${BASH_SOURCE[0]%/*}; [ -n "$_HOOK_LIB_DIR" ] || _HOOK_LIB_DIR=/ ;;
+    *) _HOOK_LIB_DIR=$(dirname -- "${BASH_SOURCE[0]}") || exit 0 ;;
+  esac
   # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  . "$(cd -- "$_HOOK_LIB_DIR" && pwd)/fm-hook-host-lib.sh"
+  unset _HOOK_LIB_DIR
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
@@ -119,9 +127,6 @@ if [ "$CMD_SET" -eq 0 ]; then
   fi
   CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
-  # Kept for transport parity only.
-  # shellcheck disable=SC2034
-  BACKGROUND=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.background // .tool_input.background // false)' 2>/dev/null) || BACKGROUND=false
 fi
 
 [ -n "$CMD" ] || exit 0

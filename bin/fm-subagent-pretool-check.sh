@@ -136,6 +136,33 @@ done
 if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
+  # Builtin-only superset prefilter. Strip everything but letters and digits
+  # from the WHOLE raw payload (not just the eventual tool name) and test
+  # case-insensitively for any delegation stem. The tool name jq would
+  # extract is always a contiguous substring of these raw payload bytes
+  # (harness-reported tool names are plain ASCII identifiers needing no JSON
+  # escaping, unlike an arbitrary shell command), and normalizing it below
+  # only ever lower-cases it and deletes characters - operations that cannot
+  # introduce a stem that was not already present somewhere in the raw
+  # payload. So "no stem anywhere in the stripped payload" proves the exact
+  # jq+tr path below would also find no match (MATCHED would end up empty),
+  # and the jq and tr forks can be skipped entirely for the overwhelming
+  # majority of tool calls, whose name is not delegation-shaped. A positive
+  # match here falls through to the unchanged original logic, which alone
+  # decides; this prefilter owns no classification semantics.
+  if [ "${#PAYLOAD}" -le 8192 ]; then
+    PAYLOAD_STRIPPED=${PAYLOAD//[^A-Za-z0-9]/}
+    PREFILTER_MATCHED=0
+    shopt -s nocasematch
+    for stem in $DELEGATION_STEMS; do
+      if [[ $PAYLOAD_STRIPPED == *"$stem"* ]]; then
+        PREFILTER_MATCHED=1
+        break
+      fi
+    done
+    shopt -u nocasematch
+    [ "$PREFILTER_MATCHED" -eq 1 ] || exit 0
+  fi
   command -v jq >/dev/null 2>&1 || exit 0
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
 fi

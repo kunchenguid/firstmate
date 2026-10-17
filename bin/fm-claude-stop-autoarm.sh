@@ -133,7 +133,17 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script's directory without forking `dirname` on the common
+# path: Claude always invokes hooks with the absolute
+# "$CLAUDE_PROJECT_DIR"/bin/... path, so a leading "/" lets a pure parameter
+# expansion stand in for it. A relative invocation (manual runs, tests) falls
+# back to the original dirname-based resolution unchanged.
+case "${BASH_SOURCE[0]}" in
+  /*) _SRC_DIR=${BASH_SOURCE[0]%/*}; [ -n "$_SRC_DIR" ] || _SRC_DIR=/ ;;
+  *) _SRC_DIR=$(dirname "${BASH_SOURCE[0]}") ;;
+esac
+SCRIPT_DIR="$(cd "$_SRC_DIR" && pwd)"
+unset _SRC_DIR
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -169,8 +179,13 @@ GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
-# is inspected before anything else runs.
-PAYLOAD=$(cat 2>/dev/null || true)
+# is inspected before anything else runs. Builtin-only slurp avoids the fork
+# `cat` would cost on every Stop. Trailing-newline handling differs from
+# $(cat) (read keeps them, command substitution would strip them), which is
+# immaterial here - PAYLOAD is only ever handed to jq, which ignores trailing
+# whitespace.
+PAYLOAD=''
+IFS= read -r -d '' PAYLOAD || true
 
 # Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
 # a future Cursor build starts firing the Claude-shaped Stop entry, this arm
