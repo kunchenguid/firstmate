@@ -55,6 +55,11 @@ As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
+## Transcript persistence
+
+The spawn scopes `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` to every Claude worker and secondmate, so a worker launched from inside another agent session keeps its own transcript instead of inheriting the parent's `CLAUDE_CODE_CHILD_SESSION` marker, which makes Claude Code save none and removes resume-based recovery.
+`launch_template()` in `../../../../../bin/fm-spawn.sh` owns the exact mechanics.
+
 ## Feedback drafts
 
 The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
