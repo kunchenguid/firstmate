@@ -75,6 +75,14 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # can find the CLI; a case that verifies detection sets these itself.
 unset REX_SESSION REX_BLOCK
 
+# Point bootstrap's host-file checks at absent files. They read the developer's
+# own no-mistakes config by default, which would add lines to every suite that
+# expects a silent bootstrap. The variables are firstmate-owned, so live tests
+# keep the real NM_HOME and Claude login, and deliberately not named FM_*_OVERRIDE,
+# which bin/fm-gate-refuse-lib.sh reads as a home redirect. A case that exercises a check sets
+# its override itself.
+export FM_BOOTSTRAP_NO_MISTAKES_HOME=/nonexistent/fm-test-no-mistakes-home
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the

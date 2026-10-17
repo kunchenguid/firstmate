@@ -261,6 +261,41 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# no-mistakes' agent: setting, read from FM_BOOTSTRAP_NO_MISTAKES_HOME/config.yaml.
+# Each row: <label>^<config body, \n for newlines>^<expected output, exact>.
+# The fake toolchain has codex and acpx; nothing else named here is installed.
+test_no_mistakes_agents() {
+  local label body expect case_dir fakebin out n line
+  n=0
+  while IFS='^' read -r label body expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/nm-agents-$n"
+    mkdir -p "$case_dir/home" "$case_dir/nm"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    fm_fake_exit0 "$fakebin" codex acpx
+    [ "$body" = - ] || printf '%b\n' "$body" > "$case_dir/nm/config.yaml"
+    expect=${expect//@NM@/$case_dir/nm}
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_NO_MISTAKES_HOME="$case_dir/nm" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    line="NO_MISTAKES_AGENTS: @NM@/config.yaml agent: lists"
+    line=${line//@NM@/$case_dir/nm}
+    expect=${expect//@LINE@/$line}
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+absent config is silent^-^
+installed flow list is silent^agent: [codex]^
+missing agent in a flow list^agent: [codex, "claude"]  # fallback order^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+missing agent in a block list^agent:\n  - codex\n  # comment\n  - grok\nci_timeout: 1h^@LINE@ grok, but grok is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+scalar auto is never checked^agent: auto^
+rovodev resolves through acli^agent: rovodev^@LINE@ rovodev, but acli is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+acp targets need the configured acpx^agent: acp:gemini\nacpx_path: /nonexistent/acpx^@LINE@ acp:gemini, but /nonexistent/acpx is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+ROWS
+  pass "no-mistakes agent: entries that this host cannot run are reported"
+}
+
 # config/tool-provenance pins a tool to an absolute path prefix that its fully
 # resolved executable must start with. Each row: <label>^<pin file body, \n for
 # newlines>^<expected output, exact; empty means silence>. The pinned tool is a
@@ -1515,6 +1550,7 @@ ROWS
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_tool_provenance_pins
+test_no_mistakes_agents
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

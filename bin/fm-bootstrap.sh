@@ -25,6 +25,7 @@
 #                 "TOOL_PROVENANCE: <tool> resolves to <path>, not the pinned <prefix>; ..."
 #                 (or "<tool> is pinned ... but not on PATH", or
 #                 "invalid config/tool-provenance line <n> - <reason>"),
+#                 "NO_MISTAKES_AGENTS: <config> agent: lists <name>, but <binary> is not installed; ...",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
@@ -80,6 +81,12 @@
 #          plain reinstall that silently replaces a locally patched build
 #          (same version, same flags) is reported; detect_tool_provenance owns
 #          the check and docs/configuration.md "Tool provenance pins" the format.
+#          NO_MISTAKES_AGENTS reports each agent named in no-mistakes' `agent:`
+#          setting (the global config.yaml and this repo's .no-mistakes.yaml)
+#          whose executable does not resolve, because no-mistakes silently
+#          skips a missing fallback agent. It runs in every home, secondmate
+#          homes included, because the no-mistakes install is a per-host fact;
+#          detect_no_mistakes_agents owns the parsing and name mapping.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -1584,6 +1591,66 @@ detect_local_config() {
   detect_code_root_backlog_fork
   detect_home_summary_publication
   detect_tool_provenance
+  detect_no_mistakes_agents
+}
+
+# no-mistakes agent list. no-mistakes has no read-only config dump, and its own
+# `doctor` makes network calls, so this reads the `agent:` setting itself (a
+# scalar, a [flow, list], or a block list) from the global config - in
+# FM_BOOTSTRAP_NO_MISTAKES_HOME, else NM_HOME, else ~/.no-mistakes - and from this
+# repo's .no-mistakes.yaml. The name-to-executable map below MIRRORS the agent
+# options no-mistakes documents in its generated config.yaml; `no-mistakes
+# doctor` stays the authoritative view and is what the fix hint names.
+no_mistakes_agent_binaries() {  # <agent-name> <acpx-path>
+  case "$1" in
+    auto) return 1 ;;
+    rovodev) printf '%s\n' acli ;;
+    cursor) printf '%s\n' cursor-agent "${2:-acpx}" ;;
+    acp:*) printf '%s\n' "${2:-acpx}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+detect_no_mistakes_agents() {
+  local nm_home config acpx agent binary
+  nm_home=${FM_BOOTSTRAP_NO_MISTAKES_HOME:-${NM_HOME:-$HOME/.no-mistakes}}
+  for config in "$nm_home/config.yaml" "$FM_ROOT/.no-mistakes.yaml"; do
+    [ -f "$config" ] && [ -r "$config" ] || continue
+    acpx=$(LC_ALL=C awk '/^acpx_path:/ {
+        v = $0; sub(/^acpx_path:[[:space:]]*/, "", v); sub(/[[:space:]]+#.*$/, "", v)
+        gsub(/^["'"'"']|["'"'"']$/, "", v); print v; exit }' "$config" 2>/dev/null)
+    while IFS= read -r agent; do
+      [ -n "$agent" ] || continue
+      while IFS= read -r binary; do
+        [ -n "$binary" ] || continue
+        case "$binary" in
+          /*) [ -x "$binary" ] && continue ;;
+          *) command -v "$binary" >/dev/null 2>&1 && continue ;;
+        esac
+        echo "NO_MISTAKES_AGENTS: $config agent: lists $agent, but $binary is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)"
+      done < <(no_mistakes_agent_binaries "$agent" "$acpx")
+    done < <(LC_ALL=C awk '
+      function clean(x) {
+        sub(/[[:space:]]+#.*$/, "", x)
+        gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", x)
+        return x
+      }
+      /^agent:/ {
+        v = $0; sub(/^agent:[[:space:]]*/, "", v); sub(/[[:space:]]+#.*$/, "", v)
+        if (v != "") {
+          gsub(/[][]/, "", v)
+          n = split(v, parts, ",")
+          for (i = 1; i <= n; i++) { x = clean(parts[i]); if (x != "") print x }
+          exit
+        }
+        block = 1
+        next
+      }
+      block && /^[[:space:]]+-/ { x = $0; sub(/^[[:space:]]+-[[:space:]]*/, "", x); x = clean(x); if (x != "") print x; next }
+      block && /^[[:space:]]*(#.*)?$/ { next }
+      block { exit }
+    ' "$config" 2>/dev/null)
+  done
 }
 
 # Tool provenance pins: config/tool-provenance lines "<tool> <expected-prefix>",
