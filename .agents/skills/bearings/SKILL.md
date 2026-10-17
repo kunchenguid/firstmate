@@ -116,6 +116,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
+When `build` reports `lavish-off:` instead, this home has turned boards off: render the chat digest without a board URL and say plainly that no board was built.
 Never bind or arm the board before its session is listed open.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and both the build and the watcher's ordinary reconcile repair a missing listener, so no conversational turn ever blocks on the board.
 
