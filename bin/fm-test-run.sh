@@ -404,7 +404,10 @@ family_for_basename() {
       printf '%s\n' pr-forge
       ;;
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
-    fm-supervision-host.test.sh|fm-host-mirror.test.sh)
+    fm-supervision-host.test.sh|fm-supervision-host-stop-hook.test.sh|\
+    fm-supervision-host-mirror.test.sh|fm-supervision-host-away.test.sh|\
+    fm-supervision-host-latch.test.sh|fm-supervision-host-park.test.sh|\
+    fm-host-mirror.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
@@ -860,8 +863,13 @@ tests/fm-stow-cascade.test.sh 3058
 tests/fm-subagent-pretool-check.test.sh 998
 tests/fm-supervision-events.test.sh 673
 tests/fm-supervision-host-attended-live-e2e.test.sh 49
+tests/fm-supervision-host-away.test.sh 304574
+tests/fm-supervision-host-latch.test.sh 441474
 tests/fm-supervision-host-live-e2e.test.sh 75
-tests/fm-supervision-host.test.sh 789123
+tests/fm-supervision-host-mirror.test.sh 398774
+tests/fm-supervision-host-park.test.sh 274774
+tests/fm-supervision-host-stop-hook.test.sh 153674
+tests/fm-supervision-host.test.sh 232874
 tests/fm-tangle-guard.test.sh 8501
 tests/fm-task-delivery.test.sh 32789
 tests/fm-task-inbox.test.sh 31965
@@ -1552,6 +1560,11 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-wake-queue.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' __script__:fm-supervision-host.test.sh
+      printf '%s\n' __script__:fm-supervision-host-stop-hook.test.sh
+      printf '%s\n' __script__:fm-supervision-host-mirror.test.sh
+      printf '%s\n' __script__:fm-supervision-host-away.test.sh
+      printf '%s\n' __script__:fm-supervision-host-latch.test.sh
+      printf '%s\n' __script__:fm-supervision-host-park.test.sh
       # Whether an arriving outcome still lets the captain type is a fact only
       # a real Pi TUI can answer, so the live guards are selected too.
       printf '%s\n' live-harness-optin

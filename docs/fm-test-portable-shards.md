@@ -21,8 +21,10 @@ A failed script's duration is excluded even when its lane uploaded an artifact.
 In particular, run 36664663190's serial 5 finished in 22m15s with an assertion failure, not a timeout; treating that as a healthy whole-lane sample would hide the failure.
 Collect successful per-script measurements for every member before calculating a split.
 
-`tests/fm-supervision-host.test.sh` uses 789123 ms from run 36669175457, after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179), rather than its pre-fix maximum of 1065298 ms.
-That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
+The supervision host suite was one `tests/fm-supervision-host.test.sh` until 2026-10-11, when it measured 930562 to 1743343 ms in main runs [37699232582](https://github.com/kunchenguid/firstmate/actions/runs/37699232582), [37720051397](https://github.com/kunchenguid/firstmate/actions/runs/37720051397), [37739997864](https://github.com/kunchenguid/firstmate/actions/runs/37739997864), [37829693397](https://github.com/kunchenguid/firstmate/actions/runs/37829693397), [37973072108](https://github.com/kunchenguid/firstmate/actions/runs/37973072108), and [38090672222](https://github.com/kunchenguid/firstmate/actions/runs/38090672222) and PR runs [38090029535](https://github.com/kunchenguid/firstmate/actions/runs/38090029535) and [38090723262](https://github.com/kunchenguid/firstmate/actions/runs/38090723262), whose serial 2 jobs it alone carried to the 30-minute cap.
+It is now that suite plus its `-stop-hook`, `-mirror`, `-away`, `-latch`, and `-park` siblings over `tests/supervision-host-helpers.sh`, so the packing can spread them.
+Each suite's hint sums, over its cases, the slowest duration of that case across those eight runs, read from the `FM_TEST_BEGIN` and consecutive `ok -` log timestamps, plus the largest observed 11274 ms from the last case to `FM_TEST_END`.
+Those are per-case CI samples rather than runs of the split suites, so replace them with each suite's own slowest `duration_ms` once several green runs upload it.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
 
