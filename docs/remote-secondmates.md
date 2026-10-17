@@ -82,6 +82,8 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
+Linux process ownership remains stable across wall-clock and boot-time drift when `/proc` is available; macOS retains its existing identity and mismatch recovery behavior.
+On Linux, the next worker readiness check replaces a live legacy worker from the configured code root before starting its replacement; [`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the identity format and upgrade verification rules.
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
