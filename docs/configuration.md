@@ -625,8 +625,7 @@ The optional local, gitignored `config/status-archive` presence flag opts this h
 Create it with `touch "$FM_HOME/config/status-archive"`; remove it to disable future archival and pruning.
 It is off by default: without the flag, teardown deletes status logs as before and leaves existing archives untouched.
 The flag applies to teardown run by this home, including forced retirement of its secondmate children; it is not inherited by other homes.
-`FM_STATUS_ARCHIVE_RETENTION_DAYS` overrides the age limit as a nonnegative integer number of completed days (default `30`); each opted-in archival prunes older logs.
-Invalid values skip pruning with a warning, and housekeeping failures never abort teardown.
+Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
 
