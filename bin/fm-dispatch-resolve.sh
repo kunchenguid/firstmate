@@ -4,8 +4,10 @@
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh --validate-config   validate JSON stdin, exit 0 or 2; no network or quota call
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
+# Brief-resolution opt-in gate (not applied to --validate-config):
+#   TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
 #   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
 #   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
@@ -109,10 +111,12 @@ usage() {
   ' "$0"
 }
 
+VALIDATE_CONFIG=0
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
 while [ $# -gt 0 ]; do
   case "$1" in
+    --validate-config) VALIDATE_CONFIG=1; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
@@ -121,19 +125,24 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-  exit 0
-fi
+if [ "$VALIDATE_CONFIG" -eq 0 ]; then
+  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+    TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  fi
+  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+    echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+    exit 0
+  fi
 
 # ---- inputs --------------------------------------------------------------------
-[ -n "$BRIEF" ] || die "brief file required (see --help)"
-[ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
-[ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
-[ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
+  [ -n "$BRIEF" ] || die "brief file required (see --help)"
+  [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
+  [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
+  [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
+else
+  [ -z "$BRIEF" ] && [ -z "$PROJECT" ] || die "--validate-config accepts only JSON stdin"
+  RULES_PATH=/dev/stdin
+fi
 command -v jq >/dev/null 2>&1 || die "jq required"
 RULES=$(mktemp) || die "mktemp failed"
 trap 'rm -f "$RULES"' EXIT
@@ -216,6 +225,8 @@ if [ -n "$missing_provider" ]; then
   done <<< "$missing_provider"
   die "malformed rules file: $RULES_PATH - $missing_provider_detail"
 fi
+
+[ "$VALIDATE_CONFIG" -eq 0 ] || exit 0
 
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
 PMAP='{}'
