@@ -516,22 +516,35 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull
+# request - https, with no port on a Forgejo authority - and refuses anything
+# else, so a Gerrit change URL and a plain-http or ported Forgejo pull request
+# URL are recorded on the row as a note instead. Prints that note's text, or
+# nothing when tasks-axi takes the link as-is or the URL is not a change Firstmate
+# knows. The subshell keeps the parse from overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_note_form() {  # <url>
+  (
+    fm_pr_url_parse "$1" || exit 1
+    case "$FM_PR_PROVIDER" in
+      gerrit) printf 'Gerrit change %s\n' "$1" ;;
+      forgejo)
+        case "$1" in
+          https://*) case "$FM_PR_HOST" in *:*) printf 'PR %s\n' "$1" ;; esac ;;
+          *) printf 'PR %s\n' "$1" ;;
+        esac
+        ;;
+    esac
+  )
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg previous_arg=''
+  local data=$1 id=$2 arg previous_arg='' note_form
   local -a done_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+    if [ "$previous_arg" = --pr ] && note_form=$(fm_backlog_pr_note_form "$arg") && [ -n "$note_form" ]; then
       done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
+      done_args+=("$note_form")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +556,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr) [ -z "$(fm_backlog_pr_note_form "$value")" ] ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -579,7 +592,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
         else
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+          deliverable="${deliverable:+$deliverable; }$(fm_backlog_pr_note_form "$arg")"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
@@ -981,13 +994,16 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
-            && case "$arg_value" in https://*) true ;; *) false ;; esac \
+            && case "$arg_value" in https://*|http://*) true ;; *) false ;; esac \
             && case "$arg_value" in
               *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
               *) true ;;
             esac \
             && {
-              url_tail=${arg_value#https://}
+              case "$arg_value" in
+                https://*) url_tail=${arg_value#https://} ;;
+                *) url_tail=${arg_value#http://} ;;
+              esac
               url_authority=${url_tail%%/*}
               url_path=${url_tail#*/}
               url_host=$url_authority
