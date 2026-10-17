@@ -2059,6 +2059,13 @@ async function releaseLifecycleLock() {
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+
+  // fm_lock_prepare_owner records pid-identity beside pid when it can compute
+  // one, so the owner directory is not empty without removing it as well.
+  await unlink(path.join(ownerPath, "pid-identity")).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }
