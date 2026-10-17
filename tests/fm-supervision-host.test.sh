@@ -2070,6 +2070,7 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   assert_re '^arg=--safe-mode$' "$first" "the engine must load none of the home's hooks"
   assert_re '^arg=dontAsk$' "$first" "the engine must never prompt"
   assert_re '^arg=sonnet$' "$first" "the engine must default to its default model"
+  assert_re '^arg=\{"verbose":false\}$' "$first" "the engine must turn a user's verbose setting off for its json result"
   assert_re '^arg=--session-id$' "$first" "the first turn must open a new conversation"
   assert_re '^POSTURE: AWAY\.' "$first" "the wake must carry the away tail"
   assert_grep 'keep the export worker on low effort' "$home/state/.host-mirror.jsonl" "fixture: the captain's dialog was not mirrored"
