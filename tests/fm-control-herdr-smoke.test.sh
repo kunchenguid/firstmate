@@ -47,6 +47,9 @@ STANDIN_BIN=$(fm_agent_standin "$STANDIN_DIR") || {
 
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
+# Same seam tests/lib.sh exports: this sandbox pins FM_HOME to scratch homes
+# from inside the repo checkout, which is deliberate addressing, not drift.
+export FM_TEST_SEAM=1
 SCRATCH=
 LAB_PREPARED=0
 cleanup_all() {

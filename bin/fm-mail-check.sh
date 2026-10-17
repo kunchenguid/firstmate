@@ -47,6 +47,8 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$SCRIPT_DIR/fm-home-drift-lib.sh" ]; then . "$SCRIPT_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 RECORD="$STATE/.mail-check"
 CHECK_ID=mail

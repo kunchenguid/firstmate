@@ -136,7 +136,7 @@ matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
 matrix_case E03 allow 'bin/fm-watch-arm.sh # output > file &'
 matrix_case E04 allow $'# setup comment with fm-watch.sh; && >\nsource "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
-matrix_case E05 deny "FM_HOME=$ROOT bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case E05 allow "FM_HOME=$ROOT bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case E06 deny "env FM_HOME=$ROOT bin/fm-watch-arm.sh"
 matrix_case E07 deny "source '/tmp/not-firstmate/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case E08 deny "bash -lc 'bin/fm-watch-checkpoint.sh --seconds 180'"
@@ -149,6 +149,10 @@ matrix_case E14 allow '$FM_HOME/bin/fm-teardown.sh &'
 matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
+matrix_case E18 deny 'OTHER_HOME=/tmp bin/fm-watch-arm.sh'
+matrix_case E19 deny 'FM_HOME= bin/fm-watch-arm.sh'
+matrix_case E20 deny 'FM_HOME=~/sibling bin/fm-watch-arm.sh'
+matrix_case E21 allow "FM_HOME='~/sibling' bin/fm-watch-arm.sh"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

@@ -111,8 +111,10 @@ Approved nodes may be separated by `;`, a real newline, or `&&`.
 The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
 No other wrapper is approved.
+The final protected node may also carry exactly one inline `FM_HOME=<path>` prefix assignment whose value is a nonempty literal word - the explicit pin a caller uses to aim the blessed watcher entry at a specific home, which is also the remediation the fm-home-drift warning names for a leaked inherited FM_HOME.
+An empty value, an expansion (`$VAR`, `` `cmd` ``), an unquoted `~`, a glob, or a second inline assignment are not literal pins and are not blessed.
 
-Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
+Inline environment assignments other than the single literal `FM_HOME=<path>` pin on the final node, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
 
 ## Broad watcher kills
 

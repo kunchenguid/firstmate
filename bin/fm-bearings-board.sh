@@ -91,6 +91,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$SCRIPT_DIR/fm-home-drift-lib.sh" ]; then . "$SCRIPT_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
