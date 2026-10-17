@@ -1836,6 +1836,7 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$case_dir" > "$home/.fm-secondmate-parent"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/child-scout-wt"
@@ -1853,7 +1854,7 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed"
+  expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed: $(cat "$case_dir/stderr")"
   [ -z "$(git -C "$child_wt" status --porcelain --untracked-files=all)" ] \
     || fail "secondmate-child-nested-clean: untracked entries remain: $(git -C "$child_wt" status --porcelain --untracked-files=all)"
   assert_absent "$child_wt/scratch-clone" "secondmate-child-nested-clean: nested clone survived return"
@@ -1887,6 +1888,7 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$case_dir" > "$home/.fm-secondmate-parent"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/pool/6/repo"
@@ -1906,7 +1908,7 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 4 "$rc" "secondmate-child-dirty-return: a lost child slot should exit 4 after retirement"
+  expect_code 4 "$rc" "secondmate-child-dirty-return: a lost child slot should exit 4 after retirement: $(cat "$case_dir/stderr")"
   assert_grep "lost this slot" "$case_dir/stderr" \
     "secondmate-child-dirty-return: no lost-slot warning for the dirty child return"
   assert_grep "left-behind-clone" "$case_dir/stderr" \
@@ -5588,6 +5590,84 @@ test_accounting_failure_preserves_the_containing_home() {
   pass "cleanup restores generation bindings and retains homes after release failure, then completes on retry"
 }
 
+test_retirement_adopts_ancestor_episode() {
+  local name state TMP_ROOT
+  TMP_ROOT=$(fm_test_tmproot fm-teardown-inherited)
+  # These execute actual teardown with clean and real nested-Git residue
+  # returns. The waiting host-shaped parent retains ownership after each child.
+  . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+  for name in secondmate-child-nested-clean secondmate-child-dirty-return; do
+    state="$TMP_ROOT/$name/state"
+    mkdir -p "$state"
+    fm_supervisor_lifecycle_acquire "$state" task-x1 0 || fail "could not hold host episode"
+    if [ "$name" = secondmate-child-nested-clean ]; then
+      test_forced_secondmate_child_scout_nested_clone_returns_clean
+    else
+      test_forced_secondmate_dirty_child_return_warns_and_completes
+    fi
+    fm_supervisor_lifecycle_adopt "$state" task-x1 || fail "teardown released its ancestor's episode"
+    fm_supervisor_lifecycle_release "$state" task-x1
+  done
+  pass "initial clean and residue teardown adopt and preserve the waiting host episode"
+}
+
+test_retirement_refuses_invalid_inherited_episode() {
+  local case_dir carrier damage rc holder attempt
+  . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+  case_dir=$(make_case invalid-retirement-episode)
+  write_meta "$case_dir" local-only secondmate
+  fm_supervisor_lifecycle_acquire "$case_dir/state" task-x1 0 || fail "could not hold host episode"
+  carrier=$FM_SUPERVISOR_LIFECYCLE_CARRIER
+  for damage in "${carrier%|*}|stale" "$case_dir/state/.secondmate-liveness-task-x1.lock|forged|identity|episode"; do
+    rc=0
+    FM_SUPERVISOR_LIFECYCLE_CARRIER=$damage run_teardown "$case_dir" --force \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "invalid inherited retirement episode must refuse"
+    assert_present "$case_dir/state/task-x1.meta" "invalid carrier removed the route"
+    assert_present "$case_dir/wt" "invalid carrier removed the worktree"
+    fm_supervisor_lifecycle_adopt "$case_dir/state" task-x1 || fail "refusal released its ancestor's episode"
+  done
+  fm_supervisor_lifecycle_release "$case_dir/state" task-x1
+  ROOT="$ROOT" CASE_STATE="$case_dir/state" READY="$case_dir/carrier" bash -c '
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_supervisor_lifecycle_acquire "$CASE_STATE" task-x1 0 || exit 1
+    trap '\''fm_supervisor_lifecycle_release "$CASE_STATE" task-x1'\'' EXIT
+    printf "%s\n" "$FM_SUPERVISOR_LIFECYCLE_CARRIER" > "$READY"
+    for ((i=0; i<100; i++)); do
+      [ ! -f "$READY.release" ] || exit 0
+      sleep 0.1
+    done
+    exit 1
+  ' &
+  holder=$!
+  for attempt in $(seq 1 100); do
+    [ ! -s "$case_dir/carrier" ] || break
+    sleep 0.1
+  done
+  rc=0
+  FM_SUPERVISOR_LIFECYCLE_CARRIER=$(cat "$case_dir/carrier") run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_present "$case_dir/state/.secondmate-liveness-task-x1.lock" "foreign episode was released"
+  touch "$case_dir/carrier.release"
+  wait "$holder" || fail "foreign episode owner failed to finish"
+  expect_code 1 "$rc" "a verified non-ancestor episode must refuse"
+  assert_present "$case_dir/state/task-x1.meta" "foreign carrier removed the route"
+  assert_present "$case_dir/wt" "foreign carrier removed the worktree"
+  pass "stale, forged, and non-ancestor retirement episodes refuse before destruction"
+}
+
+if [ "$#" -gt 0 ]; then
+  for selected_test in "$@"; do
+    case "$selected_test" in
+      test_retirement_adopts_ancestor_episode|test_retirement_refuses_invalid_inherited_episode|test_descendant_episode_refuses_before_coordination) "$selected_test" ;;
+      *) fail "unknown focused test: $selected_test" ;;
+    esac
+  done
+  exit 0
+fi
+
+test_retirement_adopts_ancestor_episode
+test_retirement_refuses_invalid_inherited_episode
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 
 # Archive coverage uses the real teardown entry point over isolated homes.

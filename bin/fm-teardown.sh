@@ -698,7 +698,7 @@ trap teardown_release_locks EXIT
 # fleet order is episode, then control, then metadata), waiting a bounded time
 # for a running liveness recovery or launch to finish rather than interleaving.
 if [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_meta_get "$META" kind 2>/dev/null || true)" = secondmate ]; then
-  fm_supervisor_lifecycle_acquire "$STATE" "$ID" 30 || {
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 30 || {
     echo "error: a secondmate liveness check is in progress for $ID (lifecycle episode pid ${FM_LOCK_HELD_PID:-unknown}); nothing was changed - retry teardown" >&2
     exit 1
   }
@@ -735,7 +735,7 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 # can act on the route mid-teardown, and its relaunch ledger and park marker are
 # removed with the route instead of surviving for a reused id.
 if [ "$TEARDOWN_META_KIND" = secondmate ] && [ -z "$SM_LIVENESS_LOCK" ]; then
-  fm_supervisor_lifecycle_acquire "$STATE" "$ID" 0 || {
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 0 || {
     echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
     exit 1
   }
