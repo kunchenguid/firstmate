@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, CONFIG_REREAD, TOOL_PROVENANCE, NO_MISTAKES_AGENTS, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, CONFIG_REREAD, TOOL_PROVENANCE, NO_MISTAKES_AGENTS, CLAUDE_PERMISSIONS, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -30,6 +30,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
   The `... is pinned ... but not on PATH` and `invalid config/tool-provenance line` variants name a missing tool or a malformed pin line; [`docs/configuration.md`](../../../docs/configuration.md) ("Tool provenance pins") owns the format.
 - `NO_MISTAKES_AGENTS: <config> agent: lists <name>, but <binary> is not installed; ...` - no-mistakes' `agent:` setting names an agent this host cannot run, and no-mistakes silently skips a missing fallback agent, so validation may run on fewer agents than configured.
   Tell the captain which agent is missing on this host and ask whether to install it or drop it from the list; never edit their no-mistakes config yourself, and confirm the result with `no-mistakes doctor`.
+- `CLAUDE_PERMISSIONS: Claude auto mode is on (<file>) but no Bash(...bin/fm-*...) allow rule ...` - Claude settings put this primary in auto mode with no allow rule for firstmate's own `bin/fm-*` scripts, so the auto-mode classifier can refuse the commands firstmate runs to supervise.
+  Give the captain the exact rule the line names for the home's `.claude/settings.local.json` and let them add it; never edit Claude settings yourself.
+  The check only proves a rule is present or absent, not that auto mode honors it; the `is not a valid JSON settings object` variant names a settings file Claude may be ignoring.
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
