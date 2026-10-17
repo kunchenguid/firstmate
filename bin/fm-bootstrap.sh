@@ -22,6 +22,9 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "CONFIG_REREAD: secondmate <id>: send failed: <reason>",
 #                 "NETWORK_CHECKS: <what did not complete>",
+#                 "TOOL_PROVENANCE: <tool> resolves to <path>, not the pinned <prefix>; ..."
+#                 (or "<tool> is pinned ... but not on PATH", or
+#                 "invalid config/tool-provenance line <n> - <reason>"),
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
@@ -72,6 +75,11 @@
 #          upgrade recommendation for synchronous reply acceptance.
 #          tasks-axi feature probes remain a separate defense-in-depth check, and
 #          a build failing one is OUTDATED like a below-floor build.
+#          TOOL_PROVENANCE compares each tool pinned in the optional, local
+#          config/tool-provenance with where PATH actually resolves it, so a
+#          plain reinstall that silently replaces a locally patched build
+#          (same version, same flags) is reported; detect_tool_provenance owns
+#          the check and docs/configuration.md "Tool provenance pins" the format.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -1575,6 +1583,48 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_tool_provenance
+}
+
+# Tool provenance pins: config/tool-provenance lines "<tool> <expected-prefix>",
+# where <expected-prefix> is an absolute path that the fully resolved executable
+# (every symlink followed) must start with. A local read plus one path
+# resolution per pinned tool; it never runs the tool.
+detect_tool_provenance() {
+  local file="$CONFIG/tool-provenance" n=0 line tool prefix extra found resolved
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%%#*}
+    read -r tool prefix extra <<EOF
+$line
+EOF
+    [ -n "$tool" ] || continue
+    if [ -z "$prefix" ] || [ -n "$extra" ]; then
+      echo "TOOL_PROVENANCE: invalid config/tool-provenance line $n - expected '<tool> <absolute-path-prefix>'"
+      continue
+    fi
+    case "$prefix" in
+      /*) ;;
+      *)
+        echo "TOOL_PROVENANCE: invalid config/tool-provenance line $n - '$prefix' is not an absolute path"
+        continue
+        ;;
+    esac
+    if ! found=$(command -v "$tool" 2>/dev/null) || [ -z "$found" ]; then
+      echo "TOOL_PROVENANCE: $tool is pinned in config/tool-provenance but not on PATH"
+      continue
+    fi
+    resolved=$(readlink -f "$found" 2>/dev/null) || resolved=""
+    if [ -z "$resolved" ]; then
+      # shellcheck disable=SC2016 # Perl, not the shell, expands $ARGV.
+      resolved=$(perl -MCwd=realpath -e 'my $r = realpath($ARGV[0]); print $r if defined $r' "$found" 2>/dev/null) || resolved=""
+    fi
+    case "$resolved" in
+      "$prefix"*) ;;
+      *) echo "TOOL_PROVENANCE: $tool resolves to ${resolved:-$found}, not the pinned $prefix; a reinstall may have replaced the pinned build - restore it, or remove the pin once the upstream release carries what it needs" ;;
+    esac
+  done < "$file"
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

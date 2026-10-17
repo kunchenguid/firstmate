@@ -91,7 +91,7 @@ test_silent_home_maps_every_line() {
   dir=$(new_case silent)
   doctor "$dir" --json
   for id in doctor/jq doctor/inventory doctor/bootstrap doctor/unmapped-line \
-    tools/missing tools/missing-manual tools/presentation backend/invalid \
+    tools/missing tools/missing-manual tools/presentation tools/provenance backend/invalid \
     config/crew-dispatch fleet/tangle fleet/backlog-reconcile fleet/home-summary \
     fleet/secondmate-handoff fleet/info config/role; do
     assert_status "$DOCTOR_OUT" "$id" ok "silent home"
@@ -144,6 +144,15 @@ test_provoked_lines_render_their_ids() {
   printf '%s\n' '- [ ] queued item' > "$dir/home/data/handoff/mate.outbox.md"
   doctor "$dir" --json
   assert_status "$DOCTOR_OUT" fleet/secondmate-handoff warn "pending handoff"
+
+  dir=$(new_case provenance)
+  mkdir -p "$dir/upstream"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/upstream/pinned-tool"
+  chmod +x "$dir/upstream/pinned-tool"
+  ln -s "$dir/upstream/pinned-tool" "$dir/fakebin/pinned-tool"
+  printf 'pinned-tool %s/patched/\n' "$dir" > "$dir/home/config/tool-provenance"
+  doctor "$dir" --json
+  assert_status "$DOCTOR_OUT" tools/provenance warn "replaced pinned build"
   assert_status "$DOCTOR_OUT" doctor/unmapped-line ok "provoked lines are all mapped"
   pass "provoked bootstrap lines render under their inventory ids and severities"
 }

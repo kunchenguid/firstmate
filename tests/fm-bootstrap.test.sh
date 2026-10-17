@@ -261,6 +261,44 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# config/tool-provenance pins a tool to an absolute path prefix that its fully
+# resolved executable must start with. Each row: <label>^<pin file body, \n for
+# newlines>^<expected output, exact; empty means silence>. The pinned tool is a
+# PATH symlink into $case/src/patched or $case/src/upstream.
+test_tool_provenance_pins() {
+  local label body expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label body expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/provenance-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/src/patched/bin" "$case_dir/src/upstream/bin"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/src/patched/bin/pinned-tool"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/src/upstream/bin/pinned-tool"
+    chmod +x "$case_dir/src/patched/bin/pinned-tool" "$case_dir/src/upstream/bin/pinned-tool"
+    case "$label" in
+      *upstream*) ln -s "$case_dir/src/upstream/bin/pinned-tool" "$fakebin/pinned-tool" ;;
+      *absent*) ;;
+      *) ln -s "$case_dir/src/patched/bin/pinned-tool" "$fakebin/pinned-tool" ;;
+    esac
+    body=${body//@CASE@/$case_dir}
+    expect=${expect//@CASE@/$case_dir}
+    printf '%b\n' "$body" > "$case_dir/home/config/tool-provenance"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+patched build matches its pin silently^# patched until upstream ships it\n\npinned-tool @CASE@/src/patched/^
+upstream reinstall is reported^pinned-tool @CASE@/src/patched/^TOOL_PROVENANCE: pinned-tool resolves to @CASE@/src/upstream/bin/pinned-tool, not the pinned @CASE@/src/patched/; a reinstall may have replaced the pinned build - restore it, or remove the pin once the upstream release carries what it needs
+absent pinned tool is reported^pinned-tool @CASE@/src/patched/^TOOL_PROVENANCE: pinned-tool is pinned in config/tool-provenance but not on PATH
+pin without a prefix is malformed^pinned-tool^TOOL_PROVENANCE: invalid config/tool-provenance line 1 - expected '<tool> <absolute-path-prefix>'
+relative prefix is malformed^pinned-tool src/patched/^TOOL_PROVENANCE: invalid config/tool-provenance line 1 - 'src/patched/' is not an absolute path
+ROWS
+  pass "config/tool-provenance pins report a replaced, missing, or malformed pinned build"
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -1476,6 +1514,7 @@ ROWS
 
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
+test_tool_provenance_pins
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
