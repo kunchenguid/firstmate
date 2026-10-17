@@ -34,6 +34,34 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Windows has no tmux reference backend. Its opt-in proof runs below the real
+# invoking primary, claims only a disposable home, and submits no model prompt.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    fm_live_gate opt-in FM_WINDOWS_SESSION_LOCK_LIVE powershell
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    unset FM_PROC_PLATFORM_OVERRIDE FM_PROC_SELF_PID_OVERRIDE FM_PROC_MSYS_PROC_ROOT
+    windows_lab=$(fm_test_tmproot fm-windows-session-lock-live)
+    FM_HOME="$windows_lab" bash "$ROOT/bin/fm-lock.sh" > "$windows_lab/acquire.out" 2>&1 \
+      || fail "the real Windows primary could not acquire its disposable home: $(cat "$windows_lab/acquire.out")"
+    windows_owner=$(cat "$windows_lab/state/.lock")
+    fm_harness_pid_alive "$windows_owner" \
+      || fail "the real Windows owner $windows_owner did not classify as a live harness"
+    fm_session_lock_owned_by_self "$windows_lab/state" \
+      || fail "a tool shell below the real Windows primary did not recognize its own lock"
+    fm_session_lock_inspect "$windows_lab/state"
+    [ "$FM_LOCK_INSPECT_STATE" = held ] || fail "the real Windows lock was not reported as held"
+    printf '# Windows executable: %s\n' "$FM_WIN_PROC_COMM"
+    for windows_harness in claude codex opencode pi pi-signed omp grok kimi cursor-agent; do
+      command -v "$windows_harness" >/dev/null 2>&1 \
+        || printf '# unverified here: %s is not installed\n' "$windows_harness"
+    done
+    pass "real Windows primary acquires, inspects and recognizes its own disposable session lock"
+    exit 0
+    ;;
+esac
+
 fm_live_gate default-on FM_HARNESS_LIVENESS_DRIFT tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

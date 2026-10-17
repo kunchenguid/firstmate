@@ -64,6 +64,13 @@ if [ "${1:-}" = "status" ]; then
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
     held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    unknown)
+      if fm_windows_process_host; then
+        echo "lock: unknown (cannot verify pid $FM_LOCK_INSPECT_PID)"
+      else
+        echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)"
+      fi
+      ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
@@ -226,6 +233,25 @@ confirm_own_lock() {  # <recorded-pid>
   return 1
 }
 
+# Acquisition may reclaim only a confirmed absent Windows owner. Keep query
+# failure and live-but-unrecognized processes distinct from a dead holder.
+# POSIX keeps the existing harness-liveness acquisition contract unchanged.
+session_owner_alive() {  # <recorded-pid>
+  if ! fm_windows_process_host; then
+    fm_harness_pid_alive "$1"
+    return $?
+  fi
+  fm_session_lock_inspect "$STATE"
+  case "$FM_LOCK_INSPECT_STATE" in
+    held) return 0 ;;
+    stale|free) return 1 ;;
+    *)
+      echo "error: cannot verify the Windows session-lock owner (pid $1); operate read-only until resolved" >&2
+      exit 1
+      ;;
+  esac
+}
+
 refuse_live_owner() {  # <recorded-pid>
   local recorded
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
@@ -242,7 +268,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if [ -z "$REANCHOR" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && session_owner_alive "$old"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -270,10 +296,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   }
   # A re-anchor decided above has held the claim lock since, so line 1 is the
   # pid it recorded and needs no second verdict.
-  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && session_owner_alive "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && session_owner_alive "$old"; then
       refuse_live_owner "$old"
     fi
   fi

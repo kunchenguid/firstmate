@@ -74,6 +74,23 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Session-lock readers use native Windows PIDs, unlike ordinary mutex owners
+# recorded from MSYS BASHPID. Unknown native liveness must retain ownership;
+# only confirmed absence permits recovery. POSIX uses fm_pid_alive unchanged.
+fm_session_owner_alive() {
+  local pid=$1 rc=0
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$_FM_UNAME" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) fm_pid_alive "$pid"; return $? ;;
+  esac
+  _fm_wake_require_session_lock || return 0
+  fm_windows_pid_exists "$pid" || rc=$?
+  [ "$rc" -ne 1 ]
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
   local -a stat_fields
@@ -352,7 +369,7 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
     fm_pi_extension_loaded "$state/$marker" "$version" "$lock" "$phase" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
-  fm_pid_alive "$session_pid"
+  fm_session_owner_alive "$session_pid"
 }
 
 # Away-mode supervision evidence. While state/.afk exists the away-mode daemon
@@ -590,6 +607,31 @@ fm_lock_claim() {
   return 0
 }
 
+# MSYS's default ln can copy a directory instead of creating a symlink. Require
+# native links only there; POSIX retains its original command and retry path.
+fm_ln_symlink() {  # <target> <link>
+  case "$_FM_UNAME" in
+    MINGW*|MSYS*|CYGWIN*) MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$1" "$2" ;;
+    *) ln -s "$1" "$2" ;;
+  esac
+}
+
+fm_lock_check_symlink_capability() {  # <private-owner-directory>
+  local ownerdir=$1 probe
+  case "$_FM_UNAME" in MINGW*|MSYS*|CYGWIN*) ;; *) return 0 ;; esac
+  probe="$ownerdir/.symlink-probe"
+  # Probe a private pathname, never the contested lock: a winner may have
+  # released the lock between ln's EEXIST and our next filesystem observation.
+  if fm_ln_symlink "$ownerdir" "$probe" 2>/dev/null && [ -L "$probe" ]; then
+    rm -f "$probe"
+    return 0
+  fi
+  rm -f "$probe" 2>/dev/null || true
+  fm_lock_discard_owner "$ownerdir"
+  printf '%s\n' 'error: cannot create native symlink locks; enable Windows Developer Mode or use a symlink-capable filesystem; operate read-only until resolved' >&2
+  exit 1
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -602,7 +644,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_ln_symlink "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -612,6 +654,7 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    fm_lock_check_symlink_capability "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
@@ -1948,7 +1991,7 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
   [ -n "$FM_AUTOARM_SESSION" ] && [ "$FM_AUTOARM_SESSION" = "$lock_pid" ] || return 1
-  fm_pid_alive "$lock_pid" || return 1
+  fm_session_owner_alive "$lock_pid" || return 1
   fm_recovery_marker_read "$state/.watcher-down" || return 1
   recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
   [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1

@@ -1568,6 +1568,63 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_windows_symlink_capability_failure_is_bounded() {
+  local dir rc
+  dir=$(make_case windows-no-symlinks)
+  rc=0
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    _FM_UNAME=MINGW64_NT
+    ln() { return 1; }
+    fm_lock_acquire_wait_max "$2" 2
+  ' _ "$LIB" "$dir/state/.claim" > "$dir/out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Windows lock was granted without symlink support"
+  grep -q 'cannot create.*symlink' "$dir/out" \
+    || fail "missing Windows symlink capability silently waited instead of explaining the failure"
+  pass "missing Windows symlink capability terminates acquisition with a diagnostic"
+}
+
+test_lock_creation_race_is_not_a_capability_failure() {
+  local dir
+  dir=$(make_case symlink-create-race)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    _FM_UNAME=MINGW64_NT
+    first=1
+    ln() {
+      # Model a winner creating and releasing the requested link before the
+      # loser observes EEXIST. A private capability probe still succeeds.
+      if [ "$first" -eq 1 ]; then first=0; return 1; fi
+      MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" command ln "$@"
+    }
+    fm_lock_acquire_wait_max "$2" 5 || exit 11
+    fm_lock_release "$2"
+    # Ordinary non-Windows creation failures must retain their retry semantics.
+    _FM_UNAME=Linux
+    first=1
+    fm_lock_acquire_wait_max "$2" 5 || exit 12
+    fm_lock_release "$2"
+  ' _ "$LIB" "$dir/state/.claim" \
+    || fail "a transient lock creation race terminated acquisition"
+  pass "a disappeared competing lock is retried, not diagnosed as missing symlink support"
+}
+
+windows_lock_failed=0
+for windows_lock_test in test_windows_symlink_capability_failure_is_bounded test_lock_creation_race_is_not_a_capability_failure; do
+  ( "$windows_lock_test" ) || windows_lock_failed=1
+done
+[ "$windows_lock_failed" -eq 0 ] || exit 1
+
+# The remaining real-process fixtures require POSIX signals and ps -o. Keep the
+# native MSYS /proc check, and exercise the full process suite on Linux/macOS.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    test_msys_pid_identity_uses_proc
+    echo 'skip: POSIX watcher-process integration requires Linux or macOS'
+    exit 0
+    ;;
+esac
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant

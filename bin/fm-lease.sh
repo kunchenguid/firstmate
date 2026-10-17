@@ -130,7 +130,7 @@ case "$CMD" in
     LOCK_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
     if [ -z "$HOLDER_PID" ]; then
       HOLDER_PID=$LOCK_PID
-    elif [ "$HOLDER_PID" != "$LOCK_PID" ] && fm_pid_alive "$HOLDER_PID" && fm_pid_alive "$LOCK_PID"; then
+    elif [ "$HOLDER_PID" != "$LOCK_PID" ] && fm_session_owner_alive "$HOLDER_PID" && fm_session_owner_alive "$LOCK_PID"; then
       HOLDER_PID=$LOCK_PID
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
