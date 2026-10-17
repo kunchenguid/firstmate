@@ -46,7 +46,7 @@ Logs live at `${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions/YYYY/MM/DD/<ses
 The spawn writes `state/<id>.muse-session` with root, worktree, binding incarnation, and pre-existing matching main logs, then unique resolution pins `state/<id>.muse-session-current`.
 It folds that path while the bounded current-day main namespace is unchanged and resolves again if the namespace changes, path disappears, or a newer binding wins.
 
-Turns are bracketed by `{"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"started"` and matching `"event":{"kind":"terminal"`, observed as `completed` or `cancelled`.
+Turns are bracketed by a payload whose kind is `run`, with a `started` event and a matching `terminal` event observed as `completed` or `cancelled`, regardless of JSON field order.
 Interrupt therefore has a real terminal, unlike Claude Stop.
 Never use `--no-session-log`, which removes Muse's only busy source.
 
