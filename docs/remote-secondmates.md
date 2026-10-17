@@ -530,6 +530,9 @@ Only a structured `report=data/....md` pointer offers a document.
 A bare path inside prose is a mention.
 So writing about a document, including one the mate has not created yet, never asks this channel to fetch it.
 
+The adapter cleans up ingest staging and in-flight document-fetch temporary files after normal handling, continuity breaks, payload validation failures, and SIGTERM during a fetch.
+The focused cleanup regression is in [`tests/fm-remote-reply.test.sh`](../tests/fm-remote-reply.test.sh).
+
 ### Replay identity
 
 Each normalized source line, before its delivered `report=` pointers are rewritten, is the replay identity.
