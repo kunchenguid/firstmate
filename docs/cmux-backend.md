@@ -69,7 +69,11 @@ Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+A held workspace UUID is cmux's authoritative identity, so readiness checks verify it by the task-id suffix of its own live title, independent of the caller's home; only title-based recovery after the UUID is gone is scoped to the caller's home, so cross-home recovery is unsupported.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
+
+Secondmate homes are supported on cmux: a `--secondmate` spawn stands up that home's own workspace, titled with its `2ndmate-<id>` home label, by scoping the create call to the secondmate's `FM_HOME` like herdr.
+cmux has no recovery-grade agent-process classifier yet, so a secondmate on cmux uses the generic ordinary-launch recovery semantics rather than a verified liveness probe.
 
 ```text
 backend=cmux
@@ -116,7 +120,7 @@ Real tests share the captain's running app rather than creating an isolated cmux
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified.
+- cmux has no recovery-grade agent-process classifier yet, so a secondmate on cmux uses generic ordinary-launch recovery rather than a verified liveness probe.
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
