@@ -51,8 +51,8 @@ assert_contains "$OUT" 'payload_bytes=11' 'the payload byte count is wrong'
 [ "$(tail -n 1 "$TMP_ROOT/growth.out")" = 'first line' ] || fail 'the delta did not carry the appended line'
 pass 'an appended line produces a delta with exact offsets, hashes, and payload'
 
-# An unchanged log closes the window with 75 and never runs the snapshot path:
-# one stat per sample is the whole per-poll cost.
+# An unchanged log takes one initial snapshot, then closes the window with 75
+# without repeating it: one stat per later sample is the whole per-poll cost.
 DELTA_SHIM="$TMP_ROOT/delta-shim"
 EXEC_LOG="$TMP_ROOT/delta-execs"
 mkdir -p "$DELTA_SHIM"
