@@ -230,7 +230,7 @@ sleep 0.3
 
 new_case running
 printf '%s\n' "$LAUNCHD_PID" > "$CASE_OWNER"
-load_job gui dev.firstmate.herdr.fm-remote "$LAUNCHD_PID"
+load_job gui dev.firstmate.herdr.fm-remote "$$"
 guard
 expect_code 0 "$GUARD_RC" "the guard did not exit 0 for a gui-domain launchd owner"
 assert_not_started "the guard started a second server over a gui-domain launchd owner"
@@ -242,12 +242,11 @@ new_case running
 printf '%s\n' "$WORKER_PID" > "$CASE_OWNER"
 load_job gui dev.firstmate.remote-job
 guard
-expect_code 0 "$GUARD_RC" "the guard did not exit 0 for the gui-domain worker owner"
-assert_not_started "the guard started a second server over a gui-domain worker owner"
-assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped a gui-domain worker owner"
-assert_contains "$GUARD_OUT" "pid $WORKER_PID born in the Aqua login session (worker)" \
-  "the guard did not name the worker owner"
-pass "launchd and worker markers require gui-domain launchctl proof"
+expect_code 0 "$GUARD_RC" "the guard failed to take over a gui-domain worker owner without a live guard"
+assert_stop_before_start
+assert_contains "$GUARD_OUT" "pid $WORKER_PID born in the Aqua login session (worker) without a live guard" \
+  "the guard did not name the unsupervised worker owner"
+pass "launchd and worker markers require gui-domain launchctl proof, and only a live guard keeps the owner"
 
 # --- a foreign owner is stopped, then the guard becomes the server -----------
 
