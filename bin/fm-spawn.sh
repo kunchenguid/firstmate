@@ -289,6 +289,14 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   A Treehouse copy must also be linked to the spawning project's own common
+#   git dir: Treehouse keys a pool by clone directory name and origin, so a
+#   free slot another clone of the same origin created is refused before any
+#   fetch, reset, or slot claim. A secondmate home (one carrying
+#   .fm-secondmate-home) runs `treehouse --root <state>/treehouse get`, so its
+#   clones allocate from a pool root of their own; the primary home keeps
+#   Treehouse's default root. Teardown returns a slot by its path and needs no
+#   root.
 #   On the backends that discover that path by reading the task pane's own cwd,
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
@@ -755,6 +763,8 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -3818,7 +3828,8 @@ real_path_or_raw() { # <path>
 
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# is not the repository's primary checkout, and, for a Treehouse copy, is
+# linked to the spawning project's own common git dir. SPAWN_WT_TOP is
 # left holding the worktree root the check read, and SPAWN_WT_REASON a short
 # phrase naming why a rejected path failed, both for the refusal messages.
 #
@@ -3833,7 +3844,7 @@ real_path_or_raw() { # <path>
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
 spawn_worktree_isolated() { # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  local path=$1 wt_real wt_top_real wt_git_dir wt_common proj_common
   SPAWN_WT_TOP=
   SPAWN_WT_REASON=
   wt_real=
@@ -3878,6 +3889,22 @@ spawn_worktree_isolated() { # <path>
   fi
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  # A Treehouse pool is keyed by the clone's directory name and origin, not by
+  # the clone itself, so two clones of one origin under one pool root share a
+  # pool and a free slot one of them created is handed to the other. Such a
+  # copy is isolated from this project yet belongs to a different repository:
+  # refreshing its base would fetch into and reset the other clone's copy, and
+  # claiming it would mark another home's slot. Only a worktree linked to the
+  # spawning project's own common git dir is this task's copy, so anything else
+  # is refused here, before any refresh, claim, or launch. Orca creates its own
+  # per-task worktree outside any shared pool and its shape is unverified
+  # (docs/orca-backend.md), so this ownership test applies to Treehouse copies.
+  wt_common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    wt_common=$(cd "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+  if [ "$BACKEND" != orca ] && [ "$wt_common" != "$proj_common" ]; then
+    SPAWN_WT_REASON="it belongs to a different clone (its common git dir is '${wt_common:-unresolved}', not the spawning project's '$proj_common')"
     return 1
   fi
   return 0
@@ -5008,7 +5035,19 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Treehouse names a pool after the clone's directory and origin, so a
+  # secondmate home's clone and the primary home's clone of the same project
+  # would share one pool under the default root and hand each other's slots
+  # out. A secondmate home therefore allocates from its own pool root under its
+  # state directory, using Treehouse's documented --root; the primary home
+  # keeps the default root and its existing pools. A slot from any other clone
+  # that still reaches this spawn is refused by the ownership screen below.
+  spawn_treehouse_get='treehouse get'
+  if fm_root_is_secondmate_home "$FM_HOME"; then
+    spawn_treehouse_root=$(cd "$STATE" && pwd -P)/treehouse || exit 1
+    spawn_treehouse_get="treehouse --root '${spawn_treehouse_root//\'/\'\\\'\'}' get"
+  fi
+  spawn_send_text_line "$WT_TARGET" "$spawn_treehouse_get"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

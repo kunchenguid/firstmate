@@ -747,6 +747,92 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# Two independent clones of one origin, as a secondmate home and the primary
+# home each hold: Treehouse names a pool after the clone's directory and
+# origin, so under one root it hands a free slot one clone created to the other.
+# The spawn from the other clone must refuse that copy before it fetches into,
+# resets, or claims it, while the clone that owns the slot still launches from
+# it and claims it.
+test_foreign_clone_slot_is_refused_before_any_mutation() {
+  local rec id out status other slot_head slot_reflog origin_ref foreign_claim fetch_head
+  id='pool-foreign-clone-r1'
+  rec=$(make_case foreign-clone "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  other="$CASE_DIR/other-home-project"
+  git clone --quiet "$(git -C "$PROJECT_DIR" remote get-url origin)" "$other"
+  [ "$(git -C "$other" remote get-url origin)" = "$(git -C "$PROJECT_DIR" remote get-url origin)" ] \
+    || fail "fixture clones do not share one origin"
+  printf 'task=owner-task\nhome=%s\n' "$CASE_DIR/owner-home" > "$SLOT_CLAIM"
+  foreign_claim=$(cat "$SLOT_CLAIM")
+  slot_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  slot_reflog=$(git -C "$POOL_DIR" reflog)
+  origin_ref=$(git -C "$PROJECT_DIR" for-each-ref refs/remotes/origin)
+  fetch_head="$(git -C "$POOL_DIR" rev-parse --absolute-git-dir)/FETCH_HEAD"
+  [ ! -e "$fetch_head" ] || fail "fixture slot already carries a FETCH_HEAD"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" "$id" "$other" --scout)
+  status=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: foreign-clone slot\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$other" "$out" "$status"
+    printf 'slot HEAD before=%s after=%s\n' "$slot_head" "$(git -C "$POOL_DIR" rev-parse HEAD)"
+    printf 'owner remote refs before=[%s] after=[%s]\n' "$origin_ref" "$(git -C "$PROJECT_DIR" for-each-ref refs/remotes/origin)"
+    printf 'slot claim after:\n%s\n# evidence end\n' "$(cat "$SLOT_CLAIM")"
+  fi
+  [ "$status" -ne 0 ] || fail "spawn launched a worker in another clone's Treehouse slot"$'\n'"$out"
+  assert_contains "$out" "belongs to a different clone" \
+    "the refusal did not name the clone mismatch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused spawn published task metadata"
+  [ ! -e "$fetch_head" ] || fail "the refused spawn fetched into another clone's slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$slot_head" ] \
+    || fail "the refused spawn reset another clone's slot"
+  [ "$(git -C "$POOL_DIR" reflog)" = "$slot_reflog" ] \
+    || fail "the refused spawn moved another clone's slot reflog"
+  [ "$(git -C "$PROJECT_DIR" for-each-ref refs/remotes/origin)" = "$origin_ref" ] \
+    || fail "the refused spawn updated the owning clone's remote refs"
+  [ "$(cat "$SLOT_CLAIM")" = "$foreign_claim" ] \
+    || fail "the refused spawn claimed or released another home's slot: $(cat "$SLOT_CLAIM")"
+
+  id='pool-owner-clone-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "the clone that owns the slot should still launch from it"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the owning clone's spawn did not record its slot"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the owning clone's spawn did not claim its slot: $(cat "$SLOT_CLAIM")"
+  pass "a slot from another clone of the same origin is refused before any fetch, reset, or claim, and its owner still launches"
+}
+
+# A secondmate home allocates from its own Treehouse root under its state
+# directory, so its clone never shares a pool with the primary home's clone of
+# the same origin; the primary home keeps the default root.
+test_secondmate_home_allocates_from_its_own_pool_root() {
+  local rec id out status pane_log state_real shape
+  for shape in primary secondmate; do
+    id="pool-root-$shape-r1"
+    rec=$(make_case "pool-root-$shape" "$id")
+    read_case_record "$rec"
+    [ "$shape" = primary ] || printf 'sm-qa\n' > "$HOME_DIR/.fm-secondmate-home"
+    pane_log="$CASE_DIR/pane.log"
+    : > "$pane_log"
+    out=$(FM_FAKE_PANE_LOG="$pane_log" run_spawn "$id" --scout)
+    status=$?
+    expect_code 0 "$status" "a $shape home spawn should launch"$'\n'"$out"
+    state_real=$(cd "$HOME_DIR/state" && pwd -P)
+    if [ "$shape" = primary ]; then
+      grep -Fxq 'treehouse get' "$pane_log" \
+        || fail "the primary home did not allocate from the default pool root: $(cat "$pane_log")"
+    else
+      grep -Fxq "treehouse --root '$state_real/treehouse' get" "$pane_log" \
+        || fail "the secondmate home did not allocate from its own pool root: $(cat "$pane_log")"
+    fi
+  done
+  pass "a secondmate home allocates from its own Treehouse pool root while the primary keeps the default"
+}
+
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
 # window is a file recording its stable id and the path its shell sits in; a
 # `treehouse get` typed into a window moves it into the lowest slot no live
@@ -1176,6 +1262,8 @@ test_scout_base_branch_refused_on_gerrit_forge() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_foreign_clone_slot_is_refused_before_any_mutation
+test_secondmate_home_allocates_from_its_own_pool_root
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window

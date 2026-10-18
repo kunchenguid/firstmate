@@ -91,6 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- In a secondmate home, the Treehouse pool root for its own task copies under `state/treehouse/` (`bin/fm-spawn.sh`); the primary home uses Treehouse's default root.
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
