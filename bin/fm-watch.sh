@@ -1173,6 +1173,51 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 FM_WEDGE_GUARD_TIMEOUT_SECS=${FM_WEDGE_GUARD_TIMEOUT_SECS:-5}
 FM_WEDGE_GUARD_DEFER_MAX=${FM_WEDGE_GUARD_DEFER_MAX:-3}
 
+# Upper bound on consecutive wedge escalations for a single (window) before a
+# PERMANENTLY-WEDGED wake is emitted and both cap markers are written.
+# Disabled by default (0): the unconfigured path keeps the existing
+# escalates-every-STALE_ESCALATE_SECS behavior, so this never changes anything
+# unless the captain sets it. Past the bound the wake is published once and
+# the per-hash and window-scoped cap markers silence further wakes for this
+# WINDOW until FM_CAP_HORIZON_SECS elapses or the operator manually removes
+# both markers - a hash change alone does not re-engage while the window-scoped
+# marker stands.
+FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-0}
+case "$FM_WEDGE_MAX_ESCALATIONS" in
+  ''|*[!0-9]*) FM_WEDGE_MAX_ESCALATIONS=0 ;;
+esac
+# Cap marker lifetime: how long the per-hash and window-scoped markers silence
+# the wedge path after a cap fire. Re-fires after this horizon elapses.
+FM_CAP_HORIZON_SECS=${FM_CAP_HORIZON_SECS:-86400}
+case "$FM_CAP_HORIZON_SECS" in ''|*[!0-9]*|0) FM_CAP_HORIZON_SECS=86400 ;; esac
+# How long a rollback-failure sentinel silences the wedge path before the
+# sentinel expires and a normal re-escalation is allowed again. A value of 0
+# would let the wedge re-fire immediately under persistent fs failure, which
+# is the queue-flood behavior this setting exists to bound.
+FM_ROLLBACK_SENTINEL_TTL_SECS=${FM_ROLLBACK_SENTINEL_TTL_SECS:-3600}
+case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL_SECS=3600 ;; esac
+
+# _wedge_cap_rollback: reset the per-window wedge state after a cap-marker
+# write failure so the next poll re-accumulates from escalation 1 instead of
+# inheriting the saturated counter and an expired stale timer that would
+# amplify a single write failure into a wake-queue flood. On rollback
+# failure a transient `.wedge-rollback-failed-<key>` sentinel is written so
+# the wedge path stays silent for FM_ROLLBACK_SENTINEL_TTL_SECS; the top of
+# wedge_timer_check checks it before any wake or marker logic runs.
+# _wedge_cap_rollback <window> <key> <escalation-file> <since-file>
+_wedge_cap_rollback() {
+  local _win=$1 _key=$2 _esc=$3 _since=$4 _failed=0 _sentinel _sentinel_rc=0
+  { : > "$_esc"; } 2>/dev/null || _failed=1
+  { date +%s > "$_since"; } 2>/dev/null || _failed=1
+  clear_write_tracking "$_key" 2>/dev/null || true
+  [ "$_failed" -eq 0 ] && return 0
+  _sentinel="$STATE/.wedge-rollback-failed-$_key"
+  _sentinel_rc=0
+  { printf '%s rollback-failed\n' "$(date +%s 2>/dev/null || echo 0)" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
+  [ "$_sentinel_rc" -eq 0 ] || return 2
+  return 1
+}
+
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -1676,6 +1721,25 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n reason evidence guard guard_note
+  local _wkey _wrollback_sentinel _wrb_ts _wrb_window_marker _wrb_perm_marker _wrb_marker_ts _wrb_cap_reason _wrb_rm_status
+  _wkey=$(window_key "$win")
+  # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel
+  # (the SAME fs failure that broke the cap-marker write also broke the
+  # rollback). Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
+  # no wake, no marker write - so the operator observes one failure per
+  # wedge-event instead of a wake-queue flood under persistent fs failure.
+  _wrollback_sentinel="$STATE/.wedge-rollback-failed-$_wkey"
+  if [ -e "$_wrollback_sentinel" ]; then
+    _wrb_ts=$(head -1 "$_wrollback_sentinel" 2>/dev/null | awk '{print $1}')
+    case "$_wrb_ts" in
+      ''|*[!0-9]*) _wrb_ts=0 ;;
+    esac
+    if [ "$_wrb_ts" -ne 0 ] && [ $(( $(date +%s) - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
+      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); cap silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
+      return 0
+    fi
+    rm -f "$_wrollback_sentinel"
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1689,6 +1753,32 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Window-scoped cap marker silences ALL hashes for this WINDOW within
+        # FM_CAP_HORIZON_SECS, so a hash-churning busy pane cannot rebuild the
+        # escalation counter on a fresh hash and re-fire PERMANENTLY-WEDGED
+        # every FM_WEDGE_MAX_ESCALATIONS polls. Honored until the horizon
+        # elapses; after that the marker is stale and a new wedge re-fires.
+        _wrb_window_marker="$STATE/.wedge-permanent-$_wkey"
+        if [ -e "$_wrb_window_marker" ]; then
+          _wrb_marker_ts=$(cat "$_wrb_window_marker" 2>/dev/null || true)
+          case "$_wrb_marker_ts" in ''|*[!0-9]*) _wrb_marker_ts=0 ;; esac
+          if [ $(( $(date +%s) - _wrb_marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
+            return 0
+          fi
+        fi
+        # Per-hash cap marker silences the SAME hash within FM_CAP_HORIZON_SECS
+        # while letting a fresh stale hash in the same window escalate on its
+        # own merits.
+        if [ -n "$hash" ]; then
+          _wrb_perm_marker="$STATE/.wedge-permanent-$_wkey-${hash:0:12}"
+          if [ -e "$_wrb_perm_marker" ]; then
+            _wrb_marker_ts=$(cat "$_wrb_perm_marker" 2>/dev/null || true)
+            case "$_wrb_marker_ts" in ''|*[!0-9]*) _wrb_marker_ts=0 ;; esac
+            if [ $(( $(date +%s) - _wrb_marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
+              return 0
+            fi
+          fi
+        fi
         if evidence=$(wedge_wait_evidence "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
@@ -1708,7 +1798,57 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           guard_note="; guard ${guard%%$'\037'*} still reports CRITICAL (${guard#*$'\037'}) after its consecutive-deferral cap, so recheck the lane"
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$escalation_file"
+        # Brace-wrapped so a failed redirect's own diagnostic is captured by the
+        # wrapper's stderr rather than leaking past it; a wedge-cap failure path
+        # must report itself through triage_log only.
+        { echo "$n" > "$escalation_file"; } 2>/dev/null
+        # Cap-fire block: when FM_WEDGE_MAX_ESCALATIONS is configured above 0
+        # and the per-window escalation counter has reached the bound, emit
+        # ONE terminal wake (PERMANENTLY-WEDGED) and write BOTH cap markers
+        # so subsequent polls for this WINDOW short-circuit regardless of
+        # hash. The marker-write failures roll back cap state to avoid
+        # amplifying a single write failure into a queue flood; a rollback
+        # that itself fails writes a transient sentinel so the next polls
+        # stay silent for FM_ROLLBACK_SENTINEL_TTL_SECS.
+        if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
+          _wrb_cap_reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this WINDOW until FM_CAP_HORIZON_SECS elapses or operator manually removes BOTH STATE/.wedge-permanent-<key> AND STATE/.wedge-permanent-<key>-<hash12>)"
+          _wrb_cap_reason=$(stale_reason_naming_dialog "$_wrb_cap_reason" "$dialog")
+          if ! fm_wake_append stale "$win" "$_wrb_cap_reason"; then
+            triage_log "wedge fm_wake_append FAILED for cap on $win, no markers written (next poll will retry)"
+            exit 1
+          fi
+          if [ -n "$hash" ]; then
+            _wrb_perm_marker="$STATE/.wedge-permanent-$_wkey-${hash:0:12}"
+          else
+            _wrb_perm_marker="$STATE/.wedge-permanent-$_wkey"
+          fi
+          if ! { date +%s > "$_wrb_perm_marker"; } 2>/dev/null; then
+            _wrb_rm_status=0
+            _wedge_cap_rollback "$win" "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
+            case "$_wrb_rm_status" in
+              2) triage_log "wedge cap-marker write FAILED AND rollback AND sentinel write ALL FAILED on $win - no queue-flood suppression; operator MUST intervene"; exit 1 ;;
+              1) triage_log "wedge cap-marker write FAILED AND rollback ALSO FAILED on $win - sentinel set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification"; exit 1 ;;
+              *) triage_log "wedge cap-marker write FAILED on $win - cap state rolled back"; exit 1 ;;
+            esac
+          fi
+          if ! { date +%s > "$STATE/.wedge-permanent-$_wkey"; } 2>/dev/null; then
+            rm -f "$_wrb_perm_marker"
+            _wrb_rm_status=0
+            _wedge_cap_rollback "$win" "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
+            case "$_wrb_rm_status" in
+              2) triage_log "wedge window-scoped marker write FAILED AND rollback AND sentinel write ALL FAILED on $win"; exit 1 ;;
+              1) triage_log "wedge window-scoped marker write FAILED on $win AND rollback ALSO FAILED - sentinel set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS)"; exit 1 ;;
+              *) triage_log "wedge window-scoped marker write FAILED on $win - per-hash marker rolled back AND cap state reset"; exit 1 ;;
+            esac
+          fi
+          rm -f "$since_file"
+          clear_write_tracking "$(window_key "$win")"
+          : > "$escalation_file"
+          rm -f "$STATE/.wedge-rollback-failed-$_wkey"
+          triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
+          wake "$_wrb_cap_reason"
+          return 0
+        fi
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
