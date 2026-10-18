@@ -74,7 +74,9 @@ A named-model or named-product scope is an additional bound for that model alone
 Match the candidate to its `quota[]` row by that established provider, its credential key when the snapshot is schema 6 (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter), and scope.
 First use a row whose `accountKey` exactly matches the credential key.
 Only when there is no exact match, use a row whose producer-declared `accountKeys` contains the key, and only when exactly one row matches.
-Without a match, use the `default` row, else report unmeasured; conflicting covered-key matches are unmeasured, never selected by position or summed across accounts.
+Without an exact or covered-key match, use the `default` row, else report unmeasured.
+If no exact match exists and multiple rows cover the key, keep the candidate eligible but unranked, even with a `default` row.
+Never select a row by position or sum quotas across accounts.
 When TOON does not expose covered keys and the candidate has no direct match, use the permitted JSON fallback rather than infer an alias from its name.
 A stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
 

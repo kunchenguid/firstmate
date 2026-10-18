@@ -13,7 +13,10 @@
 # Snapshot schemas: fm_quota_json_valid accepts quota-axi schema 5 (one row per
 # provider, no accountKey) and schema 6 (every row carries accountKey, unique on
 # provider + accountKey; quota-axi emits it once any provider expands to more
-# than one account). Schema 5 keeps its exact pre-schema-6 rules so an older
+# than one account). Schema 6 permits an optional accountKeys array of
+# non-empty strings, including strings containing whitespace; an invalid
+# accountKeys value rejects the whole snapshot. An absent or empty array
+# adds no aliases. Schema 5 keeps its exact pre-schema-6 rules so an older
 # quota-axi keeps working unchanged. FM_QUOTA_ROW_JQ is the one join used to
 # bind a candidate to its row under either schema.
 
