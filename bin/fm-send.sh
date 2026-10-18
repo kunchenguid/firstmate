@@ -206,7 +206,7 @@
 # SECONDMATE's ledger names a call held in that mate's own backlog, which only
 # the mate's home can close. After the answer is durably delivered, fm-send
 # therefore also hands the mate home's own bin/fm-captain-hold.sh keyed-answer
-# intake one `<task>\t<answer>\tparent-relay` line per such key (a local mate
+# intake one `<task>\t<answer>\t` line per such key (a local mate
 # through a direct call into its recorded home, a remote mate through
 # fm-remote-secondmate-control.sh `answers`), so the call closes in the mate's
 # home within seconds instead of waiting for its model to read the message. That
@@ -919,7 +919,7 @@ fm_send_feed_mate_holds() { # <answer-text>
     task=${k#captain-hold-}
     task=${task%-*}
     [ -n "$task" ] || continue
-    lines="${lines}${task}"$'\t'"${note}"$'\t'"parent-relay"$'\n'
+    lines="${lines}${task}"$'\t'"${note}"$'\t'$'\n'
   done
   [ -n "$lines" ] || return 0
   budget=${FM_SEND_REMOTE_BUDGET:-30}
