@@ -1821,6 +1821,58 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   pass "host+hook: the next park takes over the cycle a main-only pass-through left, so one arm owns it"
 }
 
+# The take-over's own close of the left watcher is in the lifecycle ledger.
+take_over_closed() {  # <home> <left-watcher>
+  grep -q "	watcher_pid=$2	origin=attached	" "$1/state/.watch-cycle-exits.log" 2>/dev/null
+}
+
+# The live loop (2026-10-18): the left watcher was inside its herdr event wait,
+# a command substitution that holds TERM until it returns (up to the 15s poll
+# budget on bash 3.2), so it outlived the take-over's 5s stop bound. The
+# take-over fell back to attaching to the dying watcher, whose close published
+# downtime and left no successor; the next host's fresh watcher resurfaced that
+# downtime to main as an empty check: rearm-resurface, and main's Stop repeated
+# it. The take-over now waits for the stop it sent and owns the cycle.
+test_take_over_waits_for_a_left_watcher_that_defers_its_stop() {
+  local home
+  home=$(make_primary_home hook-takeover-deferred-stop)
+  printf 'project=demo\nwindow=default:w1:p1\nbackend=herdr\nharness=claude\n' > "$home/state/demo.meta"
+  cat > "$home/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'session list --json' ] || exit 1
+printf '{"sessions":[{"name":"default","socket_path":"/nonexistent/herdr.sock"}]}\n'
+SH
+  # The event reader blocks past the take-over's stop bound once the test has
+  # asked it to, as a full production poll budget does.
+  cat > "$home/fakebin/fake-eventwait" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+if [ -e "$FM_HOME/eventwait.block" ] && rm "$FM_HOME/eventwait.block" 2>/dev/null; then
+  : > "$FM_HOME/eventwait.blocking"
+  sleep 9
+else
+  sleep "$2"
+fi
+SH
+  chmod +x "$home/fakebin/herdr" "$home/fakebin/fake-eventwait"
+  export FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$home/fakebin/fake-eventwait"
+  leave_a_cycle_for_main_and_restart "$home"
+  : > "$home/eventwait.block"
+  wait_until 100 test -e "$home/eventwait.blocking" || fail "fixture: the left watcher never entered its event wait"
+  turn_end "$home"
+  wait_until 400 take_over_closed "$home" "$LEFT_WATCHER" \
+    || fail "deferred stop: the take-over never closed the left watcher $LEFT_WATCHER: $(cat "$home/state/.supervision-host.log")"
+  ! wait_until 80 hook_exited "$home" \
+    || fail "deferred stop: the take-over woke main: $(cat "$home/hook.err")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  host_owns_the_only_cycle "$home" \
+    || fail "deferred stop: the park did not own the home's only watcher cycle (left arm $LEFT_ARM):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  assert_re '^acked:' "$home/state/.watcher-down" "deferred stop: the take-over left a downtime episode open"
+  assert_no_re 'rearm-resurface' "$home/state/.supervision-host.log" "deferred stop: the take-over resurfaced a recovery to main"
+  assert_re 'reason=taken-over	' "$home/state/.watch-cycle-exits.log" "deferred stop: the take-over did not complete as a handover"
+  unset FM_BACKEND_HERDR_EVENTS_FORCE FM_BACKEND_HERDR_EVENT_READER
+  pass "host+hook: a take-over waits for a left watcher that defers its stop, so no empty recovery reaches main"
+}
+
 # A park stopped before its take-over stops the left cycle (here held in the
 # take-over's handover snapshot by the recovery-marker lock) must not forget
 # that cycle's arm: the park the Stop hook runs next still takes it over rather
@@ -3252,6 +3304,7 @@ test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
+test_take_over_waits_for_a_left_watcher_that_defers_its_stop
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main
 test_primary_without_a_verified_mirror_runs_away_only
