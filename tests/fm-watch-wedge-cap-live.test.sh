@@ -14,16 +14,35 @@
 # wedge timer exists to catch, and the cap's whole purpose is to bound what an
 # unattended supervisor spends re-notifying about exactly that pane.
 #
-# It demonstrates both halves of the contract in one run:
-#   1. the cap engaging - after FM_WEDGE_MAX_ESCALATIONS wedge escalations the
+# It demonstrates all three facts in one run, against the SAME workload:
+#   0. the UNCEILED baseline - with FM_WEDGE_MAX_ESCALATIONS at its default of
+#      0, a wedged pane escalates on every threshold forever. This is the
+#      behaviour the cap exists to bound, and it is what the incident that
+#      motivated the cap actually looked like; the incident therefore
+#      motivates the ceiling, and is not itself evidence the ceiling engaged.
+#   1. the cap engaging - at FM_WEDGE_MAX_ESCALATIONS wedge escalations the
 #      watcher publishes exactly one PERMANENTLY-WEDGED wake, writes both cap
 #      markers, and goes silent while the pane stays wedged;
 #   2. the cap releasing - once FM_CAP_HORIZON_SECS has elapsed the markers
 #      expire, the wedge re-escalates on its own merits, and the watcher is
 #      audible again without any operator action.
 #
-# It writes a timestamped transcript so a pull request can cite real output
-# rather than a claim.
+# Running the unceiled and ceiled arms back to back on one workload is what
+# makes this falsifiable rather than a demonstration: the same pane, the same
+# thresholds, the same watcher, one differing setting.
+#
+# Surface precision, because conflating these two is exactly the overstatement
+# this guard must not make. The pane here is a busy pane whose agent process is
+# still generating output, which routes through wedge_timer_check - the wedge
+# timer, and the only surface the cap covers. The non-terminal FIRST-SIGHT
+# stale surface is NOT covered by the cap: a pane that re-renders each poll
+# reaches that sibling path and still emits one stale wake per hash. That
+# residual is a documented limitation, not something this transcript shows
+# working, and no line here should be read as claiming otherwise.
+#
+# It writes a timestamped transcript, reprinted in full to stdout immediately
+# before cleanup so the run's own output is one self-contained evidence block
+# a pull request can cite verbatim.
 #
 # Ordinary CI has no cost-free way to keep a tmux server and a wedged process
 # alive for the horizon this run needs, so this is opt-in under fm_live_gate and
@@ -32,6 +51,11 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# hash_text lives here, not in lib.sh, and reset_lab_state seeds the pane hash
+# from it to put each arm at a fresh first sight. Same source as the sibling
+# watcher suites fm-wake-queue.test.sh and fm-watch-triage.test.sh.
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -62,7 +86,10 @@ say() {
 note() { printf '# %s\n' "$1"; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-MAX=2
+# The ceiled arm's bound. Three rather than two so the transcript shows the
+# train stopping at a count an operator could plausibly read at a glance.
+CEILING=3
+MAX=$CEILING
 # A horizon short enough to watch elapse, and a stale bound short enough to
 # reach the wedge path without a long wait. Both are the point of a live run:
 # the real production values are a day and four minutes, which no CI budget can
@@ -121,11 +148,15 @@ WINDOW_NAME=wedged
 # shell would be classified `dead` instead, and a dead endpoint is a different
 # contract (reported once, never re-escalated) - not the one the cap bounds.
 AGENT_BIN="$TMP_ROOT/wedged-claude"
+# The pane text the wedged worker renders, in this script's own scope. The
+# heredoc below prints this exact string, and reset_lab_state seeds the pane
+# hash from it, so keep the two in step when either changes.
+PANE_TEXT='claude> working (elapsed 00:00:01)'
 cat > "$AGENT_BIN" <<'AGENT'
 #!/usr/bin/env bash
 # A wedged worker: alive, occupying the pane, making no progress. It renders a
 # prompt-like line and then waits forever, which is what a hung agent looks like
-# from the outside.
+# from the outside. The printed line must stay identical to PANE_TEXT above.
 printf 'claude> working (elapsed 00:00:01)\n'
 sleep 2147483647
 AGENT
@@ -158,6 +189,7 @@ FM_HOME="$LAB_HOME" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' \
   _ "$ROOT/bin/fm-wake-lib.sh" "$LAB_HOME" "$TASK.status"
 
 key=$(printf '%s' "$WINDOW" | tr -c 'A-Za-z0-9' '_')
+KEY="$key"
 say "wedged worker recorded as $TASK (key=$key); its pane holds a live process that has made no progress"
 
 # Arm the busy record the production path reads, so the pane reads as an agent
@@ -174,10 +206,12 @@ touch -d '5 seconds ago' "$STATE/$TASK.meta" 2>/dev/null \
   || perl -e 'utime(time()-5, time()-5, $ARGV[0])' "$STATE/$TASK.meta"
 
 # watcher_cycle <label>: one real watcher cycle against the lab home, run with
-# the cap armed and the tmux socket pointed at the lab. Records its exit status
-# and the reason line it printed, then drains and acknowledges what it queued.
+# the cap bound in $MAX and the tmux socket pointed at the lab. Records its exit
+# status and the reason line it printed, then drains and acknowledges what it
+# queued. Set MAX=0 for the unceiled baseline arm, which is the shipped default.
 cycle=0
 CYCLE_WOKE=0
+CYCLE_REASON=''
 watcher_cycle() {
   local label=$1 out rc
   cycle=$((cycle + 1))
@@ -229,24 +263,65 @@ watcher_cycle() {
     '') CYCLE_WOKE=0 ;;
     *) CYCLE_WOKE=1 ;;
   esac
+  CYCLE_REASON="$reason"
   say "$label -> exit=$rc woke=$CYCLE_WOKE reason=${reason:-none}"
   # Acknowledge so the next cycle starts from an empty queue and its exit
   # status reflects the pane, not a leftover wake.
   FM_HOME="$LAB_HOME" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 || true
   cat "$out" >> "$TRANSCRIPT"
 }
+# reset_lab_state: put the wedged worker back to a fresh first sight, so the
+# next arm starts from the same state the previous one started from. Without
+# this the second arm inherits the first arm's markers and counter, and the
+# comparison would be between a warm and a cold window rather than between the
+# cap setting and its absence.
+reset_lab_state() {
+  rm -f "$STATE"/.wedge-permanent-* "$STATE"/.wedge-rollback-failed-* \
+    "$STATE"/.wedge-escalations-* "$STATE"/.stale-since-* "$STATE"/.stale-* \
+    "$STATE"/.count-* "$STATE"/.hash-*
+  printf '%s' "$(hash_text "$PANE_TEXT")" > "$STATE/.hash-$KEY"
+  printf '1\n' > "$STATE/.count-$KEY"
+  touch -d '5 seconds ago' "$STATE/$TASK.meta" 2>/dev/null \
+    || perl -e 'utime(time()-5, time()-5, $ARGV[0])' "$STATE/$TASK.meta"
+}
 
-# --- Part 1: the cap engages on a genuinely wedged worker -------------------
-say "part 1: drive the wedged worker past the cap"
-watcher_cycle "cycle 1 (first sight: absorbed)"
-watcher_cycle "cycle 2 (escalation 1)"
-watcher_cycle "cycle 3 (escalation 2: cap threshold)"
+# --- Part 0: the UNCEILED baseline, at the shipped default -------------------
+# This arm exists so the ceiled arm has something to be compared against. With
+# the cap at its default of 0 the watcher escalates the same wedged pane on
+# every threshold, indefinitely. That train is the behaviour the cap bounds and
+# the shape the motivating incident took; the incident motivates the ceiling
+# and is NOT evidence that the ceiling engaged.
+say "part 0: UNCEILED baseline at the shipped default FM_WEDGE_MAX_ESCALATIONS=0"
+reset_lab_state
+MAX=0
+cycle=0
+unceiled=0
+i=0
+while [ "$i" -lt 5 ]; do
+  i=$((i + 1))
+  watcher_cycle "unceiled escalation $i"
+  [ "$CYCLE_WOKE" -eq 1 ] || fail "the unceiled baseline went quiet at escalation $i - that is not the baseline this guard measures"
+  unceiled=$((unceiled + 1))
+done
+say "UNCEILED: $unceiled consecutive wakes from one wedged pane with the cap at its default, and nothing bounds the next one"
+[ "$unceiled" -ge 4 ] \
+  || fail "the unceiled baseline produced only $unceiled wakes; too few to show the train"
+
+# --- Part 1: the cap engages on the same workload --------------------------
+say "part 1: the SAME workload with FM_WEDGE_MAX_ESCALATIONS=$CEILING (ceiled)"
+reset_lab_state
+MAX=$CEILING
+cycle=0
+watcher_cycle "ceiled cycle 1 (first sight: absorbed)"
+watcher_cycle "ceiled cycle 2 (escalation 1)"
+watcher_cycle "ceiled cycle 3 (escalation 2)"
+watcher_cycle "ceiled cycle 4 (escalation $MAX: cap threshold)"
 
 terminal_fired=0
 for f in "$TMP_ROOT"/cycle-*.out; do
   grep -q 'PERMANENTLY-WEDGED' "$f" 2>/dev/null && terminal_fired=$((terminal_fired + 1))
 done
-say "cycles that printed PERMANENTLY-WEDGED: $terminal_fired (cap bound is $MAX)"
+say "ceiled cycles that printed PERMANENTLY-WEDGED: $terminal_fired (cap bound is $MAX)"
 [ "$terminal_fired" -ge 1 ] \
   || fail "the cap never engaged on a genuinely wedged worker; no cycle printed PERMANENTLY-WEDGED"
 
@@ -269,11 +344,14 @@ while [ "$i" -lt 2 ]; do
   silenced=$((silenced + 1))
 done
 silence_elapsed=$(( $(date +%s) - silence_start ))
-say "post-cap polls that produced no further wake: $silenced (over ${silence_elapsed}s, inside the ${HORIZON_SECS}s horizon)"
+say "ceiled: $silenced further polls produced no wake at all (over ${silence_elapsed}s, inside the ${HORIZON_SECS}s horizon)"
 [ "$silenced" -ge 2 ] || fail "could not confirm the cap holds the still-wedged pane quiet"
 # The silence only proves anything if the probes ran INSIDE the horizon.
 [ "$silence_elapsed" -lt "$HORIZON_SECS" ] \
   || fail "the silence probes ran ${silence_elapsed}s, past the ${HORIZON_SECS}s horizon, so they proved nothing about the cap"
+
+# The comparison, stated in the transcript itself rather than left to the reader.
+say "COMPARISON: same pane, same watcher, same thresholds - $unceiled wakes unceiled at the default versus $silenced silent polls ceiled at $MAX, with one terminal PERMANENTLY-WEDGED wake instead of a train"
 
 # --- Part 2: the cap releases itself after the horizon ----------------------
 say "part 2: wait out FM_CAP_HORIZON_SECS and confirm the cap releases itself"
@@ -281,22 +359,36 @@ remaining=$(( HORIZON_SECS - silence_elapsed + 2 ))
 say "sleeping ${remaining}s so the ${HORIZON_SECS}s cap horizon elapses with no operator action"
 sleep "$remaining"
 
-# A wedge can only re-escalate once its counter has re-accumulated, so drive
-# the same cycles again and require a real wake on a pane nobody touched.
+# A wedge can only re-escalate once its counter has re-accumulated, so drive the
+# same cycles again and require the pane to be audible again. The counter starts
+# from zero after the cap fired, so the first post-horizon wake is an ordinary
+# escalation (escalation 1) and the pane reaches the bound again one cycle
+# later. Assert the lane is audible, NOT that the very next cycle carries the
+# terminal marker: requiring the terminal wake on the first cycle would assert a
+# re-fire that the reset counter makes false.
 watcher_cycle "post-horizon cycle 1"
-watcher_cycle "post-horizon cycle 2"
 [ "$CYCLE_WOKE" -eq 1 ] \
   || fail "after the cap horizon elapsed the pane stayed silent; the cap never released itself"
+first_post="$CYCLE_REASON"
+watcher_cycle "post-horizon cycle 2"
+released="$CYCLE_WOKE"
 
-say "the pane is audible again with no operator action and both markers untouched"
+say "post-horizon the pane is audible again with no operator action: cycle 1 woke ($first_post), cycle 2 woke=$released"
 markers_after=$(find "$STATE" -maxdepth 1 -name '.wedge-permanent-*' | wc -l | tr -d ' ')
-say "cap markers still on disk after the horizon (stale, not yet rewritten): $markers_after"
+say "cap markers on disk after the horizon: $markers_after"
 
-say "cap engaged once at the bound, held the wedged pane quiet for $silenced polls inside the horizon, and released itself on the horizon with no operator action"
+say "SUMMARY: unceiled $unceiled consecutive wakes at the default; ceiled $terminal_fired terminal wake then $silenced silent polls at FM_WEDGE_MAX_ESCALATIONS=$MAX; audible again after the ${HORIZON_SECS}s horizon with no operator action"
 say "wedge-cap live run complete"
-pass "the cap engaged on a real wedged worker and released itself after FM_CAP_HORIZON_SECS"
+pass "the same wedged worker escalates without bound at the default and is capped and then released at FM_WEDGE_MAX_ESCALATIONS=$MAX"
 
-note "transcript: $TRANSCRIPT"
+# Reprint the whole transcript as one self-contained block before cleanup, so
+# the run's own output ends with the citable evidence rather than a pointer to
+# a temporary file this script is about to delete.
+say ""
+say "----- transcript begin -----"
+cat "$TRANSCRIPT"
+say "----- transcript end -----"
+
 cleanup
 trap - EXIT
 exit 0
