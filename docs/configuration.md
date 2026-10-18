@@ -426,6 +426,23 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, and paseo, since herdr, zellij, cmux, and paseo are session providers only; Orca provides both the task worktree and terminal endpoint.
 
+### Legacy cross-clone Treehouse slots
+
+Treehouse keys a pool by the clone's directory name and origin, so before secondmate homes allocated from their own `state/treehouse/` root, a secondmate home's clone and the primary home's clone of the same project could share one pool under Treehouse's default root.
+Slots created that way remain in the default-root pool after upgrade, and one of them may belong to another clone than the one now spawning from it.
+A Treehouse spawn refuses such a slot before any fetch, reset, slot claim, or launch: the spawn fails with `treehouse get did not enter an isolated worktree within 60s`, naming `it belongs to a different clone` and both common git dirs.
+That refusal leaves the slot and its contents as found: Firstmate does not migrate, quarantine, or delete it or run `treehouse return` on it, and it does not recover any older task that used it.
+Retrying the spawn does not fix the routing, because Treehouse may hand the same free slot out again.
+
+To identify which clone a refused slot belongs to, gather read-only evidence only:
+
+- Compare `git -C <slot> rev-parse --path-format=absolute --git-common-dir` with the same command run in each candidate project clone; the slot belongs to the clone whose common git dir matches.
+- Read the slot's owner claim at `<pool>/<slot>/.fm-slot-owner`, a sibling of the repository checkout, whose `task=` and `home=` lines name the task and home that last claimed it; a slot with no claim records neither.
+- Read the named home's task record for that task, if one exists, before drawing any conclusion about the slot's work.
+
+Stop if the evidence is ambiguous: common git dirs that match no known clone, a claim naming a home or task that cannot be found, or a claim that disagrees with the common git dir.
+Any future migration, return, or deletion of a legacy slot is a separate change that needs explicit human authority for that slot, given only after its landed and unlanded work, including uncommitted changes and unpushed commits, has been checked.
+
 ### Backend selection order
 
 New spawns choose the backend in this order:
