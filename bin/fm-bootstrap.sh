@@ -1666,7 +1666,9 @@ detect_claude_permissions() {
       mode=$(jq -r '.permissions.defaultMode? // empty | strings' "$file" 2>/dev/null)
       [ -z "$mode" ] || mode_file=$file
     fi
-    jq -e '[.permissions.allow? // [] | .[]? | strings | select(test("^Bash\\(.*bin/fm-"))] | length > 0' \
+    jq -e --arg root "$FM_ROOT" '[.permissions.allow? // [] | .[]? | strings
+      | select(. == "Bash(" + $root + "/bin/fm-*:*)"
+          or . == "Bash(bin/fm-*:*)")] | length > 0' \
       "$file" >/dev/null 2>&1 && rule=1
   done
   [ "$mode" = auto ] && [ "$rule" -eq 0 ] || return 0

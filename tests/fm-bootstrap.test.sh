@@ -334,6 +334,8 @@ test_claude_permissions() {
     mkdir -p "$case_dir/home" "$case_dir/root/.claude" "$case_dir/user"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
+    local_body=${local_body//@CASE@/$case_dir}
+    user_body=${user_body//@CASE@/$case_dir}
     [ "$local_body" = - ] || printf '%s\n' "$local_body" > "$case_dir/root/.claude/settings.local.json"
     [ "$user_body" = - ] || printf '%s\n' "$user_body" > "$case_dir/user/settings.json"
     [ "$kind" != secondmate ] || : > "$case_dir/home/.fm-secondmate-home"
@@ -349,8 +351,10 @@ test_claude_permissions() {
   done <<'ROWS'
 auto mode without a rule is reported^-^{"permissions":{"defaultMode":"auto"}}^claude^primary^@LINE@
 auto mode off without a rule is not reported^-^{"permissions":{"defaultMode":"default"}}^claude^primary^
-a local allow rule clears it^{"permissions":{"allow":["Bash(/home/me/firstmate/bin/fm-*:*)"]}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
+a local allow rule clears it^{"permissions":{"allow":["Bash(@CASE@/root/bin/fm-*:*)"]}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
 a user allow rule clears it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-*:*)"]}}^claude^primary^
+a single script rule does not clear it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(@CASE@/root/bin/fm-doctor.sh:*)"]}}^claude^primary^@LINE@
+a different checkout rule does not clear it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(/home/me/firstmate/bin/fm-*:*)"]}}^claude^primary^@LINE@
 a local mode overrides user auto mode^{"permissions":{"defaultMode":"default"}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
 a non-Claude primary is never checked^-^{"permissions":{"defaultMode":"auto"}}^pi^primary^
 a secondmate home is never checked^-^{"permissions":{"defaultMode":"auto"}}^claude^secondmate^
