@@ -1166,6 +1166,37 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Contract: the inbox listing the brief tells a worker to run succeeds silently
+# on an empty or absent inbox and lists messages in numeric order, in bash and zsh.
+test_inbox_listing_command_is_safe_on_empty_inbox() {
+  local home brief cmd inbox shell_name out status
+  home="$TMP_ROOT/inbox-listing-home"
+  mkdir -p "$home/data" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-inbox-list some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-inbox-list/brief.md"
+  # shellcheck disable=SC2016
+  cmd=$(sed -n 's/.*list them with `\(find [^`]*\)`.*/\1/p' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "the brief does not give a find-based inbox listing command"
+  inbox="$home/state/brief-inbox-list.inbox"
+  for shell_name in bash zsh; do
+    command -v "$shell_name" >/dev/null 2>&1 || continue
+    rm -rf "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: absent inbox listing was not silent success (exit $status): $out"
+    mkdir -p "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: empty inbox listing was not silent success (exit $status): $out"
+    : > "$inbox/1000.msg"
+    : > "$inbox/999.msg"
+    out=$("$shell_name" -c "$cmd" 2>&1 | sed 's#.*/##' | tr '\n' ' ')
+    [ "$out" = "999.msg 1000.msg " ] || fail "$shell_name: messages not listed in numeric order: $out"
+  done
+  pass "fm-brief: inbox listing is silent on empty/absent inbox and numerically ordered"
+}
+
 # Contract: a waiting worker spends no turns. A decision wait ends the turn, an
 # external wait sleeps in one bounded blocking shell command sized per harness,
 # and a waiting worker neither polls its inbox nor polls a pipeline between holds.
@@ -1626,6 +1657,7 @@ test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
+test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_home_brief_include_is_appended_last

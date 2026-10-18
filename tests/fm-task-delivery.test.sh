@@ -35,6 +35,7 @@ make_home() {  # <name> [<registry-line>...]
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
+  git -c user.name=test -c user.email=test@example.com -C "$projects/proj" commit -q --allow-empty -m init || fail "could not commit project fixture"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   if [ "$#" -gt 0 ]; then

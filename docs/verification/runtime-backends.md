@@ -6,6 +6,12 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Polytoken worker lifecycle
+
+Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
+[Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
+This does not verify a Polytoken primary, secondmate, or native Herdr pane.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
@@ -2369,7 +2375,7 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 - Picker primitives: on 2026-08-26, after the final portable-shell and sentinel fixes, `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` again printed `ok - the installed Pi still bounds the picker's list and ranks its search` against the same installed 0.81.1 package.
   That case imports the real `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder`, renders a 42-row catalog through the real `SelectList` at the visible bound the extension asks for, and fails naming the installed version if Pi stops exporting a primitive or stops bounding what it renders; it skips when no npm package is installed, and the portable stubbed cases in the same file hold the ordering, search, and branch-only-pin behavior everywhere.
 - Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1` with the branch extension and its imported libraries included.
-  This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Firstmate catalog.
+  [The extension's effort-vocabulary assertion](../../.pi/extensions/fm-branch-supervision.ts) owns that invariant; the [typecheck](../../tests/fm-pi-primary-types.test.sh) owns the checked SDK matrix.
 - Historical custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
   This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
@@ -2466,8 +2472,9 @@ The current portable regression proves that only consecutive provider errors cou
 [`pi-supervision-branch.md`](../pi-supervision-branch.md) owns the current cooldown, recovery, and re-latch contract and points to the regression that now covers it.
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
-The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
-The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
+The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the npm surface; refresh the SDK construction, picker, and renderer evidence after every Pi upgrade by rerunning the applicable live guard probes and picker regression with `FM_PI_PACKAGE_DIR` pointing at a matching npm install when one exists.
+The [strict production-consumer typecheck](../../tests/fm-pi-primary-types.test.sh) owns its dependency contract; historical typecheck commands and outputs here do not describe its current SDK selection.
+The [live-guard contract](../pi-supervision-branch.md#live-guards) owns the current fallback observations and fixture limits; rerun it against the matching importable Pi package to refresh SDK fallback evidence.
 
 ### 2026-09-02 streaming-time watcher delivery
 
@@ -2550,7 +2557,7 @@ ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
 ```
 
 Every record read in those regressions ultimately goes through the real `bin/fm-afk-contract.sh`, with fixture wrappers used only to archive at deterministic call boundaries; an absent record, an archived record, and an invalid record are proven to restore attended guarded-action behavior rather than being assumed to.
-Against the installed 0.81.1 package the typecheck reports a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that this change does not touch; the option exists from the 0.84 line on, which is why the typecheck evidence uses the newer package as the earlier entries do.
+At that verification, checking against the installed 0.81.1 package reported a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that the away-posture change did not touch; the option exists from the 0.84 line on, which is why that typecheck evidence used the newer package as the earlier entries did.
 The real Pi/Herdr return guard (`FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh`) remains the owner of the live return-brief proof; it loads no supervision extension into its synthetic primary and does not yet exercise the parked-main scenario, which is a follow-up for a Herdr-lab-guarded task.
 
 ### 2026-09-20 the away words execute

@@ -41,6 +41,8 @@
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
 #       failed.
+#   (m) FM_CREW_STATE_*_OVERRIDE guard: a mismatched-basename override is
+#       ignored, a matching one is honoured.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -121,14 +123,17 @@ case "${1:-}" in
   runs)
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
   daemon)
-    # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
-    # `no-mistakes daemon status` does when the daemon is not running.
+    # FM_FAKE_DAEMON_DOWN: a missing/refused socket makes the probe fail.
+    # A clean stop instead exits 0 and prints "○ daemon not running".
     # FM_FAKE_DAEMON_TIMEOUT: the probe does not answer at all, which is what
     # the bounded call reports as 124 when `timeout` kills a slow daemon status.
     [ -z "${FM_FAKE_DAEMON_PROBE_LOG:-}" ] || printf 'probe\n' >> "$FM_FAKE_DAEMON_PROBE_LOG"
     [ "${FM_FAKE_DAEMON_TIMEOUT:-0}" = 1 ] && exit 124
-    [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
-    printf '%s\n' 'daemon running (pid 4242)'
+    if [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ]; then
+      printf '%s\n' "${FM_FAKE_DAEMON_OUTPUT-connection refused}" >&2
+      exit 1
+    fi
+    printf '%s\n' "${FM_FAKE_DAEMON_OUTPUT-  ● daemon running (pid 4242)}"
     exit 0 ;;
 esac
 exit 0
@@ -358,6 +363,7 @@ reset_fakes() {
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
   FM_FAKE_DAEMON_TIMEOUT=0
+  FM_FAKE_DAEMON_OUTPUT='  ● daemon running (pid 4242)'
   FM_FAKE_DAEMON_PROBE_LOG=
   FM_FAKE_PR_STATE=MERGED
   FM_FAKE_PR_MERGED=true
@@ -380,6 +386,7 @@ reset_fakes() {
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOW_GONE FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
+  export FM_FAKE_DAEMON_OUTPUT
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
@@ -3373,6 +3380,59 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+# (m) override guard: FM_CREW_STATE_*_OVERRIDE is honoured only when its
+# basename is the asked task's own file name. A mismatched override inherited
+# from another task's environment must fall through to $STATE/$ID.*, while the
+# snapshot's own matching-name override keeps steering the read at the captured
+# generation.
+test_mismatched_state_override_is_ignored() {
+  reset_fakes
+  local d out
+  d=$(new_case override-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-ovr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ovr.meta" "window=fm:fm-feat-ovr" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: real task log line\n' > "$d/state/feat-ovr.status"
+  # Another task's snapshot capture, under snapshot-style names.
+  fm_write_meta "$d/state/feat-other.meta" "window=fm:fm-feat-other" "worktree=$d/foreign-missing-wt" "kind=ship" "harness=claude"
+  printf 'blocked: other task log line\n' > "$d/state/feat-other.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ovr
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/state/feat-other.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$d/state/feat-other.status" \
+    run_crew_state "$d" feat-ovr)
+  assert_contains "$out" "state: working" "a mismatched override must be ignored: the task's own working log line wins"
+  assert_contains "$out" "source: status-log" "a mismatched override must fall through to the task's own status log"
+  assert_not_contains "$out" "worktree gone" "a mismatched metadata override must fall through to the task's live worktree"
+  assert_not_contains "$out" "other task log line" "a mismatched override must never surface the other task's status"
+  pass "override guard: a foreign-named override is ignored and the task's own state files are read"
+}
+
+test_matched_state_override_is_honoured() {
+  reset_fakes
+  local d out
+  d=$(new_case override-match)
+  make_repo_on_branch "$d/wt" fm/feat-ovr2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ovr2.meta" "window=fm:fm-feat-ovr2" "worktree=$d/live-missing-wt" "kind=ship" "harness=claude"
+  printf 'working: live log line\n' > "$d/state/feat-ovr2.status"
+  # The fleet snapshot's captured generation for THIS task: matching names.
+  mkdir -p "$d/snapshot"
+  fm_write_meta "$d/snapshot/feat-ovr2.meta" "window=fm:fm-feat-ovr2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: snapshot captured status\n' > "$d/snapshot/feat-ovr2.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ovr2
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/snapshot/feat-ovr2.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$d/snapshot/feat-ovr2.status" \
+    run_crew_state "$d" feat-ovr2)
+  assert_contains "$out" "state: paused" "a matched-name override must be honoured over the live status log"
+  assert_contains "$out" "source: status-log" "a matched-name override reads the captured log through the normal source"
+  assert_not_contains "$out" "worktree gone" "a matched-name metadata override must use the captured worktree"
+  pass "override guard: a matching-name override still steers the read at the captured generation"
+}
+
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
@@ -5282,6 +5342,46 @@ EOF
   pass "a coarse failed record with a dead daemon reads unknown"
 }
 
+# Exit 0 alone does not prove a live daemon: only a positive running answer
+# licenses head-free attribution. A timeout remains unanswered rather than down.
+test_daemon_probe_requires_positive_running_answer() {
+  local probe d rebased out expected
+  for probe in running stopped empty unexpected absent refused timeout; do
+    reset_fakes
+    d=$(new_case "probe-answer-$probe")
+    make_repo_on_branch "$d/wt" fm/feat-probeanswer
+    rebased=$(make_rebased_head "$d/wt")
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-probeanswer.meta" "window=fm:fm-feat-probeanswer" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'failed: earlier run failed\n' > "$d/state/feat-probeanswer.status"
+    FM_FAKE_RUN_HEAD=$rebased
+    FM_FAKE_AXI_STATUS="$(run_running fm/feat-probeanswer)
+branch_sync:
+  state: synced"
+    expected=failed
+    case "$probe" in
+      running) expected=working ;;
+      stopped) FM_FAKE_DAEMON_OUTPUT='  ○ daemon not running' ;;
+      empty) FM_FAKE_DAEMON_OUTPUT='' ;;
+      unexpected) FM_FAKE_DAEMON_OUTPUT='unknown daemon status' ;;
+      absent|refused)
+        FM_FAKE_DAEMON_DOWN=1
+        FM_FAKE_DAEMON_OUTPUT="socket $probe"
+        ;;
+      timeout) FM_FAKE_DAEMON_TIMEOUT=1; expected=working ;;
+    esac
+    arm_idle_record "$d/state" feat-probeanswer
+    out=$(run_crew_state "$d" feat-probeanswer)
+    assert_contains "$out" "state: $expected" "$probe: daemon answer controls live-run attribution"
+    if [ "$expected" = working ]; then
+      assert_contains "$out" 'source: run-step' "$probe: live run stays bound"
+    else
+      assert_contains "$out" 'source: status-log' "$probe: stale run cannot override the crew log"
+    fi
+    pass "daemon probe classifies $probe"
+  done
+}
+
 # A probe that does not ANSWER proves nothing about the daemon, so it must not
 # suppress a live rebased run: otherwise a slow `daemon status` on a busy fleet
 # drops the crew back to a stale `failed:` log line, and the crew flaps between
@@ -5709,6 +5809,8 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
+test_mismatched_state_override_is_ignored
+test_matched_state_override_is_honoured
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
@@ -5781,6 +5883,7 @@ test_selected_route_dead_daemon_names_the_run_once
 test_head_tied_row_reads_the_same_whichever_run_axi_names
 test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
+test_daemon_probe_requires_positive_running_answer
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict
 test_coarse_live_row_keeps_the_original_supersede_note

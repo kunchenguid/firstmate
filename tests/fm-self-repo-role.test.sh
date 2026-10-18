@@ -608,6 +608,7 @@ test_spawn_consent_agreement() {
   # the spawn passes the gate to whatever fails after.
   local proj="$TMP_ROOT/consent-foreign"
   git init -q "$proj" || fail "could not initialize foreign fixture"
+  git_commit "$proj" init
   git -C "$proj" remote add origin https://github.com/someone/elseware.git
   write_ship_brief "$home" spawn-consent-b4 " upstream-consent=$PUB_TARGET"
   out=$(run_spawn "$home" spawn-consent-b4 "$proj" claude --mode no-mistakes --yolo off \

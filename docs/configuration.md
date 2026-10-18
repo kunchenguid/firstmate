@@ -504,6 +504,7 @@ Legacy tmux metadata remains cleanup-compatible when its exact window name is `f
 
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+The local `config/herdr-project-groups` file opts a home in to display-only Herdr project groups; [Project groups](herdr-backend.md#project-groups) owns its values, rules, tags, inheritance, and limits.
 
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
@@ -648,9 +649,44 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Wedge evidence guards (config/wedge-evidence-guards)
+
+The optional local, gitignored `config/wedge-evidence-guards` file opts this home into consulting operator-owned [Jev guards](jev-guards.md) before the watcher wedge-escalates a quiet live pane.
+It lists one absolute guard executable path per line, and blank lines and `#` comments are skipped.
+The file and every listed executable must be regular files owned by the watcher's user and not group or world writable, or they are never run.
+
+### When a guard defers an alarm
+
+Only at the wedge threshold, after the declared-wait, worktree-write, and dead-endpoint checks have all let the escalation through, the watcher runs each guard as `<guard> --json` with `FM_GUARD_TASK` and `FM_GUARD_ENDPOINT` set, bounded by `FM_WEDGE_GUARD_TIMEOUT_SECS`.
+The first guard that prints one JSON object with `status` `CRITICAL` and a non-empty `recommendation` defers that escalation by one window, without advancing the escalation count.
+After `FM_WEDGE_GUARD_DEFER_MAX` consecutive deferrals the escalation fires anyway, and its reason names the guard and the first line of its recommendation.
+A timeout, non-zero exit, malformed output, `OK`, `WARNING`, or `UNKNOWN` changes nothing, and a dead or missing endpoint is reported before any guard is asked.
+A guard's answer is evidence only and never authorizes a decision, merge, cleanup, or any other action.
+
+With the file absent the watcher runs no guard, writes no record, and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
+The file is home-local and not inherited by secondmate homes.
+
+### Example operator family
+
+Firstmate ships no default guard for this; host-specific families belong to the operator's own layer.
+For example, an operator whose workers hold numbered tickets in a local queue directory could list a guard like this:
+
+```sh
+#!/bin/sh
+# CRITICAL while this task holds a queue ticket whose recorded job is alive.
+ticket="$HOME/queue/$FM_GUARD_TASK.ticket"
+if [ -f "$ticket" ] && kill -0 "$(head -n 1 "$ticket")" 2>/dev/null; then
+  echo '{"name":"ticket-dir","status":"CRITICAL","recommendation":"queue ticket held by a live job"}'
+else
+  echo '{"name":"ticket-dir","status":"OK","recommendation":"no live queue ticket"}'
+fi
+```
+
+`bin/fm-watch.sh`'s `wedge_guard_evidence` and `wedge_defer_guard` own the exact invocation, deferral record, and fail-open boundaries.
+
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
+The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
 Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
 
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
@@ -830,6 +866,11 @@ commandcode (Command Code) is verified for crewmate and scout launches only; a s
 It runs only on the tmux and Herdr backends; a zellij, cmux, or orca launch is refused because those backends supply no Command Code pane identity, without which its idle composer placeholder never reads empty and steering stalls.
 Its busy-state wiring is a tracked mod loaded per process with `--mod`, so no user or project Command Code settings are edited; [its adapter reference](../.agents/skills/harness-adapters/references/harness/commandcode.md) owns the launch facts and [Command Code verification](verification/commandcode.md) owns the live evidence.
 
+Polytoken is verified for crewmate and scout launches only; [its adapter reference](../.agents/skills/harness-adapters/references/harness/polytoken.md) owns the operating contract and [verification record](verification/polytoken.md) owns the live evidence.
+It has no primary or secondmate supervision protocol.
+The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
+The first-start license dialog requires an operator decision and is never accepted automatically.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.
@@ -866,6 +907,7 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
+For a separate account choice for one local secondmate, see [per-secondmate account pins](#per-secondmate-account-pins).
 
 ### Per-launch overrides and inherited defaults
 
@@ -976,7 +1018,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
-The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
+The pin is opt-in: without a home-wide or per-secondmate pin, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
 
 Both files are local and gitignored.
 
@@ -1000,7 +1042,8 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 
 ### Launch scope and sign-in checks
 
-When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+When a file is present, launches of that runner from this home use it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+A local secondmate can override this default with its own [per-secondmate account pin](#per-secondmate-account-pins).
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
@@ -1018,10 +1061,31 @@ A home that authenticates Claude through environment credentials on purpose shou
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
 The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
 
-Pins are not inherited into secondmate homes: a local secondmate agent launches on the launching home's pin, while the secondmate's own workers read the secondmate home's files.
+Pins are not inherited into secondmate homes: the secondmate's own workers read that home's `config/claude-account` and `config/pi-account` files independently.
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+### Per-secondmate account pins
+
+To choose an account for one local secondmate's own agent, create `config/secondmate-accounts/<id>/claude-account` or `config/secondmate-accounts/<id>/pi-account` in the primary home.
+Use the secondmate's registered identifier for `<id>`.
+These private files use the same [file format and provider selection](#file-format-and-provider-selection), sign-in checks, and refusal rules as the home-wide worker pins.
+
+The matching per-secondmate file overrides the primary home's matching worker pin for that secondmate alone.
+An absent per-secondmate file preserves the existing home-wide pin or unpinned behavior exactly.
+Other secondmates and ordinary workers remain unchanged.
+A pin for another runner does not apply, and `pi` and `pi-signed` share `pi-account`.
+An empty, malformed, unreadable, or unusable per-secondmate pin refuses with its path and reason rather than falling back to the primary's account.
+
+For example, `config/secondmate-accounts/work/claude-account` containing `/home/me/.claude-work` selects that existing Claude login for the local secondmate named `work`.
+Removing that file restores the primary home's account selection on the next launch.
+Every spawn, control-plane relaunch, and automatic recovery reads the durable setting again, never a previous task record or ambient account choice.
+After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
+The relaunch checks the selected pin before stopping the current agent.
+
+Per-secondmate pins stay in the primary home and are not inherited or copied into the secondmate's home.
+A matching primary-side per-secondmate pin for a remote route refuses before remote launch, because its account must be configured on that host instead.
 
 ## Lavish server address (config/lavish-axi-host)
 
@@ -1488,9 +1552,7 @@ Local routes use direct guarded filesystem operations, while remote routes deleg
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.
 
-- When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
-- A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
-- The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
+- The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the local and remote re-read behavior shared with locked bootstrap inheritance, including unchanged retries and interrupted transfers.
 - That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 - Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
@@ -1535,7 +1597,7 @@ The second condition is the reason the check exists.
 An update can install correctly and stay inert because an earlier `PATH` entry still holds an older copy, and a check that only asks whether a newer version is published reports that host as up to date.
 
 The script therefore runs every copy of a watched command found on `PATH` and asks it for its own version, rather than trusting one lookup or reading a version out of a directory name.
-It only reports; it never installs, updates, fetches, or changes `PATH`, a version manager, or any installed tool.
+It only reports; it never installs or updates tools, fetches into a watched git repository, or changes `PATH` or a version manager.
 
 This section is the single owner of the canonical schema.
 `bin/fm-tool-update-check.sh` owns probe mechanics, cadence, and the report record.
@@ -1549,6 +1611,7 @@ This section is the single owner of the canonical schema.
       "version_args": ["<optional args that make it print its version, default --version>"],
       "announce_pattern": "<optional extended regex matching the tool's own update announcement>",
       "announce_args": ["<optional args for the command that carries that announcement, default version_args>"],
+      "version_url": "<optional https URL whose body carries the newest published version>",
       "git": {
         "repo": "<optional absolute path to a local clone>",
         "remote": "<optional remote name, default origin>",
@@ -1566,6 +1629,9 @@ This section is the single owner of the canonical schema.
 - The announcement counts as `update available` only when the version it names is newer than the newest installed copy found; a version already installed is reported only as `update not in effect`, so one completed install does not report both in the same sweep. An announcement naming no readable version is reported as an available update as before.
 - A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
 - `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
+- A tool whose CLI never announces its own updates (Claude Code is one) can add `version_url` to its `command` entry: one HTTPS URL without whitespace or control characters whose response body carries the newest published version.
+- It is fetched read-only with curl inside the same probe bound; the first dotted numeric version in the body is compared with the newest installed copy found.
+- `update available` is reported only when the published version is newer than every installed copy found; a failed request, a body without a readable version, or a missing curl is reported as that tool's own check failure.
 - An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 - A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
 - An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
@@ -2477,6 +2543,8 @@ FM_BACKLOG_ROW_TIMEOUT_SECS=10   # seconds bounding each backlog row read (bin/f
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks, including the lock waits the worker makes before them; hitting it prints an actionable NETWORK_CHECKS line, and a lock a live process still holds at the deadline ends the worker with a failed-rerun record (publication and delivery are bounded by FM_SESSION_START_TIMEOUT the same way)
+FM_SECONDMATE_CONVERGENCE_TIMEOUT=75   # shared per-mate deadline in seconds for remote startup tracked-file sync and inheritance push; bin/fm-bootstrap.sh owns its scope and timeout handling
+FM_REMOTE_INHERIT_PUSH_JOBS=4   # inherited items one remote inheritance push sends at a time, 1 for strictly one after another; capped at 16 (bin/fm-remote-inherit-push.sh)
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
@@ -2571,6 +2639,8 @@ FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_WEDGE_GUARD_TIMEOUT_SECS=5      # seconds one guard from config/wedge-evidence-guards may run before it counts as no answer; zero or invalid values use 5
+FM_WEDGE_GUARD_DEFER_MAX=3         # consecutive windows a CRITICAL guard answer may defer one pane's wedge escalation before it fires anyway; invalid values use 3
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default

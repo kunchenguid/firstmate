@@ -253,6 +253,30 @@ test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
   pass "a direct-PR recorded head does not cover a later unpushed commit"
 }
 
+test_ci_ready_requires_pr_reference() {
+  local note
+  for note in \
+    'paused: PROD deploy watch, checks green on TEST' \
+    'paused: checks green on TEST, PROPERTIES watch' \
+    'PR checks green' \
+    'PR #12 checks pending'; do
+    if fm_dod_note_reports_ci_ready "$note"; then
+      fail "non-CI-ready note accepted: $note"
+    fi
+  done
+  for note in \
+    'PR https://github.com/o/r/pull/5 checks green' \
+    'checks green: https://github.com/o/r/pull/5' \
+    'PR #12 checks green' \
+    'checks green: PR#12' \
+    'https://gitlab.com/o/r/-/merge_requests/5 checks green' \
+    'https://git.example.org/team/repo/pulls/12 checks green'; do
+    fm_dod_note_reports_ci_ready "$note" \
+      || fail "CI-ready PR reference rejected: $note"
+  done
+  pass "CI-ready notes require checks green and an actual PR reference"
+}
+
 test_ci_ready_variants_are_gated() {
   local repo wt line rc
   repo="$TMP_ROOT/variant-repo"
@@ -434,6 +458,7 @@ test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
+test_ci_ready_requires_pr_reference
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated
 test_local_only_linked_branch_is_accepted
