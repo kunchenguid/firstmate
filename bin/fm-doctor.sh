@@ -338,7 +338,7 @@ MODEL=$(jq -n \
           elif $complete != null and
             ((any($s.stdout | lines_of | .[]; test($complete)) | not)
              or any($s.stdout | lines_of | .[]; test("did not finish cleanly|^NETWORK_CHECKS:"))) then
-            {status: "skip", evidence: "no finished network report covers this check: " + ($s.stdout | lines_of | .[0] // "empty" | trunc)}
+            {status: "skip", evidence: ("no finished network report covers this check: " + ($s.stdout | lines_of | .[0] // "empty" | trunc))}
           else {status: "ok", evidence: "none reported"} end
       end;
     def rule_hit($v; $json):
@@ -370,7 +370,7 @@ MODEL=$(jq -n \
            fix: "Rerun \($inv.sources[$k].command[0]) by hand to see why it did not finish.",
            detail: ($s.stderr | lines_of | map("stderr: " + .))}
         + (if $s.timedout then {status: "fail", evidence: "did not finish within \($s.timeout)s"}
-           elif $s.rc != 0 then {status: "fail", evidence: "exit \($s.rc)" + (($s.stderr | lines_of | .[0] // "") | if . == "" then "" else ": " + . end | trunc)}
+           elif $s.rc != 0 then {status: "fail", evidence: ("exit \($s.rc)" + (($s.stderr | lines_of | .[0] // "") | if . == "" then "" else ": " + . end | trunc))}
            elif ($s.stderr | lines_of | length) > 0 then {status: "info", evidence: ("stderr: " + ($s.stderr | lines_of | .[0]) | trunc)}
            else {status: "ok", evidence: "finished, exit 0"} end) ]
     + (if ($src | length) > 0 then
