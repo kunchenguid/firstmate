@@ -280,9 +280,10 @@ fi
 # fallback, never authoritative:
 # bin/fm-teardown.sh reads a merge request head from the forge at teardown
 # rather than from metadata and falls back to its provider-agnostic content
-# check, and bin/fm-review-diff.sh fetches a pull request head from the remote
-# when none is recorded and otherwise diffs the local branch, which is the
-# current content. bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at
+# check, and bin/fm-review-diff.sh fetches the pull-request or merge-request
+# head from the remote first, falls back to a recorded value only when that
+# fetch fails, and otherwise diffs the local branch, which is the current
+# content. bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at
 # merge time for the same reason, and treats a recorded value that disagrees as
 # stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
