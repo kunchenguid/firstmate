@@ -128,6 +128,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  printf '%s\n' 1 > "$dir/home/config/gitlab-support"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -3644,6 +3645,19 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_unopted_gitlab_draft_watch_keeps_upstream_behavior() {
+  local dir url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  dir=$(make_case gitlab-legacy-draft-watch)
+  rm -f "$dir/home/config/gitlab-support"
+  write_task_meta "$dir"
+  FM_TEST_GLAB_DRAFT=true run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "an unopted GitLab draft watch changed upstream's acceptance"
+  assert_grep "pr=$url" "$dir/home/state/task-a.meta" "the legacy GitLab watch did not retain its URL"
+  assert_present "$dir/home/state/task-a.check.sh" "the legacy GitLab draft watch was not armed"
+  pass "unopted GitLab watch setup retains upstream's legacy draft behavior"
+}
+
+test_unopted_gitlab_draft_watch_keeps_upstream_behavior
 test_parser_matrix
 test_gitlab_merge_watch
 test_forgejo_merge_watch

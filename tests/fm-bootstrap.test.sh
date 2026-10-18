@@ -1253,6 +1253,68 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+test_unopted_bootstrap_keeps_upstream_github_checks() {
+  local case_dir fakebin path out
+  case_dir="$TMP_ROOT/unopted-github-checks"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_git_init_commit "$case_dir/home/projects/elsewhere"
+  git -C "$case_dir/home/projects/elsewhere" remote add origin git@gitlab.example.com:group/project.git
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  path="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" gh gh-axi)"
+  out=$(PATH="$path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: gh (install:" "an unopted non-GitHub origin changed upstream's gh requirement"
+  assert_contains "$out" "MISSING: gh-axi (install:" "an unopted non-GitHub origin changed upstream's gh-axi requirement"
+  assert_contains "$out" "NEEDS_GH_AUTH" "an unopted non-GitHub origin suppressed upstream's authentication diagnostic"
+  pass "unopted bootstrap retains upstream GitHub requirements on non-GitHub origins"
+}
+
+test_unopted_bootstrap_keeps_broad_authentication() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/unopted-broad-authentication"
+  mkdir -p "$case_dir/home/config"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # github.com is authenticated, but another configured GitHub host is not.
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = auth ] && [ "$2" = status ] || exit 1
+[ "$#" -gt 2 ]
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_GH_AUTH" "an unopted home silently narrowed the upstream authentication check"
+  pass "unopted bootstrap still reports a failed configured GitHub account"
+}
+
+test_gitlab_opt_in_preserves_an_explicit_github_host() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/explicit-github-enterprise-host"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' 1 > "$case_dir/home/config/gitlab-support"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_git_init_commit "$case_dir/home/projects/gitlab"
+  git -C "$case_dir/home/projects/gitlab" remote add origin https://gitlab.example/group/project.git
+  # The explicitly selected enterprise account is unauthenticated.
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = auth ] && [ "$2" = status ] || exit 1
+case " $* " in
+  *" --hostname github.com "*) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    GH_HOST=enterprise.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only \
+    FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_GH_AUTH" "GitLab opt-in ignored the existing explicit GitHub host"
+  pass "GitLab opt-in retains an explicit GH_HOST target and its failed authentication"
+}
+
 # GitHub tooling is checked only where the home uses GitHub: a fleet whose every
 # origin is on another forge is never told to install gh or gh-axi or to log in
 # to GitHub, one GitHub origin anywhere brings every check back, and a home with
@@ -1262,6 +1324,7 @@ test_github_tooling_follows_github_use() {
   case_dir="$TMP_ROOT/github-in-use"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 1 > "$case_dir/home/config/gitlab-support"
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/gh" "$fakebin/gh-axi"
   path="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" gh gh-axi)"
@@ -1297,6 +1360,7 @@ test_gitlab_bound_project_prerequisites() {
   home="$case_dir/home"
   mkdir -p "$home/config" "$home/data" "$home/projects"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   fakebin=$(make_fake_toolchain "$case_dir")
   path="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" glab jq)"
   gitlab_bootstrap() {
@@ -1365,6 +1429,7 @@ test_authentication_uses_resolved_scoped_hosts() {
   home="$case_dir/home"
   mkdir -p "$home/config" "$home/data" "$home/projects" "$case_dir/glab-config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   fakebin=$(make_fake_toolchain "$case_dir")
   fm_git_init_commit "$home/projects/gl-project"
   git -C "$home/projects/gl-project" remote add origin git@git-storage:group/project.git
@@ -1405,6 +1470,9 @@ SH
   pass "bootstrap resolves SSH aliases and scopes authentication to the selected forge host"
 }
 
+test_unopted_bootstrap_keeps_upstream_github_checks
+test_unopted_bootstrap_keeps_broad_authentication
+test_gitlab_opt_in_preserves_an_explicit_github_host
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version

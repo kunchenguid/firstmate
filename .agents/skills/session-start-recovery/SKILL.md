@@ -10,6 +10,7 @@ metadata:
 
 The digest itself makes no external-network call and never waits for one.
 Every network check a session start owes - forge authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh - runs off the digest's blocking path in a bounded worker owned by `bin/fm-startup-network.sh` and is reported in the digest's own `NETWORK CHECKS` section.
+GitHub authentication and the original diagnostic wording remain the default; GitLab-specific checks and generic forge-authentication wording require the explicit home opt-in in [configuration.md](../../../docs/configuration.md#gitlab-support-configgitlab-support).
 The locked startup inactive-outcome scan joins that worker so a slow local current-state read cannot block the digest; its findings use the ordinary durable wake queue.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state, then starts the deferred startup stage above.

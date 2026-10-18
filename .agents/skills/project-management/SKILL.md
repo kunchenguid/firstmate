@@ -63,6 +63,10 @@ A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only` (`
 `forge=external` marks a project whose review tool uploads its own snapshot, so workers never push a task branch to its shared origin: it is never detected, so register it only on the captain's confirmation, as `[direct-PR forge=external]` with no `+yolo`, and only once the home has `config/external-review.md` (`docs/configuration.md` "External review tool").
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
+GitLab support additionally requires an explicit `1` in the effective home's `config/gitlab-support` before intake, remote creation or binding registration; [configuration.md](../../../docs/configuration.md#gitlab-support-configgitlab-support) owns the opt-in.
+Never enable that home-wide setting from host detection or project registration alone.
+Without it, retain the existing forge procedures and report the missing opt-in rather than attempting a GitLab operation.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.

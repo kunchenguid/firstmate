@@ -149,7 +149,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
-  Gerrit change and GitLab merge request URLs appear only in the deliverable line; [`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh) owns artifact compatibility with tasks-axi.
+  Gerrit change URLs, and GitLab merge request URLs only with the [GitLab home opt-in](configuration.md#gitlab-support-configgitlab-support), appear only in the deliverable line; [`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh) owns artifact compatibility with tasks-axi.
 - It runs `tasks-axi reopen`.
 
 The row returns to Queued with its hold intact.

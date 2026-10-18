@@ -2126,6 +2126,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "an unopted home changed upstream's unsupported GitLab-artifact handling: $out"
+  assert_present "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "an unopted GitLab artifact lost the pending close upstream preserves"
+  printf '%s\n' 1 > "$(home_of "$case_dir")/config/gitlab-support"
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
@@ -3104,6 +3110,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_recovery_replays_a_gitlab_close_with_its_merge_request_url_as_a_note
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
@@ -3165,7 +3172,6 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
-test_recovery_replays_a_gitlab_close_with_its_merge_request_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

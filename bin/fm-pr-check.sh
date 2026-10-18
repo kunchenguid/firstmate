@@ -9,12 +9,12 @@
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
 # instance.
-# A GitHub pull request or GitLab merge request the forge reports as a draft is
-# refused, naming the draft state and recording and arming nothing: a draft cannot
-# be merged, so a poll armed on it would wait while nobody is asked to act.
-# Mark the request ready for review, then arm again; a lane that keeps a draft
-# on purpose declares a wait instead of reporting done. An unreadable draft state
-# does not refuse, matching how the head read below is optional.
+# A GitHub pull request the forge reports as a draft is refused, naming the
+# draft state and recording and arming nothing. The same additional GitLab
+# refusal is opt-in through config/gitlab-support=1; disabled URL-only watches
+# retain their existing behavior. A draft cannot be merged, so mark it ready
+# before arming, or declare a wait instead of done when the draft is deliberate.
+# An unreadable draft state does not refuse, matching the optional head read.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
@@ -129,7 +129,7 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     exit 1
   fi
 fi
-if [ "$PROVIDER" = gitlab ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v jq >/dev/null 2>&1; then
+if [ "$PROVIDER" = gitlab ] && fm_pr_gitlab_support_enabled && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(GITLAB_HOST="$HOST" glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json 2>/dev/null || true)
   if printf '%s' "$DRAFT_JSON" | jq -e '.draft == true' >/dev/null 2>&1; then
     echo "error: $URL is a draft merge request; a draft cannot be merged - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2

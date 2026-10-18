@@ -526,7 +526,10 @@ fm_backlog_pr_note_text() {  # <url>
   ( fm_pr_url_parse "$1" || exit 1
     case "$FM_PR_PROVIDER" in
       gerrit) printf 'Gerrit change %s\n' "$1" ;;
-      gitlab) printf 'GitLab merge request %s\n' "$1" ;;
+      gitlab)
+        fm_pr_gitlab_support_enabled || exit 1
+        printf 'GitLab merge request %s\n' "$1"
+        ;;
       *) exit 1 ;;
     esac )
 }

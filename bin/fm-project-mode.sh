@@ -9,6 +9,8 @@
 # With --forge it prints one word instead: the project's registered forge,
 # none|gerrit|gitlab|forgejo|external. The forge is asked for explicitly, so the
 # default output stays the same two words for every project, bound or not.
+# gitlab is accepted only with config/gitlab-support=1 in the effective home;
+# disabled homes retain the previous closed set and its diagnostics.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -122,6 +124,16 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+GITLAB_SUPPORT_ENABLED=0
+FORGE_SPELLINGS='forge=gerrit, forge=forgejo, or forge=external'
+FORGE_VALUES='forge=gerrit, forge=forgejo, and forge=external'
+if fm_pr_gitlab_support_enabled; then
+  GITLAB_SUPPORT_ENABLED=1
+  FORGE_SPELLINGS='forge=gerrit, forge=gitlab, forge=forgejo, or forge=external'
+  FORGE_VALUES='forge=gerrit, forge=gitlab, forge=forgejo, and forge=external'
+fi
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
@@ -213,7 +225,7 @@ fi
 posture=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=gitlab, forge=forgejo, or forge=external" >&2 ;;
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled $FORGE_SPELLINGS" >&2 ;;
     posture) posture=$rest ;;
   esac
 done <<EOF
@@ -235,15 +247,20 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   exit 0
 fi
 
+valid_forge=0
 case "$forge" in
-  none|forge=gerrit|forge=gitlab|forge=forgejo|forge=external) forge=${forge#forge=} ;;
-  forge=)
-    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=gitlab, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
-    exit 3 ;;
-  *)
-    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=gitlab, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
-    exit 3 ;;
+  none|forge=gerrit|forge=forgejo|forge=external) valid_forge=1 ;;
+  forge=gitlab) valid_forge=$GITLAB_SUPPORT_ENABLED ;;
 esac
+if [ "$valid_forge" = 1 ]; then
+  forge=${forge#forge=}
+elif [ "$forge" = forge= ]; then
+  echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are $FORGE_VALUES, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+  exit 3
+else
+  echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are $FORGE_VALUES, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+  exit 3
+fi
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3

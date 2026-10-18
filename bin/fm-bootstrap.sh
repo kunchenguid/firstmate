@@ -8,12 +8,12 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
-#                 (gh, gh-axi, and NEEDS_GH_AUTH only in a home that uses GitHub;
-#                 github_in_use below owns that signal),
+#                 (the default keeps gh, gh-axi and NEEDS_GH_AUTH checks;
+#                 config/gitlab-support=1 opts into github_in_use scoping),
 #                 "NEEDS_GLAB_AUTH: <host> (run: glab auth login --hostname <host>)",
-#                 (GitLab tool checks and host-scoped auth only for registered
-#                 forge=gitlab project clones; gitlab_project_prerequisites owns
-#                 the local binding and origin-host lookup),
+#                 (only in an explicitly GitLab-enabled home for registered
+#                 forge=gitlab project clones; gitlab_project_prerequisites
+#                 owns the local binding and origin-host lookup),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -892,18 +892,19 @@ missing_tool_diagnostic() {
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
+GITLAB_SUPPORT_ENABLED=0
+if fm_pr_gitlab_support_enabled; then GITLAB_SUPPORT_ENABLED=1; fi
 
-# GitHub tooling - gh, gh-axi, and gh's login - is checked only in a home that
-# uses GitHub, so a fleet on GitLab or Gerrit is not told to install and log in
-# to a forge it never talks to. The signal is local and needs no network: the
-# origin remote of the Firstmate code root and of every project clone under
-# projects/. Any origin on github.com (or a *.github.com host such as
-# ssh.github.com) means GitHub is in use. A home where none of them has an origin
-# keeps the checks, since a missing origin says nothing about which forge is in
-# use; a fresh install and every existing GitHub home therefore see no change.
+# With config/gitlab-support=1, GitHub tooling follows local origin evidence.
+# The default keeps the existing universal requirements and broad auth probe.
+# The signal needs no network: the origin remote of the code root and every
+# project clone under projects/. Any github.com or *.github.com origin, or an
+# explicit GH_HOST, retains GitHub checks. An origin-less home retains them too.
 
 github_in_use() {
   local dir url host seen=0
+  # GH_HOST is an existing explicit GitHub target, not a GitLab setting.
+  [ -z "${GH_HOST:-}" ] || return 0
   for dir in "$FM_ROOT" "$PROJECTS"/*; do
     [ -d "$dir" ] || continue
     # The configured URL, before any insteadOf rewrite: the forge is what the
@@ -926,6 +927,7 @@ gitlab_project_prerequisites() {
   local dir forge origin host
   GITLAB_IN_USE=0
   GITLAB_HOSTS=
+  [ "$GITLAB_SUPPORT_ENABLED" = 1 ] || return 0
   for dir in "$PROJECTS"/*; do
     [ -d "$dir" ] || continue
     forge=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge "${dir##*/}" 2>/dev/null) || continue
@@ -943,7 +945,7 @@ gitlab_project_prerequisites() {
 gitlab_project_prerequisites
 
 GITHUB_IN_USE=1
-if ! github_in_use; then
+if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && ! github_in_use; then
   GITHUB_IN_USE=0
   COMMON_TOOLS="node git no-mistakes chrome-devtools-axi tasks-axi quota-axi"
 fi
@@ -1677,7 +1679,11 @@ detect_home_summary_publication() {
 local_phase && detect_local_tools
 if network_phase && [ "$GITHUB_IN_USE" = 1 ]; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status --active --hostname github.com >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ -z "${GH_HOST:-}" ]; then
+    gh auth status --active --hostname github.com >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  else
+    gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  fi
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 if network_phase && [ "$GITLAB_IN_USE" = 1 ] && command -v glab >/dev/null 2>&1; then

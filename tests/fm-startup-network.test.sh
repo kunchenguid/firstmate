@@ -859,6 +859,31 @@ EOF
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"
 }
 
+test_authentication_label_requires_home_opt_in() {
+  local rec home root log pending enabled auth
+  for enabled in 0 1; do
+    rec=$(new_world "authentication-label-$enabled")
+    IFS='|' read -r home root log <<EOF
+$rec
+EOF
+    auth=GitHub
+    if [ "$enabled" = 1 ]; then
+      mkdir -p "$home/config"
+      printf '%s\n' 1 > "$home/config/gitlab-support"
+      auth=forge
+    fi
+    FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=3 \
+      run_stage "$home" "$root" start --locked 0 >/dev/null
+    await_worker_record "$home"
+    pending=$(run_stage "$home" "$root" report)
+    run_stage "$home" "$root" wait 30 >/dev/null || fail "the label fixture's worker did not finish"
+    assert_contains "$pending" "NOT yet confirmed: $auth authentication" \
+      "the pending authentication label did not preserve the unopted upstream message"
+  done
+  pass "deferred authentication labels change only for an opted-in home"
+}
+
+test_authentication_label_requires_home_opt_in
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it

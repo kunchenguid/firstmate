@@ -141,6 +141,10 @@ PUBLISH_LOCK="$STATE/.startup-network.lock"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+if ! declare -F fm_pr_gitlab_support_enabled >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+fi
 
 usage() {
   sed -n '2,/^set -u$/p' "$SCRIPT_DIR/fm-startup-network.sh" | sed 's/^# \{0,1\}//; $d'
@@ -222,9 +226,11 @@ worker_alive() {
 # The exact phase names the digest and the report use, so "what has not been
 # confirmed yet" is always answerable from the status record alone.
 phase_label() {  # <phases>
+  local auth=GitHub
+  if fm_pr_gitlab_support_enabled; then auth=forge; fi
   case "$1" in
-    probe) printf 'forge authentication' ;;
-    probe,sweeps) printf 'forge authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe) printf '%s authentication' "$auth" ;;
+    probe,sweeps) printf '%s authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' "$auth" ;;
     *) printf 'the deferred network checks' ;;
   esac
 }

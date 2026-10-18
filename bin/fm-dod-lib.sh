@@ -55,6 +55,7 @@
 # under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
 # forge is none|gerrit|gitlab|forgejo|external and defaults to none;
+# gitlab additionally requires config/gitlab-support=1 in the effective home.
 # bin/fm-project-mode.sh's header owns what the registry binding means, and this
 # file owns what each binding changes for a WORKER (docs/gerrit-forge-integration.md
 # is the gerrit design and docs/external-review-forge.md the external one).
@@ -164,13 +165,20 @@ EOF
 # forge=external also refuses no-mistakes, because the pipeline's push, pr, and
 # ci steps would push to the shared origin.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
-  local forge=$1 mode=$2 caller=$3
+  local forge=$1 mode=$2 caller=$3 valid=0 gitlab=0
+  local accepted='none, gerrit, forgejo, or external'
+  if fm_pr_gitlab_support_enabled; then
+    gitlab=1
+    accepted='none, gerrit, gitlab, forgejo, or external'
+  fi
   case "$forge" in
-    none|gerrit|gitlab|forgejo|external) ;;
-    *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, gitlab, forgejo, or external)" >&2
-      return 1 ;;
+    none|gerrit|forgejo|external) valid=1 ;;
+    gitlab) valid=$gitlab ;;
   esac
+  if [ "$valid" != 1 ]; then
+    echo "error: $caller: unknown forge '$forge' (expected $accepted)" >&2
+    return 1
+  fi
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1

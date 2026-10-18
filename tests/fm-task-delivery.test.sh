@@ -1024,7 +1024,8 @@ EOF
 test_project_mode_binds_the_forge_orthogonally() {
   local home out err status label registry expect forge
   home="$TMP_ROOT/forge-binding/home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/config"
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   while IFS='|' read -r label registry expect forge; do
     [ -n "$label" ] || continue
     printf '%s\n' "$registry" > "$home/data/projects.md"
@@ -1614,6 +1615,7 @@ test_forge_gitlab_uses_glab_and_keeps_yolo() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   : > "$home/config/wait-no-turns"
   FM_HOME="$home" "$BRIEF" forge-gitlab-d1 proj --mode direct-PR --forge gitlab >/dev/null \
     || fail "a gitlab direct-PR brief should scaffold"

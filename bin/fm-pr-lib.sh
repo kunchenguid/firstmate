@@ -97,6 +97,23 @@ FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
 
+# The GitLab integration is opt-in for the effective home. Existing URL-only
+# operations keep their legacy behavior unless config/gitlab-support contains 1.
+# FM_CONFIG_OVERRIDE has the same precedence as in the scripts that consume it.
+fm_pr_gitlab_support_enabled() {
+  local config=${FM_CONFIG_OVERRIDE:-} home value
+  if [ -z "$config" ]; then
+    home=${FM_HOME:-${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}}
+    if [ -z "$home" ]; then
+      home=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd) || return 1
+    fi
+    config="$home/config"
+  fi
+  [ -f "$config/gitlab-support" ] || return 1
+  value=$(cat "$config/gitlab-support" 2>/dev/null) || return 1
+  [ "$value" = 1 ]
+}
+
 fm_task_id_path_safe() {
   local id=${1-}
   local LC_ALL=C

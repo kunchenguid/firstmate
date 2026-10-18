@@ -141,7 +141,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated pull-request, merge-request, and Gerrit-change poll sidecars |
 | `fm-contributions.sh`    | Observe owned publications, retain exact-head judgments, measure required actors, and wake on maintainer signals |
-| `fm-pr-check.sh`         | Record validated task `pr=` and `pr_head=` values, then atomically arm a static merge poll; refuses positive GitHub or GitLab drafts and persistent secondmate records (see [architecture.md](architecture.md)) |
+| `fm-pr-check.sh`         | Record validated task `pr=` and `pr_head=` values, then atomically arm a static merge poll; refuses positive GitHub drafts, GitLab drafts only with [GitLab support enabled](configuration.md#gitlab-support-configgitlab-support), and persistent secondmate records (see [architecture.md](architecture.md)) |
 | `fm-review-check.sh`    | Record a forge=external task's validated `review=` and `review_head=` without arming a merge watch ([design](external-review-forge.md)) |
 | `fm-external-review-lib.sh` | Shared readers for the forge=external review tool adapter, ready-URL pattern, backup remote, and remote URLs |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub, GitLab, or Forgejo URL, refuse a Gerrit change because firstmate never submits one, then verify the outcome under its [forge-specific contract](../bin/fm-pr-merge.sh) |

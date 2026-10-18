@@ -18,6 +18,10 @@ PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-project-mode-tests)
 DATA="$TMP_ROOT/data"
 mkdir -p "$DATA"
+FM_CONFIG_OVERRIDE="$TMP_ROOT/enabled-config"
+mkdir -p "$FM_CONFIG_OVERRIDE"
+printf '%s\n' 1 > "$FM_CONFIG_OVERRIDE/gitlab-support"
+export FM_CONFIG_OVERRIDE
 
 cat > "$DATA/projects.md" <<'EOF'
 ## Projects
@@ -44,6 +48,15 @@ run_mode() {
 run_forge() {
   FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge "$1" 2>/dev/null
 }
+
+out=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/disabled-config" FM_DATA_OVERRIDE="$DATA" \
+  "$PROJECT_MODE" --forge gl-pr 2>"$TMP_ROOT/disabled.stderr")
+status=$?
+[ "$status" -eq 3 ] || fail "an unopted home accepted a forge binding upstream main refuses"
+[ -z "$out" ] || fail "an unopted GitLab binding returned a posture"
+assert_equals "refused: unknown forge \"gitlab\" registered for gl-pr in $DATA/projects.md; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" \
+  "$(cat "$TMP_ROOT/disabled.stderr")" "the unopted binding refusal changed upstream's text"
+pass "unopted registry parsing retains upstream's accepted forge set and refusal"
 
 [ "$(run_mode legacy)" = "no-mistakes off" ] || fail "legacy entry's default output changed: $(run_mode legacy)"
 [ "$(run_forge legacy)" = "none" ] || fail "an entry with no forge token must report forge none: $(run_forge legacy)"

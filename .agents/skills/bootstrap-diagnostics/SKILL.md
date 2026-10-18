@@ -30,6 +30,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
   This probe now arrives from the deferred network stage, so it is also how an unreachable network shows up: `gh` cannot validate its token offline and reports the same failure. Confirm reachability before asking the captain to re-authenticate a credential that may be fine.
 - `NEEDS_GLAB_AUTH: <host> (run: <command>)` - ask the captain to run the printed `glab auth login` command for that host.
+  This diagnostic belongs only to a home explicitly enabled through `config/gitlab-support=1` and its registered GitLab clones; do not infer or enable that setting from the diagnostic.
   Like `NEEDS_GH_AUTH`, this probe runs in the deferred network stage, so an unreachable instance fails it too.
   Confirm the host is reachable before asking for a new login, and never overwrite one host's login to fix another.
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.

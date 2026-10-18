@@ -280,6 +280,8 @@ test_forge_selection_renders_correct_cli() {
   assert_no_grep 'gh-axi pr ready' "$brief" \
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi to clear a draft"
 
+  mkdir -p "$home/config"
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue
     # shellcheck disable=SC2086 # The row's arguments must split into words.

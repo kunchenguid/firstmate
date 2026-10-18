@@ -65,9 +65,9 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A GitLab merge request is looked up the same way through glab, addressing the
-# project by host and path (docs/gitlab-merge-watch.md) and fetching
-# refs/merge-requests/<n>/head; pr_is_merged's helpers own when GitLab applies.
+# With config/gitlab-support=1, a GitLab merge request is looked up through glab,
+# addressing the project by host and path (docs/gitlab-merge-watch.md) and
+# fetching refs/merge-requests/<n>/head; disabled homes retain the prior path.
 # A gh or glab lookup error falls back to the content check; if that is also
 # inconclusive, teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
@@ -1571,6 +1571,7 @@ teardown_gitlab_project() {
   local parsed forge origin rest authority host path
   TEARDOWN_GITLAB_HOST=
   TEARDOWN_GITLAB_PATH=
+  fm_pr_gitlab_support_enabled || return 1
   if [ -n "$PR_URL" ]; then
     parsed=$(fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = gitlab ] \
       && printf '%s\t%s' "$FM_PR_HOST" "$FM_PR_PATH") || return 1

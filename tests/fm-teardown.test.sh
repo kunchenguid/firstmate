@@ -91,6 +91,7 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  printf '%s\n' 1 > "$case_dir/config/gitlab-support"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -847,6 +848,23 @@ SH
 # never received the content. Teardown must read the merge request with glab,
 # addressing the project by host and path, and close the backlog item with the
 # merge request URL kept as a note, since tasks-axi takes no GitLab --pr link.
+test_unopted_gitlab_url_keeps_upstream_cleanup_proof() {
+  local case_dir head rc mr_url=https://gitlab.example/group/repo/-/merge_requests/7
+  case_dir=$(make_case gitlab-unopted-landing-proof)
+  rm -f "$case_dir/config/gitlab-support"
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
+  add_glab_mr_for_head "$case_dir" "$head"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "an unopted home acquired a GitLab-only landed-work proof"
+  assert_present "$case_dir/state/task-x1.meta" "an unopted cleanup discarded the task record"
+  assert_present "$case_dir/wt/feature.txt" "an unopted cleanup discarded work upstream would preserve"
+  pass "unopted GitLab cleanup retains upstream's landed-work proof and preserves unlanded work"
+}
+
 test_teardown_reads_a_merged_gitlab_merge_request() {
   local case_dir rc local_head mr_head mr_url=https://gitlab.example/group/repo/-/merge_requests/7
   case_dir=$(make_case gitlab-recorded-mr)
@@ -5279,6 +5297,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_unopted_gitlab_url_keeps_upstream_cleanup_proof
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup

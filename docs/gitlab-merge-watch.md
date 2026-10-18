@@ -184,9 +184,22 @@ The live registration tag is `fm-pr-poll-registration-v2`, which includes the pr
 A `fm-pr-poll-registration-v1` record no longer parses.
 Arm a current watch with `bin/fm-pr-check.sh`.
 
+## Optional GitLab integration
+
+The historical URL-only watch and merge interfaces above remain available with their existing behavior.
+The additional bound-forge integration requires the effective home's `config/gitlab-support` to contain `1`, then an explicit `forge=gitlab` project binding.
+[configuration.md](configuration.md#gitlab-support-configgitlab-support) owns the setting, its bootstrap effects and the disabled-mode contract.
+In the enabled mode, ready registration refuses a positive GitLab draft, merge verification reads raw safety fields, ordinary merges request synchronous submission, and a successful command is not reported as landed without a merged readback.
+GitLab cleanup can use MR head/content evidence and retain its URL in backlog notes.
+Without the setting, existing URL-only operations retain the upstream path rather than acquiring those checks or outcomes.
+
 ## Merging a merge request
 
-[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the current GitLab merge rule, including the project-required-pipeline setting and verified-head binding.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the GitLab merge rule, its explicit opt-ins and verified-head binding.
+The default still requires a successful pipeline at the current head.
+Only the attended `--allow-no-pipeline` flag permits an explicitly absent pipeline, and only with readable boolean-false `only_allow_merge_if_pipeline_succeeds` project policy and every other readiness check satisfied.
+That flag enables strict verification for the single call without enabling the home's binding, discovery or bootstrap integration.
+It cannot waive an existing pipeline's status or SHA, a required pipeline, an unreadable field or an away-posture refusal.
 The missing-tool evidence below was collected on 2026-08-22 using a throwaway `FM_HOME` and a `glab` wrapper that refused every merge subcommand.
 
 Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
@@ -205,7 +218,7 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 The watch poll reads glab's field output without `jq`; [configuration.md](configuration.md#toolchain) owns the additional prerequisites for registered GitLab projects.
-The raw API reads used for merge verification are owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh), including its `gitlab_verify_mergeable` function.
+The enabled integration and explicit absence waiver use raw API reads for merge verification, owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s `gitlab_verify_mergeable`; disabled URL-only runs retain the previous `glab mr view` read.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 `tests/fm-pr-merge.test.sh` covers current pipeline and project-requirement cases through the executable merge interface.

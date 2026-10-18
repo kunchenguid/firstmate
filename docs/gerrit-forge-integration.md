@@ -132,6 +132,7 @@ Firstmate owns none of the mechanics.
 Every forge decision it makes after publication, it makes with the URL already in hand.
 The one GitLab fact needed before publication is which CLI opens the merge request.
 That changes the tool but not the shape of what is published, and the `forge=gitlab` binding carries it.
+The GitLab binding and strengthened GitLab delivery paths require the [explicit home opt-in](configuration.md#gitlab-support-configgitlab-support); without it, the existing URL-only behavior remains unchanged.
 
 Gerrit breaks that in exactly one way.
 The forge must be known **before** anything is published, because there is no pull request to open.

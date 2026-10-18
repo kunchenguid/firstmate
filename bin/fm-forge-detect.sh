@@ -16,6 +16,9 @@
 #
 # Evidence read, all local and never from the network; Gerrit's protocol facts
 # are checked first because they are the stronger evidence:
+# The two GitLab host checks and redacted evidence require the explicit home
+# opt-in config/gitlab-support=1. Disabled homes retain the Gerrit-only
+# proposals and original URL/refspec evidence.
 #   - an origin fetch or push URL on SSH port 29418, Gerrit's default SSH port;
 #   - an origin push refspec targeting refs/for/, Gerrit's change-creating ref;
 #   - an origin host that is gitlab.com or has a DNS label exactly `gitlab`,
@@ -31,6 +34,10 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+GITLAB_SUPPORT_ENABLED=0
+if fm_pr_gitlab_support_enabled; then GITLAB_SUPPORT_ENABLED=1; fi
 # shellcheck source=bin/fm-forge-host-lib.sh
 . "$SCRIPT_DIR/fm-forge-host-lib.sh"
 
@@ -50,9 +57,13 @@ while IFS= read -r url; do
       authority=${authority%%/*}
       case "$authority" in
         *:29418)
-          host=${authority##*@}
-          host=${host%:29418}
-          printf 'forge=gerrit evidence=origin host %s uses SSH port 29418\n' "$host"
+          if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then
+            host=${authority##*@}
+            host=${host%:29418}
+            printf 'forge=gerrit evidence=origin host %s uses SSH port 29418\n' "$host"
+          else
+            printf 'forge=gerrit evidence=origin remote %s uses SSH port 29418\n' "$url"
+          fi
           exit 0
           ;;
       esac
@@ -67,13 +78,22 @@ refspecs=$(git -C "$DIR" config --get-all remote.origin.push 2>/dev/null || true
 while IFS= read -r refspec; do
   case "$refspec" in
     *:refs/for/*)
-      printf 'forge=gerrit evidence=origin push refspec targets refs/for/\n'
+      if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then
+        printf 'forge=gerrit evidence=origin push refspec targets refs/for/\n'
+      else
+        printf 'forge=gerrit evidence=origin push refspec %s targets refs/for/\n' "$refspec"
+      fi
       exit 0
       ;;
   esac
 done <<EOF
 $refspecs
 EOF
+
+if [ "$GITLAB_SUPPORT_ENABLED" != 1 ]; then
+  printf 'forge=none\n'
+  exit 0
+fi
 
 glab_config=$(fm_forge_glab_config_file)
 while IFS= read -r url; do

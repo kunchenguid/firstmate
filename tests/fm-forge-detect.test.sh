@@ -14,6 +14,10 @@ DETECT="$ROOT/bin/fm-forge-detect.sh"
 # Never read this machine's own glab setup; the cases that need one write it.
 GLAB_CONFIG_DIR="$TMP_ROOT/no-glab-config"
 export GLAB_CONFIG_DIR
+FM_CONFIG_OVERRIDE="$TMP_ROOT/enabled-config"
+mkdir -p "$FM_CONFIG_OVERRIDE"
+printf '%s\n' 1 > "$FM_CONFIG_OVERRIDE/gitlab-support"
+export FM_CONFIG_OVERRIDE
 FAKE_SSH_BIN=$(fm_fakebin "$TMP_ROOT/ssh")
 cat > "$FAKE_SSH_BIN/ssh" <<'SH'
 #!/usr/bin/env bash
@@ -160,6 +164,29 @@ test_not_a_clone_is_an_error() {
   pass "a directory that is not a git work tree is refused with exit 2"
 }
 
+test_unopted_detection_keeps_upstream_proposals_and_evidence() {
+  local clone out
+  clone=$(new_clone unopted-gitlab)
+  git -C "$clone" remote add origin https://gitlab.example/group/project.git
+  out=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/disabled-config" "$DETECT" "$clone")
+  assert_equals forge=none "$out" "an unopted clone acquired automatic GitLab detection"
+
+  clone=$(new_clone unopted-gerrit)
+  git -C "$clone" remote add origin ssh://someone@review.example:29418/group/project
+  out=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/disabled-config" "$DETECT" "$clone")
+  assert_equals 'forge=gerrit evidence=origin remote ssh://someone@review.example:29418/group/project uses SSH port 29418' \
+    "$out" "an unopted Gerrit clone changed upstream's evidence"
+
+  clone=$(new_clone unopted-refspec)
+  git -C "$clone" remote add origin https://review.example/group/project
+  git -C "$clone" config remote.origin.push HEAD:refs/for/main
+  out=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/disabled-config" "$DETECT" "$clone")
+  assert_equals 'forge=gerrit evidence=origin push refspec HEAD:refs/for/main targets refs/for/' \
+    "$out" "an unopted Gerrit refspec changed upstream's evidence"
+  pass "unopted detection preserves upstream proposals and Gerrit evidence"
+}
+
+test_unopted_detection_keeps_upstream_proposals_and_evidence
 test_ssh_port_29418_proposes_gerrit
 test_refs_for_push_refspec_proposes_gerrit
 test_other_remotes_propose_none
