@@ -470,8 +470,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md;
-// bin/fm-supervisor-work-pretool-check.sh, docs/supervisor-work-guard.md). All
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both
 // piggyback on this same extension file rather than separate ones so no extra Pi -e flag is needed at
 // launch - the primary already loads this file for the turn-end guard, and
 // pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
@@ -509,8 +508,14 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
   return runChecker("fm-cd-pretool-check.sh", command);
 }
 
-function runSupervisorWorkCheck(command: string): Promise<{ code: number; stderr: string }> {
-  return runChecker("fm-supervisor-work-pretool-check.sh", command);
+function runSupervisorWorkCheck(command: string): { code: number; stderr: string } {
+  const script = resolve(process.env.XDG_DATA_HOME || resolve(process.env.HOME ?? "", ".local/share"), "fm-supervisor-guard/fm-supervisor-work-pretool-check.sh");
+  if (!existsSync(script)) return { code: 0, stderr: "" };
+  const result = spawnSync(script, [], { input: JSON.stringify({ tool_input: { command }, cwd: process.cwd() }), encoding: "utf8" });
+  if (result.status !== 2) return { code: 0, stderr: "" };
+  let reason = result.stderr;
+  try { reason = JSON.parse(result.stderr).systemMessage ?? result.stderr; } catch {}
+  return { code: 2, stderr: reason };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -600,7 +605,7 @@ export default function (pi: ExtensionAPI) {
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
     }
-    const workResult = await runSupervisorWorkCheck(command);
+    const workResult = runSupervisorWorkCheck(command);
     if (workResult.code === 2) {
       return { block: true, reason: workResult.stderr.trim() || "denied by the supervisor-work PreToolUse seatbelt" };
     }
