@@ -15,6 +15,7 @@ That blocked reading is the gate working, not a stuck worker, so steer the worke
 A direct-PR worker pushes that commit to its PR branch, and a local-only worker commits it on its ship branch.
 A no-mistakes worker re-validates it with /no-mistakes so the pipeline stays the one publisher; it never pushes from its copy.
 In no-mistakes mode the earlier `done [at=<epoch>]: committed on <branch>, local and unpublished until the pipeline pushes: {summary}` (on Gerrit, `until you publish the change`) is the pipeline handoff and is not gated.
+While no remote ref holds its head, `bin/fm-crew-state.sh` reads that handoff as `working` (implemented but unpublished, awaiting /no-mistakes), not done, so keep supervising the lane until its ready signal arrives.
 Tell the captain the PR's full `https://...` URL copied from the worker's ready line, the resolved checks-green crew-state line, or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
