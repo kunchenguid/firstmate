@@ -83,10 +83,16 @@ Two vendor settings are opt-in per home, never part of the shared contract:
 
 Put either in user settings or the untracked `.claude/settings.local.json`, never the tracked project `.claude/settings.json`, which would impose one home's choice on every home and worker copy.
 
+## Permission prompts
+
+Worker `PermissionRequest` hooks report security decisions through the existing status and watcher path; `bin/fm-busy-event.sh` owns request deduplication.
+Never answer a permission prompt with keys; route the decision to firstmate.
+[`../../../../../docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#claude-permission-prompt-wake) records the live event and its refresh command.
+
 ## Primary integration
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
-This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
+Worker hooks update the parent's task state through `.claude/settings.local.json`.
 A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
 Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
