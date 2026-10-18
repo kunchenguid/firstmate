@@ -51,10 +51,17 @@ esac
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
-# a doctored sidecar cannot redirect this poll at another host or project.
+# a doctored sidecar cannot silently address a different project or a differently
+# spelled URL. The host is one of those components: a GitHub Enterprise host is
+# recorded only by bin/fm-pr-lib.sh after this home named it in
+# config/github-hosts, and it is re-checked for shape here like every other
+# provider's, because this static body sources nothing and cannot read config.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -65,8 +72,8 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)

@@ -1570,6 +1570,19 @@ A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
 [`docs/external-review-forge.md`](external-review-forge.md) is the design.
 
+## GitHub Enterprise hosts (config/github-hosts)
+
+`config/github-hosts` is an optional local, gitignored file naming the GitHub Enterprise hosts whose pull request URLs this home accepts, one lowercase hostname per line, such as `leadsonline.ghe.com`.
+`github.com` needs no line and is always accepted.
+Blank lines, `#` comments, and any other line authorize nothing: only a line equal to the host is a match, so the file cannot be made to allow more than it spells out.
+
+GitHub pull request URLs are otherwise identical on every GitHub host, so a hostname's shape cannot show whether it is a GitHub host or a look-alike such as `github.com.evil`, and [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_github_host_allowed` accepts an Enterprise host only when this file names it.
+That covers registration through `bin/fm-pr-check.sh`, the merge poll, `bin/fm-pr-merge.sh`, and the merge-outcome and teardown reads, which all carry the parsed host through `gh` and `gh-axi` via `GH_HOST`.
+A host named here still needs its own `gh` authentication (`gh auth login --hostname <host>`), exactly as `gh` itself requires.
+
+The file is local to each home and not part of secondmate inherited configuration, so a secondmate home that serves such a project names the host in its own copy.
+The host is part of each recorded PR identity, so removing a host while a task's pull request is still open stops that task's merge monitoring rather than pointing it at another host.
+
 ## External review tool (config/external-review.md, config/external-review-url, config/external-review-backup)
 
 These optional local, gitignored files configure a home's `forge=external` projects; a home with no such project needs none of them.

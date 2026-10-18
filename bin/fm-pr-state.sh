@@ -58,6 +58,10 @@ fi
 PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 ENDPOINT="/repos/$PATH_PART/pulls/$NUMBER"
+# gh addresses github.com unless told otherwise, and the api reads below carry a
+# repository path rather than the URL, so a GitHub Enterprise host is exported
+# once here for every read this run makes.
+fm_pr_github_host_export "$FM_PR_HOST"
 
 CORE=$(gh pr view "$URL" \
   --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq '
