@@ -811,6 +811,15 @@ assert_contains "$out" '  status: clear' "native Codex headroom resolves despite
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex reads codex-home"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex headroom is chosen"
 
+jq '(.providers[] | select(.provider == "codex" and .accountKey == "codex-home")).accountKeys = ["codex-home", "work account"]' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-whitespace-alias.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-whitespace-alias.json" run code out err "$BRIEF"
+expect_code 0 "$code" "a whitespace-containing alias exits 0"
+assert_contains "$out" '  status: clear' "a whitespace-containing alias does not invalidate the snapshot"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "an exact accountKey match still supplies quota with a whitespace-containing alias"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "the exact accountKey match is chosen despite a whitespace-containing alias"
+pass "schema 6 accepts whitespace in accountKeys without changing exact matching"
+
 jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-reversed.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-reversed.json" run code out err "$BRIEF"

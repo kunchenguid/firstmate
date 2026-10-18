@@ -106,7 +106,7 @@ fm_quota_json_valid() {
            (if has("accountKeys") then
              (.accountKeys | type) == "array" and
              all(.accountKeys[];
-               type == "string" and length > 0 and (test("\\s") | not))
+               type == "string" and length > 0)
             else true end)) and
          (([.providers[] | [.provider, .accountKey]] | length) ==
           ([.providers[] | [.provider, .accountKey]] | unique | length))
