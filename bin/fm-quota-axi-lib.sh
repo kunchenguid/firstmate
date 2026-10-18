@@ -38,8 +38,15 @@ FM_QUOTA_ROW_JQ='
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
-      (([$rows[] | select(.accountKey == $lane)] | first) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+      ([$rows[] | select(.accountKey == $lane)] | first) as $exact |
+      if $exact != null then $exact
+      else
+        ([$rows[] | select(((.accountKeys // []) | index($lane)) != null)]) as $matches |
+        if ($matches | length) == 1 then $matches[0]
+        elif ($matches | length) > 1 then null
+        else ([$rows[] | select(.accountKey == "default")] | first) // null
+        end
+      end
     else ($rows | first) // null
     end;
 '
@@ -95,7 +102,12 @@ fm_quota_json_valid() {
          all(.providers[];
            (.accountKey | type) == "string" and
            (.accountKey | length) > 0 and
-           ((.accountKey | test("\\s")) | not)) and
+           ((.accountKey | test("\\s")) | not) and
+           (if has("accountKeys") then
+             (.accountKeys | type) == "array" and
+             all(.accountKeys[];
+               type == "string" and length > 0 and (test("\\s") | not))
+            else true end)) and
          (([.providers[] | [.provider, .accountKey]] | length) ==
           ([.providers[] | [.provider, .accountKey]] | unique | length))
        else false
