@@ -622,6 +622,25 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
   pass "an away entry over quiet mode records away, and a quiet entry never masks a standing away record"
 }
 
+# The liveness probe behind live-workers runs bounded: a backend CLI that never
+# answers neither hangs entry nor frees the cap - the record counts as unproven.
+test_live_workers_probe_is_bounded_and_a_stalled_probe_counts() {
+  local home fakebin start elapsed n
+  home=$(make_home live-probe-stall)
+  fakebin="$TMP_ROOT/live-probe-stall-bin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  fm_write_meta "$home/state/task-1.meta" "window=stall:fm-task-1" "kind=ship"
+  start=$(date +%s)
+  n=$(PATH="$fakebin:$PATH" FM_AFK_CONTRACT_PROBE_SECONDS=1 contract "$home" live-workers)
+  elapsed=$(( $(date +%s) - start ))
+  [ "$n" = 1 ] || fail "a stalled probe did not count the record as live: $n"
+  [ "$elapsed" -lt 15 ] || fail "live-workers waited ${elapsed}s on a stalled probe"
+  pass "live-workers bounds each endpoint probe and counts a stalled one as live"
+}
+
+
 # The spend cap entry records without --spend is the parallelism already
 # standing in this home, counted exactly the way the later refusal counts it, so
 # away mode never narrows work that is already under way. The earlier default
@@ -668,6 +687,7 @@ test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
+test_live_workers_probe_is_bounded_and_a_stalled_probe_counts
 test_retired_two_step_entry_is_refused_by_name
 test_enter_removes_a_legacy_proposal_without_promoting_it
 test_same_turn_entry_pre_authorizes_nothing_on_the_never_set

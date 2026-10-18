@@ -1390,7 +1390,7 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
     "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "spend-cap refusal exited $status, not 1: $out"
-  assert_contains "$out" "caps concurrent workers at 2 and 2 ordinary task(s) are live" "spend-cap refusal lost its count"
+  assert_contains "$out" "caps concurrent workers at 2 and 2 live worker(s) are running" "spend-cap refusal lost its count"
   # The cap binds main too: the posture, not the actor, is what caps spend.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -1552,7 +1552,7 @@ test_quiet_record_never_caps_a_present_captains_spawn() {
   assert_not_contains "$out" "caps concurrent workers" "a quiet record capped a present captain's spawn"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null 2>&1 || fail "away entry over quiet failed"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
-  assert_contains "$out" "caps concurrent workers at 1 and 2 ordinary task(s) are live" "the away record's cap no longer binds"
+  assert_contains "$out" "caps concurrent workers at 1 and 2 live worker(s) are running" "the away record's cap no longer binds"
   pass "a quiet-mode record never caps a present captain's spawn, while the away record's cap still binds"
 }
 
@@ -1605,10 +1605,171 @@ WRAPPER
   : > "$home/competitor-published"
   wait || true
   out=$(cat "$home/q1.out" 2>/dev/null || true)
-  assert_contains "$out" "caps concurrent workers at 1 and 1 ordinary task(s) are live" \
+  assert_contains "$out" "caps concurrent workers at 1 and 1 live worker(s) are running" \
     "the paused spawn did not recheck the cap after the competitor published: $out"
   [ ! -f "$home/state/task-q1.meta" ] || fail "the stale-count spawn published after a competitor landed"
   pass "the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish"
+}
+
+# make_cap_probe_tmux <dir>: a fake tmux whose answers come from the directory
+# $FM_CAP_TMUX_DB, so the away spend cap's per-record endpoint read
+# (fm_backend_agent_alive, bin/fm-backend.sh) sees controlled verdicts:
+#   <session>.windows - the names `list-windows -t <session>` reports; a
+#     session with no file answers "can't find session", which the tmux
+#     classifier owns as `missing`.
+#   <window>.comm - the #{pane_current_command} for any <session>:<window>.
+#     `claude` classifies alive, `zsh` dead, and `node` ambiguous; a present
+#     window with no file fails the read, so the endpoint is `unreadable`.
+# Every other query (the pane_tty probes) fails, so no foreground process
+# group is ever observed.
+make_cap_probe_tmux() {
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+db=$FM_CAP_TMUX_DB
+sub=${1:-}
+target=
+prev=
+for a in "$@"; do
+  [ "$prev" = -t ] && target=$a
+  prev=$a
+done
+target=${target#=}
+case "$sub" in
+  list-windows)
+    if [ -f "$db/$target.windows" ]; then
+      cat "$db/$target.windows"
+      exit 0
+    fi
+    printf "can't find session: %s\n" "$target" >&2
+    exit 1
+    ;;
+  display-message)
+    case " $* " in
+      *pane_current_command*)
+        win=${target#*:}
+        if [ -f "$db/$win.comm" ]; then
+          cat "$db/$win.comm"
+          exit 0
+        fi
+        exit 1
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# The cap counts live agent endpoints, not retained records: a record whose
+# recorded endpoint is positively agent-free (the recovery-grade classifier's
+# `dead` or `missing` verdict, surfaced by fm_backend_agent_alive) spends
+# nothing, while `alive`, `ambiguous`, `unreadable`, and every other unproven
+# read still count, so the cap stays conservative. Secondmate records and
+# relaunches stay exempt, exactly as before.
+test_away_spend_cap_counts_only_live_worker_endpoints() {
+  local home root fakebin db wt proj out status
+  home="$TMP_ROOT/away-livecap-home"
+  root="$TMP_ROOT/away-livecap-root"
+  db="$TMP_ROOT/away-livecap-db"
+  mkdir -p "$home/state" "$root" "$db"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  fakebin=$(make_cap_probe_tmux "$TMP_ROOT/away-livecap-fake")
+  printf 'fm-dead\nfm-live\nfm-ambig\nfm-unread\nfm-rel1\n' > "$db/capsess.windows"
+  printf 'zsh\n' > "$db/fm-dead.comm"
+  printf 'claude\n' > "$db/fm-live.comm"
+  printf 'node\n' > "$db/fm-ambig.comm"
+  printf 'claude\n' > "$db/fm-rel1.comm"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
+
+  # Stopped records - a positively dead pane and an authoritatively absent
+  # window - and a secondmate record spend nothing: only task-live, whose
+  # pane holds an agent, counts against the cap of 2.
+  fm_write_meta "$home/state/task-gone.meta" "window=nosess:fm-gone" "kind=ship"
+  fm_write_meta "$home/state/task-dead.meta" "window=capsess:fm-dead" "kind=ship"
+  fm_write_meta "$home/state/task-live.meta" "window=capsess:fm-live" "kind=ship"
+  fm_write_meta "$home/state/mate-1.meta" "window=capsess:fm-live" "kind=secondmate"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "caps concurrent workers" "stopped or secondmate records counted as spend"
+  assert_contains "$out" "queued unblocked work" "a spawn under the cap did not reach the branch's queued-work gate: $out"
+
+  # The exact boundary: one ambiguous endpoint joins the live one - two
+  # unproven-free records against a cap of two refuse as two live workers.
+  fm_write_meta "$home/state/task-ambig.meta" "window=capsess:fm-ambig" "kind=ship"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "the cap did not refuse at its live-worker boundary (exit $status): $out"
+  assert_contains "$out" "caps concurrent workers at 2 and 2 live worker(s) are running" \
+    "the cap refusal lost the live-worker count: $out"
+
+  # An unreadable endpoint counts too, taking the live count past the cap.
+  fm_write_meta "$home/state/task-unread.meta" "window=capsess:fm-unread" "kind=ship"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "the cap did not refuse above its boundary (exit $status): $out"
+  assert_contains "$out" "caps concurrent workers at 2 and 3 live worker(s) are running" \
+    "the cap stopped counting an unreadable endpoint: $out"
+
+  # A relaunch never pays the cap even when it is full: it reaches the
+  # endpoint check on its own record and is refused there for a live endpoint.
+  wt="$TMP_ROOT/away-livecap-relwt"
+  proj="$TMP_ROOT/away-livecap-proj"
+  mkdir -p "$wt" "$proj"
+  fm_write_meta "$home/state/rel1.meta" \
+    "window=capsess:fm-rel1" "endpoint_task_id=rel1" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" "tasktmp=/tmp/fm-rel1" \
+    "model=default" "effort=default"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_SPAWN_NO_GUARD=1 HOME="$TMP_ROOT/away-livecap-userhome" \
+    "$ROOT/bin/fm-spawn.sh" rel1 --relaunch 2>&1)
+  assert_not_contains "$out" "caps concurrent workers" "a relaunch was held to the away spend cap"
+  assert_contains "$out" "positively agent-free endpoint" "the relaunch did not reach its own endpoint gate: $out"
+
+  pass "the away spend cap counts only live worker endpoints - stopped records free it, unknown reads still count, secondmates and relaunches stay exempt"
+}
+
+# A record published moments ago whose agent is not in the pane yet reads
+# `dead`, but its launch is in flight, so it still spends against the cap: two
+# fresh spawns at cap 1 cannot both pass the recheck. Once the record ages past
+# the launch grace, the same dead endpoint frees the cap.
+test_away_spend_cap_counts_in_flight_launches() {
+  local home root fakebin db out status now
+  home="$TMP_ROOT/away-inflight-home"
+  root="$TMP_ROOT/away-inflight-root"
+  db="$TMP_ROOT/away-inflight-db"
+  mkdir -p "$home/state" "$root" "$db"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  fakebin=$(make_cap_probe_tmux "$TMP_ROOT/away-inflight-fake")
+  printf 'fm-pending\n' > "$db/capsess.windows"
+  printf 'zsh\n' > "$db/fm-pending.comm"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "away entry failed"
+
+  now=$(date +%s)
+  fm_write_meta "$home/state/task-pending.meta" "window=capsess:fm-pending" "kind=ship" "spawn_gen=s${now}.1.1"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an in-flight launch did not count against the cap (exit $status): $out"
+  assert_contains "$out" "caps concurrent workers at 1 and 1 live worker(s) are running" \
+    "the in-flight launch was not counted: $out"
+
+  fm_write_meta "$home/state/task-pending.meta" "window=capsess:fm-pending" "kind=ship" "spawn_gen=s$((now - 3600)).1.1"
+  out=$(env FM_CAP_TMUX_DB="$db" PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "caps concurrent workers" "a long-stopped record kept counting after the launch grace"
+  pass "the away spend cap counts a record whose launch is still in flight, then frees it once the grace passes"
 }
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
@@ -1647,3 +1808,5 @@ test_away_record_relocates_main_owned_actions_to_the_branch
 test_away_branch_spawn_requires_queued_dispatchable_work
 test_away_spend_cap_is_rechecked_under_the_task_set_lock
 test_quiet_record_never_caps_a_present_captains_spawn
+test_away_spend_cap_counts_only_live_worker_endpoints
+test_away_spend_cap_counts_in_flight_launches

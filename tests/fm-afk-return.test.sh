@@ -453,7 +453,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
   assert_contains "$out" '4 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task record(s) at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
