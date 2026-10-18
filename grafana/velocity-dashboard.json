@@ -1,0 +1,444 @@
+{
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/prs/"
+        }
+      },
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Pull requests",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/commits/"
+        }
+      },
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Commits",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/added/"
+        }
+      },
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Lines added",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/removed/"
+        }
+      },
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Lines removed",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/runs/"
+        }
+      },
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "No-mistakes runs",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Per project",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "targets": [
+        {
+          "csvContent": "project,agent,prs,commits,added,removed\nDECADA,Carlos Lopez,0,529,6791428,3314655\nDECADA,Carlos L\u00f3pez,0,2,1338,279\nDECADA,Carlos L\u00f3pez-Camey,0,571,1067420,2987872\nDECADA,FxSgBot Support,0,63,379608,1354\nDECADA,famlopezmuralles,38,35,82647,2237\nDECADA,kmels,0,3,0,0\nDECADA,root,0,18,7147,762\nDECADA,yourname,0,1,505,0\nMoneyManagerPlus,Carlos Lopez,0,189,61960,13779\nMoneyManagerPlus,famlopezmuralles,212,231,181412,32351\nMoneyManagerPlus,kmels,0,16,0,0\ncabsa-ai-enablement-engineering,Carlos Lopez,0,142,22078,4451\ncabsa-ai-enablement-engineering,Fam Lo Mu,0,12,14497,68\ncabsa-ai-enablement-engineering,famlopezmuralles,23,23,8336,868\ncazalive,Carlos Lopez,0,26,8073,629\ncazalive,c.lopezkmey@gmail.com,0,24,32817,455\ncazalive,famlopezmuralles,18,17,9287,295\ncentinela,Carlos Lopez,0,385,745030,55946\ncentinela,FLM,0,120,68065,8598\ncentinela,Fam Lo Mu,0,12,1352,350\ncentinela,OpenClaw Assistant,0,8,828,121\ncentinela,copilot-swe-agent[bot],0,1,1,1\ncentinela,famlopezmuralles,466,1002,587171,213349\ncentinela,kmels,4,18,0,0\ncentinela,root,0,30,4543,2459\ndaily-tracker,Carlos Lopez,0,32,17259,1927\ndaily-tracker,Codex Sites,0,2,12256,1\ndaily-tracker,famlopezmuralles,8,8,4732,485\nfillroute,Carlos Lopez,0,125,237777,47944\nfillroute,FillRoute Dev,0,5,129,80\nfillroute,c.lopezkmey@gmail.com,0,133,97477,36209\nfillroute,famlopezmuralles,132,123,43928,43098\nfillroute,kmels,0,4,0,0\nhorizonte,Carlos Lopez,0,110,178389,42155\nhorizonte,c.lopezkmey@gmail.com,0,34,91912,112594\nhorizonte,famlopezmuralles,34,29,7064,12250\nlopezc-skills,Carlos Lopez,0,42,4869,449\nlopezc-skills,famlopezmuralles,11,10,1221,1\nlopezc-skills,kmels,0,1,0,0\nquota-axi,AI Tooling for @idvorkin,0,1,1820,33\nquota-axi,Andrew Sweet,0,2,455,18\nquota-axi,Berke Ozelsel,0,1,278,52\nquota-axi,Caleb LeNoir,0,1,235,17\nquota-axi,Camilo Martinez,0,1,1993,603\nquota-axi,Carlos Lopez,0,5,1746,55\nquota-axi,Douglas Jarquin,0,1,498,41\nquota-axi,Dutopy,0,2,1409,222\nquota-axi,Ian Brown,0,3,5019,369\nquota-axi,Jon Roosevelt,0,3,2853,72\nquota-axi,Jonathan Demirgian,0,1,294,52\nquota-axi,Joseph Kim,0,3,4658,121\nquota-axi,Justin,0,2,3541,72\nquota-axi,Kun Chen,0,67,433790,397812\nquota-axi,Leon Miltiadou,0,1,316,61\nquota-axi,Olivier Vanheuverzwijn,0,2,1260,62\nquota-axi,Pascal HE,0,1,190,15\nquota-axi,Pedro Guimar\u00e3es,0,1,4705,170\nquota-axi,Peter Petermann,0,1,2295,65\nquota-axi,Rodrigo D\u00edaz Jonguitud,0,2,23,6\nquota-axi,Sergnio,0,1,129,24\nquota-axi,Shang Wei,0,1,532,91\nquota-axi,Tiago,0,7,5985,565\nquota-axi,Umer,0,1,129,13\nquota-axi,bastotec,0,1,1237,29\nquota-axi,data-driven-decision,0,1,345,34\nquota-axi,famlopezmuralles,1,1,0,0\nquota-axi,github-actions[bot],0,54,49824,106\nquota-axi,jazz127,0,5,3814,269\nquota-axi,kunchenguid,0,218,438607,10818\nquota-axi,nunoras,0,1,746,153\nquota-axi,pm-justinm,0,1,384,31\nquota-axi,ruby-dlee,0,1,669,50\nquota-axi,sdivanl,0,1,60,7\nquota-axi,twelvesixsports,0,1,245,1\nquota-axi,xiaosongshu,0,1,436,30\nquota-axi,zachlandes,0,2,3926,117",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Per agent",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-testdata-datasource",
+        "uid": "testdata"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "targets": [
+        {
+          "csvContent": "project,prs,commits,added,removed,runs\nDECADA,38,1222,8330093,6307159,62\nMoneyManagerPlus,212,436,243372,46130,85\ncabsa-ai-enablement-engineering,23,177,44911,5387,43\ncazalive,18,67,50177,1379,30\ncentinela,470,1576,1406990,280824,241\ndaily-tracker,8,42,34247,2413,18\nfillroute,132,390,379311,127331,87\nhorizonte,34,173,277365,166999,11\nlopezc-skills,11,53,6090,450,7\nquota-axi,1,399,974446,412256,4",
+          "refId": "A",
+          "scenarioId": "csv_content"
+        }
+      ],
+      "title": "Commits per project",
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "regex",
+                  "options": {
+                    "pattern": "$project"
+                  }
+                },
+                "fieldName": "project"
+              }
+            ],
+            "match": "any"
+          }
+        }
+      ],
+      "type": "barchart"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [
+    "velocity",
+    "firstmate"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "label": "Project",
+        "multi": true,
+        "name": "project",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "text": "DECADA",
+            "value": "DECADA"
+          },
+          {
+            "text": "MoneyManagerPlus",
+            "value": "MoneyManagerPlus"
+          },
+          {
+            "text": "cabsa-ai-enablement-engineering",
+            "value": "cabsa-ai-enablement-engineering"
+          },
+          {
+            "text": "cazalive",
+            "value": "cazalive"
+          },
+          {
+            "text": "centinela",
+            "value": "centinela"
+          },
+          {
+            "text": "daily-tracker",
+            "value": "daily-tracker"
+          },
+          {
+            "text": "fillroute",
+            "value": "fillroute"
+          },
+          {
+            "text": "horizonte",
+            "value": "horizonte"
+          },
+          {
+            "text": "lopezc-skills",
+            "value": "lopezc-skills"
+          },
+          {
+            "text": "quota-axi",
+            "value": "quota-axi"
+          }
+        ],
+        "query": "DECADA,MoneyManagerPlus,cabsa-ai-enablement-engineering,cazalive,centinela,daily-tracker,fillroute,horizonte,lopezc-skills,quota-axi",
+        "type": "custom"
+      }
+    ]
+  },
+  "timezone": "browser",
+  "title": "Velocity Dashboard",
+  "uid": "firstmate-velocity",
+  "version": 0
+}
