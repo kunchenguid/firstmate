@@ -3231,10 +3231,13 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  # cortex=ask: a titled rounded composer box is the one shape a Cortex agent
+  # identity changes, so the classifier answers need-identity for it and the
+  # lazy probe below runs; no other verdict pays for it.
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1')
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\ncortex=ask')
   elif cap=$(fm_backend_herdr_visible_capture "$target"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1')
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\ncortex=ask')
   else
     printf 'unknown'
     return 0

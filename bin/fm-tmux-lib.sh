@@ -183,6 +183,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
+  # Cortex Code parks its terminal cursor in the first column of the blank row
+  # under its footer, before and after typing (verified cortex 1.1.104 in
+  # tmux), so the cursor row names no composer and the same cursorless read
+  # applies, gated on its anchored foreground process name rather than on the
+  # verdict alone. That proven identity is also what lets the classifier
+  # accept Cortex's titled top rule (the cortex=1 capability).
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cortex "$target"; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)"$'\ncortex=1' "$pane" '')
+  fi
   # Command Code parks its terminal cursor below its footer too, drawing its
   # own reverse-video cursor cell in the composer (verified live, Command Code
   # 1.74.1), so it takes the same cursorless reclassification, gated on its own
@@ -193,6 +202,25 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
+}
+
+# fm_tmux_pane_is_cortex: true when the pane's FOREGROUND process group contains
+# a process named exactly `cortex` (Cortex Code is a compiled single binary, so
+# its comm is that anchored word). The foreground scoping (pgid = tpgid)
+# matches fm_tmux_pane_is_cursor, so a pane whose agent exited to a shell gets
+# no reclassification.
+fm_tmux_pane_is_cortex() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" = cortex ] && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
