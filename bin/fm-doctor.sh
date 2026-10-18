@@ -333,7 +333,9 @@ MODEL=$(jq -n \
         | if ($hits | length) > 0 then
             {status: ([$hits[] | line_status($c; .)] | worst), evidence: evidence_of($hits), detail: $hits}
           elif $s.rc != 0 then {status: "skip", evidence: "source \($c.source) did not finish; see doctor/\($c.source)"}
-          elif $complete != null and (any($s.stdout | lines_of | .[]; test($complete)) | not) then
+          elif $complete != null and
+            ((any($s.stdout | lines_of | .[]; test($complete)) | not)
+             or any($s.stdout | lines_of | .[]; test("did not finish cleanly|^NETWORK_CHECKS:"))) then
             {status: "skip", evidence: "no finished network report covers this check: " + ($s.stdout | lines_of | .[0] // "empty" | trunc)}
           else {status: "ok", evidence: "none reported"} end
       end;

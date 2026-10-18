@@ -170,6 +170,17 @@ test_provoked_lines_render_their_ids() {
     FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude "$DOCTOR" --json 2>/dev/null) || DOCTOR_RC=$?
   assert_status "$DOCTOR_OUT" permissions/claude-fm-scripts warn "auto mode without a bin/fm-* rule"
 
+  printf '%s\n' '{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-doctor.sh:*)"]}}' > "$dir/user-settings.json"
+  DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_BOOTSTRAP_CLAUDE_USER_SETTINGS="$dir/user-settings.json" \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude "$DOCTOR" --json --area permissions 2>/dev/null)
+  assert_status "$DOCTOR_OUT" permissions/claude-fm-scripts warn "a single allowed script does not cover supervision"
+  printf '%s\n' '{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-*:*)"]}}' > "$dir/user-settings.json"
+  DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_BOOTSTRAP_CLAUDE_USER_SETTINGS="$dir/user-settings.json" \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude "$DOCTOR" --json --area permissions 2>/dev/null)
+  assert_status "$DOCTOR_OUT" permissions/claude-fm-scripts ok "the script family is allowed"
+
   dir=$(new_case herdr-launcher)
   printf '%s\n' herdr > "$dir/home/config/backend"
   cat > "$dir/fakebin/herdr" <<'SH'
@@ -264,7 +275,7 @@ write_network_report() {
 }
 
 test_network_checks() {
-  local dir
+  local dir state id
   dir=$(new_case network)
   write_network_report "$dir/home" probe,sweeps \
     'FLEET_SYNC: alpha: STUCK: on feature, 3 commits behind main - needs attention'
@@ -287,11 +298,78 @@ test_network_checks() {
   doctor "$dir" --json --network
   assert_status "$DOCTOR_OUT" fleet/sync skip "probe-only report cannot clear sweep checks"
 
+  for state in timeout failed; do
+    write_network_report "$dir/home" probe,sweeps \
+      'FLEET_SYNC: alpha: STUCK: needs attention' \
+      'NETWORK_CHECKS: the deferred checks may be incomplete'
+    sed "s/state=done/state=$state/" "$dir/home/state/.startup-network.status" > "$dir/status"
+    mv "$dir/status" "$dir/home/state/.startup-network.status"
+    doctor "$dir" --json --network
+    assert_status "$DOCTOR_OUT" fleet/sync warn "$state preserves a reported problem"
+    for id in fleet/secondmate-sync fleet/secondmate-liveness fleet/secondmate-nudge fleet/config-reread; do
+      assert_status "$DOCTOR_OUT" "$id" skip "$state cannot clear absent sweep diagnostics"
+    done
+    assert_status "$DOCTOR_OUT" supervision/network-checks warn "$state diagnostic"
+    assert_status "$DOCTOR_OUT" supervision/startup-network warn "$state report"
+  done
+
+  write_network_report "$dir/home" probe,sweeps 'NETWORK_CHECKS: the recorded fleet lock holder changed, so sweeps were skipped'
+  doctor "$dir" --json --network
+  assert_status "$DOCTOR_OUT" fleet/sync skip "skipped sweeps cannot clear fleet results"
+  write_network_report "$dir/home" probe,sweeps
+  sed 's/report_published=1/report_published=0/' "$dir/home/state/.startup-network.status" > "$dir/status"
+  mv "$dir/status" "$dir/home/state/.startup-network.status"
+  doctor "$dir" --json --network
+  assert_status "$DOCTOR_OUT" fleet/sync skip "unpublished report cannot clear fleet results"
+
   rm -f "$dir/home/state/.startup-network.status" "$dir/home/state/.startup-network.report"
   doctor "$dir" --json --network
   assert_status "$DOCTOR_OUT" fleet/secondmate-liveness skip "no report yet"
   assert_status "$DOCTOR_OUT" supervision/startup-network info "no report yet is informational"
   pass "--network adds a fresh auth probe and reads the last finished network report"
+}
+
+test_memory_budget_status() {
+  local dir role
+  dir=$(new_case memory-budget)
+  doctor "$dir" --json --area memory
+  assert_status "$DOCTOR_OUT" memory/budget info "absent budget"
+  printf '%s\n' malformed > "$dir/home/config/startup-memory-budget"
+  doctor "$dir" --json --area memory
+  assert_status "$DOCTOR_OUT" memory/budget warn "malformed budget"
+  printf '%s\n' 1 > "$dir/home/config/startup-memory-budget"
+  for role in primary secondmate; do
+    [ "$role" != secondmate ] || : > "$dir/home/.fm-secondmate-home"
+    printf 'abc' > "$dir/home/data/captain-shared.md"
+    doctor "$dir" --json --area memory
+    assert_status "$DOCTOR_OUT" memory/budget ok "$role at the budget"
+    printf 'abcd' > "$dir/home/data/captain-shared.md"
+    doctor "$dir" --json --area memory
+    assert_status "$DOCTOR_OUT" memory/budget warn "$role exceeds the budget despite exit zero"
+  done
+  pass "memory reports use the published budget status for both home roles"
+}
+
+test_supported_harnesses() {
+  local dir harness
+  dir=$(new_case harnesses)
+  for harness in claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken; do
+    printf '%s\n' "$harness" > "$dir/home/config/crew-harness"
+    DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+      FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS="$harness" "$DOCTOR" --json --area config 2>/dev/null)
+    assert_status "$DOCTOR_OUT" config/harness ok "supported own harness $harness"
+    assert_status "$DOCTOR_OUT" config/crew-harness ok "supported crew harness $harness"
+  done
+  for harness in bogus unknown codex-extra; do
+    printf '%s\n' "$harness" > "$dir/home/config/crew-harness"
+    doctor "$dir" --json --area config
+    assert_status "$DOCTOR_OUT" config/crew-harness warn "unsupported crew harness $harness"
+  done
+  printf '%s\n' default > "$dir/home/config/crew-harness"
+  DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=codex "$DOCTOR" --json --area config 2>/dev/null)
+  assert_status "$DOCTOR_OUT" config/crew-harness ok "default resolves to a supported own harness"
+  pass "own and crew checks accept supported adapters and reject unsupported names"
 }
 
 test_toon_and_json_agree() {
@@ -377,6 +455,8 @@ test_tangle_is_rendered
 test_unmapped_line_fails
 test_invalid_inventories_fail
 test_network_checks
+test_memory_budget_status
+test_supported_harnesses
 test_toon_and_json_agree
 test_area_and_usage
 test_help_contract
