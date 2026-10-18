@@ -36,6 +36,14 @@
 #       turn-ended notification. Arm and retire clear the marker, and an old
 #       incarnation can never refresh its replacement's progress.
 #
+#   permission-request <state-dir> <id> --gen G
+#       Read a Claude PermissionRequest JSON payload on stdin and append a
+#       keyed needs-decision event to state/<id>.status without changing busy
+#       state or answering the prompt. Duplicate requests share a key derived
+#       from the incarnation, lifecycle sequence, session, tool input, and
+#       transcript byte position. The status log is the durable dedup record;
+#       the existing watcher surfaces it even while the busy record is open.
+#
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
@@ -61,6 +69,7 @@ usage:
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--turn-ended]
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh stream <state-dir> <id> <open|progress|close> --gen G --request N
+  fm-busy-event.sh permission-request <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -73,7 +82,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply|progress|stream|retire) shift ;;
+  arm|apply|progress|stream|permission-request|retire) shift ;;
   *) usage ;;
 esac
 
@@ -121,10 +130,20 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
 fi
 
-[ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
+case "$CMD" in progress|permission-request) [ "$USE_CURRENT_GEN" = 0 ] || usage ;; esac
 if [ "$CMD" = stream ]; then
   [ "$USE_CURRENT_GEN" = 0 ] || usage
   fm_busy_stream_uint_valid "$REQUEST" || usage
+fi
+
+if [ "$CMD" = permission-request ]; then
+  PAYLOAD=$(jq -ceS '
+    select(.hook_event_name == "PermissionRequest")
+    | select((.session_id | type) == "string" and (.session_id | length) > 0)
+    | select((.tool_name | type) == "string" and (.tool_name | test("^[A-Za-z0-9_.-]+$")))
+    | select((.tool_input | type) == "object")
+    | {session_id, tool_name, tool_input, transcript_path}
+  ') || { echo "error: invalid Claude PermissionRequest payload" >&2; exit 1; }
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -212,7 +231,7 @@ if [ "$CMD" = arm ]; then
   exit 0
 fi
 
-# apply / progress / retire
+# apply / progress / permission-request / retire
 if [ "$USE_CURRENT_GEN" = 1 ] && [ "$CMD" != retire ]; then
   GEN=$(fm_busy_current_gen "$STATE" "$ID") || {
     umask "$old_umask"
@@ -309,6 +328,32 @@ if [ "$CMD" = stream ]; then
     fi
   fi
   lock_release
+  exit 0
+fi
+if [ "$CMD" = permission-request ]; then
+  transcript=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty')
+  transcript_size=0
+  if [ -f "$transcript" ]; then
+    if [ "$(uname)" = Darwin ]; then
+      transcript_size=$(/usr/bin/stat -f %z "$transcript")
+    else
+      transcript_size=$(stat -c %s "$transcript")
+    fi
+  fi
+  request_key=$(printf '%s\n' "$GEN" "$(cat "$REC")" "$PAYLOAD" "$transcript_size" | git hash-object --stdin) || {
+    lock_release; umask "$old_umask"; exit 1;
+  }
+  request_key="claude-permission-$request_key"
+  status="$STATE/$ID.status"
+  if ! grep -qF "[key=$request_key]:" "$status" 2>/dev/null; then
+    tool=$(printf '%s' "$PAYLOAD" | jq -r '.tool_name')
+    printf 'needs-decision [at=%s] [key=%s]: Claude permission prompt for %s; inspect the worker and route the security decision; never answer with keys\n' \
+      "$(date +%s)" "$request_key" "$tool" >> "$status" || {
+      lock_release; umask "$old_umask"; exit 1;
+    }
+  fi
+  lock_release
+  umask "$old_umask"
   exit 0
 fi
 OLD_SEQ=0

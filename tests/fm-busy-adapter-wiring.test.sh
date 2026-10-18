@@ -453,12 +453,23 @@ test_claude_hooks_semantic_lifecycle() {
   settings="$WT_DIR/.claude/settings.local.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
-  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd PermissionRequest; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  local payload='{"hook_event_name":"PermissionRequest","session_id":"permission-session","tool_name":"Bash","tool_input":{"command":"example"}}'
+  out=$(printf '%s' "$payload" | run_claude_hook "$settings" PermissionRequest)
+  [ -z "$out" ] || fail "permission hook returned output that could answer the prompt: $out"
+  grep -q 'needs-decision .*Claude permission prompt for Bash' "$state/$id.status" \
+    || fail "permission hook did not record a decision"
+  printf '%s' "$payload" | run_claude_hook "$settings" PermissionRequest
+  [ "$(grep -c 'Claude permission prompt' "$state/$id.status")" = 1 ] \
+    || fail "permission hook duplicated a request"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "permission hook changed the busy record: $out"
 
   rm -f "$state/$id.turn-ended"
   run_claude_hook "$settings" Stop || fail "Stop hook command failed"
