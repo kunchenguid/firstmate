@@ -408,7 +408,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 
 | Test | What it covers |
 |---|---|
-| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
+| `tests/fm-supervision-host.test.sh` and its five sibling suites | Drive the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section, with the Claude Stop hook around the host, the dialog mirror, away turns and the return handoff, the engine-error latch, and the park boundary in the `-stop-hook`, `-mirror`, `-away`, `-latch`, and `-park` siblings over `tests/supervision-host-helpers.sh`. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |
