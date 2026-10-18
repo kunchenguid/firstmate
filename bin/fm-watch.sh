@@ -1213,6 +1213,37 @@ _wedge_cap_markers_clear() {
     "$STATE/.wedge-rollback-failed-$key"
 }
 
+# wedge_episode_end: THE choke point for ending a wedge episode.
+#
+# .stale-since-<key> is the marker that DEFINES a wedge episode, so every removal
+# of it in this file must go through here. The helper removes the episode marker,
+# removes the escalation count unless the caller says the counter is being
+# restarted while the wedge timer keeps aging, and then clears the cap markers.
+# The cap release is therefore structural rather than enumerated: a route that
+# ends an episode cannot forget to release the cap, because forgetting would mean
+# not calling this function at all, and the completeness assertion in
+# tests/fm-watch-wedge-cap.test.sh fails on any direct rm of .stale-since-.
+#
+# That enumeration is not hypothetical. The release was first wired at two inline
+# sites and two more were missed, one of them surface_nonterminal_stale, which is
+# the hot path - it ends the episode marker on every non-terminal stale poll - so
+# a genuine new wedge after a pause-and-resume stayed silent for the whole
+# horizon. The choke point exists so that failure cannot recur silently.
+#
+# keep-counter=1 marks a route that only restarts the escalation count while the
+# wedge timer keeps aging. That is the same episode, not a new one, so the cap
+# markers must NOT be cleared there; an existing triage test pins that behaviour.
+# wedge_episode_end <window-key> [keep-counter]
+wedge_episode_end() {
+  local key=$1 keep=${2:-0}
+  if [ "$keep" = 1 ]; then
+    rm -f "$STATE/.stale-since-$key"
+  else
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+    _wedge_cap_markers_clear "$key"
+  fi
+}
+
 # _wedge_cap_marker_stands: 0 while the cap marker a fired cap wrote for this
 # WINDOW is still inside FM_CAP_HORIZON_SECS, 1 once it is absent or expired.
 # The cap is window-scoped by design, so this one marker is the whole ceiling:
@@ -1986,8 +2017,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  _wedge_cap_markers_clear "$key"
+  wedge_episode_end "$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -2110,7 +2140,8 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+  wedge_episode_end "$key"
+  rm -f "$STATE/.stale-$key" \
     "$STATE/.waiting-resurfaced-$key"
 }
 
@@ -2371,7 +2402,7 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
+  wedge_episode_end "$key"
   clear_write_tracking "$key"
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"

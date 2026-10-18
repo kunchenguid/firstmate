@@ -1177,6 +1177,113 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
   pass "an unwritable terminal episode marker narrows suppression instead of flooding the queue"
 }
 
+# The cap's release invariant is "every reset that ends a wedge episode releases
+# the cap markers". That invariant was first wired at two inline sites and two
+# more were missed, one of them the hot path, so a real pause-and-resume could
+# leave the cap engaged for the whole horizon. It is now enforced by a single
+# choke point, wedge_episode_end. This assertion is what makes that structural
+# rather than merely intended: any future site that removes the episode marker
+# without going through the choke point fails here, loudly, instead of silently
+# reintroducing the defect.
+test_wedge_cap_episode_end_is_the_only_way_to_end_an_episode() {
+  local lineno text outside=0 in_choke
+
+  in_choke=$(grep -n '^wedge_episode_end() {' "$WATCH" | head -1 | cut -d: -f1)
+  [ -n "$in_choke" ] \
+    || fail "bin/fm-watch.sh no longer defines wedge_episode_end, so the cap release has no choke point"
+
+  while IFS= read -r lineno; do
+    lineno=${lineno%%:*}
+    # Skip contract comments: neither is code.
+    text=$(sed -n "${lineno}p" "$WATCH")
+    case "$text" in
+      *'#'*) continue ;;
+    esac
+    # Inside the choke point, a .stale-since- occurrence is either its own removal
+    # or its own read. Outside it, a removal is the defect this assertion exists
+    # to catch.
+    case "$text" in
+      *'rm -f'*'stale-since-'*)
+        if [ "$lineno" -lt "$in_choke" ] || [ "$lineno" -gt $((in_choke + 40)) ]; then
+          outside=$((outside + 1))
+          printf '  %s: %s\n' "$lineno" "$text" >&2
+        fi
+        ;;
+    esac
+  done < <(grep -n 'stale-since-' "$WATCH")
+
+  [ "$outside" -eq 0 ] \
+    || fail "$outside removal(s) of the wedge-episode marker sit outside wedge_episode_end; every end of a wedge episode must release the cap markers, and a site added here would silently re-arm the defect"
+  pass "every removal of the wedge-episode marker routes through the wedge_episode_end choke point"
+}
+
+# The behavioural proof of the same invariant: the hot path
+# surface_nonterminal_stale ended the episode marker on every non-terminal stale
+# poll without releasing the cap, so a genuine new wedge after a pause-and-resume
+# stayed silent for the full horizon. Drive that exact sequence and assert the
+# fresh wedge escalates immediately.
+test_wedge_cap_releases_after_nonterminal_stale_episode() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max n statusf
+  dir=$(make_case wedge-cap-nonterminal-reset); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-nonterminal-reset"
+  statusf="$state/wedge-cap-nonterminal-reset.status"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-nonterminal-reset.meta"
+  printf 'working: still wedged\n' > "$statusf"
+  mark_status_seen "$state" "$statusf"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 3 || fail "prime-and-ack failed"
+  max=3
+  n=1
+  while [ "$n" -le "$max" ]; do
+    poll_wedge_round "$dir" "$max" ""
+    n=$((n + 1))
+  done
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "cap round did not fire PERMANENTLY-WEDGED"
+  [ -e "$state/.wedge-permanent-$key" ] || fail "window-scoped marker missing after cap fire"
+
+  # Now a non-terminal stale poll on a FRESH hash. That takes the first-sight
+  # branch into surface_nonterminal_stale, which ends the wedge episode on the
+  # hot path - the route that used to leave the cap marker standing, so a
+  # genuine new wedge stayed silent for the whole horizon.
+  # pause_state_class must NOT be working or paused here, or the poll takes the
+  # provably-working absorb or the declared-wait branch instead of the hot path.
+  export FM_FAKE_CREW_STATE='state: idle · source: none'
+  printf 'a different pane body entirely' > "$capture_file"
+  rm -f "$state/.stale-$key" "$state/.wedge-escalations-$key"
+  printf '%s' "$(hash_text "a different pane body entirely")" > "$state/.hash-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 200 || fail "non-terminal reset poll did not settle: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "non-terminal reset ack failed"
+
+  [ ! -e "$state/.wedge-permanent-$key" ] \
+    || fail "a non-terminal stale poll ended the wedge episode but left the cap marker standing; a genuine new wedge would stay silent for the whole horizon"
+
+  # And the fresh wedge must escalate immediately rather than sit silenced.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  n=1
+  while [ "$n" -le "$max" ]; do
+    poll_wedge_round "$dir" "$max" ""
+    grep -F "escalation $n" "$out" >/dev/null \
+      || fail "the fresh wedge after a non-terminal reset did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "a non-terminal stale poll ends the episode, releases the cap, and lets the fresh wedge escalate immediately"
+}
+
 test_wedge_cap_disabled_by_default
 test_wedge_cap_fires_permanently_wedged_at_threshold
 test_wedge_cap_silences_subsequent_polls_for_same_hash
@@ -1192,3 +1299,5 @@ test_wedge_cap_reports_gone_endpoint_while_capped
 test_wedge_cap_new_episode_publishes_its_own_terminal_wake
 test_wedge_cap_probe_keeps_its_cadence_while_capped
 test_wedge_cap_unwritable_terminal_marker_does_not_flood
+test_wedge_cap_episode_end_is_the_only_way_to_end_an_episode
+test_wedge_cap_releases_after_nonterminal_stale_episode
