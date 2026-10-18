@@ -25,6 +25,7 @@ live_lab_cleanup() {
   while read -r pid; do [ -n "$pid" ] && { pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }; done < "$TMP_ROOT/pids"
   while read -r dir; do
     [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
     env -u TMUX TMUX_TMPDIR="$dir" tmux kill-server 2>/dev/null
     case "$dir" in /tmp/fml.*) rm -rf "$dir" ;; esac
   done < "$TMP_ROOT/tmux-dirs"
