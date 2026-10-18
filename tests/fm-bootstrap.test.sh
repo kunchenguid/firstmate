@@ -348,6 +348,7 @@ test_claude_permissions() {
     [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
   done <<'ROWS'
 auto mode without a rule is reported^-^{"permissions":{"defaultMode":"auto"}}^claude^primary^@LINE@
+auto mode off without a rule is not reported^-^{"permissions":{"defaultMode":"default"}}^claude^primary^
 a local allow rule clears it^{"permissions":{"allow":["Bash(/home/me/firstmate/bin/fm-*:*)"]}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
 a user allow rule clears it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-*:*)"]}}^claude^primary^
 a local mode overrides user auto mode^{"permissions":{"defaultMode":"default"}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
