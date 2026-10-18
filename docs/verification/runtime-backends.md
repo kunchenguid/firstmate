@@ -6,6 +6,24 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Selected worker preparation
+
+Verified on 2026-10-18 on macOS arm64 with Node 24.19.0, using the real brief/spawn executables and isolated no-generation receivers:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-worker-preparation.test.sh tests/fm-kimi-harness.test.sh tests/fm-rovo-harness.test.sh
+```
+
+The receivers observe associated and independent skill bodies in actual initial OMP/Codex arguments, missing-source refusal before a launch, current-source association removal, canonical deduplication with both origins, and compatibility without associations or a selected role.
+Managed source symlinks, hidden associations, malformed bindings, explicit source-root precedence, and raw-command refusal are covered.
+Claude's staged startup settings execute a context hook that returns the same worker identity and prepared bodies before a turn; Kimi/Rovo's first submitted text carries the context losslessly in one JSON line, avoiding literal terminal newline submissions.
+This verifies prepared delivery and the configured startup callback, not installed runtime adoption or model behavior.
+Backend-independent preparation does not claim new live-backend certification.
+The full portable OMP suite also passes under a real outer OMP process: its test-owned ancestry boundary excludes only the fixture root's outgoing parent link while preserving native named-process identities.
+Refresh that portable proof with `bash bin/fm-test-run.sh tests/fm-omp-harness.test.sh tests/fm-worker-preparation.test.sh`.
+[`fm-brief.sh`](../../bin/fm-brief.sh) and [`fm-spawn.sh`](../../bin/fm-spawn.sh) own the selection and delivery contract; this is Firstmate input preparation, not native OMP subagent autoload.
+
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.

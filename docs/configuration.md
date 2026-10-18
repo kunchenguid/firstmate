@@ -1710,6 +1710,16 @@ When the file is absent, routing falls back to registry entries that name the si
 A malformed line or an unregistered project is an error rather than a guess, and two projects sharing the deciding entry are reported as ambiguous.
 Snapshots and their metadata live under `<home>/.lavish/snapshots/`; `bin/fm-lavish-url.sh` owns the matching order, the snapshot record, and the routing output.
 
+## Selected worker roles and skills
+
+Ship and scout tasks can supply an explicitly selected canonical role and independently selected skills through the typed inputs owned by [`fm-brief.sh --help`](../bin/fm-brief.sh).
+Firstmate resolves the role's skill associations before launch and supplies the actual source bodies, rather than asking the worker to discover or manually load a role default.
+Hidden associated skills remain eligible, independent selections are preserved, and canonical duplicate sources are supplied once with both origins recorded.
+Project instructions and applicable project-local skills retain precedence over selected roles and shared skills.
+Missing or malformed declared sources stop preparation; tasks without a selection retain their existing behavior.
+This is Firstmate prepared-input injection, not native OMP subagent selection, and it does not choose a role, workflow, model, or routing policy.
+The preparation and per-adapter delivery mechanics are owned by [`fm-spawn.sh --help`](../bin/fm-spawn.sh); [`worker preparation regressions`](../tests/fm-worker-preparation.test.sh) exercise the executable path without model generation.
+
 ## Home brief include (config/brief-include.md)
 
 The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.

@@ -1165,6 +1165,45 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+test_kimi_prepared_skill_precedes_first_prompt() {
+  local id="kimi-prepared-skill-$$" rec out rc=0
+  rec=$(make_spawn_case prepared-skill "$id")
+  read_spawn_record "$rec"
+  KIMI_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  KIMI_RUNTIME_LAUNCH_DIR=$(kimi_launch_dir "$id" "$HOME_DIR")
+  mkdir -p "$HOME_DIR/.agents/skills/example"
+  printf '%s\n' '---' 'name: example' 'description: Example method' '---' 'PREPARED_METHOD_BODY' > "$HOME_DIR/.agents/skills/example/SKILL.md"
+  ln -s "$(command -v node)" "$FAKEBIN_DIR/node"
+  rm "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" HOME="$HOME_DIR" bash "$ROOT/bin/fm-brief.sh" "$id" example --mode no-mistakes --skill "$HOME_DIR/.agents/skills/example/SKILL.md" >/dev/null
+  node - "$HOME_DIR/data/$id/brief.md" <<'JS'
+const fs = require('node:fs'), file = process.argv[2];
+fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('{TASK}', 'Verify prepared delivery.').replace('{FIRSTMATE_SPEC}', 'No model generation.'));
+JS
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "kimi prepared-input spawn: $out"
+  assert_grep PREPARED_METHOD_BODY "$CASE_DIR/pointer.log" 'kimi first submitted prompt lost prepared skill'
+  assert_grep 'Current worker role contract' "$CASE_DIR/pointer.log" 'kimi first prompt lost worker identity'
+  case "$(cat "$CASE_DIR/pointer.log")" in
+    *$'\n'*) fail 'prepared context must use one terminal submission line' ;;
+  esac
+  jq -j .workerContext "$CASE_DIR/pointer.log" > "$CASE_DIR/decoded-context.md"
+  cmp "$HOME_DIR/data/$id/worker-context.md" "$CASE_DIR/decoded-context.md" ||
+    fail 'terminal serialization changed prepared source content'
+  if [ -n "${FM_PREPARATION_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_PREPARATION_EVIDENCE_DIR/kimi-context"
+    cp "$CASE_DIR/pointer.log" "$CASE_DIR/decoded-context.md" \
+      "$HOME_DIR/data/$id/worker-preparation.json" "$FM_PREPARATION_EVIDENCE_DIR/kimi-context/"
+  fi
+  fm_test_remove_tree "$KIMI_RUNTIME_TASK_TMP"
+  fm_test_remove_tree "$KIMI_RUNTIME_LAUNCH_DIR"
+  KIMI_RUNTIME_TASK_TMP=
+  KIMI_RUNTIME_LAUNCH_DIR=
+  pass 'kimi submits prepared context with its initial prompt rather than delaying a skill read'
+}
+
+test_kimi_prepared_skill_precedes_first_prompt
+
 assert_project_server_stayed_idle() {
   [ ! -s "$CASE_DIR/marker.log" ] \
     || fail "the declared project MCP server started: $(cat "$CASE_DIR/marker.log")"

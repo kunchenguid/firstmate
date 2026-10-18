@@ -486,6 +486,38 @@ tool output line $i"
   pass "busy detection: a rovo busy marker scrolled out of the tail classifies unknown, never idle"
 }
 
+test_rovo_prepared_skill_precedes_first_prompt() {
+  local id=rovo-prepared-skill rec out rc=0
+  rec=$(make_spawn_case prepared-skill "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/.agents/skills/example"
+  printf '%s\n' '---' 'name: example' 'description: Example method' '---' 'PREPARED_METHOD_BODY' > "$HOME_DIR/.agents/skills/example/SKILL.md"
+  ln -s "$(command -v node)" "$FAKEBIN_DIR/node"
+  rm "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" HOME="$HOME_DIR" bash "$ROOT/bin/fm-brief.sh" "$id" example --mode no-mistakes --skill "$HOME_DIR/.agents/skills/example/SKILL.md" >/dev/null
+  node - "$HOME_DIR/data/$id/brief.md" <<'JS'
+const fs = require('node:fs'), file = process.argv[2];
+fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('{TASK}', 'Verify prepared delivery.').replace('{FIRSTMATE_SPEC}', 'No model generation.'));
+JS
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "rovo prepared-input spawn: $out"
+  assert_grep PREPARED_METHOD_BODY "$CASE_DIR/pointer.log" 'rovo first submitted prompt lost prepared skill'
+  assert_grep 'Current worker role contract' "$CASE_DIR/pointer.log" 'rovo first prompt lost worker identity'
+  case "$(cat "$CASE_DIR/pointer.log")" in
+    *$'\n'*) fail 'prepared context must use one terminal submission line' ;;
+  esac
+  jq -j .workerContext "$CASE_DIR/pointer.log" > "$CASE_DIR/decoded-context.md"
+  cmp "$HOME_DIR/data/$id/worker-context.md" "$CASE_DIR/decoded-context.md" ||
+    fail 'terminal serialization changed prepared source content'
+  if [ -n "${FM_PREPARATION_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_PREPARATION_EVIDENCE_DIR/rovo-context"
+    cp "$CASE_DIR/pointer.log" "$CASE_DIR/decoded-context.md" \
+      "$HOME_DIR/data/$id/worker-preparation.json" "$FM_PREPARATION_EVIDENCE_DIR/rovo-context/"
+  fi
+  pass 'rovo submits prepared context with its initial prompt rather than delaying a skill read'
+}
+
+test_rovo_prepared_skill_precedes_first_prompt
 test_rovo_launch_then_send_is_verified
 test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override

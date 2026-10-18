@@ -64,6 +64,19 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   Optional worker-selection.json is owned by fm-brief.sh's typed selection
+#   flags. Resolve it with fm-worker-preparation.mjs before allocating a worker:
+#   inject current role and unique canonical skill bodies into launch-brief.md,
+#   and record resolved paths/hashes/associations/origins in worker-preparation.json.
+#   No native OMP subagent is involved. A missing/unreadable/malformed binding
+#   refuses launch; an absent selection preserves legacy behavior.
+#   Initial-input adapters carry those bodies through their existing envelope.
+#   Claude keeps its record doorbell and receives worker-context.md through a
+#   SessionStart stdout hook; Kimi/Rovo serialize that context and the brief
+#   pointer as one JSON line for readiness-gated text submission. Backend
+#   placement and lifecycle are unchanged.
+#   Relaunch re-resolves the same selection; raw custom commands cannot guarantee
+#   prepared delivery and are refused when typed worker selection is present.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -4352,6 +4365,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF records a Base branch line but the spawn has no --base-branch; pass the brief's base with --base-branch or re-scaffold the brief without one" >&2
     exit 1
   fi
+  WORKER_PREPARATION=
+  WORKER_SELECTION="$DATA/$ID/worker-selection.json"
+  if [ -e "$WORKER_SELECTION" ] || [ -L "$WORKER_SELECTION" ]; then
+    [ "$RAW_LAUNCH" -eq 0 ] || {
+      echo "error: typed worker selection requires a supported launch template, not a raw launch command" >&2
+      exit 1
+    }
+    WORKER_PREPARATION=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" prepare \
+      "$WORKER_SELECTION" "$DATA/$ID/worker-preparation.json") || exit 1
+    # Pointer-only adapters need the same bytes before their first model turn,
+    # not a later tool read. Keep the generic worker identity first here too.
+    WORKER_CONTEXT_FILE="$DATA/$ID/worker-context.md"
+    { fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+      printf '\n%s\n' "$WORKER_PREPARATION"; } > "$WORKER_CONTEXT_FILE" || exit 1
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -4360,6 +4388,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   {
     fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n' &&
+      { [ -z "$WORKER_PREPARATION" ] || printf '%s\n\n' "$WORKER_PREPARATION"; } &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
@@ -7519,6 +7548,15 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
     claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    if [ -n "${WORKER_PREPARATION:-}" ]; then
+      # SessionStart stdout is Claude's native pre-turn context channel. Keep
+      # the canonical one-line operational doorbell and its durable envelope.
+      worker_context_command="cat -- $(shell_quote "$WORKER_CONTEXT_FILE")"
+      claude_settings=$(jq -cn --arg command "$worker_context_command" \
+        '{feedbackDrafts:"off",hooks:{SessionStart:[{hooks:[{type:"command",command:$command}]}]}}') || exit 1
+      claude_settings="${claude_settings%\}}__CLAUDEATTRIBUTION__}"
+      claude_settings=$(shell_quote "$claude_settings")
+    fi
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;
@@ -8099,6 +8137,11 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  if [ -n "${WORKER_PREPARATION:-}" ]; then
+    # Literal terminal delivery must not turn source newlines into submissions.
+    KIMI_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
+      --arg task "$KIMI_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+  fi
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
@@ -8123,6 +8166,10 @@ if [ "$HARNESS" = rovo ]; then
     exit 1
   fi
   ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  if [ -n "${WORKER_PREPARATION:-}" ]; then
+    ROVO_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
+      --arg task "$ROVO_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+  fi
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
   ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}

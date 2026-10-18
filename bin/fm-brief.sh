@@ -17,6 +17,25 @@
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   Ship/scout selection: [--worker-role <ROLE.md>] [--skill <SKILL.md>]...
+#   [--skill-root <directory>]... records data/<id>/worker-selection.json.
+#   Role input is an explicit canonical roles/<role>/ROLE.md, or its managed
+#   symlink, with name fm-<role>; prose role names are never scraped or guessed.
+#   Skills are explicit independent source files; associations come only from
+#   the selected role's autoloadSkills literal block/inline list.
+#   Skill roots default to ~/.agents/skills; explicit roots replace that default
+#   in caller-supplied precedence order (first matching installed name wins).
+#   Pass project-local roots before shared roots when selecting local methods;
+#   never point at another project's primary copy instead of the task's copy.
+#   Hidden skills remain eligible for association. Installed directory symlinks
+#   are supported; a selected skill must resolve to the configured entry for its
+#   frontmatter name. Sources must be nonempty readable regular files.
+#   Selection is validated before scaffolding and re-resolved by fm-spawn before
+#   launch, so removed associations cannot leave stale bodies in the input.
+#   Missing or malformed bindings stop preparation. The internal parser/schema
+#   owner is bin/fm-worker-preparation.mjs; no role means no inferred defaults.
+#   No selection flags preserves the existing no-role task contract. These flags
+#   do not apply to persistent secondmate charters or select a native OMP agent.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -235,6 +254,7 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+WORKER_ARGS=()
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +271,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      worker-role|skill|skill-root) WORKER_ARGS+=("--$want_value" "$a") ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +298,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --worker-role|--skill|--skill-root) want_value=${a#--} ;;
+    --worker-role=*|--skill=*|--skill-root=*) WORKER_ARGS+=("${a%%=*}" "${a#*=}") ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -437,9 +460,23 @@ append_brief_include() {
     "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
 }
 
+# Resolve typed worker inputs before creating a scaffold. Spawn re-reads the
+# live sources rather than freezing association content in this selection.
+WORKER_SELECTION=
+if [ "${#WORKER_ARGS[@]}" -gt 0 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: worker role/skill selection applies only to ship and scout briefs" >&2
+    exit 1
+  }
+  WORKER_SELECTION=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" select "${WORKER_ARGS[@]}") || exit 1
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+if [ -n "$WORKER_SELECTION" ]; then
+  printf '%s\n' "$WORKER_SELECTION" > "$DATA/$ID/worker-selection.json"
+fi
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
