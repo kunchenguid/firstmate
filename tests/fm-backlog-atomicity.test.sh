@@ -2098,6 +2098,75 @@ SH
   pass "session start replays a recorded Gerrit close with its change URL as a note"
 }
 
+# A Forgejo instance on a private LAN often serves plain http on a
+# non-default port, so a task on one finishes with a --pr link tasks-axi
+# refuses as non-canonical. The close still lands, with the URL recorded as
+# a note instead, the same fallback a Gerrit change URL already takes.
+test_recovery_replays_an_http_forgejo_close_with_its_url_as_a_note() {
+  local case_dir id out real_tasks_axi pr_url=http://pi4:3001/joergspoerl/Scan2Excel/pulls/7
+  id=atomic-heal-http-forgejo-b12
+  case_dir=$(make_home heal-pending-http-forgejo-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The record a teardown on a plain-http Forgejo instance leaves: the pull
+  # request URL as a --pr link.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-http-forgejo\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$pr_url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # https GitHub or port-free https Forgejo pull request, so this case keeps
+  # reproducing whatever the installed release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] \
+    && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]] \
+    && ! [[ "\$arg" =~ ^https://[^/:]+/[^/]+/[^/]+/pulls/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded plain-http Forgejo close at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"PR $pr_url\"" >/dev/null \
+    || fail "the replayed plain-http Forgejo close did not record its URL as a note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed plain-http Forgejo close left its record behind"
+  pass "session start replays a recorded plain-http Forgejo close with its URL as a note"
+}
+
+# A canonical https Forgejo pull request is a link tasks-axi accepts, so its
+# close lands with the --pr link itself rather than the note fallback.
+test_recovery_replays_an_https_forgejo_close_with_its_pr_link() {
+  local case_dir id out pr_url=https://git.example.com/joergspoerl/Scan2Excel/pulls/8
+  id=atomic-heal-https-forgejo-b12
+  case_dir=$(make_home heal-pending-https-forgejo-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-https-forgejo\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$pr_url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded https Forgejo close at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "links: \"pr:$pr_url\"" >/dev/null \
+    || fail "the replayed https Forgejo close dropped its --pr link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed https Forgejo close left its record behind"
+  pass "session start replays a recorded https Forgejo close with its --pr link"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -2384,10 +2453,11 @@ test_recovery_rejects_raw_control_bytes() {
 }
 
 test_recovery_rejects_malformed_pr_urls() {
-  local case_dir first_id second_id third_id first_marker second_marker third_marker out
+  local case_dir first_id second_id third_id fourth_id first_marker second_marker third_marker fourth_marker out
   first_id=atomic-marker-pr-port-b12
   second_id=atomic-marker-pr-percent-b12
   third_id=atomic-marker-pr-host-label-b12
+  fourth_id=atomic-marker-pr-http-host-label-b12
   case_dir=$(make_home marker-malformed-pr)
   add_item "$case_dir" "$first_id"
   start_item "$case_dir" "$first_id"
@@ -2395,26 +2465,34 @@ test_recovery_rejects_malformed_pr_urls() {
   start_item "$case_dir" "$second_id"
   add_item "$case_dir" "$third_id"
   start_item "$case_dir" "$third_id"
+  add_item "$case_dir" "$fourth_id"
+  start_item "$case_dir" "$fourth_id"
   first_marker="$(home_of "$case_dir")/state/$first_id.backlog-close"
   second_marker="$(home_of "$case_dir")/state/$second_id.backlog-close"
   third_marker="$(home_of "$case_dir")/state/$third_id.backlog-close"
+  fourth_marker="$(home_of "$case_dir")/state/$fourth_id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-pr-port\narg=--pr\narg=https://github.com:abc/pull/1\n' \
     "$first_id" "$(home_of "$case_dir")/data" > "$first_marker"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-pr-percent\narg=--pr\narg=https://github.com/pull/%%ZZ\n' \
     "$second_id" "$(home_of "$case_dir")/data" > "$second_marker"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-pr-host-label\narg=--pr\narg=https://foo.-bar.com/pull/1\n' \
     "$third_id" "$(home_of "$case_dir")/data" > "$third_marker"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-pr-http-host-label\narg=--pr\narg=http://foo.-bar.com/pull/1\n' \
+    "$fourth_id" "$(home_of "$case_dir")/data" > "$fourth_marker"
 
   out=$(run_bootstrap "$case_dir")
   assert_present "$first_marker" "PR marker with a nonnumeric port was consumed"
   assert_present "$second_marker" "PR marker with an invalid percent escape was consumed"
   assert_present "$third_marker" "PR marker with a malformed host label was consumed"
+  assert_present "$fourth_marker" "plain-http PR marker with a malformed host label was consumed"
   [ "$(row_state "$case_dir" "$first_id")" = in_flight ] \
     || fail "nonnumeric PR port changed the backlog row: $out"
   [ "$(row_state "$case_dir" "$second_id")" = in_flight ] \
     || fail "invalid PR percent escape changed the backlog row: $out"
   [ "$(row_state "$case_dir" "$third_id")" = in_flight ] \
     || fail "malformed PR host label changed the backlog row: $out"
+  [ "$(row_state "$case_dir" "$fourth_id")" = in_flight ] \
+    || fail "malformed plain-http PR host label changed the backlog row: $out"
   pass "recovery rejects malformed PR URL values"
 }
 
@@ -3125,6 +3203,8 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
+test_recovery_replays_an_http_forgejo_close_with_its_url_as_a_note
+test_recovery_replays_an_https_forgejo_close_with_its_pr_link
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
