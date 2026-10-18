@@ -344,13 +344,14 @@ say "ceiled cycles that printed PERMANENTLY-WEDGED: $terminal_fired (cap bound i
 [ "$terminal_fired" -ge 1 ] \
   || fail "the cap never engaged on a genuinely wedged worker; no cycle printed PERMANENTLY-WEDGED"
 
-# Both markers must be on disk: the per-hash one and the window-scoped one.
+# The cap's own marker must be on disk: the window-scoped one the terminal
+# wake names for the operator.
 markers=$(find "$STATE" -maxdepth 1 -name '.wedge-permanent-*' | wc -l | tr -d ' ')
 say "cap markers on disk: $markers"
-[ "$markers" -ge 2 ] \
-  || fail "the cap engaged but did not write both the per-hash and window-scoped markers"
+[ "$markers" -ge 1 ] \
+  || fail "the cap engaged but did not write the window-scoped cap marker"
 
-# While the markers stand, further polls on the same wedged pane must stay
+# While the marker stands, further polls on the same wedged pane must stay
 # silent. This is the property the whole cap exists for.
 say "part 1b: the cap must silence the still-wedged pane"
 silence_start=$(date +%s)
