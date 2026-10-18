@@ -111,3 +111,74 @@ if FM_HOME="$HOME_DIR" FM_SENTINEL_DRY_RUN=1 FM_SENTINEL_HERDR_SESSION="$SESSION
   fail "dry run was accepted for tick"
 fi
 pass "dry run is refused for tick"
+
+# One-shot episode record. A herdr stand-in that reports the server running
+# leaves a lane unreadable, so the lane is unsettled and no action runs.
+EPISODE="$SESSION:$RESTART"
+IDFILE=$STATE/.sentinel-herdr-identity
+FAKEBIN_UP=$TMP_ROOT/fakebin-up
+mkdir -p "$FAKEBIN_UP"
+cat > "$FAKEBIN_UP/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" status "*) printf '%s\n' '{"server":{"running":true}}' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN_UP/herdr"
+
+oneshot() {  # <home> <path-prefix> <dry-run 0|1>
+  PATH="$2:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_DATA_OVERRIDE="$1/data" \
+    FM_CONFIG_OVERRIDE="$1/config" FM_SENTINEL_HERDR_SESSION="$SESSION" \
+    FM_SENTINEL_EPISODE="$EPISODE" FM_SENTINEL_DRY_RUN="$3" \
+    "$ROOT/bin/fm-sentinel.sh" reconcile
+}
+
+new_home() {  # <home>
+  mkdir -p "$1/state" "$1/data" "$1/config" "$1/projects"
+}
+
+printf '%s\n' "$EPISODE" > "$IDFILE"
+OUT=$(reconcile_dry) || fail "one-shot reconcile failed for a recorded episode: $OUT"
+[ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ] || fail "a recorded episode did more than report: $OUT"
+printf '%s\n' "$OUT" | grep -qx "herdr episode $EPISODE already reconciled; nothing to do" \
+  || fail "recorded episode was not reported as reconciled: $OUT"
+[ "$(cat "$IDFILE")" = "$EPISODE" ] || fail "recorded episode identity changed"
+pass "a recorded episode is reported as reconciled and nothing else runs"
+rm -f "$IDFILE"
+
+HOME_SETTLED=$TMP_ROOT/settled
+new_home "$HOME_SETTLED"
+oneshot "$HOME_SETTLED" "$FAKEBIN" 0 >/dev/null || fail "settled one-shot reconcile failed"
+[ "$(cat "$HOME_SETTLED/state/.sentinel-herdr-identity" 2>/dev/null)" = "$EPISODE" ] \
+  || fail "settled one-shot reconcile did not record its episode"
+pass "a settled one-shot reconcile records its episode"
+
+HOME_UNSETTLED=$TMP_ROOT/unsettled
+new_home "$HOME_UNSETTLED"
+cat > "$HOME_UNSETTLED/state/unsettled.meta" <<EOF
+window=$SESSION:w9:p1
+endpoint_task_id=unsettled
+worktree=$TMP_ROOT/wt-unsettled
+project=$TMP_ROOT/wt-unsettled
+harness=claude
+kind=ship
+spawn_gen=s$((RESTART - 3600)).1.1
+backend=herdr
+herdr_session=$SESSION
+herdr_workspace_id=w9
+herdr_tab_id=w9:t1
+herdr_pane_id=w9:p1
+EOF
+printf '%s\n' "working [at=$((RESTART - 60))]: implementing the brief" > "$HOME_UNSETTLED/state/unsettled.status"
+OUT=$(oneshot "$HOME_UNSETTLED" "$FAKEBIN_UP" 0) || fail "unsettled one-shot reconcile failed: $OUT"
+printf '%s\n' "$OUT" | grep -q 'not settled, left for the next pass' \
+  || fail "lane was not left unsettled: $OUT"
+[ ! -e "$HOME_UNSETTLED/state/.sentinel-herdr-identity" ] || fail "unsettled episode was recorded"
+pass "an unsettled one-shot reconcile records nothing"
+
+HOME_DRY=$TMP_ROOT/dry
+new_home "$HOME_DRY"
+oneshot "$HOME_DRY" "$FAKEBIN" 1 >/dev/null || fail "dry-run one-shot reconcile failed"
+[ ! -e "$HOME_DRY/state/.sentinel-herdr-identity" ] || fail "dry run recorded its episode"
+pass "a dry-run one-shot reconcile records nothing"

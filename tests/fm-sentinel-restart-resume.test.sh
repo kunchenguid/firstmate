@@ -142,7 +142,7 @@ pass "one restart: one resume nudge for the lost turn, none for mid-turn, waitin
 OUT=$(reconcile) || fail "second reconcile failed: $OUT"
 [ -z "$EVID" ] || printf '%s\n' "$OUT" > "$EVID/pass2.txt"
 expect_nudges "repeat pass"
-printf '%s\n' "$OUT" | grep -q '^lost: already nudged in this state' || fail "repeat pass did not dedupe: $OUT"
+printf '%s\n' "$OUT" | grep -q '^herdr episode .* already reconciled; nothing to do$' || fail "repeat pass did not skip the reconciled episode: $OUT"
 pass "a repeat pass after the same restart nudges nothing new"
 
 restart

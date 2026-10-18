@@ -14,7 +14,7 @@
 # Usage (FM_HOME is required; the backend session defaults to Herdr's default):
 #   FM_HOME=<home> fm-sentinel.sh tick       one pass; what a scheduler runs
 #   FM_HOME=<home> fm-sentinel.sh loop       tick every FM_SENTINEL_INTERVAL seconds
-#   FM_HOME=<home> fm-sentinel.sh reconcile  nudge or relaunch this home's direct reports
+#   FM_HOME=<home> fm-sentinel.sh reconcile  nudge or relaunch this home's direct reports, once per episode
 #   FM_HOME=<home> fm-sentinel.sh unit       print a systemd user service running `loop`
 #
 # tick, under the home's state/.sentinel.lock:
@@ -73,6 +73,10 @@
 #   keeps the key (its busy record, spawn_gen, and status log length), and a
 #   lane whose key still matches is not nudged again until it moves.
 #   One line per task goes to stdout and state/.sentinel.log.
+# A one-shot reconcile whose episode state/.sentinel-herdr-identity already
+# records prints that it is reconciled and does nothing else. After a one-shot
+# reconcile that returns success it records the episode under the same settle
+# rule tick uses, so a later session start in that episode skips it.
 #
 # Knobs: FM_SENTINEL_HERDR_SESSION (HERDR_SESSION, else default), FM_SENTINEL_INTERVAL (60),
 # FM_SENTINEL_REWAKE_SECS (1800), FM_GUARD_GRACE (300).
@@ -355,6 +359,28 @@ wake_primary() {  # <body>
   say "primary: woke $target"
 }
 
+# Record <episode> as reconciled once the pass left no lane unsettled, or 30
+# minutes after the restart; until then the next pass reconciles again.
+settle_episode() {  # <episode>
+  [ "$DRY_RUN" = 0 ] || return 0
+  if [ -z "$RECONCILE_UNSETTLED" ] || [ $(( $(date +%s) - ${1##*:} )) -ge 1800 ]; then
+    [ -z "$RECONCILE_UNSETTLED" ] || say "still not settled 30 minutes after the restart; left to the primary:$RECONCILE_UNSETTLED"
+    printf '%s\n' "$1" >"$STATE/.sentinel-herdr-identity"
+  fi
+}
+
+# The one-shot reconcile: skipped for an episode already recorded as reconciled.
+reconcile_episode() {  # <episode>
+  local rc=0
+  if [ -n "$1" ] && [ "$(cat "$STATE/.sentinel-herdr-identity" 2>/dev/null)" = "$1" ]; then
+    say "herdr episode $1 already reconciled; nothing to do"
+    return 0
+  fi
+  reconcile "$1" || rc=$?
+  [ "$rc" -ne 0 ] || [ -z "$1" ] || settle_episode "$1"
+  return "$rc"
+}
+
 tick() {
   local id prev beat woken_beat age last body rc=0
   id=$(herdr_identity)
@@ -369,10 +395,7 @@ tick() {
           printf '%s\n' "The Herdr server restarted at $(date -u +%Y-%m-%dT%H:%M:%SZ), which stopped every agent and watcher in it. The sentinel already reconciled this home's direct reports; its lines are in $LOG. Run bin/fm-session-start.sh if this session was resumed, reconcile what remains, then end the turn so supervision re-arms." \
           >"$STATE/.sentinel-wake-pending"
         }
-        if [ -z "$RECONCILE_UNSETTLED" ] || [ $(( $(date +%s) - ${id##*:} )) -ge 1800 ]; then
-          [ -z "$RECONCILE_UNSETTLED" ] || say "still not settled 30 minutes after the restart; left to the primary:$RECONCILE_UNSETTLED"
-          printf '%s\n' "$id" >"$STATE/.sentinel-herdr-identity"
-        fi
+        settle_episode "$id"
       else
         rc=1
       fi
@@ -408,7 +431,7 @@ locked() {
 
 case "$CMD" in
   tick) locked tick ;;
-  reconcile) locked reconcile "${FM_SENTINEL_EPISODE:-$(herdr_identity)}" ;;
+  reconcile) locked reconcile_episode "${FM_SENTINEL_EPISODE:-$(herdr_identity)}" ;;
   loop)
     while :; do
       locked tick || true
