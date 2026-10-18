@@ -1105,9 +1105,9 @@ test_reassigned_records_sharing_a_slot_retire_before_the_owner() {
   for claim in absent unreadable conflicting empty-task-first empty-home-first; do
     dir=$(make_case "slot-three-records-$claim")
     mark_case_as_treehouse_pool "$dir"
-    write_shared_slot_record "$dir" "$first" scout
-    write_shared_slot_record "$dir" "$second" scout
-    write_shared_slot_record "$dir" "$owner" scout
+    write_shared_slot_record "$dir" "$first" ship
+    write_shared_slot_record "$dir" "$second" ship
+    write_shared_slot_record "$dir" "$owner" ship
     case "$claim" in
       unreadable) printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner" ;;
       conflicting) printf 'task=%s\ntask=%s\nhome=%s\n' "$first" "$owner" "$dir/home" \
