@@ -504,11 +504,12 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# .wedge-escalations-, .wedge-permanent-, .wedge-rollback-failed-, .paused-*,
+# .writing-*, .waiting-*), and live homes hold those markers on disk under the
+# current format, so the format lives here alone: a second copy is how a future
+# change to it silently orphans a window's markers instead of clearing them. The
+# helpers below take the derived key rather than re-deriving it, so one poll of one
+# window derives it once.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -1202,7 +1203,9 @@ case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL
 # the rollback-failure sentinel. Called from the recovery boundary that already
 # resets the wedge timer and escalation count, so a crew that resumes and wedges
 # again escalates from scratch rather than inheriting a window the cap left
-# silent.
+# silent. A route that only restarts the escalation count while the wedge timer
+# keeps aging is not that boundary: the window is still the same episode, and
+# clearing there would reopen the loop the cap exists to bound.
 # _wedge_cap_markers_clear <window-key>
 _wedge_cap_markers_clear() {
   local key=$1
@@ -1942,6 +1945,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  _wedge_cap_markers_clear "$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -2029,6 +2033,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # leaves it, because the daemon owns that bookkeeping.
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
+      _wedge_cap_markers_clear "$key"
       clear_write_tracking "$key"
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if captain_held_silenced "$(status_declared_wait_line "$statusf")"; then

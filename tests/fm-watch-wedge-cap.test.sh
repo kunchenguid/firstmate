@@ -89,6 +89,18 @@ seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
 }
 
+# mark_status_seen <state> <status-file>: record the file's CURRENT complete
+# snapshot as both reported and classified, so a status this case writes itself
+# (a declared wait, then its lift) does not also raise a status-signal wake and
+# mask which route the pane took.
+mark_status_seen() {
+  FM_STATE_OVERRIDE="$1" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+
 # prime_and_ack: run the watcher once on a long STALE_ESCALATE_SECS so it
 # reaches the wedge path, drain the resulting wake, and return the state dir.
 prime_and_ack() {
@@ -767,6 +779,98 @@ test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure() {
   pass "a persistent marker-write failure across two cap cycles queues exactly one PERMANENTLY-WEDGED wake"
 }
 
+# 11. The release boundary is the wedge EPISODE, not one branch of it. Every
+# reset that drops a window's escalation count must drop the cap markers with
+# it, and the sibling routes to that reset are the declared wait: the crew
+# declares an external pause (absorbed on the long pause cadence) and then
+# lifts it (reconciled on the next poll). A window left silent on either half
+# would keep a recovered pane dark for the rest of FM_CAP_HORIZON_SECS.
+test_wedge_cap_releases_after_declared_wait() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max n statusf
+  dir=$(make_case wedge-cap-declared-wait); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-declared-wait"
+  statusf="$state/wedge-cap-declared-wait.status"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-declared-wait.meta"
+  printf 'working: still wedged\n' > "$statusf"
+  mark_status_seen "$state" "$statusf"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 3 || fail "prime-and-ack failed"
+  max=3
+  n=1
+  while [ "$n" -le "$max" ]; do
+    poll_wedge_round "$dir" "$max" ""
+    n=$((n + 1))
+  done
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "cap round did not fire PERMANENTLY-WEDGED"
+  [ -e "$state/.wedge-permanent-$key" ] || fail "window-scoped marker missing after cap fire"
+
+  # The crew declares an external wait, so the pane is absorbed on the long
+  # pause cadence - the wedge episode it was in ends there, not on the busy
+  # branch the previous case exercises.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  mark_status_seen "$state" "$statusf"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "declared-wait poll failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "declared-wait ack failed"
+  [ -e "$state/.paused-$key" ] || fail "the declared wait was not absorbed on the pause cadence"
+  [ ! -e "$state/.wedge-permanent-$key" ] \
+    || fail "the window-scoped cap marker survived the declared wait; a re-wedging pane would stay silent until the horizon"
+  [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] \
+    || fail "the per-hash cap marker survived the declared wait"
+
+  # The wait is lifted, so the pause reconciliation drops the rest of the
+  # window's bookkeeping on its next poll.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  printf 'working: the wait is over\n' > "$statusf"
+  mark_status_seen "$state" "$statusf"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "wait-lift poll failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "wait-lift ack failed"
+
+  # The crew wedges again: the escalation must reach the supervisor off a fresh
+  # counter, not as the cap's silence.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 150; then
+    reap "$pid"; fail "the re-wedged pane stayed silent after a declared wait ended: $(cat "$out")"
+  fi
+  grep -F "escalation 1" "$out" >/dev/null || fail "the re-wedge did not escalate from a fresh counter: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "the re-wedge fired the cap again instead of escalating normally"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared wait and its lift both release the cap markers, and the re-wedged pane escalates again"
+}
+
 test_wedge_cap_disabled_by_default
 test_wedge_cap_fires_permanently_wedged_at_threshold
 test_wedge_cap_silences_subsequent_polls_for_same_hash
@@ -777,3 +881,4 @@ test_wedge_cap_validates_invalid_overrides
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
 test_wedge_cap_releases_after_genuine_recovery
 test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
+test_wedge_cap_releases_after_declared_wait
