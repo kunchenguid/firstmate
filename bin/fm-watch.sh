@@ -1179,9 +1179,9 @@ FM_WEDGE_GUARD_DEFER_MAX=${FM_WEDGE_GUARD_DEFER_MAX:-3}
 # escalates-every-STALE_ESCALATE_SECS behavior, so this never changes anything
 # unless the captain sets it. Past the bound the wake is published once and
 # the per-hash and window-scoped cap markers silence further wakes for this
-# WINDOW until FM_CAP_HORIZON_SECS elapses or the operator manually removes
-# both markers - a hash change alone does not re-engage while the window-scoped
-# marker stands.
+# WINDOW until FM_CAP_HORIZON_SECS elapses, the crew resumes (both markers are
+# per-window wedge bookkeeping and are cleared with the rest of it), or the
+# operator manually removes both markers.
 FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-0}
 case "$FM_WEDGE_MAX_ESCALATIONS" in
   ''|*[!0-9]*) FM_WEDGE_MAX_ESCALATIONS=0 ;;
@@ -1196,6 +1196,42 @@ case "$FM_CAP_HORIZON_SECS" in ''|*[!0-9]*|0) FM_CAP_HORIZON_SECS=86400 ;; esac
 # is the queue-flood behavior this setting exists to bound.
 FM_ROLLBACK_SENTINEL_TTL_SECS=${FM_ROLLBACK_SENTINEL_TTL_SECS:-3600}
 case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL_SECS=3600 ;; esac
+
+# _wedge_cap_markers_clear: drop every cap marker a fired cap wrote for one
+# window - the window-scoped marker, every per-hash marker filed under it, and
+# the rollback-failure sentinel. Called from the recovery boundary that already
+# resets the wedge timer and escalation count, so a crew that resumes and wedges
+# again escalates from scratch rather than inheriting a window the cap left
+# silent.
+# _wedge_cap_markers_clear <window-key>
+_wedge_cap_markers_clear() {
+  local key=$1
+  rm -f "$STATE/.wedge-permanent-$key" "$STATE/.wedge-permanent-$key"-* \
+    "$STATE/.wedge-rollback-failed-$key"
+}
+
+# _wedge_cap_terminal_append: publish one terminal PERMANENTLY-WEDGED row for
+# a window. The row is written BEFORE the cap markers, because a wedge the
+# operator cannot see is worse than a repeated one; the repeat is bounded here
+# instead. A marker write that keeps failing rolls the cap state back, so the
+# cap re-accumulates and re-fires every cycle, and without this predicate each
+# of those cycles would append its own terminal row. The check and the append
+# share the wake-queue append lock, so no concurrent publisher can slip a second
+# terminal row between them. Returns 0 having appended, 3 when an
+# unacknowledged terminal row for the window already stands and the append was
+# skipped, and the append's own status otherwise.
+# _wedge_cap_terminal_append <window> <reason>
+_wedge_cap_terminal_append() {
+  local _win=$1 _reason=$2 _status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if fm_wake_queued_carries_locked stale "$_win" PERMANENTLY-WEDGED; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+    return 3
+  fi
+  fm_wake_append_locked stale "$_win" "$_reason" || _status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || [ "$_status" -ne 0 ] || _status=1
+  return "$_status"
+}
 
 # _wedge_cap_rollback: reset the per-window wedge state after a cap-marker
 # write failure so the next poll re-accumulates from escalation 1 instead of
@@ -1721,7 +1757,7 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n reason evidence guard guard_note
-  local _wkey _wrollback_sentinel _wrb_ts _wrb_window_marker _wrb_perm_marker _wrb_marker_ts _wrb_cap_reason _wrb_rm_status
+  local _wkey _wrollback_sentinel _wrb_ts _wrb_window_marker _wrb_perm_marker _wrb_marker_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel
   # (the SAME fs failure that broke the cap-marker write also broke the
@@ -1753,11 +1789,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        # Window-scoped cap marker silences ALL hashes for this WINDOW within
-        # FM_CAP_HORIZON_SECS, so a hash-churning busy pane cannot rebuild the
-        # escalation counter on a fresh hash and re-fire PERMANENTLY-WEDGED
-        # every FM_WEDGE_MAX_ESCALATIONS polls. Honored until the horizon
-        # elapses; after that the marker is stale and a new wedge re-fires.
+        # Window-scoped cap marker silences further wedge escalations for this
+        # WINDOW within FM_CAP_HORIZON_SECS, so a hash-churning busy pane
+        # cannot rebuild the escalation counter on a fresh hash and re-fire
+        # PERMANENTLY-WEDGED every FM_WEDGE_MAX_ESCALATIONS polls. Honored
+        # until the horizon elapses; after that the marker is stale and a new
+        # wedge re-fires.
         _wrb_window_marker="$STATE/.wedge-permanent-$_wkey"
         if [ -e "$_wrb_window_marker" ]; then
           _wrb_marker_ts=$(cat "$_wrb_window_marker" 2>/dev/null || true)
@@ -1802,18 +1839,28 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # wrapper's stderr rather than leaking past it; a wedge-cap failure path
         # must report itself through triage_log only.
         { echo "$n" > "$escalation_file"; } 2>/dev/null
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
+        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+        fi
         # Cap-fire block: when FM_WEDGE_MAX_ESCALATIONS is configured above 0
         # and the per-window escalation counter has reached the bound, emit
         # ONE terminal wake (PERMANENTLY-WEDGED) and write BOTH cap markers
         # so subsequent polls for this WINDOW short-circuit regardless of
-        # hash. The marker-write failures roll back cap state to avoid
-        # amplifying a single write failure into a queue flood; a rollback
-        # that itself fails writes a transient sentinel so the next polls
-        # stay silent for FM_ROLLBACK_SENTINEL_TTL_SECS.
+        # hash. The terminal wake carries the same evidence the escalation it
+        # replaces would have carried, because it is the only one this window
+        # publishes for the rest of the horizon. The marker-write failures roll
+        # back cap state to avoid amplifying a single write failure into a
+        # queue flood; a rollback that itself fails writes a transient sentinel
+        # so the next polls stay silent for FM_ROLLBACK_SENTINEL_TTL_SECS.
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
-          _wrb_cap_reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this WINDOW until FM_CAP_HORIZON_SECS elapses or operator manually removes BOTH STATE/.wedge-permanent-<key> AND STATE/.wedge-permanent-<key>-<hash12>)"
+          _wrb_cap_reason="$reason, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wedge escalations for this WINDOW while its cap markers stand: until FM_CAP_HORIZON_SECS elapses, the crew resumes, or the operator manually removes BOTH STATE/.wedge-permanent-<key> AND STATE/.wedge-permanent-<key>-<hash12>"
           _wrb_cap_reason=$(stale_reason_naming_dialog "$_wrb_cap_reason" "$dialog")
-          if ! fm_wake_append stale "$win" "$_wrb_cap_reason"; then
+          _wrb_cap_status=0
+          _wedge_cap_terminal_append "$win" "$_wrb_cap_reason" || _wrb_cap_status=$?
+          if [ "$_wrb_cap_status" -eq 3 ]; then
+            triage_log "wedge cap for $win already has an unacknowledged PERMANENTLY-WEDGED wake queued; suppressing the duplicate terminal wake"
+          elif [ "$_wrb_cap_status" -ne 0 ]; then
             triage_log "wedge fm_wake_append FAILED for cap on $win, no markers written (next poll will retry)"
             exit 1
           fi
@@ -1842,21 +1889,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             esac
           fi
           rm -f "$since_file"
-          clear_write_tracking "$(window_key "$win")"
+          clear_write_tracking "$_wkey"
           : > "$escalation_file"
           rm -f "$STATE/.wedge-rollback-failed-$_wkey"
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
-          wake "$_wrb_cap_reason"
+          [ "$_wrb_cap_status" -eq 3 ] || wake "$_wrb_cap_reason"
           return 0
-        fi
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
-        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
-        clear_write_tracking "$(window_key "$win")"
+        clear_write_tracking "$_wkey"
         wake "$reason"
       fi
       ;;
@@ -3608,12 +3651,15 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through busy_turn_bound_check, which hands the crossed
         # bound to the same wedge timer unless the crew declared the wait itself.
+        # A pane that leaves the stale path ends the wedge episode it was in, so
+        # the cap that episode fired goes with the rest of its bookkeeping.
         paused_bound=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
+          _wedge_cap_markers_clear "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -3632,6 +3678,7 @@ EOF
       else
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
+        _wedge_cap_markers_clear "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

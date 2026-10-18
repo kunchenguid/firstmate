@@ -251,7 +251,7 @@ say "cycles that printed PERMANENTLY-WEDGED: $terminal_fired (cap bound is $MAX)
   || fail "the cap never engaged on a genuinely wedged worker; no cycle printed PERMANENTLY-WEDGED"
 
 # Both markers must be on disk: the per-hash one and the window-scoped one.
-markers=$(ls "$STATE"/.wedge-permanent-* 2>/dev/null | wc -l | tr -d ' ')
+markers=$(find "$STATE" -maxdepth 1 -name '.wedge-permanent-*' | wc -l | tr -d ' ')
 say "cap markers on disk: $markers"
 [ "$markers" -ge 2 ] \
   || fail "the cap engaged but did not write both the per-hash and window-scoped markers"
@@ -289,7 +289,7 @@ watcher_cycle "post-horizon cycle 2"
   || fail "after the cap horizon elapsed the pane stayed silent; the cap never released itself"
 
 say "the pane is audible again with no operator action and both markers untouched"
-markers_after=$(ls "$STATE"/.wedge-permanent-* 2>/dev/null | wc -l | tr -d ' ')
+markers_after=$(find "$STATE" -maxdepth 1 -name '.wedge-permanent-*' | wc -l | tr -d ' ')
 say "cap markers still on disk after the horizon (stale, not yet rewritten): $markers_after"
 
 say "cap engaged once at the bound, held the wedged pane quiet for $silenced polls inside the horizon, and released itself on the horizon with no operator action"

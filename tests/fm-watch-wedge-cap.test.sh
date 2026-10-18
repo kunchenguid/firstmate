@@ -638,6 +638,135 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   pass "the rollback-failed sentinel silences the wedge path within FM_ROLLBACK_SENTINEL_TTL_SECS"
 }
 
+# 9. The cap is a ceiling on CONSECUTIVE escalations: a crew that genuinely
+# resumes after the cap fired takes the watcher's wedge-bookkeeping reset with
+# it, so both cap markers go and a pane that wedges again escalates normally
+# instead of staying silent until the horizon elapses.
+test_wedge_cap_releases_after_genuine_recovery() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max n
+  dir=$(make_case wedge-cap-recovery); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-recovery"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-recovery.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-recovery.status"
+  sig=$(seen_sig "$state/wedge-cap-recovery.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-recovery_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 3 || fail "prime-and-ack failed"
+  max=3
+  n=1
+  while [ "$n" -le "$max" ]; do
+    poll_wedge_round "$dir" "$max" ""
+    n=$((n + 1))
+  done
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "cap round did not fire PERMANENTLY-WEDGED"
+  [ -e "$state/.wedge-permanent-$key" ] || fail "window-scoped marker missing after cap fire"
+
+  # The crew genuinely resumes: a busy pane whose completed-turn marker is
+  # fresh, so it is not over the busy-turn bound and lands on the watcher's
+  # reset-the-escalation-bookkeeping branch.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  printf 'crew resumed, work rendering again' > "$capture_file"
+  : > "$state/fm-wedge-cap-recovery.turn-ended"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "resume poll failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "resume ack failed"
+  [ ! -e "$state/.wedge-permanent-$key" ] \
+    || fail "the window-scoped cap marker survived a genuine recovery; a re-wedging pane would stay silent until the horizon"
+  [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] \
+    || fail "the per-hash cap marker survived a genuine recovery"
+
+  # The crew wedges again: the escalation must reach the supervisor as an
+  # ordinary wedge wake off a fresh counter, not as the cap's silence.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  rm -f "$state/fm-wedge-cap-recovery.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 150; then
+    reap "$pid"; fail "the re-wedged pane stayed silent after a genuine recovery: $(cat "$out")"
+  fi
+  grep -F "escalation 1" "$out" >/dev/null || fail "the re-wedge did not escalate from a fresh counter: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "the re-wedge fired the cap again instead of escalating normally"
+  unset FM_FAKE_CREW_STATE
+  pass "a genuine recovery clears both cap markers and the re-wedged pane escalates again"
+}
+
+# 10. The terminal wake is durable, so it is published BEFORE the cap markers
+# and a marker write that keeps failing rolls the cap state back - which lets
+# the cap re-accumulate and re-fire on the very next poll. Those repeated cap
+# cycles must not each append their own PERMANENTLY-WEDGED row: one
+# unacknowledged terminal row per window is the bound.
+test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max marker_window cycle round_status terminal_rows
+  dir=$(make_case wedge-cap-dup-terminal); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-dup-terminal"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-dup-terminal.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-dup-terminal.status"
+  sig=$(seen_sig "$state/wedge-cap-dup-terminal.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-dup-terminal_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+
+  # A non-empty directory on the window-scoped marker path makes that write
+  # fail on every cycle, while the rollback's own counter reset and idle-timer
+  # refresh keep succeeding - so the cap re-accumulates from scratch and fires
+  # again on the next wedge poll.
+  marker_window="$state/.wedge-permanent-$key"
+  mkdir -p "$marker_window/blocker"
+  cycle=1
+  while [ "$cycle" -le 2 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+      "$WATCH" > "$out" &
+    pid=$!
+    round_status=0
+    wait_for_exit "$pid" 100 || round_status=$?
+    [ "$round_status" -eq 1 ] \
+      || fail "cap cycle $cycle expected exit 1 on the failed marker write, got $round_status: $(cat "$out")"
+    grep -F "window-scoped marker write FAILED on" "$state/.watch-triage.log" >/dev/null \
+      || fail "cap cycle $cycle did not report the failed marker write: $(cat "$state/.watch-triage.log")"
+    [ -d "$marker_window/blocker" ] || fail "cap cycle $cycle consumed the planted marker-write blocker"
+    cycle=$((cycle + 1))
+  done
+  terminal_rows=$(awk -F '\t' '$3 == "stale" && $5 ~ /PERMANENTLY-WEDGED/ { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$terminal_rows" -eq 1 ] \
+    || fail "two cap cycles under a persistent marker-write failure queued $terminal_rows PERMANENTLY-WEDGED rows; exactly one terminal wake per window is the bound"
+  grep -F "suppressing the duplicate terminal wake" "$state/.watch-triage.log" >/dev/null \
+    || fail "the second cap cycle did not suppress its duplicate terminal wake: $(cat "$state/.watch-triage.log")"
+  unset FM_FAKE_CREW_STATE
+  pass "a persistent marker-write failure across two cap cycles queues exactly one PERMANENTLY-WEDGED wake"
+}
+
 test_wedge_cap_disabled_by_default
 test_wedge_cap_fires_permanently_wedged_at_threshold
 test_wedge_cap_silences_subsequent_polls_for_same_hash
@@ -646,3 +775,5 @@ test_wedge_cap_expires_after_horizon
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_overrides
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
+test_wedge_cap_releases_after_genuine_recovery
+test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
