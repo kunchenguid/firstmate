@@ -150,6 +150,49 @@ poll_wedge_round() {
   ack_stopped_cycle "$state" || fail "wedge round ack failed"
 }
 
+# poll_capped_wedge_round: one more poll on a pane already recorded as stably
+# stale at its recorded hash - the population wedge_timer_check owns - with the
+# cap settings a case chose, and WITHOUT acknowledging anything, so a case can
+# leave a wake queued and unconsumed. <extra-env> drives the pane's endpoint
+# verdict: FM_FAKE_TMUX_CURRENT_COMMAND is its foreground command and
+# FM_FAKE_TMUX_WINDOWS the session inventory the recorded window must appear
+# in, so an inventory that omits it reads as `missing`. `exit` requires the
+# watcher to surface and exit, `absorb` requires it to survive whole poll cycles
+# at the threshold instead.
+poll_capped_wedge_round() {  # <dir> <max> <extra-env> <exit|absorb>
+  local dir=$1 max=$2 extra_env=$3 mode=$4
+  local state fakebin out capture_file window key pid
+  state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  # shellcheck disable=SC2086
+  env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    PATH="$fakebin:$PATH" $extra_env \
+    "$WATCH" > "$out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  wait_poll_cycle "$state" "$pid" 200 || { reap "$pid"; return 1; }
+  reap "$pid"
+  return 0
+}
+
+# Count the queued stale wakes for <window> whose payload carries <needle>.
+queued_wakes_carrying() {  # <state> <window> <needle>
+  awk -F '\t' -v w="$2" -v needle="$3" \
+    'NF >= 5 && $3 == "stale" && $4 == w && index($5, needle) { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || printf '0\n'
+}
+
 # 1. Disabled by default: FM_WEDGE_MAX_ESCALATIONS=0 leaves the cap inert,
 # and a wedged worker keeps receiving stale wakes without ever firing
 # PERMANENTLY-WEDGED.
@@ -355,9 +398,11 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
     # per-hash branch. The window-scoped marker is what stops the loop.
     printf '%s' "$(hash_text "churning wedged pane iteration $i fresh content")" > "$state/.hash-$key"
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-    # Reset the absorbed hash so the matcher sees each fresh hash as a new
-    # arrival (the provably-working absorbed path).
-    rm -f "$state/.stale-$key"
+    # Record the fresh hash as this window's already-classified stale hash, the
+    # state a pane that re-renders twice settles into. The FIRST-SIGHT route
+    # would classify the new hash and publish nothing, so the poll would never
+    # reach wedge_timer_check and the cap marker below would go unexercised.
+    printf '%s' "$(hash_text "churning wedged pane iteration $i fresh content")" > "$state/.stale-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -375,6 +420,8 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
     # Stop the still-running watcher before grepping its output.
     reap "$pid"
     ack_stopped_cycle "$state" || true
+    [ ! -s "$state/.wedge-escalations-$key" ] \
+      || fail "post-cap churn poll $i advanced the escalation counter ($(cat "$state/.wedge-escalations-$key")); the window-scoped marker did not silence the wedge path"
     if grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null; then
       total_terminal=$((total_terminal + 1))
     fi
@@ -421,9 +468,12 @@ test_wedge_cap_expires_after_horizon() {
   printf 'idle wedged content fresh hash' > "$capture_file"
   new_hash=$(hash_text "idle wedged content fresh hash")
   printf '%s' "$new_hash" > "$state/.hash-$key"
-  # Reset the absorbed hash so the matcher treats the new hash as a fresh
-  # arrival and reaches wedge_timer_check.
-  rm -f "$state/.stale-$key"
+  # Record the fresh hash as the already-classified stale hash of this window,
+  # the state the pane settles into on its second identical render, so the poll
+  # reaches wedge_timer_check where the window-scoped marker is consulted. The
+  # FIRST-SIGHT route would classify and publish nothing, proving nothing about
+  # the marker.
+  printf '%s' "$new_hash" > "$state/.stale-$key"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -438,6 +488,8 @@ test_wedge_cap_expires_after_horizon() {
   reap "$pid"
   ack_stopped_cycle "$state" || true
   grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "fresh-hash poll within horizon fired PERMANENTLY-WEDGED - window-scoped marker is not silencing"
+  [ ! -s "$state/.wedge-escalations-$key" ] \
+    || fail "fresh-hash poll within horizon advanced the escalation counter ($(cat "$state/.wedge-escalations-$key")); the window-scoped marker did not silence the wedge path"
 
   # Now age both cap markers past the horizon (cap=2s) and leave the pane
   # exactly as it was, so the only thing that changed is the marker age. The
@@ -871,6 +923,136 @@ test_wedge_cap_releases_after_declared_wait() {
   pass "a declared wait and its lift both release the cap markers, and the re-wedged pane escalates again"
 }
 
+# 12. The cap is a ceiling on ESCALATIONS, not on detection. A pane that keeps
+# rendering the identical frame after its agent exits is not a wedge suspect at
+# all, so the marker short-circuit must still consult the dead-record probe: the
+# gone endpoint is reported once while the cap holds, and every later capped poll
+# stays quiet instead of re-reporting it or re-firing the terminal wake.
+test_wedge_cap_reports_gone_endpoint_while_capped() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max gone round
+  dir=$(make_case wedge-cap-gone-endpoint); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-gone-endpoint"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-gone-endpoint.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-gone-endpoint.status"
+  sig=$(seen_sig "$state/wedge-cap-gone-endpoint.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-gone-endpoint_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+
+  # The endpoint is a live agent for this round, so the pane is escalated rather
+  # than reported gone and the ceiling fires while the worker is provably here.
+  poll_wedge_round "$dir" "$max" "FM_FAKE_TMUX_CURRENT_COMMAND=grok"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the cap did not fire against a live endpoint: $(cat "$out")"
+  [ -e "$state/.wedge-permanent-$key" ] || fail "the window-scoped cap marker is missing after the cap fired"
+
+  # The agent now exits while its pane keeps rendering the identical frame: the
+  # session inventory no longer lists the recorded window, so the endpoint reads
+  # as missing rather than as an agent that might still recover.
+  gone="FM_FAKE_TMUX_CURRENT_COMMAND=bash FM_FAKE_TMUX_WINDOWS=someone-elses-window"
+  poll_capped_wedge_round "$dir" "$max" "$gone" exit \
+    || fail "the capped window never reported its gone endpoint: $(cat "$out")"
+  grep -F "agent missing" "$out" >/dev/null \
+    || fail "the capped window did not report the gone endpoint: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the gone endpoint was escalated as a wedge instead of reported: $(cat "$out")"
+
+  # Two further capped polls: the death is delivered once, not once per poll, and
+  # neither of them re-fires the terminal wake or advances the counter.
+  round=1
+  while [ "$round" -le 2 ]; do
+    poll_capped_wedge_round "$dir" "$max" "$gone" absorb \
+      || fail "capped poll $round surfaced a wake: $(cat "$out")"
+    grep -F "agent missing" "$out" >/dev/null \
+      && fail "capped poll $round repeated the already-reported gone endpoint"
+    grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+      && fail "capped poll $round re-fired the terminal wake"
+    [ ! -s "$state/.wedge-escalations-$key" ] \
+      || fail "capped poll $round advanced the escalation counter"
+    round=$((round + 1))
+  done
+  gone=$(queued_wakes_carrying "$state" "$window" "agent missing")
+  [ "$gone" -eq 1 ] \
+    || fail "the capped window queued $gone gone-endpoint reports; a death is reported once per incarnation"
+  unset FM_FAKE_CREW_STATE
+  pass "a capped window still reports its gone endpoint exactly once across repeated polls"
+}
+
+# 13. The duplicate suppression for the terminal wake is episode-scoped, not
+# window-scoped. The cap markers are released on every legitimate episode-ending
+# reset, so a terminal wake left queued and UNACKNOWLEDGED by an earlier episode
+# must not silence the next episode's own wake - while a rollback that keeps
+# re-firing the cap inside one episode still publishes no second row (case 10).
+test_wedge_cap_new_episode_publishes_its_own_terminal_wake() {
+  local dir state out capture_file window key pane_hash sig pid fakebin max post_hash terminal_rows
+  dir=$(make_case wedge-cap-new-episode); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-new-episode"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-new-episode.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-new-episode.status"
+  sig=$(seen_sig "$state/wedge-cap-new-episode.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-new-episode_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+
+  # Episode 1: the cap fires and its terminal wake is deliberately left queued
+  # and unacknowledged, standing in for a supervisor that never consumed it.
+  poll_capped_wedge_round "$dir" "$max" "" exit \
+    || fail "the first episode did not fire the cap: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the first episode did not fire PERMANENTLY-WEDGED: $(cat "$out")"
+  [ "$(queued_wakes_carrying "$state" "$window" "PERMANENTLY-WEDGED")" -eq 1 ] \
+    || fail "the first episode did not queue exactly one terminal wake"
+
+  # The crew genuinely resumes: a busy pane whose completed-turn marker is fresh
+  # lands on the watcher's reset branch, which releases the cap state - the end
+  # of that wedge episode - without consuming the wake still sitting in the queue.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  printf 'crew resumed, work rendering again' > "$capture_file"
+  : > "$state/wedge-cap-new-episode.turn-ended"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "resume poll failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -e "$state/.wedge-permanent-$key" ] \
+    || fail "the window-scoped cap marker survived the recovery that ended the first episode"
+
+  # Episode 2: the crew wedges again on a fresh render, and the cap fires again.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  rm -f "$state/wedge-cap-new-episode.turn-ended"
+  post_hash=$(hash_text "idle wedged content second episode")
+  printf 'idle wedged content second episode' > "$capture_file"
+  printf '%s' "$post_hash" > "$state/.hash-$key"
+  printf '%s' "$post_hash" > "$state/.stale-$key"
+  printf '3\n' > "$state/.count-$key"
+  poll_capped_wedge_round "$dir" "$max" "" exit \
+    || fail "the second episode stayed silent instead of publishing its own terminal wake: $(cat "$out")"
+  terminal_rows=$(queued_wakes_carrying "$state" "$window" "PERMANENTLY-WEDGED")
+  [ "$terminal_rows" -eq 2 ] \
+    || fail "the second episode's terminal wake was suppressed by the first episode's unacknowledged one; $terminal_rows rows are queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a new wedge episode publishes its own terminal wake behind an unconsumed earlier one"
+}
+
 test_wedge_cap_disabled_by_default
 test_wedge_cap_fires_permanently_wedged_at_threshold
 test_wedge_cap_silences_subsequent_polls_for_same_hash
@@ -882,3 +1064,5 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure
 test_wedge_cap_releases_after_genuine_recovery
 test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
 test_wedge_cap_releases_after_declared_wait
+test_wedge_cap_reports_gone_endpoint_while_capped
+test_wedge_cap_new_episode_publishes_its_own_terminal_wake
