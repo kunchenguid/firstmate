@@ -646,7 +646,7 @@ write_forgejo_pr_json() {
 # count), regardless of any state= override.
 write_forgejo_status_json() {
   local file=$1 kv key value
-  local state=success total=1
+  local state=success total=1 statuses
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -660,8 +660,10 @@ write_forgejo_status_json() {
   if [ "$total" = 0 ]; then
     printf '{"state":"","total_count":0,"statuses":[]}\n' > "$file"
   else
-    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" \
-      "$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)" \
+    # Built outside the printf arguments: bash 3.2 mangles an escaped quote
+    # inside a command substitution nested in double quotes.
+    statuses=$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)
+    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" "$statuses" \
       > "$file"
   fi
 }
