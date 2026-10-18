@@ -146,6 +146,14 @@ fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
 [ "${1:-}" = --json ] || exit 2
+if [ "${FAKE_QUOTA_ATTENTION:-0}" = 1 ]; then
+  cat "${QUOTA_AXI_FIXTURE:?}"
+  exit 1
+fi
+if [ "${FAKE_QUOTA_FAIL_GARBAGE:-0}" = 1 ]; then
+  printf 'not json\n'
+  exit 1
+fi
 cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
@@ -877,7 +885,18 @@ reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
-assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
+assert_contains "$out" '  reason: quota-axi --json failed and left no valid snapshot' "quota-axi failure with no snapshot is named"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL_GARBAGE=1 run code out err "$BRIEF"
+expect_code 0 "$code" "quota-axi nonzero exit with invalid output exits 0"
+assert_contains "$out" '  status: error' "quota-axi nonzero exit with invalid output is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json failed and left no valid snapshot' "invalid output after a nonzero exit is named"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_QUOTA_ATTENTION=1 run code out err "$BRIEF"
+expect_code 0 "$code" "quota-axi attention exit exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a nonzero quota-axi exit with a valid snapshot still resolves"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
