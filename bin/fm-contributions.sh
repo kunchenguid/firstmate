@@ -165,7 +165,8 @@ BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 TRACK_THREADS=false
 if [ -n "$REPLY_AGE" ]; then
-  case "$REPLY_AGE" in *[!0-9]*|0) fail 'invalid reply age' ;; esac
+  case "$REPLY_AGE" in *[!0-9]*) fail 'invalid reply age' ;; esac
+  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail 'invalid reply age'
   TRACK_THREADS=true
 else
   REPLY_AGE=0

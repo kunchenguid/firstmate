@@ -1766,7 +1766,7 @@ test_reply_rules() {
 }
 
 test_reply_age_is_configurable_and_validated() {
-  local home out
+  local home out bad
   home=$(unanswered_home reply-age)
   poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
   ack_pending "$home"
@@ -1774,8 +1774,12 @@ test_reply_age_is_configurable_and_validated() {
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll with a one-hour reply age failed'
   printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
     || fail "a one-hour reply age did not raise the thread: $out"
-  with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE=soon "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
-    && fail 'a malformed reply age was accepted'
+  for bad in soon -5 1.5 0 00 000; do
+    with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE="$bad" "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
+      && fail "the reply age '$bad' was accepted"
+  done
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z FM_CONTRIBUTIONS_REPLY_AGE=03600 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 || fail 'a zero-padded positive reply age was refused'
   pass 'the reply age is a validated seconds setting'
 }
 
