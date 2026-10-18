@@ -60,8 +60,10 @@
 #     failed is relaunched in its recorded worktree through bin/fm-control.sh,
 #     with a note carrying its current status line, when its agent is dead,
 #     missing, or alive outside that worktree. A dead lane that acted since the
-#     restart is left alone, and no lane is relaunched while it is an open
-#     captain call (bin/fm-captain-hold.sh open exits 0, or 2 when unreadable).
+#     restart is left alone, as is a dead lane whose state/<id>.exit epoch (the
+#     last verified fm-control exit) is newer than its spawn_gen, and no lane is
+#     relaunched while it is an open captain call (bin/fm-captain-hold.sh open
+#     exits 0, or 2 when unreadable).
 #     Alive inside the worktree, the lane is
 #     properly waiting and left alone when crew state reads parked, paused, or
 #     blocked or its status log's current line (fm-classify-lib.sh) is an open
@@ -189,16 +191,31 @@ delivery_id() {
   printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
 }
 
+# Epoch of a lane's latest spawn or relaunch, from its spawn_gen; 0 when absent.
+lane_spawn_epoch() {  # <meta>
+  local spawn
+  spawn=$(fm_meta_get "$1" spawn_gen)
+  spawn=${spawn#s}
+  spawn=${spawn%%.*}
+  case "$spawn" in ''|*[!0-9]*) spawn=0 ;; esac
+  printf '%s\n' "$spawn"
+}
+
 # Newest epoch a lane is recorded acting at: its busy record or its spawn.
 lane_acted_at() {  # <id> <meta>
   local ts spawn
   ts=$(sed -n 's/.* ts=\([0-9][0-9]*\).*/\1/p' "$STATE/$1.busy-state" 2>/dev/null | head -n 1)
-  spawn=$(fm_meta_get "$2" spawn_gen)
-  spawn=${spawn#s}
-  spawn=${spawn%%.*}
-  case "$spawn" in ''|*[!0-9]*) spawn=0 ;; esac
+  spawn=$(lane_spawn_epoch "$2")
   [ "${ts:-0}" -gt "$spawn" ] && spawn=$ts
   printf '%s\n' "$spawn"
+}
+
+# Epoch fm-control exit recorded for a lane's last verified stop; 0 when none.
+lane_exited_at() {  # <id>
+  local ts
+  ts=$(head -n 1 "$STATE/$1.exit" 2>/dev/null)
+  case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
+  printf '%s\n' "$ts"
 }
 
 # Why a lane idle in its worktree is properly waiting; fails for a lost turn.
@@ -264,6 +281,10 @@ reconcile() {  # <episode>
     esac
     if [ "$agent" = alive ] && [ "$(fm_backend_busy_state herdr "$target")" = busy ]; then
       say "$id: mid-turn; left alone"
+      continue
+    fi
+    if [ "$agent" != alive ] && [ "$(lane_exited_at "$id")" -gt "$(lane_spawn_epoch "$meta")" ]; then
+      say "$id: stopped on purpose; left alone"
       continue
     fi
     if [ "$kind" = secondmate ]; then

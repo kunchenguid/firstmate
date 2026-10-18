@@ -1355,6 +1355,12 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    # Every outcome that proves the agent stopped records its epoch, so the
+    # sentinel's reconcile leaves this lane down until a spawn newer than it.
+    case "$result" in
+      stopped|already-stopped|endpoint-gone)
+        printf '%s\n' "$(date +%s)" >"$STATE/$ID.exit" || die "task $ID stopped, but its exit record could not be written" ;;
+    esac
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)

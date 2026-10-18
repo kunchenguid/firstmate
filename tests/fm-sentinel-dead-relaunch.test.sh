@@ -3,13 +3,14 @@
 # relaunch in bin/fm-sentinel.sh reconcile.
 #
 # A session-start reconcile must not relaunch a dead ship or scout that is an
-# open captain call, nor one that already acted since the restart. Three dead
-# lanes sit in one home: a held lane, a lane that acted after the restart, and an
+# open captain call, that already acted since the restart, or that fm-control
+# exit stopped on purpose. Four dead lanes sit in one home: a held lane, a lane
+# that acted after the restart, a lane stopped through fm-control exit, and an
 # ordinary paused lane that did not act. A herdr stand-in reports the server
 # stopped, so every lane reads missing without a live Herdr. Reconcile runs in
 # FM_SENTINEL_DRY_RUN=1, which must print the decisions and leave the home
-# byte-identical: the held and acted lanes are skipped, and the paused lane is
-# still chosen for relaunch.
+# byte-identical: the held, acted and stopped lanes are skipped, and the paused
+# lane is still chosen for relaunch. A lane spawned after its exit is relaunched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,6 +68,27 @@ EOF
 lane held 1 "$((RESTART - 3600))" "working [at=$((RESTART - 60))]: implementing the brief"
 lane acted 2 "$((RESTART - 3600))" "working [at=$((RESTART - 60))]: implementing the brief"
 lane paused 3 "$((RESTART - 3600))" "paused [at=$((RESTART - 60))]: waiting on the validation run"
+lane stopped 4 "$((RESTART - 3600))" "working [at=$((RESTART - 60))]: implementing the brief"
+
+# The stopped lane is stopped through the real fm-control exit, which needs a
+# Herdr server that answers for its pane: the stand-in reports the pane present
+# with no agent in it, so the exit proves the agent stopped and records its epoch.
+FAKEBIN_STOP=$TMP_ROOT/fakebin-stop
+mkdir -p "$FAKEBIN_STOP"
+cat > "$FAKEBIN_STOP/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" status "*) printf '%s\n' '{"server":{"running":true,"socket":"/nonexistent.sock"}}' ;;
+  *" pane get "*) printf '%s\n' '{"result":{"pane":{"pane_id":"w4:p1"}}}' ;;
+  *" agent get "*) printf '%s\n' '{"error":{"code":"agent_not_found"}}' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN_STOP/herdr"
+PATH="$FAKEBIN_STOP:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  "$ROOT/bin/fm-control.sh" stopped exit >/dev/null || fail "fm-control exit could not stop the stopped lane"
+[ -f "$STATE/stopped.exit" ] || fail "fm-control exit recorded no exit epoch"
 # The acted lane posted a busy event after the restart, as a relaunched or
 # resumed lane does.
 printf 'v1 gen=s%s.1.1 seq=2 state=idle source=claude-hook event=stop ts=%s\n' \
@@ -100,11 +122,23 @@ printf '%s\n' "$OUT" | grep -q '^acted: acted since the restart; left alone$' \
   || fail "dead lane that acted since the restart was not skipped: $OUT"
 printf '%s\n' "$OUT" | grep -q '^paused: dry run, no action: agent missing; relaunched in ' \
   || fail "unheld paused dead lane was not chosen for relaunch: $OUT"
+printf '%s\n' "$OUT" | grep -q '^stopped: stopped on purpose; left alone$' \
+  || fail "dead lane stopped through fm-control exit was not skipped: $OUT"
 printf '%s\n' "$OUT" | grep -q 'FAILED' && fail "dry run ran an action: $OUT"
-pass "dead lanes: a held lane and an acted lane are skipped, an unheld paused lane is relaunched"
+pass "dead lanes: held, acted and stopped-on-purpose lanes are skipped, an unheld paused lane is relaunched"
 
 [ "$before" = "$after" ] || fail "dry run changed the home"
 pass "dry run prints its decisions and writes nothing to the home"
+
+# A stop and a later relaunch both before the restart: the relaunch moves
+# spawn_gen past the exit epoch, which makes the lane eligible again. Rewrite the
+# two epochs the way fm-control exit and fm-spawn --relaunch record them.
+printf '%s\n' "$((RESTART - 1800))" > "$STATE/stopped.exit"
+sed -i "s/^spawn_gen=s[0-9]*\./spawn_gen=s$((RESTART - 1200))./" "$STATE/stopped.meta"
+OUT=$(reconcile_dry) || fail "dry-run reconcile after a relaunch failed: $OUT"
+printf '%s\n' "$OUT" | grep -q '^stopped: dry run, no action: agent missing; relaunched in ' \
+  || fail "a lane spawned after its exit was not eligible for relaunch: $OUT"
+pass "a lane spawned after its exit is relaunched again"
 
 if FM_HOME="$HOME_DIR" FM_SENTINEL_DRY_RUN=1 FM_SENTINEL_HERDR_SESSION="$SESSION" \
   "$ROOT/bin/fm-sentinel.sh" tick >/dev/null 2>&1; then
