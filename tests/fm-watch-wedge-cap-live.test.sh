@@ -83,7 +83,6 @@ say() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" | tee -a "$TRANSCRIPT"
 }
 
-note() { printf '# %s\n' "$1"; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 # The ceiled arm's bound. Three rather than two so the transcript shows the
@@ -188,7 +187,12 @@ printf 'working: implementing\n' > "$STATE/$TASK.status"
 FM_HOME="$LAB_HOME" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' \
   _ "$ROOT/bin/fm-wake-lib.sh" "$LAB_HOME" "$TASK.status"
 
-key=$(printf '%s' "$WINDOW" | tr -c 'A-Za-z0-9' '_')
+# The watcher's ONE derivation of a window's marker key (bin/fm-watch.sh
+# window_key): `:`, `/` and `.` become `_`, every other character is kept. This
+# copy has to agree with it byte for byte or the first sight seeded below is
+# orphaned; assert_derived_key_matches_watcher proves the agreement against a
+# real poll instead of trusting it.
+key=$(printf '%s' "$WINDOW" | tr ':/.' '___')
 KEY="$key"
 say "wedged worker recorded as $TASK (key=$key); its pane holds a live process that has made no progress"
 
@@ -285,6 +289,20 @@ reset_lab_state() {
     || perl -e 'utime(time()-5, time()-5, $ARGV[0])' "$STATE/$TASK.meta"
 }
 
+# assert_derived_key_matches_watcher: the pane-hash markers a real poll writes
+# must be named by this run's derived key. A derivation that drifts leaves the
+# seeded first sight behind as an orphan and the watcher writing its own, and
+# from there the two arms run warm versus cold rather than cap versus no-cap.
+assert_derived_key_matches_watcher() {
+  local stray
+  stray=$(find "$STATE" -maxdepth 1 \
+    \( -name '.hash-*' -o -name '.count-*' \) \
+    ! -name ".hash-$KEY" ! -name ".count-$KEY" | wc -l | tr -d ' ')
+  say "pane-hash markers the watcher wrote under a key other than $KEY: $stray"
+  [ "$stray" -eq 0 ] \
+    || fail "the watcher named this window's pane-hash markers under a key this run did not derive (key=$KEY), so the seeded first sight was orphaned and the two arms are no longer comparable"
+}
+
 # --- Part 0: the UNCEILED baseline, at the shipped default -------------------
 # This arm exists so the ceiled arm has something to be compared against. With
 # the cap at its default of 0 the watcher escalates the same wedged pane on
@@ -302,6 +320,7 @@ while [ "$i" -lt 5 ]; do
   watcher_cycle "unceiled escalation $i"
   [ "$CYCLE_WOKE" -eq 1 ] || fail "the unceiled baseline went quiet at escalation $i - that is not the baseline this guard measures"
   unceiled=$((unceiled + 1))
+  if [ "$i" -eq 1 ]; then assert_derived_key_matches_watcher; fi
 done
 say "UNCEILED: $unceiled consecutive wakes from one wedged pane with the cap at its default, and nothing bounds the next one"
 [ "$unceiled" -ge 4 ] \
