@@ -60,6 +60,12 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
 The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
+## Session name
+
+A Claude crewmate or scout launches with `--name '<project> · <task>'`, with ` [scout]` appended on a scout and the project prefix dropped from a task id that already starts with it.
+Remote Control lists the session under that name instead of an auto-generated one, and `--name` never turns Remote Control on, so a captain who keeps it off still gets a plain display name.
+A `--secondmate` launch carries no name; `claude_session_name()` in `../../../../../bin/fm-spawn.sh` owns the format.
+
 ## Task control channel
 
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
