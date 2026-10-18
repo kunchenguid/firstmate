@@ -1643,8 +1643,10 @@ detect_herdr_launcher() {
 # <FM_ROOT>/.claude/settings.json, then the user file
 # (FM_BOOTSTRAP_CLAUDE_USER_SETTINGS, else $CLAUDE_CONFIG_DIR or ~/.claude,
 # /settings.json). The first layer that sets permissions.defaultMode decides the
-# mode; an allow entry in any layer of the form Bash(...bin/fm-...) counts as the
-# rule. A --permission-mode flag on the primary's command line is invisible here.
+# mode; an allow entry in any layer must be Bash(bin/fm-*:*) or
+# Bash(<FM_ROOT>/bin/fm-*:*) to cover this checkout's whole script family.
+# A single-script rule or another checkout's absolute rule does not count.
+# A --permission-mode flag on the primary's command line is invisible here.
 # Primary homes only, and only when fm-harness.sh resolves this process's own
 # harness to claude; jq is required and its absence keeps the check silent.
 detect_claude_permissions() {

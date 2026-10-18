@@ -42,8 +42,10 @@
 #               and skip for a sweep-phase prefix that a detect-only run cannot
 #               print, or for a network-phase check without --network. A "scan"
 #               source (the network report) may also print lines the inventory
-#               does not map; its optional "complete" ERE must match one line
-#               before an absent prefix counts as ok.
+#               does not map. An absent prefix counts as ok only after exit 0;
+#               when the source has a "complete" ERE, it must also match a line
+#               with no "did not finish cleanly" or NETWORK_CHECKS diagnostic.
+#               Otherwise the absent prefix is skip; reported findings remain.
 #   verb        the first rule that matches decides: exit (exit status), match
 #               (an ERE against any stdout or stderr line), or field+equals (a dotted JSON
 #               path); otherwise the entry's default, or warn. A verb that hits
