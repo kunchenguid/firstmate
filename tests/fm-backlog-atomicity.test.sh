@@ -2127,7 +2127,7 @@ exec "$real_tasks_axi" "\$@"
 SH
     chmod +x "$case_dir/fakebin/tasks-axi"
     out=$(run_bootstrap "$case_dir")
-    [ "$(row_state "$case_dir" "$id")" = done ] \
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
       || fail "session start left a recorded GitLab close at $(row_state "$case_dir" "$id"): $out"
     tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
       | grep -F "body: \"GitLab merge request $gitlab_url\"" >/dev/null \
