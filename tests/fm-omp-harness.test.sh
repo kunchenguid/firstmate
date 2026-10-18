@@ -54,11 +54,26 @@ export NODE_NO_WARNINGS=1
 # exact signal under test. Every `-c` body below ends in a no-op so bash does
 # not exec-optimize the single command away and replace the named process.
 make_named_shells() {  # <dir> -> echoes <bindir>
-  local dir=$1 name
+  local dir=$1 name real_ps
+  real_ps=$(command -v ps) || fail "detection fixture needs ps"
   mkdir -p "$dir"
   for name in omp ompd comp; do
     ln -sf /bin/bash "$dir/$name"
   done
+  # Use the existing ps-query seam, but bound only the fixture root's parent
+  # link. Real named-process identities remain visible; the suite's launching
+  # harness must not supply the omp evidence in a decoy or marker-only case.
+  # Terminate at 0 rather than host pid 1, which may itself be a harness.
+  cat > "$dir/ps" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 4 ] && [ "\$1" = -o ] && [ "\$2" = ppid= ] &&
+   [ "\$3" = -p ] && [ "\$4" = "\${FM_TEST_ANCESTRY_ROOT:-}" ]; then
+  printf '%s\n' 0
+  exit 0
+fi
+exec "$real_ps" "\$@"
+SH
+  chmod +x "$dir/ps"
   printf '%s' "$dir"
 }
 
@@ -69,23 +84,23 @@ test_detection_anchored_name_and_marker_precedence() {
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-    "$bin/omp" -c '"$1"; :' _ "$HARNESS")
+    PATH="$bin:$PATH" "$bin/omp" -c 'export FM_TEST_ANCESTRY_ROOT=$$; "$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
     out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+      PATH="$bin:$PATH" "$bin/$decoy" -c 'export FM_TEST_ANCESTRY_ROOT=$$; "$1"; :' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    "$bin/omp" -c '"$1"; :' _ "$HARNESS")
+    PATH="$bin:$PATH" "$bin/omp" -c 'export FM_TEST_ANCESTRY_ROOT=$$; "$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    PATH="$bin:$PATH" bash -c 'export FM_TEST_ANCESTRY_ROOT=$$; "$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
