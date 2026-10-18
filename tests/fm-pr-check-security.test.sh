@@ -909,6 +909,7 @@ test_github_enterprise_config_resolution() {
 
   (
     unset FM_HOME FM_CONFIG_OVERRIDE
+    # shellcheck source=/dev/null
     . "$code_root/bin/fm-pr-lib.sh" || exit 1
     cd "$TMP_ROOT" || exit 1
     fm_pr_url_parse "$url" || fail "parser ignored the code-root config with both home variables unset"
@@ -919,6 +920,8 @@ test_github_enterprise_config_resolution() {
     FM_HOME=
     fm_pr_url_parse "$url" || fail "an empty FM_HOME hid the code-root config"
 
+    # Consumed by the separately analyzed parser library.
+    # shellcheck disable=SC2034
     FM_HOME="$code_root/home"
     fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
       || fail "FM_HOME did not override the code-root config"
