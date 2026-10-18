@@ -216,7 +216,7 @@
 # or skipped a task prints a notice, and the mate still closes the call itself
 # when it reads the answer. The reverse mistake, a steer to a secondmate that
 # has such open calls but carries no --resolve-key, prints one notice naming the
-# open keys and never blocks or reads the message text.
+# open keys after the steer is delivered, and never blocks or reads the message text.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -952,17 +952,23 @@ fm_send_feed_mate_holds() { # <answer-text>
 }
 
 # A steer to a secondmate that holds open captain calls in its own backlog, sent
-# without --resolve-key, closes none of them (see the header). Notice only: the
-# send is never blocked and the message text is never read. Recovery resends and
-# fire-and-forget system asks are not captain answers and stay quiet.
+# without --resolve-key, closes none of them (see the header). Notice only, and
+# only once the steer is delivered, so a failed send keeps its real error first:
+# the send is never blocked and the message text is never read. Recovery resends
+# and fire-and-forget system asks are not captain answers and stay quiet.
+NOTICE_OPEN_MATE_CALLS=0
 if [ -z "$RESOLVE_KEYS" ] && [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -z "$FIRE_AND_FORGET_ID" ] &&
   [ -z "${FM_PENDING_REPLY_EXISTING_CORR+x}" ] && [ "${1:-}" != "--key" ]; then
+  NOTICE_OPEN_MATE_CALLS=1
+fi
+fm_send_notice_open_mate_calls() {
+  local open_mate_calls
+  [ "$NOTICE_OPEN_MATE_CALLS" = 1 ] || return 0
   open_mate_calls=$(fm_send_open_mate_calls | tr '\n' ' ')
   open_mate_calls=${open_mate_calls% }
-  if [ -n "$open_mate_calls" ]; then
-    echo "notice: $TARGET_TASK_ID has open captain call(s) in this home's ledger ($open_mate_calls) and this send carries no --resolve-key, so it closes none of them; if it answers one, send the answer with --resolve-key <key> so the call closes without waiting for the mate's next turn." >&2
-  fi
-fi
+  [ -n "$open_mate_calls" ] || return 0
+  echo "notice: $TARGET_TASK_ID has open captain call(s) in this home's ledger ($open_mate_calls) and this send carries no --resolve-key, so it closes none of them; if it answers one, send the answer with --resolve-key <key> so the call closes without waiting for the mate's next turn." >&2
+}
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used to
 # scope the codex `$<skill>` popup-settle below and the kiro composer rules
@@ -1220,6 +1226,7 @@ else
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
     fi
+    fm_send_notice_open_mate_calls
     exit 0
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
@@ -1313,6 +1320,7 @@ else
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
     fi
+    fm_send_notice_open_mate_calls
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
@@ -1456,6 +1464,7 @@ else
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
   fi
+  fm_send_notice_open_mate_calls
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
