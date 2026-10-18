@@ -781,9 +781,9 @@ fm_lint_run_doctor_inventory() {
     jq -r '[(.sources // {})[]?.command[0]?, (.checks[]? | objects | .owner?, .command[0]?)] | map(strings) | unique[]' "$inventory" \
       | while IFS= read -r owner; do
         case "$owner" in
-          bin/*..* | bin/*[!A-Za-z0-9._/-]*) printf 'docs/doctor-checks.json: owner %s is not a plain path under bin/\n' "$owner" ;;
-          bin/?*) [ -f "$owner" ] && [ -x "$owner" ] || printf 'docs/doctor-checks.json: owner %s does not exist or is not executable\n' "$owner" ;;
-          *) printf 'docs/doctor-checks.json: owner %s is not under bin/\n' "$owner" ;;
+          (bin/*..* | bin/*[!A-Za-z0-9._/-]*) printf 'docs/doctor-checks.json: owner %s is not a plain path under bin/\n' "$owner" ;;
+          (bin/?*) [ -f "$owner" ] && [ -x "$owner" ] || printf 'docs/doctor-checks.json: owner %s does not exist or is not executable\n' "$owner" ;;
+          (*) printf 'docs/doctor-checks.json: owner %s is not under bin/\n' "$owner" ;;
         esac
       done
   )
