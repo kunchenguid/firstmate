@@ -425,6 +425,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `paseo` | Experimental; no dedicated real-backend CI lane | [`docs/paseo-backend.md`](paseo-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, and paseo, since herdr, zellij, cmux, and paseo are session providers only; Orca provides both the task worktree and terminal endpoint.
+A secondmate home's Treehouse spawns run `treehouse --root <state>/treehouse get`, so they need Treehouse v2.2.0 or later; earlier releases reject `--root` as an unknown flag.
 
 ### Legacy cross-clone Treehouse slots
 
