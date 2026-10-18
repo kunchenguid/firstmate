@@ -146,8 +146,10 @@ The propagation, generation publication, and pointer-delivery sequence holds one
 A newly launched or relaunched secondmate already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
 Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
 Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
-A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after a changed transfer.
-The parent records that nudge before delivery, retains it after a failed send, and retries the exact same route during locked bootstrap convergence.
+A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after successful convergence when a transfer or tracked instruction-surface change requires it, or an earlier re-read remains owed.
+An unchanged transfer or a tracked advance outside `AGENTS.md`, `bin/`, and `.agents/skills/` creates no new re-read obligation.
+The parent records that nudge before delivery, retains it after a failed send, a partial apply, unknown completion, or an attempt killed before it reported, and retries the exact same route during locked bootstrap convergence.
+[`fm-secondmate-nudge-lib.sh`](../../../bin/fm-secondmate-nudge-lib.sh) owns the durable obligation record and compatibility behavior.
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
 Inherited harness and runtime-backend defaults must not harden `fm-spawn` to reject a deliberate runtime choice that differs from those defaults.
 The [worker launch environment contract](../../../docs/configuration.md#worker-launch-environment-configlaunch-env-allowlist) separately governs explicit environment grants.
