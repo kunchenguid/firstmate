@@ -21,19 +21,16 @@ A failed script's duration is excluded even when its lane uploaded an artifact.
 In particular, run 36664663190's serial 5 finished in 22m15s with an assertion failure, not a timeout; treating that as a healthy whole-lane sample would hide the failure.
 Collect successful per-script measurements for every member before calculating a split.
 
-Serial hints retain that baseline's maxima and were raised where successful script records in the timing aggregate of fork run [37608647552](https://github.com/umeranjum17/firstmate/actions/runs/37608647552) measured slower durations.
-That aggregate includes records from more than one attempt; failed records and missing scripts are not successful measurements.
-On 2026-10-16 every serial hint that differed by more than 20 seconds from the slowest successful sample of five green fork main runs ([38817092194](https://github.com/umeranjum17/firstmate/actions/runs/38817092194), [38883048109](https://github.com/umeranjum17/firstmate/actions/runs/38883048109), [38889557661](https://github.com/umeranjum17/firstmate/actions/runs/38889557661), [38929674692](https://github.com/umeranjum17/firstmate/actions/runs/38929674692), and [38944553918](https://github.com/umeranjum17/firstmate/actions/runs/38944553918)) took that sample, and unhinted members gained one.
-The host suite's former 789123 ms hint substantially understated its successful 1602476 ms execution in serial job 112793307797 of that run, which finished all assertions but was cancelled at the job limit.
-Its unchanged cases and fixtures now live in `tests/fm-supervision-host-helpers.sh`, called by three disjoint executable parts: `fm-supervision-host.test.sh`, `fm-supervision-host-away.test.sh`, and `fm-supervision-host-recovery.test.sh`.
-Their initial weights are estimates from the intervals between that job's successful case markers, with the entire original setup/cleanup remainder charged to each part conservatively.
-Those intervals include work between cases and are not independent case benchmarks; the split jobs' own timing artifacts must establish their actual durations and variance.
+`tests/fm-supervision-host.test.sh` uses 789123 ms from run 36669175457, after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179), rather than its pre-fix maximum of 1065298 ms.
+That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
+The 2026-10-07 polytoken adapter tests carry provisional local measurements instead - 21090 ms for `tests/fm-polytoken-harness.test.sh` and the 103 ms live-guard skip for `tests/fm-polytoken-signals-live-e2e.test.sh`, both measured on the adapter-verification macOS host - until the next CI refresh replaces them with Ubuntu measurements, because they postdate the 2026-09-30 baseline.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
 
 ## Parallel lanes
 
-The two parallel lanes use longest-processing-time assignment over those hints, with the Pi typecheck pinned to the job that installs its prerequisite.
+The two parallel lanes use longest-processing-time assignment over those hints.
+[`tests/fm-pi-primary-types.test.sh`](../tests/fm-pi-primary-types.test.sh) owns its typecheck dependencies independently of the lane's installed Pi runtime.
 [`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1` and `list_portable_parallel_2`.
 Read the derived packing estimates with that runner's `--check-coverage`; its header and `--help` own the output fields and the selection-specific `--list-scheduled` weight rules.
 The largest individual hint sets a lower bound on the estimated duration of any split, regardless of how evenly the remaining work is assigned.
@@ -72,7 +69,7 @@ Refresh the hints whenever a serial member grows materially or the lane gains sc
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
 Its header and `--help` own the modeled-budget check and output fields; read the current estimates from `--check-coverage` instead of retaining copied lane sums here.
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_serial_packing_budget_boundary`, verifies acceptance exactly at the budget and refusal one millisecond above it through the executable runner.
-`tests/fm-watch-triage.test.sh` outgrew one shard (1343758 ms in run 38817092194, above the packing target), so its cases run in two halves: the file runs the first half and `tests/fm-watch-triage-2.test.sh` runs the second, splitting near the midpoint of that run's case timestamps.
+The longest script, `tests/fm-watch-triage.test.sh`, is the indivisible floor for this layout.
 The estimates use per-file maxima from different runs, not measured rebalanced jobs or an end-to-end latency guarantee.
 The baseline watch-triage samples range from 944375 to 1074843 ms, while each observed completed portable job adds at most 30 seconds beyond its summed scripts in these runs.
 Even so, maxima from five runs do not establish a P95 or guarantee future headroom.
@@ -110,17 +107,15 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Lint partitions and end-to-end latency
 
-`bin/fm-lint.sh` owns four canonical CI partitions, each attempting full source-aware ShellCheck analysis and running workflow validation and backend-purity checks.
+`bin/fm-lint.sh` owns two canonical CI partitions, each attempting full source-aware ShellCheck analysis and running workflow validation and backend-purity checks.
 CI requires its per-root bounds, so an unenforceable deadline or address-space limit refuses lint rather than running uncapped; the script header owns the envelope, per-root execution contract, and memory fallback.
 Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.sh` verifies complete/disjoint executed roots, initial analysis flags, and fallback reporting.
 The workflow uploads each partition's quiet telemetry plus its per-root lifecycle sidecar to distinguish analysis cost, memory use, and host contention.
-Each partition lints one root at a time, because the heaviest roots reach about 8 GiB resident and two of them overflow the 16 GB hosted runner; more partitions, not more concurrent jobs, shorten lint.
-No fast mode or paid runner provisioning is part of this layout.
-The one path skip is the docs-only scope in `.github/workflows/ci.yml`, whose changes job owns the full classification: a pull request it classifies docs-only skips lint and the behavior lanes, and its `CI result` gate still reports.
+No fast mode, path skips, or paid runner provisioning is part of this layout.
 
-The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the slowest serial shard alone still exceeds that objective.
+The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the current watch-triage floor alone exceeds that objective.
 The immediate packing target is the runner's modeled script budget, not a claim that more shards alone can make an indivisible script faster.
-The layout uses seventeen long-lived Linux jobs (ten serial, two parallel, Herdr, four lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
+The layout uses fourteen long-lived Linux jobs (nine serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
 Compare complete before/after runs, preserve cancelled and partial-run evidence, and measure a representative normal-run sample before claiming a P95 improvement.
 The workflow retains per-PR supersession without cancelling main pushes or changing the compliance workflow's event semantics.
 
@@ -137,7 +132,7 @@ A lane that reaches its tier bound needs investigation and a distribution or run
 
 | Tier | Jobs | Bound | Rationale |
 |---|---|---|---|
-| Fast | change scope, coverage guard, repo invariants, timing aggregate, CI result | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
+| Fast | coverage guard, repo invariants, timing aggregate | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
 | Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same policy instead of allowing per-lane packing estimates or one-off caps to set the bound. |
 | Heavy | Herdr | family-run step 20 minutes under a 75-minute job-level last-resort backstop | Healthy runs finish in about 7-10 minutes, so the step tripwire fails a wedged suite while the `always()` cleanup and timing upload still run, and the job cap only catches a hang outside that step. |
 

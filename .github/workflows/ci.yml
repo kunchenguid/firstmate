@@ -26,100 +26,25 @@ concurrency:
 # tiers and their rationale; tests/fm-ci-workflow.test.sh guards this workflow.
 # Each job comment identifies the tier implemented by its executable value.
 
-# Runner selection for the light Linux jobs that fit the review box:
-#   * A run is trusted only when it is a push to main, or a pull_request whose
-#     head repository is this repository. A fork pull_request runs untrusted
-#     code, so it must never reach the self-hosted box and always uses
-#     ubuntu-latest.
-#   * Even for a trusted run the box is used only while the FM_REVIEW_BOX
-#     repository variable is '1', which keeps an opt-in switch for fallback:
-#     set FM_REVIEW_BOX to 0 (or delete it) to send every job back to
-#     ubuntu-latest on the next run, with no code change and no revert, when the
-#     box is offline.
-# Only changes, test-coverage, invariants, and ci-result move: they finish in
-# seconds and stay inside the box's 1500M runner cap. The lint partitions stay on ubuntu-latest
-# because ShellCheck's dataflow analysis peaks above that cap - linting
-# bin/fm-promote.sh was OOM-killed at ~1.48GB - and the cap exists so the
-# review service keeps priority on the 4GB box; raising it would put that
-# service at risk. The macOS job and the Herdr lane stay on GitHub, and the
-# heavyweight test shards stay on ubuntu-latest because one runner instance
-# would serialize them. See data/fm-review-box-runner/evidence.md.
-
+# Fork opt-out: a fork sets the repository variable FM_CI_SKIP_PUSH to 1 to
+# skip the push run, and FM_CI_SKIP_MACOS to 1 to skip the macOS job, without
+# a tracked edit that drifts from upstream; with neither set, every job runs
+# exactly as before. The skip is a job-level condition, repeated per job
+# because workflow syntax has no shared anchor, and never a trigger filter: a
+# job skipped by its condition reports success, while a workflow filtered out
+# at the trigger stays pending and blocks the merge. CONTRIBUTING.md documents
+# the variables.
 jobs:
-  # Docs-only scope: a pull request whose every changed path selects no test in
-  # bin/fm-test-run.sh's changed-file map (README, LICENSE, assets, and docs/
-  # outside the mapped contract docs) skips lint and the behavior lanes. That
-  # map is the single owner of which paths need no test; an unmapped path makes
-  # the selection fail, which runs everything. A deleted path outside that
-  # docs-only set (under tests/ or bin/, say) also runs everything: retired
-  # paths select nothing by design, so an empty selection cannot tell them
-  # from docs-only, and removing coverage is never docs-only. A change to the
-  # runner or to anything under .github/workflows/ also runs everything: on a
-  # pull_request those files come from the merge commit, so the skip is never
-  # decided by code the pull request itself carries. Pushes to main always
-  # run all.
-  changes:
-    name: Change scope
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.FM_REVIEW_BOX == '1' && fromJSON('["self-hosted","review-box"]') || 'ubuntu-latest' }}
-    # Fast tier: one git diff and a path lookup.
-    timeout-minutes: 5
-    outputs:
-      heavy: ${{ steps.scope.outputs.heavy }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
-      - name: Classify changed paths
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -eu
-          heavy=true
-          # The pull_request checkout is the merge commit; its first parent is
-          # the base tip, so HEAD^1..HEAD is exactly this pull request's change.
-          if [ "$EVENT_NAME" = pull_request ]; then
-            deleted_heavy=false
-            trusted=true
-            while IFS= read -r path; do
-              [ -n "$path" ] || continue
-              # The runner and the workflow files themselves come from the
-              # merge commit on pull_request, so a change to either must run
-              # everything without being classified by the code it carries.
-              case "$path" in
-                bin/fm-test-run.sh|.github/workflows/*) trusted=false ;;
-              esac
-              # A deleted path outside the docs-only set selects nothing by
-              # design, so the empty-selection check below cannot tell it from
-              # docs-only; deleting tests or code must run everything.
-              case "$path" in
-                README.md|LICENSE|assets/*|docs/*|.gitignore) continue ;;
-              esac
-              if [ ! -e "$path" ]; then
-                deleted_heavy=true
-                break
-              fi
-            done < <(git diff --name-only HEAD^1 HEAD)
-            if [ "$deleted_heavy" = false ] && [ "$trusted" = true ] \
-              && selected=$(bin/fm-test-run.sh --changed --base HEAD^1 --list) \
-              && [ -z "$selected" ]; then
-              heavy=false
-            fi
-          fi
-          echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
-          echo "heavy lanes: $heavy"
-
   lint:
     name: Lint ${{ matrix.partition }}
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2]
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -141,9 +66,6 @@ jobs:
           # Fail closed rather than lint uncapped when a configured per-root
           # bound (wall deadline or memory rlimit) cannot be enforced here.
           FM_LINT_REQUIRE_BOUNDS: '1'
-          # One root at a time: the heaviest roots reach ~8 GiB resident, so two
-          # concurrent roots overflow the 16 GB runner. More partitions, not
-          # more jobs, shorten lint (bin/fm-lint.sh PARTITION_COUNT).
           FM_LINT_JOBS: '1'
         run: |
           set -eu
@@ -165,7 +87,8 @@ jobs:
   # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.FM_REVIEW_BOX == '1' && fromJSON('["self-hosted","review-box"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Fast tier: the coverage guard is a seconds-long local computation.
     timeout-minutes: 5
     steps:
@@ -177,9 +100,8 @@ jobs:
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -223,9 +145,8 @@ jobs:
 
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -269,16 +190,15 @@ jobs:
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -306,9 +226,9 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      # The Pi extension tests read the installed Pi package's own types and
-      # runtime, so without it they gate-skip and pass silently. It is a public
-      # npm package and needs no credential, so CI can hold the real thing.
+      # Runtime-facing Pi extension probes need the installed public package
+      # to avoid capability skips. tests/fm-pi-primary-types.test.sh owns its
+      # separate compiler dependencies.
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
@@ -324,8 +244,6 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # The Pi package is installed above and CI provides npm and tsc, so
-          # any missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
@@ -343,9 +261,8 @@ jobs:
   # the failure evidence and move the job to macOS rather than skip assertions.
   tests-herdr:
     name: Behavior tests (Herdr)
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Heavy tier (see the timeout policy above): the last-resort job backstop.
     # The family-run step below owns the hang tripwire, so a wedged suite fails
     # there with the always() cleanup and timing upload still running.
@@ -470,12 +387,11 @@ jobs:
     # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
-      - changes
       - tests-portable-parallel-1
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
-    if: always() && needs.changes.outputs.heavy == 'true'
+    if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     steps:
       - uses: actions/checkout@v6
       - name: Download lane timing artifacts
@@ -507,9 +423,8 @@ jobs:
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
-    needs: changes
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: macos-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && vars.FM_CI_SKIP_MACOS != '1' }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -603,7 +518,8 @@ jobs:
 
   invariants:
     name: Repo invariants
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.FM_REVIEW_BOX == '1' && fromJSON('["self-hosted","review-box"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Fast tier: the invariant checks are seconds-long file comparisons.
     timeout-minutes: 5
     steps:
@@ -628,39 +544,3 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
-
-  # The one required check. A matrix job skipped by its if never expands into
-  # per-shard contexts, so requiring each lane would leave a docs-only pull
-  # request waiting forever; this gate reports on every run instead. It passes
-  # only when every lane succeeded, or when the change scope succeeded and
-  # declared the heavy lanes skippable and they were skipped, not failed.
-  ci-result:
-    name: CI result
-    needs:
-      - changes
-      - lint
-      - test-coverage
-      - tests-portable-parallel-1
-      - tests-portable-parallel-2
-      - tests-portable-serial
-      - tests-herdr
-      - macos-stock-bash
-      - invariants
-    if: always()
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.FM_REVIEW_BOX == '1' && fromJSON('["self-hosted","review-box"]') || 'ubuntu-latest' }}
-    # Fast tier: one comparison over the needed jobs' results.
-    timeout-minutes: 5
-    steps:
-      - name: Require every lane to pass or be skipped as docs-only
-        env:
-          SCOPE: ${{ needs.changes.result }}
-          HEAVY: ${{ needs.changes.outputs.heavy }}
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-          SKIPPED: ${{ contains(needs.*.result, 'skipped') }}
-        run: |
-          set -eu
-          echo "change scope: $SCOPE (heavy=$HEAVY); failed or cancelled: $FAILED; skipped: $SKIPPED"
-          [ "$SCOPE" = success ] || { echo "::error::the change scope did not succeed"; exit 1; }
-          [ "$FAILED" = false ] || { echo "::error::a required CI lane failed or was cancelled"; exit 1; }
-          [ "$SKIPPED" = false ] || [ "$HEAVY" = false ] \
-            || { echo "::error::a required CI lane was skipped outside a docs-only change"; exit 1; }

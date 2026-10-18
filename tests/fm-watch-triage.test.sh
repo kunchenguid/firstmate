@@ -7681,11 +7681,6 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
-# CI runs the cases in two halves on separate serial shards, because the whole
-# suite outgrew one shard's packing budget (docs/fm-test-portable-shards.md).
-# fm-watch-triage-2.test.sh runs the second half; run with no part set, this
-# file runs the first half.
-watch_triage_part_1() {
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -7784,9 +7779,6 @@ test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_declared_wait_contradicted_by_parked_run_wakes_once
 test_live_declared_wait_churn_honors_the_resurface_throttle
-}
-
-watch_triage_part_2() {
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
@@ -7849,10 +7841,3 @@ test_record_owned_pane_state_never_pruned
 test_record_owned_pane_still_escalates_normally
 test_stuck_busy_record_with_idle_pane_is_not_working
 test_uncertain_read_keeps_phantom_state
-}
-
-case "${FM_WATCH_TRIAGE_PART:-1}" in
-  1) watch_triage_part_1 ;;
-  2) watch_triage_part_2 ;;
-  *) fail "FM_WATCH_TRIAGE_PART must be 1 or 2, got $FM_WATCH_TRIAGE_PART" ;;
-esac

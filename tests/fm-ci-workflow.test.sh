@@ -9,9 +9,14 @@
 # three-tier timeout policy that docs/fm-test-portable-shards.md "Timeouts"
 # owns (fast, normal, heavy), so no job drifts back to a one-off number.
 #
-# The workflow is parsed as YAML and its concurrency expressions are resolved
-# against simulated pull_request and push contexts, so the assertions describe
-# what GitHub would do, not how the file happens to be spelled.
+# They also hold the fork opt-out: the repository variables FM_CI_SKIP_PUSH and
+# FM_CI_SKIP_MACOS let a fork skip the push run and the macOS job through a
+# job-level condition, while with neither set every job runs exactly as before.
+#
+# The workflow is parsed as YAML and its concurrency and job-level `if`
+# expressions are resolved against simulated pull_request and push contexts,
+# so the assertions describe what GitHub would do, not how the file happens
+# to be spelled.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,12 +28,134 @@ assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
 command -v ruby >/dev/null 2>&1 \
   || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
 
+# Evaluate the subset of GitHub's expression language that ci.yml uses -
+# string literals, context lookups, the status functions, !, ==, !=, &&,
+# ||, and parentheses - against a simulated context hash, following the
+# documented operator precedence, the case-insensitive string comparison, and
+# the `a || b` fallback that returns the first truthy operand rather than a
+# boolean. The status functions read the simulated outcome of the needed jobs
+# from the context key "needs.status" (success, failure, or cancelled), which
+# defaults to success. Each ruby -e below prepends this so every resolver shares one
+# evaluator.
+# shellcheck disable=SC2016  # the ${{ }} below is Ruby text, not a shell expansion
+EXPRESSION_RUBY='
+require "strscan"
+class Expression
+  def self.evaluate(source, context)
+    new(source, context).parse
+  end
+
+  STATUS_FUNCTIONS = %w[always() success() failure() cancelled()].freeze
+
+  # A job or step `if` is a bare expression or one wrapped in ${{ }}, an
+  # absent condition means the job runs, and a condition that calls no status
+  # function gets the implicit success() check GitHub documents.
+  def self.condition(raw, context)
+    source = raw.to_s.strip
+    source = Regexp.last_match(1) if source =~ /\A\$\{\{(.*)\}\}\z/m
+    source = "success()" if source.empty?
+    source = "success() && (#{source})" unless new(source, context).status_check?
+    truthy?(evaluate(source, context))
+  end
+
+  # A result is truthy unless it is false, nil, or the empty string.
+  def self.truthy?(value)
+    value != false && !value.nil? && value != ""
+  end
+
+  def initialize(source, context)
+    @context = context
+    @tokens = []
+    scanner = StringScanner.new(source)
+    until scanner.eos?
+      next if scanner.skip(/\s+/)
+      if scanner.scan(/\x27([^\x27]*)\x27/) then @tokens << [:string, scanner[1]]
+      elsif scanner.scan(/\|\||&&|==|!=|[()!]/) then @tokens << [:operator, scanner.matched]
+      elsif scanner.scan(/[A-Za-z_][\w.\-]*(?:\(\))?/) then @tokens << [:name, scanner.matched]
+      else raise "unsupported expression syntax at: #{scanner.rest}"
+      end
+    end
+  end
+
+  def status_check?
+    @tokens.any? { |kind, value| kind == :name && STATUS_FUNCTIONS.include?(value) }
+  end
+
+  def parse
+    result = parse_or
+    raise "unexpected trailing token: #{@tokens.first.inspect}" unless @tokens.empty?
+    result
+  end
+
+  private
+
+  def take?(operator)
+    return false unless @tokens.first == [:operator, operator]
+    @tokens.shift
+    true
+  end
+
+  def parse_or
+    left = parse_and
+    while take?("||")
+      right = parse_and
+      left = Expression.truthy?(left) ? left : right
+    end
+    left
+  end
+
+  def parse_and
+    left = parse_comparison
+    while take?("&&")
+      right = parse_comparison
+      left = Expression.truthy?(left) ? right : left
+    end
+    left
+  end
+
+  def parse_comparison
+    left = parse_unary
+    loop do
+      operator = ["==", "!="].find { |candidate| take?(candidate) } or break
+      right = parse_unary
+      unless left.class == right.class
+        raise "the resolver only compares operands of one type: #{left.inspect} #{operator} #{right.inspect}"
+      end
+      equal = left.is_a?(String) ? left.casecmp?(right) : left == right
+      left = operator == "==" ? equal : !equal
+    end
+    left
+  end
+
+  def parse_unary
+    return !Expression.truthy?(parse_unary) if take?("!")
+    parse_primary
+  end
+
+  def parse_primary
+    if take?("(")
+      inner = parse_or
+      raise "missing closing parenthesis" unless take?(")")
+      return inner
+    end
+    kind, value = @tokens.shift
+    raise "expected an operand, got #{kind.inspect}" unless kind == :string || kind == :name
+    return value if kind == :string
+    if STATUS_FUNCTIONS.include?(value)
+      status = @context.fetch("needs.status", "success")
+      return value == "always()" || value == "#{status}()"
+    end
+    raise "unresolvable context reference: #{value}" unless @context.key?(value)
+    @context.fetch(value)
+  end
+end
+'
+
 # Resolve the workflow's concurrency contract under one simulated event and
-# print "<group><TAB><cancel-in-progress>". Only the two expression constructs
-# this workflow uses are resolved: an `a || b` fallback and an `==` comparison.
+# print "<group><TAB><cancel-in-progress>".
 resolve_concurrency() {
   local event=$1 pr_number=$2 run_id=$3
-  ruby -ryaml -e '
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
 doc = YAML.load_file(ARGV[0])
 concurrency = doc.fetch("concurrency")
 context = {
@@ -38,30 +165,29 @@ context = {
   "github.run_id" => ARGV[3],
 }
 
-value = lambda do |token|
-  token = token.strip
-  next token[1..-2] if token.start_with?("\x27") && token.end_with?("\x27")
-  raise "unresolvable context reference: #{token}" unless context.key?(token)
-  context.fetch(token)
-end
-
-evaluate = lambda do |expression|
-  expression = expression.strip
-  if expression.include?("==")
-    left, right = expression.split("==", 2)
-    next value.call(left) == value.call(right) ? "true" : "false"
-  end
-  resolved = expression.split("||").map { |token| value.call(token) }.find { |v| !v.empty? }
-  resolved.to_s
-end
-
 interpolate = lambda do |raw|
-  raw.to_s.gsub(/\$\{\{(.+?)\}\}/) { evaluate.call(Regexp.last_match(1)) }
+  raw.to_s.gsub(/\$\{\{(.+?)\}\}/) { Expression.evaluate(Regexp.last_match(1), context).to_s }
 end
 
 puts [interpolate.call(concurrency.fetch("group")),
       interpolate.call(concurrency.fetch("cancel-in-progress"))].join("\t")
 ' "$CI_WORKFLOW" "$event" "$pr_number" "$run_id"
+}
+
+# Print, one per line in workflow order, the jobs whose job-level `if`
+# resolves true under one simulated event and fork variable setting; an unset
+# repository variable reads as the empty string, as GitHub documents.
+jobs_running_under() {  # <event> <FM_CI_SKIP_PUSH> <FM_CI_SKIP_MACOS>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
+context = {
+  "github.event_name" => ARGV[1],
+  "vars.FM_CI_SKIP_PUSH" => ARGV[2],
+  "vars.FM_CI_SKIP_MACOS" => ARGV[3],
+}
+YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
+  puts name if Expression.condition(job["if"], context)
+end
+' "$CI_WORKFLOW" "$1" "$2" "$3"
 }
 
 job_timeout() {
@@ -73,7 +199,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # Tier membership is the executable inventory of the timeout policy: a new job
 # must join a tier, and a job-level value outside these tiers is exactly the
 # one-off number the policy removed.
-FAST_TIER_JOBS='changes test-coverage invariants tests-timing-aggregate ci-result'
+FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
 HEAVY_TIER_JOBS='tests-herdr'
 
@@ -99,79 +225,8 @@ workflow_jobs() {
   ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).fetch("jobs").keys' "$CI_WORKFLOW"
 }
 
-# Resolve one job's runs-on under a simulated event, head repository, and
-# FM_REVIEW_BOX value, printing "<job><TAB><comma-joined labels>". Only the
-# constructs this workflow uses are resolved: a parenthesized || / && chain,
-# == comparisons, and fromJSON('[...]'); a plain runner string passes through.
-resolve_runs_on() {
-  local event=$1 head_repo=$2 variable=$3
-  shift 3
-  ruby -ryaml -e '
-doc = YAML.load_file(ARGV[0])
-event, head_repo, variable = ARGV[1], ARGV[2], ARGV[3]
-context = {
-  "github.event_name" => event,
-  "github.event.pull_request.head.repo.full_name" => head_repo,
-  "github.repository" => "umeranjum17/firstmate",
-  "vars.FM_REVIEW_BOX" => variable,
-}
-ARGV[4..].each do |job|
-  raw = doc.fetch("jobs").fetch(job).fetch("runs-on").to_s.strip
-  match = raw.match(/\A\s*\$\{\{\s*(.*?)\s*\}\}\s*\z/m)
-  labels =
-    if match
-      inner = match[1]
-      inner = inner.gsub(%r{fromJSON\(([^)]*)\)}) { Regexp.last_match(1).gsub("\x27", "") }
-      context.each { |key, value| inner = inner.gsub(key, value.inspect) }
-      value = eval(inner) # rubocop:disable Security/Eval
-      value.is_a?(Array) ? value.join(",") : value.to_s
-    else
-      raw
-    end
-  puts "#{job}\t#{labels}"
-end
-' "$CI_WORKFLOW" "$event" "$head_repo" "$variable" "$@"
-}
-
 group_of() { printf '%s\n' "$1" | cut -f1; }
 cancel_of() { printf '%s\n' "$1" | cut -f2; }
-
-# Print ci.yml's real changes-job classify step script: the decision text the
-# Actions runner executes, extracted through the YAML, not a copy of it.
-classify_step_script() {
-  ruby -ryaml -e '
-steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("changes").fetch("steps")
-index = steps.index { |s| s["id"] == "scope" }
-raise "changes job has no scope-classifying step" unless index
-puts steps[index].fetch("run")
-' "$CI_WORKFLOW"
-}
-
-# Run ci.yml's classify step inside a fixture repository with a pull_request
-# event and print the heavy value it writes to GITHUB_OUTPUT.
-run_classify_step() {  # <fixture-repo> <step-script>
-  local repo=$1 step=$2 out value
-  out="$repo/../classify-output"
-  rm -f "$out"
-  (cd "$repo" && EVENT_NAME=pull_request GITHUB_OUTPUT="$out" bash -c "$step") 1>&2 \
-    || { echo "classify step failed in $repo" >&2; return 1; }
-  value=$(sed -n 's/^heavy=//p' "$out")
-  [ -n "$value" ] || { echo "classify step wrote no heavy output" >&2; return 1; }
-  printf '%s\n' "$value"
-}
-
-# Build a fixture repository under the registered temp root with bin/ tracked
-# (the classify step calls bin/fm-test-run.sh) and one tracked payload file.
-build_classify_repo() {  # <repo> <payload-rel-path> <payload-content>
-  local repo=$1 path=$2 content=$3 dir
-  dir=$(dirname "$path")
-  mkdir -p "$repo/bin" "$repo/$dir"
-  cp "$ROOT/bin/fm-test-run.sh" "$repo/bin/"
-  printf '%s\n' "$content" >"$repo/$path"
-  git -C "$repo" -c init.defaultBranch=main init -q
-  git -C "$repo" add -A
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qm base
-}
 
 test_pr_pushes_supersede_within_one_pr() {
   local first second
@@ -290,6 +345,70 @@ puts steps[index].fetch("timeout-minutes", "none")
   pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
 }
 
+# The fork opt-out is opt-in: with neither variable set every job runs on both
+# events, FM_CI_SKIP_PUSH=1 empties only the push run, and FM_CI_SKIP_MACOS=1
+# removes only the macOS job. A "-" in the table means the variable is unset.
+test_fork_skip_variables_are_opt_in() {
+  local all event skip_push skip_macos expected want actual
+  all=$(workflow_jobs) || fail "could not list ci.yml jobs"
+  printf '%s\n' "$all" | grep -qx macos-stock-bash \
+    || fail "the macOS job is missing from ci.yml, so the table below would prove nothing"
+  while read -r event skip_push skip_macos expected; do
+    [ "$skip_push" != - ] || skip_push=
+    [ "$skip_macos" != - ] || skip_macos=
+    case $expected in
+      all) want=$all ;;
+      none) want= ;;
+      all-but-macos) want=$(printf '%s\n' "$all" | grep -vx macos-stock-bash) ;;
+      *) fail "unknown expectation $expected" ;;
+    esac
+    actual=$(jobs_running_under "$event" "$skip_push" "$skip_macos") \
+      || fail "could not resolve the job conditions for $event FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos"
+    [ "$actual" = "$want" ] \
+      || fail "$event with FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos must run $expected jobs"$'\n'"ran: $(printf '%s' "$actual" | tr '\n' ' ')"$'\n'"wanted: $(printf '%s' "$want" | tr '\n' ' ')"
+  done <<'TABLE'
+push         - - all
+pull_request - - all
+push         1 - none
+pull_request 1 - all
+pull_request - 1 all-but-macos
+push         - 1 all-but-macos
+TABLE
+  pass "the fork skip variables change nothing unless set, and each skips only its own run or job"
+}
+
+# Print true or false: whether one job's job-level `if` resolves true under
+# one simulated event, fork variable setting, and outcome of its needed jobs.
+job_runs_under() {  # <job> <event> <FM_CI_SKIP_PUSH> <FM_CI_SKIP_MACOS> <needs status>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
+context = {
+  "github.event_name" => ARGV[2],
+  "vars.FM_CI_SKIP_PUSH" => ARGV[3],
+  "vars.FM_CI_SKIP_MACOS" => ARGV[4],
+  "needs.status" => ARGV[5],
+}
+puts Expression.condition(YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1])["if"], context)
+' "$CI_WORKFLOW" "$@"
+}
+
+# The aggregate must keep running after a failed lane so its timing summary
+# still lands, while the push skip still removes it from a skipped push run.
+test_timing_aggregate_still_runs_after_a_failed_lane() {
+  local event skip_push expected actual
+  while read -r event skip_push expected; do
+    [ "$skip_push" != - ] || skip_push=
+    actual=$(job_runs_under tests-timing-aggregate "$event" "$skip_push" '' failure) \
+      || fail "could not resolve the aggregate condition for $event FM_CI_SKIP_PUSH=$skip_push"
+    [ "$actual" = "$expected" ] \
+      || fail "after a failed lane, the aggregate on $event with FM_CI_SKIP_PUSH=$skip_push must resolve $expected, got $actual"
+  done <<'TABLE'
+pull_request - true
+push         - true
+push         1 false
+TABLE
+  pass "the timing aggregate still runs after a failed lane unless the push run is skipped"
+}
+
 test_ci_matrices_match_executable_partitions() {
   ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
 jobs = YAML.load_file(ARGV[0]).fetch("jobs")
@@ -320,126 +439,12 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
-# The self-hosted review box backs a public repository, so untrusted fork pull
-# requests must never select it, while trusted runs use it only when the
-# FM_REVIEW_BOX repository variable opts in, so a maintainer can fall back to
-# GitHub-hosted runners by clearing that one variable instead of reverting.
-test_review_box_runner_selection_is_fork_safe() {
-  local moved job line
-  moved='changes test-coverage invariants ci-result'
-  for job in $moved; do
-    # Fork PR: never the box, even with the opt-in variable set.
-    line=$(resolve_runs_on pull_request "someuser/firstmate" 1 "$job") \
-      || fail "could not resolve $job runs-on"
-    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
-      || fail "a fork pull_request must never run $job on the review box, got $(printf '%s' "$line" | cut -f2)"
-    # Trusted PR with the opt-in variable set: the box.
-    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 1 "$job") \
-      || fail "could not resolve $job runs-on"
-    [ "$(printf '%s' "$line" | cut -f2)" = "self-hosted,review-box" ] \
-      || fail "a trusted PR must run $job on the review box when opted in, got $(printf '%s' "$line" | cut -f2)"
-    # Push to main with the opt-in variable set: the box.
-    line=$(resolve_runs_on push "" 1 "$job") \
-      || fail "could not resolve $job runs-on"
-    [ "$(printf '%s' "$line" | cut -f2)" = "self-hosted,review-box" ] \
-      || fail "a push to main must run $job on the review box when opted in, got $(printf '%s' "$line" | cut -f2)"
-    # Fallback: clearing the variable returns trusted runs to GitHub-hosted.
-    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 0 "$job") \
-      || fail "could not resolve $job runs-on"
-    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
-      || fail "clearing FM_REVIEW_BOX must fall back to ubuntu-latest for $job, got $(printf '%s' "$line" | cut -f2)"
-  done
-
-  # The lint partitions (ShellCheck peaks above the box's memory cap), the
-  # heavyweight shards, and the Herdr lane stay on GitHub-hosted runners.
-  for job in lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial tests-herdr; do
-    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 1 "$job") \
-      || fail "could not resolve $job runs-on"
-    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
-      || fail "$job must stay on ubuntu-latest, got $(printf '%s' "$line" | cut -f2)"
-  done
-  pass "review-box runner selection stays fork-safe and falls back on one variable"
-}
-
-# The docs-only skip decides from an empty test selection, but a deleted
-# tests/ or bin/ path also selects nothing by design, so deleting coverage
-# must not ride that skip to a green required check. This executes ci.yml's
-# real classify step against fixture repositories and asserts the decision.
-test_changes_decision_runs_everything_for_deleted_tests() {
-  local step repo root heavy
-  step=$(classify_step_script) || fail "could not read the changes job's classify step"
-
-  # A pull request that only deletes a test file must run the heavy lanes.
-  root=$(fm_test_tmproot fm-ci-delete-test)
-  repo="$root/repo"
-  build_classify_repo "$repo" tests/fm-deleted-classify.test.sh 'exit 0'
-  git -C "$repo" rm -q tests/fm-deleted-classify.test.sh
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qm "delete the test"
-  heavy=$(run_classify_step "$repo" "$step") || fail "classify step failed for a deleted test"
-  [ "$heavy" = true ] \
-    || fail "a deletion-only pull request must run the heavy lanes, got heavy=$heavy"
-
-  # Deleting a docs-only path keeps the skip: docs changes select nothing.
-  root=$(fm_test_tmproot fm-ci-delete-doc)
-  repo="$root/repo"
-  build_classify_repo "$repo" docs/notes.md notes
-  git -C "$repo" rm -q docs/notes.md
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qm "delete the note"
-  heavy=$(run_classify_step "$repo" "$step") || fail "classify step failed for a deleted doc"
-  [ "$heavy" = false ] \
-    || fail "deleting a docs-only path must stay skippable, got heavy=$heavy"
-
-  # An ordinary docs-only pull request (edit, no deletion) keeps the skip.
-  root=$(fm_test_tmproot fm-ci-edit-doc)
-  repo="$root/repo"
-  build_classify_repo "$repo" docs/notes.md notes
-  printf '%s\n' edited >"$repo/docs/notes.md"
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qam "edit the note"
-  heavy=$(run_classify_step "$repo" "$step") || fail "classify step failed for an edited doc"
-  [ "$heavy" = false ] \
-    || fail "an ordinary docs-only pull request must stay skippable, got heavy=$heavy"
-
-  # A pull request that carries the runner itself must not be classified by
-  # it: the head commit swaps in a runner that reports an empty selection,
-  # so only the untrusted-source rule can keep the heavy lanes running.
-  root=$(fm_test_tmproot fm-ci-touch-runner)
-  repo="$root/repo"
-  build_classify_repo "$repo" docs/notes.md notes
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/bin/fm-test-run.sh"
-  chmod +x "$repo/bin/fm-test-run.sh"
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qam "swap in a lying runner"
-  heavy=$(run_classify_step "$repo" "$step") || fail "classify step failed for a runner change"
-  [ "$heavy" = true ] \
-    || fail "a pull request changing bin/fm-test-run.sh must run the heavy lanes, got heavy=$heavy"
-
-  # The same holds when the pull request touches the workflow files, whose
-  # text also comes from the merge commit. The fixture's base already runs a
-  # stub that reports an empty selection, and the head commit changes only
-  # the workflow file, so heavy=true can come from the workflow arm alone.
-  root=$(fm_test_tmproot fm-ci-touch-workflow)
-  repo="$root/repo"
-  build_classify_repo "$repo" docs/notes.md notes
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/bin/fm-test-run.sh"
-  chmod +x "$repo/bin/fm-test-run.sh"
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -q --amend -am "base with a lying runner" \
-    || fail "could not rebuild the workflow fixture's base"
-  mkdir -p "$repo/.github/workflows"
-  printf '%s\n' 'name: other' >"$repo/.github/workflows/other.yml"
-  git -C "$repo" add -A
-  git -C "$repo" -c user.email=ci@firstmate.test -c user.name=ci commit -qm "add a workflow file"
-  heavy=$(run_classify_step "$repo" "$step") || fail "classify step failed for a workflow change"
-  [ "$heavy" = true ] \
-    || fail "a pull request changing .github/workflows/ must run the heavy lanes, got heavy=$heavy"
-
-  pass "the changes job runs everything for deleted tests, never trusts the pull request's own classifier, and keeps the docs-only skip"
-}
-
 test_ci_matrices_match_executable_partitions
-test_review_box_runner_selection_is_fork_safe
-test_changes_decision_runs_everything_for_deleted_tests
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
+test_fork_skip_variables_are_opt_in
+test_timing_aggregate_still_runs_after_a_failed_lane
 test_every_job_has_a_finite_timeout
 test_every_job_belongs_to_exactly_one_timeout_tier
 test_fast_tier_shares_one_short_tripwire

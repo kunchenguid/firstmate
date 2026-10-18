@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live Herdr wrapped-doorbell guard (live-harness-optin family).
+# Live Herdr wrapped-doorbell guard (real-herdr-gated family).
 #
 # A named Claude Code session draws its title into the composer's top rule, so
 # the composer read depends on the bare-rule sandwich. The steering doorbell
