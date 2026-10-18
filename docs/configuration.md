@@ -1578,18 +1578,16 @@ An absent, empty or non-`1` value keeps the existing behavior.
 The setting is not inferred from a remote, an installed `glab`, a project binding or an existing merge-authority setting.
 Enable it before registering `forge=gitlab` or scaffolding a GitLab-bound brief.
 
-The opt-in covers GitLab discovery, binding validation, generated worker instructions, the additional GitLab draft/readiness checks, synchronous merge submission and outcome proof, GitLab cleanup evidence, and GitLab backlog artifact notes.
+The opt-in covers GitLab discovery, binding validation, generated worker instructions, the additional GitLab draft/readiness checks, synchronous merge submission and outcome proof, and GitLab cleanup evidence.
 It also enables forge-aware bootstrap: non-GitHub origins can suppress GitHub tool/authentication requirements, while GitHub origins retain them and an origin-less home keeps the default checks.
 GitHub authentication in that mode checks the active `github.com` account; an existing explicit `GH_HOST` retains its target and the original authentication probe.
 Without the setting, bootstrap keeps its original GitHub requirements and broad auth probe, detection keeps its original Gerrit proposals/evidence, startup text stays unchanged, and existing URL-only GitLab commands keep their previous behavior.
 The setting changes neither delivery mode nor `+yolo`, and it grants no pipeline waiver.
 
-`bin/fm-pr-merge.sh <task-id> <merge-request-url> --allow-no-pipeline` is a separate attended-only, one-run opt-in.
-Without that flag, an absent head pipeline is refused even when GitLab support is enabled or the project allows absent pipelines.
-With it, the raw MR response must explicitly contain `head_pipeline: null`, the project's `only_allow_merge_if_pipeline_succeeds` must be a readable boolean `false`, and every other readiness condition must hold.
-A failed, running, canceled, stale or unreadable pipeline is never waived.
-The flag is refused on other providers and while away, including an away transition during verification.
-It does not repurpose `--allow-red`, `--allow-missing` or `--attended-override`, and it does not enable the home's other GitLab features.
+The existing attended `--allow-no-pipeline` waiver is owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header and remains available without this setting.
+It does not enable the home integration or change any other waiver's meaning.
+When the home integration is enabled, its additional raw-field verification corroborates readable boolean-false `only_allow_merge_if_pipeline_succeeds` project policy before applying the upstream absence waiver.
+GitLab completion links are already retained as artifact notes by upstream's [`fm_backlog_pr_note_label`](../bin/fm-backlog-transition-lib.sh), independently of this home setting.
 
 ## Forge selection (data/projects.md forge= token)
 

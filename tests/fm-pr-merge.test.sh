@@ -362,13 +362,15 @@ case "${1:-} ${2:-}" in
     fi
     if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ] && [ ! -e "$case_dir/glab-auto-queued" ]; then
       cat "$case_dir/mr-post.json"
-    else
-      # glab 1.114.0 loses null/missing draft and omitted pipeline fields in
-      # mr view. The raw API preserves them for the stricter merge guard.
+    elif [ -e "$case_dir/glab-normalizes-json" ]; then
+      # Native glab 1.114.0 normalizes these fields; raw-API safety cases
+      # opt into that representation separately from malformed-output faults.
       jq 'if type == "object" then
         .draft = (if .draft == null then false else .draft end) |
         .head_pipeline = .head_pipeline
         else . end' "$FM_TEST_GLAB_JSON"
+    else
+      cat "$FM_TEST_GLAB_JSON"
     fi
     exit 0
     ;;
@@ -655,7 +657,9 @@ make_gitlab_case() {
   shift
   case_dir=$(make_case "$name")
   mkdir -p "$case_dir/wt"
-  printf '%s\n' 1 > "$case_dir/home/config/gitlab-support"
+  if [ "${FM_TEST_GITLAB_SUPPORT:-1}" = 1 ]; then
+    printf '%s\n' 1 > "$case_dir/home/config/gitlab-support"
+  fi
   add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
   add_glab_mock "$case_dir"
   : > "$case_dir/gh-axi.log"
@@ -2030,12 +2034,14 @@ test_gitlab_merge_requires_an_independent_boolean_false_draft() {
   for draft in true null '"false"'; do
     n=$((n + 1))
     case_dir=$(make_gitlab_case "gitlab-merge-draft-$n" "draft=$draft")
+    : > "$case_dir/glab-normalizes-json"
     rc=0
     run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     [ "$rc" -ne 0 ] || fail "$draft: mergeable detail masked a draft or unreadable draft field"
     assert_absent "$case_dir/glab-merge-called" "$draft: merging reached the forge without a boolean-false draft field"
   done
   case_dir=$(make_gitlab_case gitlab-merge-draft-missing)
+  : > "$case_dir/glab-normalizes-json"
   "$JQ_BIN" 'del(.draft)' "$case_dir/mr.json" > "$case_dir/mr-incomplete.json"
   mv "$case_dir/mr-incomplete.json" "$case_dir/mr.json"
   rc=0
@@ -2199,6 +2205,7 @@ test_gitlab_no_pipeline_respects_the_project_requirement() {
   assert_present "$case_dir/glab-merge-called" "a satisfied pipeline requirement never reached merging"
 
   case_dir=$(make_gitlab_case gitlab-pipeline-field-missing)
+  : > "$case_dir/glab-normalizes-json"
   "$JQ_BIN" 'del(.head_pipeline)' "$case_dir/mr.json" > "$case_dir/mr-incomplete.json"
   mv "$case_dir/mr-incomplete.json" "$case_dir/mr.json"
   rc=0
@@ -3180,6 +3187,24 @@ test_gitlab_async_flags_do_not_change_github_argument_handling() {
   pass "GitLab async argument guards do not intercept GitHub's native argument handling"
 }
 
+test_upstream_waiver_does_not_enable_home_integration() {
+  local case_dir
+  case_dir=$(make_gitlab_case upstream-waiver-unopted-home draft=null pipeline=null)
+  rm -f "$case_dir/home/config/gitlab-support"
+  : > "$case_dir/glab-normalizes-json"
+  : > "$case_dir/glab-project-fails"
+  : > "$case_dir/glab-stays-open"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "upstream's waiver acquired the home integration's draft, policy or outcome checks"
+  assert_present "$case_dir/glab-merge-called" "the existing upstream waiver was not submitted"
+  assert_present "$case_dir/state/task-x1.check.sh" "the upstream unconfirmed-submission monitor was lost"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'only_allow_merge_if_pipeline_succeeds' \
+    "an unopted upstream waiver acquired another project-policy check"
+  pass "upstream's existing waiver does not enable the additional home integration"
+}
+
+test_upstream_waiver_does_not_enable_home_integration
 test_gitlab_async_flags_do_not_change_github_argument_handling
 test_gitlab_requires_an_explicit_no_pipeline_waiver
 test_unopted_gitlab_url_keeps_legacy_merge_behavior
@@ -4671,6 +4696,8 @@ test_allow_missing_follows_the_allow_red_rules() {
   expect_code 2 "$RC" "gitlab-allow-missing: the waiver must not apply on GitLab"
   assert_grep '--allow-missing does not apply to GitLab' "$case_dir/stderr" \
     "gitlab-allow-missing: the refusal did not name GitLab"
+  assert_grep '--allow-no-pipeline waives only a merge request with no head pipeline' "$case_dir/stderr" \
+    "gitlab-allow-missing: the refusal did not point at the GitLab no-pipeline waiver"
   [ ! -s "$case_dir/glab.log" ] || fail "gitlab-allow-missing: glab ran despite the waiver"
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
@@ -4703,6 +4730,130 @@ test_allow_missing_refused_on_forgejo() {
     "forgejo-allow-missing: refusal did not name Forgejo"
   [ ! -s "$case_dir/tea.log" ] || fail "forgejo-allow-missing: tea ran despite --allow-missing"
   pass "fm-pr-merge refuses --allow-missing on Forgejo"
+}
+
+# --allow-no-pipeline is for a GitLab repository that deliberately runs no merge
+# request pipeline: it waives only a head_pipeline GitLab reports as null, and
+# the merge stays bound to the verified head.
+test_allow_no_pipeline_merges_only_a_null_head_pipeline() {
+  local case_dir rc merge_line name spec expected
+  local FM_TEST_GITLAB_SUPPORT=0
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-waived pipeline=null)
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitlab-no-pipeline-waived: a merge request with no head pipeline should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "gitlab-no-pipeline-waived: unexpected merge invocation: '$merge_line'"
+  assert_grep "at head $MR_HEAD, with no head pipeline, waived by --allow-no-pipeline" "$case_dir/stderr" \
+    "gitlab-no-pipeline-waived: the waived verification was not reported"
+
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-flag-absent pipeline=null)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-no-pipeline-flag-absent: no head pipeline must still refuse by default"
+  assert_grep 'the head pipeline status is "none", not success' "$case_dir/stderr" \
+    "gitlab-no-pipeline-flag-absent: the refusal did not name the missing pipeline"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-pipeline-flag-absent: a merge was attempted without the waiver"
+
+  # A pipeline that exists is a verdict, never an absence, so the waiver does
+  # not reach it; and every other condition still holds beside the waiver.
+  set -- \
+    "failed|pipeline_status=failed|the head pipeline status is \"failed\", not success" \
+    "running|pipeline_status=running|the head pipeline status is \"running\", not success" \
+    "canceled|pipeline_status=canceled|the head pipeline status is \"canceled\", not success" \
+    "stale|pipeline_sha=$MR_STALE_HEAD|the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" \
+    "not-mergeable|pipeline=null detail=ci_must_pass|detailed_merge_status is \"ci_must_pass\", not mergeable" \
+    "discussions|pipeline=null discussions=false|blocking_discussions_resolved is \"false\", not true" \
+    "conflicts|pipeline=null conflicts=true|has_conflicts is \"true\", not false"
+  for spec in "$@"; do
+    name=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    # shellcheck disable=SC2086 # the field list is deliberately word-split
+    case_dir=$(make_gitlab_case "gitlab-no-pipeline-refuse-$name" ${spec%%|*})
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitlab-no-pipeline-refuse-$name: the waiver must not merge"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "gitlab-no-pipeline-refuse-$name: the refusal did not name the failing condition"
+    [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+      || fail "gitlab-no-pipeline-refuse-$name: a merge was attempted despite the refusal"
+  done
+
+  # An absent head_pipeline field is unreadable state, not a reported absence.
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-field-missing)
+  "$JQ_BIN" -c 'del(.head_pipeline)' "$case_dir/mr.json" > "$case_dir/mr.json.new"
+  mv "$case_dir/mr.json.new" "$case_dir/mr.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-no-pipeline-field-missing: an unread pipeline field must not be waived"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-pipeline-field-missing: a merge was attempted on an unread pipeline field"
+  pass "fm-pr-merge --allow-no-pipeline waives only a null GitLab head pipeline and keeps every other condition"
+}
+
+test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
+  local case_dir rc head
+  local FM_TEST_GITLAB_SUPPORT=0
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-away pipeline=null)
+  write_away_record "$case_dir" --words 'merge task-x1'
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "gitlab-no-pipeline-away: the waiver must be refused while away"
+  assert_grep '--allow-no-pipeline is attended-only' "$case_dir/stderr" \
+    "gitlab-no-pipeline-away: the refusal did not name attended-only"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-pipeline-away: glab merged despite an away waiver"
+
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-equals pipeline=null)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline=true \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "gitlab-no-pipeline-equals: a value must be refused"
+  [ ! -s "$case_dir/glab.log" ] || fail "gitlab-no-pipeline-equals: glab ran for a valued flag"
+
+  head=abababababababababababababababababababab
+  case_dir=$(make_case github-no-pipeline)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-no-pipeline: the waiver must not apply on GitHub"
+  assert_grep '--allow-no-pipeline applies only to GitLab' "$case_dir/stderr" \
+    "github-no-pipeline: the refusal did not name GitLab"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-no-pipeline: gh pr merge ran despite the waiver"
+
+  case_dir=$(make_forgejo_case forgejo-no-pipeline)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "forgejo-no-pipeline: the waiver must not apply on Forgejo"
+  assert_grep '--allow-no-pipeline applies only to GitLab' "$case_dir/stderr" \
+    "forgejo-no-pipeline: the refusal did not name GitLab"
+  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-no-pipeline: tea ran despite the waiver"
+  pass "fm-pr-merge --allow-no-pipeline is attended-only, takes no value, and applies only to GitLab"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -4761,3 +4912,5 @@ test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
+test_allow_no_pipeline_merges_only_a_null_head_pipeline
+test_allow_no_pipeline_is_attended_only_and_gitlab_only

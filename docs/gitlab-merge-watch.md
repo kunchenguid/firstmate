@@ -190,16 +190,15 @@ The historical URL-only watch and merge interfaces above remain available with t
 The additional bound-forge integration requires the effective home's `config/gitlab-support` to contain `1`, then an explicit `forge=gitlab` project binding.
 [configuration.md](configuration.md#gitlab-support-configgitlab-support) owns the setting, its bootstrap effects and the disabled-mode contract.
 In the enabled mode, ready registration refuses a positive GitLab draft, merge verification reads raw safety fields, ordinary merges request synchronous submission, and a successful command is not reported as landed without a merged readback.
-GitLab cleanup can use MR head/content evidence and retain its URL in backlog notes.
+Enabled GitLab cleanup can use MR head/content evidence; the existing upstream artifact-note handling remains available independently of this setting.
 Without the setting, existing URL-only operations retain the upstream path rather than acquiring those checks or outcomes.
 
 ## Merging a merge request
 
 [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the GitLab merge rule, its explicit opt-ins and verified-head binding.
 The default still requires a successful pipeline at the current head.
-Only the attended `--allow-no-pipeline` flag permits an explicitly absent pipeline, and only with readable boolean-false `only_allow_merge_if_pipeline_succeeds` project policy and every other readiness check satisfied.
-That flag enables strict verification for the single call without enabling the home's binding, discovery or bootstrap integration.
-It cannot waive an existing pipeline's status or SHA, a required pipeline, an unreadable field or an away-posture refusal.
+The existing attended `--allow-no-pipeline` flag retains its upstream contract and does not enable the additional home integration.
+With the home setting enabled, raw merge verification additionally corroborates readable boolean-false project policy before applying that waiver.
 The missing-tool evidence below was collected on 2026-08-22 using a throwaway `FM_HOME` and a `glab` wrapper that refused every merge subcommand.
 
 Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
@@ -218,11 +217,56 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 The watch poll reads glab's field output without `jq`; [configuration.md](configuration.md#toolchain) owns the additional prerequisites for registered GitLab projects.
-The enabled integration and explicit absence waiver use raw API reads for merge verification, owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s `gitlab_verify_mergeable`; disabled URL-only runs retain the previous `glab mr view` read.
+The enabled integration uses raw API reads for merge verification, owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s `gitlab_verify_mergeable`; disabled URL-only runs, including upstream waiver calls, retain the existing `glab mr view` read.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
-`tests/fm-pr-merge.test.sh` covers current pipeline and project-requirement cases through the executable merge interface.
-The same suite verifies independent refusals, stale recorded heads, verified-head binding, and preservation of the recorded MR and armed poll after a refusal.
+The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
+
+```
+$ fm-pr-merge.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+armed: state/e1.check.sh
+error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+  - state is "merged", not open
+  - detailed_merge_status is "not_open", not mergeable
+  - the head pipeline status is "none", not success
+  - the head pipeline ran at "none", not at the current head 33762fcf6777c8d993220d25fb541e56c48081b9
+$ echo $?
+1
+```
+
+The open half is `mergeable`, conflict-free, and has its discussions resolved, so only the pipeline conditions refuse it.
+The fixture runs no CI, so its `head_pipeline` is `null`, which is reported as `none` rather than treated as nothing to check:
+
+```
+$ fm-pr-merge.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+armed: state/e2.check.sh
+error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+  - the head pipeline status is "none", not success
+  - the head pipeline ran at "none", not at the current head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+$ echo $?
+1
+```
+
+By default, a project that runs no pipeline at all therefore cannot merge through this path.
+That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
+The only exception is an attended `--allow-no-pipeline` on an explicit captain order, which waives exactly this null `head_pipeline` and nothing else; the header of `bin/fm-pr-merge.sh` owns its guards.
+
+Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
+
+A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
+The stale value below was written into the task record by hand, because a GitLab task never records one on its own:
+
+```
+$ fm-pr-merge.sh e4 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+armed: state/e4.check.sh
+notice: recorded head 1111111111111111111111111111111111111111 disagrees with the live head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8; verifying the live head
+error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+  - the head pipeline status is "none", not success
+  - the head pipeline ran at "none", not at the current head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+```
+
+The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
+The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
 The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
 
 ## Why the head is read live and bound to the merge

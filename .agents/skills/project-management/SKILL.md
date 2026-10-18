@@ -85,6 +85,8 @@ For GitLab, explicitly select the approved instance and namespace and pass the a
 After remote creation succeeds, clone it locally, confirm and record its forge binding, add the registry entry, and initialize it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no forge call.
+A new repository has no commit, and spawn refuses to dispatch work into a project with an unborn `HEAD`.
+Tell the captain that the project needs a first commit.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize

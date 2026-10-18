@@ -89,29 +89,29 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
-# config/gitlab-support=1 enables the additional GitLab integration; otherwise
-# URL-only operations retain their existing reads, arguments and outcomes.
-# In the enabled mode, each condition is read live: the merge request is open,
-# has a boolean-false draft field, detailed_merge_status is mergeable,
-# has_conflicts is false, and blocking_discussions_resolved is true.
-# By default the head pipeline must have succeeded at the exact current head.
-# The separate boolean --allow-no-pipeline flag is an attended-only one-run
-# opt-in, also usable without the home setting. It permits only explicit
-# head_pipeline:null when the project's only_allow_merge_if_pipeline_succeeds
-# setting is a readable boolean false. Only that case reads project policy.
-# Existing pipelines, unreadable fields and required pipelines are never waived.
-# Every failing condition is reported, not just the first. The verified head is
-# passed to glab as --sha, so a push between verification and merge cannot land
-# unverified commits. A recorded pr_head that disagrees with the live head is
-# reported rather than trusted. Reading this state needs glab and jq, and either
-# one absent stops the merge before any state is recorded.
-# The enabled integration and one-run absence waiver force --auto-merge=false
-# for ordinary GitLab merges rather than inheriting glab's asynchronous default.
-# Explicit --auto-merge or --when-pipeline-succeeds requests then need the same
-# attended override as GitHub --auto and remain refused while away.
-# Their zero-exit submission also requires a live state=merged readback; an
-# open, closed or unreadable outcome returns nonzero with the poll armed,
-# quoting the CLI report separately.
+# A GitLab merge is refused unless every pre-merge condition holds, each read
+# live at merge time rather than taken from recorded metadata: the merge request
+# is open, detailed_merge_status is mergeable, has_conflicts is false,
+# blocking_discussions_resolved is true, and the head pipeline succeeded at the
+# exact current head commit. Every failing condition is reported, not just the
+# first. An attended --allow-no-pipeline, for a repository that deliberately
+# runs no merge request pipeline, waives only the pipeline condition and only
+# when GitLab reports head_pipeline as present and null: a failed, running,
+# canceled, or stale pipeline still refuses, every other condition still
+# holds, and a project that requires a pipeline to succeed still refuses
+# through detailed_merge_status. It is refused while the away-posture record
+# exists and on any forge other than GitLab. The verified head is then passed
+# to glab as --sha, so a push that lands between that read and the merge fails
+# the merge instead of landing commits nothing verified. A recorded pr_head that disagrees with the live head is
+# reported rather than trusted, because a rebase moves the head and leaves the
+# recorded value stale. Reading that state needs glab and jq, and either one
+# absent stops the merge before any state is recorded.
+#
+# The additional GitLab integration requires config/gitlab-support=1.
+# Without it, the existing waiver and URL-only operations retain upstream's
+# reads, arguments and outcomes. Enabled homes read raw safety fields, require
+# boolean-false draft and readable false project policy for an absent pipeline,
+# submit ordinary merges synchronously and require merged-state readback.
 #
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
@@ -179,7 +179,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -238,9 +238,9 @@ if [ "$PROVIDER" = gerrit ]; then
 fi
 shift 2
 ATTENDED_OVERRIDE=false
+ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
-ALLOW_NO_PIPELINE=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -283,24 +283,21 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
-if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$PROVIDER" != gitlab ]; then
-  echo "error: --allow-no-pipeline applies only to GitLab merge requests" >&2
-  exit 2
-fi
 GITLAB_SUPPORT_ENABLED=0
-if fm_pr_gitlab_support_enabled || [ "$ALLOW_NO_PIPELINE" = true ]; then
+if fm_pr_gitlab_support_enabled; then
   GITLAB_SUPPORT_ENABLED=1
 fi
 # --allow-red names one check run to waive, which only GitHub's per-check
 # reading can match. GitLab and Forgejo each collapse their checks into a
 # single head verdict - a head pipeline status and a combined commit status -
-# so there is no per-check name to waive there and the pipeline requirement stays
-# unwaivable. Refuse the combination rather than accept a flag that would be
-# silently dropped into a refusal the caller cannot explain.
+# so there is no per-check name to waive there; GitLab's only waiver is the
+# whole-pipeline absence --allow-no-pipeline covers. Refuse the combination
+# rather than accept a flag that would be silently dropped into a refusal the
+# caller cannot explain.
 if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
   case "$PROVIDER" in
     gitlab)
-      echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+      echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded; --allow-no-pipeline waives only a merge request with no head pipeline at all" >&2
       exit 2
       ;;
     forgejo)
@@ -309,10 +306,17 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
       ;;
   esac
 fi
+# --allow-no-pipeline waives only GitLab's own reading of a merge request that
+# has no head pipeline at all. GitHub's per-check waivers and Forgejo's
+# combined status have no such state to waive, so it is refused there too.
+if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$PROVIDER" != gitlab ]; then
+  echo "error: --allow-no-pipeline applies only to GitLab, where it waives a merge request that has no head pipeline at all" >&2
+  exit 2
+fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
   case "$PROVIDER" in
     gitlab)
-      echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+      echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded; --allow-no-pipeline waives only a merge request with no head pipeline at all" >&2
       exit 2
       ;;
     forgejo)
@@ -572,11 +576,11 @@ fi
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
-  local json='' fields line read_status=0 expected_fields=8
+  local json='' fields line pipeline_waived read_status=0 expected_fields=9
   local total=0 named=0 refusals=''
   local state='' draft='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
-  local pipeline_present='' pipeline_required='' project_id project_json
+  local pipeline_absent='' pipeline_required='' project_id project_json
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -612,9 +616,7 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
-        (if $enabled == 1 then
-          "pipeline_present=" + (if has("head_pipeline") and .head_pipeline == null then "false" else "true" end)
-          else empty end),
+        "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
       else
         error("merge request payload is not an object")
@@ -633,7 +635,7 @@ gitlab_verify_mergeable() {
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
-      pipeline_present=*) pipeline_present=${line#pipeline_present=} ;;
+      pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
       *) continue ;;
     esac
@@ -660,7 +662,7 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
-  if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_present" = false ]; then
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_absent" = true ]; then
     if ! project_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id" \
         --hostname "$FM_PR_HOST" --repo "$PROJECT_URL" 2>/dev/null) \
       || ! pipeline_required=$(printf '%s' "$project_json" | jq -er '
@@ -670,7 +672,11 @@ FIELDS
       pipeline_required=unreadable
     fi
     case "$pipeline_required" in
-      true|false) ;;
+      false) ;;
+      true)
+        refusals="$refusals  - the project requires pipelines to succeed, but the merge request has no head pipeline
+"
+        ;;
       *)
         refusals="$refusals  - could not read project setting only_allow_merge_if_pipeline_succeeds for $PROJECT_URL
 "
@@ -694,10 +700,11 @@ FIELDS
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
 "
-  if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_present" = false ]; then
-    [ "$pipeline_required" != true ] \
-      || refusals="$refusals  - the project requires pipelines to succeed, but the merge request has no head pipeline
-"
+  # The waiver covers only a head_pipeline GitLab reports as null; a failed,
+  # running, canceled, or stale pipeline is a verdict, not an absence of one.
+  pipeline_waived=false
+  if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_absent" = true ]; then
+    pipeline_waived=true
   else
     [ "$pipeline_status" = success ] \
       || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
@@ -712,8 +719,8 @@ FIELDS
     printf '%s' "$refusals" >&2
     return 1
   fi
-  if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_present" = false ]; then
-    printf 'verified: %s is open and mergeable at head %s; it has no head pipeline, and the project does not require one\n' \
+  if [ "$pipeline_waived" = true ]; then
+    printf 'verified: %s is open and mergeable at head %s, with no head pipeline, waived by --allow-no-pipeline\n' \
       "$URL" "$live_head" >&2
   else
     printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
@@ -1466,10 +1473,6 @@ require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
   if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
-    if [ "$ALLOW_NO_PIPELINE" = true ]; then
-      echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists the successful-pipeline requirement cannot be waived" >&2
-      return 2
-    fi
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
       return 2
@@ -1488,6 +1491,10 @@ require_current_away_authority() {
   fi
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
     echo "error: --allow-missing is attended-only; while the away-posture record exists every required check must report" >&2
+    return 2
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_PIPELINE" = true ]; then
+    echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline" >&2
     return 2
   fi
 }
