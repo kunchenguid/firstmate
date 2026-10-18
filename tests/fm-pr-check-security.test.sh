@@ -897,6 +897,48 @@ SH
 # names in config/github-hosts, and the parsed host is carried to every forge
 # call on the check, poll, and merge paths. github.com needs no configuration
 # and keeps the exact behavior it had before the list existed.
+test_github_enterprise_config_resolution() {
+  local code_root url
+  code_root="$TMP_ROOT/github-enterprise-code-root"
+  url=https://leadsonline.ghe.com/Org/repo/pull/7
+  mkdir -p "$code_root/bin" "$code_root/config" "$code_root/home/config" "$code_root/override"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$code_root/bin/"
+  printf 'leadsonline.ghe.com\n' > "$code_root/config/github-hosts"
+  printf 'home.ghe.com\n' > "$code_root/home/config/github-hosts"
+  printf 'override.ghe.com\n' > "$code_root/override/github-hosts"
+
+  (
+    unset FM_HOME FM_CONFIG_OVERRIDE
+    . "$code_root/bin/fm-pr-lib.sh" || exit 1
+    cd "$TMP_ROOT" || exit 1
+    fm_pr_url_parse "$url" || fail "parser ignored the code-root config with both home variables unset"
+    [ "$FM_PR_PROVIDER|$FM_PR_HOST|$FM_PR_PATH|$FM_PR_OWNER|$FM_PR_REPO|$FM_PR_NUMBER" \
+      = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
+      || fail "default-home parsing returned the wrong Enterprise identity"
+
+    FM_HOME=
+    fm_pr_url_parse "$url" || fail "an empty FM_HOME hid the code-root config"
+
+    FM_HOME="$code_root/home"
+    fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_HOME did not override the code-root config"
+    ! fm_pr_url_parse "$url" || fail "FM_HOME still accepted a host only named in the code-root config"
+
+    FM_CONFIG_OVERRIDE="$code_root/override"
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE did not override FM_HOME"
+    ! fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE still accepted a host only named in FM_HOME"
+    unset FM_HOME
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE required FM_HOME"
+
+    unset FM_CONFIG_OVERRIDE
+    fm_pr_url_parse "$url" || fail "parser lost the code-root config after clearing overrides"
+  ) || fail "GitHub Enterprise config resolution failed"
+  pass "GitHub Enterprise config resolves override, home, then the library code root"
+}
+
 test_github_enterprise_hosts() {
   local dir cfg url out sidecar rc
   url=https://leadsonline.ghe.com/Org/repo/pull/7
@@ -3715,6 +3757,7 @@ SH
 }
 
 test_parser_matrix
+test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
 test_forgejo_merge_watch

@@ -22,6 +22,8 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -219,7 +221,7 @@ fm_github_host_allowed() {  # <host>
   [ -n "$host" ] || return 1
   [ "$host" != github.com ] || return 0
   fm_pr_forge_host_valid "$host" || return 1
-  file="${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/github-hosts"
+  file="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$_FM_PR_LIB_ROOT}/config}/github-hosts"
   [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$line" = "$host" ] && return 0
