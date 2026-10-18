@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -136,12 +137,14 @@ fi
 # exposes a GitHub pull request's head commit as a selectable field, and a
 # GitLab merge request has a head ref of its own on the project remote
 # (bin/fm-pr-lib.sh owns the ref layout), which stays current while the request
-# is open and outlives the source branch's deletion. tea's single-PR view
-# ignores field selection entirely, so a Forgejo task records none, and neither
-# does a Gerrit task: a Gerrit revision names one patch set, every amend or
-# rebase is a new patch set, and bin/fm-review-diff.sh has no Gerrit path to
-# resolve a current head with, so a recorded revision would silently become the
-# reviewed content.
+# is open and outlives the source branch's deletion. The GitLab read is opt-in
+# per home with config/gitlab-mr-head, the same switch that lets
+# bin/fm-review-diff.sh compare against that ref; without the file a GitLab task
+# records no pr_head, exactly as on upstream. tea's single-PR view ignores field
+# selection entirely, so a Forgejo task records none, and neither does a Gerrit
+# task: a Gerrit revision names one patch set, every amend or rebase is a new
+# patch set, and bin/fm-review-diff.sh has no Gerrit path to resolve a current
+# head with, so a recorded revision would silently become the reviewed content.
 # Every consumer treats the record as optional and never as authority:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check,
@@ -157,12 +160,14 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     PR_HEAD=$REMOTE_HEAD
   fi
 fi
-# A GitLab task reads the same head ref bin/fm-review-diff.sh compares against,
-# from the copy's own project remote, so the recorded value is the published
-# head itself rather than a second reading of it. The ref is server-side and the
-# copy already holds the remote's credentials, so no JSON processor is needed.
-# An unreadable answer records nothing, exactly as an unreadable gh field does.
-if [ "$PROVIDER" = gitlab ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+# A GitLab task in an opted-in home reads the same head ref
+# bin/fm-review-diff.sh compares against, from the copy's own project remote, so
+# the recorded value is the published head itself rather than a second reading
+# of it. The ref is server-side and the copy already holds the remote's
+# credentials, so no JSON processor is needed. An unreadable answer records
+# nothing, exactly as an unreadable gh field does.
+if [ "$PROVIDER" = gitlab ] && [ -n "$WT" ] && [ -d "$WT" ] \
+  && [ -e "$CONFIG/gitlab-mr-head" ]; then
   GITLAB_HEAD_REF=$(fm_pr_forge_head_ref gitlab "$NUMBER")
   if REMOTE_HEAD=$(git -C "$WT" ls-remote --refs origin "$GITLAB_HEAD_REF" 2>/dev/null \
       | awk 'NR == 1 { print $1 }') \

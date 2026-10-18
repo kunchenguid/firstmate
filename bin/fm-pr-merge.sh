@@ -95,10 +95,12 @@
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
 # exact current head commit. Every failing condition is reported, not just the
-# first. A successful head pipeline whose commit is not the current head is
-# accepted only as this merge request's own merged-results or merge-train
-# pipeline, with the provenance requirements documented in
-# docs/gitlab-merge-watch.md under "Pipelines that run on a merged result".
+# first. In a home opted in with config/gitlab-merged-result-merge, a successful
+# head pipeline whose commit is not the current head is accepted only as this
+# merge request's own merged-results or merge-train pipeline, with the
+# provenance requirements documented in docs/gitlab-merge-watch.md under
+# "Pipelines that run on a merged result". Without that opt-in the check, its
+# message, and the number of live reads are exactly upstream's.
 # The verified head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
 # nothing verified. A recorded pr_head that disagrees with the live head is
@@ -186,6 +188,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -536,6 +539,13 @@ if [ "$PROVIDER" = gitlab ]; then
   GITLAB_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
+# Accepting a successful merged-results or merge-train pipeline whose commit is
+# not the live head is opt-in per home, exactly as reading the published merge
+# request head is. Without the mark, a pipeline that did not run at the head
+# refuses with upstream's message and no provenance read is attempted at all.
+GITLAB_MERGED_RESULT_MERGE=false
+[ -e "$CONFIG/gitlab-merged-result-merge" ] && GITLAB_MERGED_RESULT_MERGE=true
+
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
 # returns non-zero after reporting every condition that failed.
@@ -717,7 +727,8 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
-  if [ "$pipeline_status" = success ] && [ "$pipeline_sha" != "$live_head" ]; then
+  if [ "$GITLAB_MERGED_RESULT_MERGE" = true ] \
+    && [ "$pipeline_status" = success ] && [ "$pipeline_sha" != "$live_head" ]; then
     target_tip=$(gitlab_fetch_ref "refs/heads/$target_branch" "refs/fm-review/mr/$PR_NUMBER/target") ||
       refusals="$refusals  - the target branch $target_branch could not be read from the project remote
 "
@@ -725,9 +736,6 @@ FIELDS
       refusals="$refusals  - could not read the GitLab pipeline identity before merging
 "
     fi
-  fi
-
-  if [ "$pipeline_status" = success ] && [ "$pipeline_sha" != "$live_head" ]; then
     if proof=$(gitlab_pipeline_covers_head \
       "$mr_iid" "$pipeline_ref" "$pipeline_sha" "$live_head" "$target_branch" "$target_tip" "$pipeline_id"); then
       pipeline_kind=${proof##*$'\n'}
@@ -1861,10 +1869,12 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
-    gitlab_verify_mergeable || exit 1
-    if [ "$FM_PR_GITLAB_PROOF" != "$gitlab_initial_proof" ]; then
-      echo 'error: GitLab merge provenance changed before merging' >&2
-      exit 1
+    if [ "$GITLAB_MERGED_RESULT_MERGE" = true ]; then
+      gitlab_verify_mergeable || exit 1
+      if [ "$FM_PR_GITLAB_PROOF" != "$gitlab_initial_proof" ]; then
+        echo 'error: GitLab merge provenance changed before merging' >&2
+        exit 1
+      fi
     fi
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?

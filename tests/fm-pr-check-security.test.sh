@@ -912,6 +912,7 @@ publish_gitlab_head() {  # <dir> <iid>
 test_gitlab_registration_records_published_head() {
   local dir head out
   dir=$(make_case gitlab-registration-head)
+  : > "$dir/home/config/gitlab-mr-head"
   write_task_meta "$dir" task-gl
   head=$(publish_gitlab_head "$dir" 7)
 
@@ -940,6 +941,7 @@ group/subgroup/project
 test_gitlab_registration_refreshes_the_recorded_head() {
   local dir first second
   dir=$(make_case gitlab-registration-refresh)
+  : > "$dir/home/config/gitlab-mr-head"
   write_task_meta "$dir" task-gl
   first=$(publish_gitlab_head "$dir" 7)
   run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
@@ -964,6 +966,7 @@ test_gitlab_registration_refreshes_the_recorded_head() {
 test_gitlab_unreadable_head_ref_records_nothing() {
   local dir
   dir=$(make_case gitlab-registration-no-ref)
+  : > "$dir/home/config/gitlab-mr-head"
   write_task_meta "$dir" task-gl
 
   run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
@@ -975,6 +978,30 @@ test_gitlab_unreadable_head_ref_records_nothing() {
     "an unreadable head ref recorded a head anyway"
   cmp -s "$POLL" "$dir/home/state/task-gl.check.sh" || fail "published check was not byte-for-byte static"
   pass "fm-pr-check records no head when a GitLab merge request's head ref is unreadable"
+}
+
+# Without the home opt-in a GitLab registration records no pr_head, exactly as
+# on upstream main: the published head ref may exist, but nothing reads it.
+test_gitlab_unopted_registration_records_no_head() {
+  local dir
+  dir=$(make_case gitlab-registration-unopted)
+  write_task_meta "$dir" task-gl
+  publish_gitlab_head "$dir" 7 >/dev/null
+  # Main's gate accepts a head reachable outside the disposable copy; a pushed
+  # pipeline head leaves a remote-tracking ref like this one.
+  git -C "$dir/wt" push -q origin "HEAD:refs/heads/published"
+  git -C "$dir/wt" fetch -q origin "refs/heads/published:refs/remotes/origin/published"
+
+  run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "unopted GitLab registration failed: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    "$dir/home/state/task-gl.meta" || fail "canonical merge request URL was not recorded"
+  assert_no_grep 'pr_head=' "$dir/home/state/task-gl.meta" \
+    "an unopted GitLab registration recorded a head"
+  cmp -s "$POLL" "$dir/home/state/task-gl.check.sh" || fail "published check was not byte-for-byte static"
+  pass "fm-pr-check records no head for an unopted GitLab registration"
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
@@ -3722,6 +3749,7 @@ test_valid_recording_and_merge_derivation
 test_gitlab_registration_records_published_head
 test_gitlab_registration_refreshes_the_recorded_head
 test_gitlab_unreadable_head_ref_records_nothing
+test_gitlab_unopted_registration_records_no_head
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

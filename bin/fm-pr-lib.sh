@@ -306,7 +306,11 @@ fm_pr_head_valid() {
 # own after the source branch is deleted, so a review or a ready record can read
 # the published head without the source branch. bin/fm-review-diff.sh fetches
 # this ref for its compare side and bin/fm-pr-check.sh records its commit as the
-# ready record's pr_head=, so no consumer has to know the ref layout twice.
+# ready record's pr_head=, so no consumer has to know the ref layout twice. The
+# GitLab arm is reachable only in a home that opted in with
+# config/gitlab-mr-head (docs/configuration.md); GitHub and Forgejo keep their
+# existing behavior, and a home without the opt-in never reaches this function
+# for GitLab.
 fm_pr_forge_head_ref() {  # <provider> <number>
   case "${1-}" in
     github|forgejo) printf 'refs/pull/%s/head\n' "${2-}" ;;

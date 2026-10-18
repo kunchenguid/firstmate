@@ -226,8 +226,9 @@ merged-example
 33762fcf6777c8d993220d25fb541e56c48081b9
 ```
 
-`bin/fm-review-diff.sh` fetches that ref exactly as it fetches `refs/pull/<n>/head` on GitHub, and `bin/fm-pr-check.sh` records its commit as `pr_head=` when a GitLab task is armed.
-A review of the fixture's open merge request therefore shows the published change even when the worker copy's branch does not contain it:
+Reading that ref is opt-in per home with [`config/gitlab-mr-head`](configuration.md#gitlab-merge-request-head-configgitlab-mr-head): with that empty file present, `bin/fm-review-diff.sh` fetches the ref exactly as it fetches `refs/pull/<n>/head` on GitHub, and `bin/fm-pr-check.sh` records its commit as `pr_head=` when a GitLab task is armed.
+Without the file nothing fetches or records it, and a GitLab task keeps the recorded-head/local-branch fallbacks it had before this capability existed.
+A review of the fixture's open merge request in an opted-in home therefore shows the published change even when the worker copy's branch does not contain it:
 
 ```
 $ fm-review-diff.sh proof --stat
@@ -329,7 +330,8 @@ The merge itself is not exercised against any live merge request, in either dire
 ## Pipelines that run on a merged result
 
 Merged results pipelines and merge trains run the merge request's pipeline on a temporary merge commit rather than on the head, so `head_pipeline.sha` legitimately differs from the merge request's `sha` (GitLab: [merged results pipelines](https://docs.gitlab.com/ci/pipelines/merged_results_pipelines/), [merge trains](https://docs.gitlab.com/ci/pipelines/merge_trains/); both are Premium and Ultimate features and do not exist on GitLab CE or Free).
-`bin/fm-pr-merge.sh` accepts such a pipeline only as this merge request's own pipeline and only when it covers the current revisions:
+Accepting such a pipeline is opt-in per home with [`config/gitlab-merged-result-merge`](configuration.md#gitlab-merged-results-and-merge-train-merges-configgitlab-merged-result-merge); without that empty file `bin/fm-pr-merge.sh` requires the pipeline at the current head exactly as before and reports the same refusal.
+In an opted-in home it accepts such a pipeline only as this merge request's own pipeline and only when it covers the current revisions:
 
 - the pipeline's `ref` is exactly `refs/merge-requests/<iid>/merge` or `refs/merge-requests/<iid>/train` for the merge request's own iid, which is what identifies the pipeline as this merge request's own rather than another's;
 - that ref's current tip in the project repository is exactly the commit the pipeline ran on, so a pipeline the ref has moved past is refused as superseded rather than merged;

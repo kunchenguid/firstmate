@@ -629,6 +629,13 @@ make_forgejo_case() {
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
 # mocks and a merge request payload. Echoes the case dir.
+# A home opts in to accepting a successful merged-results or merge-train
+# pipeline that did not run at the live head; without the file the merge path
+# must stay exactly as it is on upstream main.
+enable_gitlab_merged_result_merge() {  # <case_dir>
+  : > "$1/home/config/gitlab-merged-result-merge"
+}
+
 make_gitlab_case() {
   local name=$1 case_dir
   shift
@@ -2237,9 +2244,44 @@ seed_train_car() {  # <case_dir> <ref>
 
 }
 
+# Without the home opt-in, a successful pipeline that did not run at the live
+# head refuses with upstream's exact line, no provenance read is attempted, and
+# no merge reaches the forge.
+test_gitlab_merged_result_merge_needs_the_opt_in() {
+  local case_dir rc expected
+  case_dir=$(make_gitlab_case gitlab-merged-results-unopted)
+  seed_gitlab_project "$case_dir" 7
+  seed_merged_result "$case_dir" refs/merge-requests/7/merge
+  [ "$GITLAB_PIPELINE" != "$GITLAB_HEAD" ] \
+    || fail "gitlab-merged-results-unopted: fixture did not separate the pipeline commit from the head"
+  write_mr_json "$case_dir/mr.json" \
+    "head=$GITLAB_HEAD" "pipeline_sha=$GITLAB_PIPELINE" pipeline_ref=refs/merge-requests/7/merge
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-merged-results-unopted: the merge must refuse without the opt-in"
+  expected="  - the head pipeline ran at \"$GITLAB_PIPELINE\", not at the current head $GITLAB_HEAD"
+  grep -Fqx -- "$expected" "$case_dir/stderr" \
+    || fail "gitlab-merged-results-unopted: the refusal was not upstream's exact line: $(cat "$case_dir/stderr")"
+  assert_no_grep 'merged-results' "$case_dir/stderr"
+  assert_no_grep 'merge-train' "$case_dir/stderr"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-merged-results-unopted: a merge was attempted despite the refusal"
+  git -C "$case_dir/wt" rev-parse --verify -q refs/fm-review/mr/7/target >/dev/null 2>&1 \
+    && fail "gitlab-merged-results-unopted: the target ref was fetched without the opt-in"
+  git -C "$case_dir/wt" rev-parse --verify -q refs/fm-review/mr/7/merge >/dev/null 2>&1 \
+    && fail "gitlab-merged-results-unopted: the merged-result ref was fetched without the opt-in"
+  pass "fm-pr-merge refuses a non-head pipeline without the home opt-in"
+}
+
 test_gitlab_merged_results_pipeline_merges() {
   local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-merged-results)
+  enable_gitlab_merged_result_merge "$case_dir"
   seed_gitlab_project "$case_dir" 7
   seed_merged_result "$case_dir" refs/merge-requests/7/merge
   [ "$GITLAB_PIPELINE" != "$GITLAB_HEAD" ] \
@@ -2269,6 +2311,7 @@ test_gitlab_merge_train_pipeline_merges() {
   local case_dir rc merge_line parents mode
   for mode in chained first paginated; do
     case_dir=$(make_gitlab_case "gitlab-merge-train-$mode")
+    enable_gitlab_merged_result_merge "$case_dir"
     seed_gitlab_project "$case_dir" 7
     seed_train_car "$case_dir" refs/merge-requests/7/train
     parents=$(git -C "$case_dir/src" rev-list --parents -1 "$GITLAB_PIPELINE" | cut -d' ' -f2-)
@@ -2331,6 +2374,7 @@ test_gitlab_pipeline_provenance_refusals() {
     name=${spec%%|*}
     expected=${spec#*|}
     case_dir=$(make_gitlab_case "gitlab-pipeline-$name")
+    enable_gitlab_merged_result_merge "$case_dir"
     seed_gitlab_project "$case_dir" 7
     seed_merged_result "$case_dir" refs/merge-requests/7/merge
     pipeline_sha=$GITLAB_PIPELINE
@@ -2442,6 +2486,7 @@ test_gitlab_train_provenance_refusals() {
   local case_dir name rc filter older
   for name in missing unreadable empty null ambiguous stale idle wrong-target wrong-iid wrong-project wrong-pipeline wrong-sha wrong-ref failed rewound-source rewound-target advanced-target missing-car missing-current broken-link duplicate-car; do
     case_dir=$(make_gitlab_case "gitlab-train-$name")
+    enable_gitlab_merged_result_merge "$case_dir"
     seed_gitlab_project "$case_dir" 7
     seed_train_car "$case_dir" refs/merge-requests/7/train
     write_mr_json "$case_dir/mr.json" "head=$GITLAB_HEAD" \
@@ -2504,6 +2549,7 @@ test_gitlab_locked_revalidation() {
         source:superseded|source:train-*|merge:train-*|source:target|source:target-rewind|source:retarget) continue ;;
       esac
       case_dir=$(make_gitlab_case "gitlab-recheck-$kind-$name")
+      enable_gitlab_merged_result_merge "$case_dir"
       seed_gitlab_project "$case_dir" 7
       ref="refs/merge-requests/7/$kind"
       case "$kind" in
@@ -3406,6 +3452,7 @@ test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
+test_gitlab_merged_result_merge_needs_the_opt_in
 test_gitlab_merged_results_pipeline_merges
 test_gitlab_merge_train_pipeline_merges
 test_gitlab_pipeline_provenance_refusals
