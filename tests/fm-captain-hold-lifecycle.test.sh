@@ -130,7 +130,12 @@ case "${1:-} ${2:-}" in
       *) printf '%s\n' '[]' ;;
     esac
     ;;
-  "api repos/"*) printf '%s\n' '{"name":"main","protected":false}' ;;
+  "api repos/"*)
+    case " $* " in
+      *"/compare/"*) printf '%s\n' 'behind_by=0' 'base_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' ;;
+      *) printf '%s\n' '{"name":"main","protected":false}' ;;
+    esac
+    ;;
 esac
 SH
   cat > "$home/fakebin/gh-axi" <<'SH'
@@ -148,6 +153,11 @@ SH
 run_pr_merge() {  # <home> <id> <url>
   local home=$1
   shift
+  # The base branch reports no required checks, so the merge also reads the
+  # worker's recorded full-suite result: a passing one against the compare tip.
+  mkdir -p "$home/data/$1"
+  printf '%s\n' 'suite=pass' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
+    > "$home/data/$1/suite-result"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
