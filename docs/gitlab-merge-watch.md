@@ -1,8 +1,8 @@
 # GitLab merge request watch and merge verification
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
-The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
-Every output is reproduced exactly.
+The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; the public-fixture merge refusals were collected on 2026-08-22, and merged-result regression verification on 2026-10-09.
+Outputs preserve the recorded versions' wording; current diagnostics may differ.
 
 ## Versions
 
@@ -31,9 +31,9 @@ That `glab` is a locally built 1.82.0; only its build tag and commit are elided,
 
 ## The evidence project
 
-All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+The public live transcripts below read <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
-Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
+Every command against it reads a public merge request and needs no credential, so a reader can rerun each one to check the recorded behavior.
 Its README asks that the open merge request be left open.
 
 A non-default host appears below only as the placeholder `gitlab.example`, which resolves nowhere.
@@ -186,8 +186,8 @@ Arm a current watch with `bin/fm-pr-check.sh`.
 
 ## Merging a merge request
 
-`bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
-Every run below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the live pre-merge contract, including merged-result evidence and the remaining target-update race.
+The 2026-08-22 runs below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
 That wrapper is why the open fixture merge request could be used as evidence at all: it is `mergeable` with discussions resolved, so the pipeline conditions are the only thing between it and a real merge.
 
 Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
@@ -237,7 +237,7 @@ $ echo $?
 ```
 
 A project that runs no pipeline at all therefore cannot merge through this path.
-That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
+That is the intended reading of the requirement rather than an oversight: a successful pipeline validating the source is a condition, and "there is no pipeline" does not satisfy it.
 
 Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
 
@@ -256,6 +256,32 @@ error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture
 The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
 The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
 The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
+
+### Merged-result regression verification (2026-10-09)
+
+The executable regression cases were refreshed on GNU Bash 5.3.15 with jq 1.8.2.
+Read-only GitLab evidence was checked with glab 1.114.0 (4d7c6cd), including the actual `mr view -F json` shape, pipeline details, repository commit parents, and current target branch.
+Private project payloads remain in task evidence; the portable fixtures retain the relevant API structure with fixture identities.
+No live merge was attempted.
+
+Commands:
+
+```sh
+FM_TEST_BASE_PATH="$PATH" bash bin/fm-test-run.sh --jobs 1 tests/fm-pr-merge.test.sh tests/fm-pr-state.test.sh tests/fm-forge-detect.test.sh
+FM_TEST_BASE_PATH="$PATH" bash bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
+```
+
+The explicit base PATH uses the security suite's supported override on NixOS, where Bash is outside its default `/usr/bin` search path.
+Selected regression output:
+
+```text
+ok - fm-pr-merge accepts a successful MR merged-result pipeline and pins its source
+ok - fm-pr-merge rejects stale, unrelated, malformed, unreadable and racing merged-result evidence
+ok - fm-pr-merge validates fork merged results in the target project and encodes branch names
+```
+
+The verifier consumes forge JSON through the same executable on every harness and runtime backend; it does not inspect harness output or drive session lifecycle operations.
+The script header remains the owner of the evidence contract and target-freshness limits.
 
 ## Why the head is read live and bound to the merge
 
