@@ -730,6 +730,26 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+# 0 when this ship done: is the ungated no-mistakes handoff ("committed on <branch>,
+# local and unpublished until the pipeline pushes") AND its named head - the worker
+# copy's HEAD - is reachable from no ref outside that copy. The line is accepted by
+# fm_dod_accept_ship_done on purpose (the handoff starts the pipeline), but it says
+# "I finished implementing", not "published and landable", so a reader must not
+# count it as finished-and-safe. Gated forms, other modes, and a head any remote
+# ref holds all return 1. An unreadable copy returns 1: this only ever downgrades
+# a reading on positive proof that the work is on one disk.
+fm_dod_is_unpublished_handoff() {  # <kind> <mode> <worktree> <project> <line>
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 sha
+  [ "$kind" = ship ] || return 1
+  case "$mode" in no-mistakes|'') ;; *) return 1 ;; esac
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  fm_dod_should_gate_ship_done "$kind" "$mode" "$line" && return 1
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 1
+  fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha" && return 1
+  return 0
+}
+
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named

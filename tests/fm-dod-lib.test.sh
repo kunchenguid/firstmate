@@ -450,6 +450,33 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+# The ungated no-mistakes handoff is downgraded only on positive proof that its
+# head is on one disk: every other shape keeps its existing reading.
+test_unpublished_handoff_is_recognized_only_on_proof() {
+  local repo wt h="done: committed on fm/h, local and unpublished until the pipeline pushes: x"
+  repo="$TMP_ROOT/handoff-repo"
+  wt="$TMP_ROOT/handoff-wt"
+  fm_git_worktree "$repo" "$wt" fm/h
+  git -C "$wt" commit -q --allow-empty -m 'implemented, not pushed'
+  fm_dod_is_unpublished_handoff ship no-mistakes "$wt" "$repo" "$h" \
+    || fail "unpushed handoff was not recognized"
+  fm_dod_is_unpublished_handoff ship '' "$wt" "$repo" "$h" \
+    || fail "unregistered-mode unpushed handoff was not recognized"
+  fm_dod_is_unpublished_handoff ship no-mistakes "$wt" "$repo" \
+    "done: PR https://example.test/o/r/pull/3 checks green" \
+    && fail "CI-ready line was treated as a handoff"
+  fm_dod_is_unpublished_handoff ship direct-PR "$wt" "$repo" "$h" \
+    && fail "direct-PR mode was treated as a handoff"
+  fm_dod_is_unpublished_handoff scout no-mistakes "$wt" "$repo" "$h" \
+    && fail "scout was treated as a handoff"
+  fm_dod_is_unpublished_handoff ship no-mistakes "$TMP_ROOT/no-such-wt" "$repo" "$h" \
+    && fail "missing worktree was treated as a handoff"
+  git -C "$wt" update-ref refs/remotes/origin/fm/h "$(git -C "$wt" rev-parse HEAD)"
+  fm_dod_is_unpublished_handoff ship no-mistakes "$wt" "$repo" "$h" \
+    && fail "handoff whose head a remote ref holds was still unpublished"
+  pass "unpublished handoff is recognized only on proof the head is on one disk"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -470,6 +497,7 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
+test_unpublished_handoff_is_recognized_only_on_proof
 
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must
