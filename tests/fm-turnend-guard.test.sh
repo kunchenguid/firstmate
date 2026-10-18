@@ -1299,8 +1299,12 @@ foreign_owner_fixture() {  # <dir> -> a primary dir with unsupervised work and a
 run_hook_default_scrubbed() {  # <dir> <stop_active> -> guard output on stdout+stderr
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s,"session_id":"sess-secondary"}' "$stop_active" \
-    | env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  # shellcheck disable=SC2016 # The inner script expands in the child shell, not here.
+  FM_HOME="$home" GUARD="$dir/bin/fm-turnend-guard.sh" STOP_ACTIVE="$stop_active" \
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID "$dir/fake-harness/codex" -c '
+      printf "{\"stop_hook_active\":%s,\"session_id\":\"sess-secondary\"}" "$STOP_ACTIVE" | bash "$GUARD" 2>&1
+      exit "${PIPESTATUS[1]}"
+    '
 }
 
 test_hook_default_mode_allows_foreign_live_owner() {
@@ -1310,7 +1314,10 @@ test_hook_default_mode_allows_foreign_live_owner() {
   "$dir/fake-harness/codex" -c 'while :; do sleep 1; done' &
   owner=$!
   printf '%s\n' "$owner" > "$dir/state/.lock"
-  sleep 0.3
+  local tries=0
+  until [ "$(ps -o comm= -p "$owner" 2>/dev/null | sed 's|.*/||')" = codex ] || [ "$tries" -ge 100 ]; do
+    sleep 0.05; tries=$((tries + 1))
+  done
   out=$(run_hook_default_scrubbed "$dir" false); status=$?
   kill "$owner" 2>/dev/null || true
   wait "$owner" 2>/dev/null || true
