@@ -2216,40 +2216,50 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # for fm_backend_herdr_pane_process_state, which owns the verdict contract and
 # the settle retry.
 fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
+  local session=$1 pane_id=$2 info tag shell_pid pid name argv0 args
   local others=0 ps_bin rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
-  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-  ' >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
-  shell_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
-    || { printf 'unreadable'; return 0; }
-  count=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) \
-    || { printf 'unreadable'; return 0; }
-  i=0
-  while [ "$i" -lt "$count" ]; do
-    pid=$(printf '%s' "$info" | jq -r --argjson i "$i" \
-      '.result.process_info.foreground_processes[$i].pid | select(type == "number") | floor' 2>/dev/null)
-    name=$(printf '%s' "$info" | jq -r --argjson i "$i" \
-      '.result.process_info.foreground_processes[$i].name // empty' 2>/dev/null)
-    argv0=$(printf '%s' "$info" | jq -r --argjson i "$i" '
-      .result.process_info.foreground_processes[$i] as $p
-      | (($p.argv // [])[0]) // $p.argv0 // empty' 2>/dev/null)
-    args=$(printf '%s' "$info" | jq -r --argjson i "$i" '
-      .result.process_info.foreground_processes[$i] as $p
-      | $p.cmdline // (($p.argv // []) | join(" ")) // empty' 2>/dev/null)
-    verdict=$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")
-    case "$verdict" in
-      agent) printf 'agent'; return 0 ;;
-      shell) ;;
-      *) others=$((others + 1)) ;;
-    esac
-    i=$((i + 1))
-  done
+
+  # One jq pass validates the response and emits NUL-separated fields: `ok`,
+  # the shell pid, then pid, name, argv0 and args for each foreground process.
+  # The watcher classifies every busy pane on every poll, so a jq process per
+  # field per process made one fleet scan outrun the watcher heartbeat grace.
+  # NUL keeps args with spaces, tabs or newlines intact. A field that is
+  # missing or malformed reads as empty, and an invalid response emits nothing.
+  {
+    if ! { IFS= read -r -d '' tag && [ "$tag" = ok ] && IFS= read -r -d '' shell_pid; }; then
+      printf 'unreadable'
+      return 0
+    fi
+    while IFS= read -r -d '' pid && IFS= read -r -d '' name \
+      && IFS= read -r -d '' argv0 && IFS= read -r -d '' args; do
+      case "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" in
+        agent) printf 'agent'; return 0 ;;
+        shell) ;;
+        *) others=$((others + 1)) ;;
+      esac
+    done
+  } < <(printf '%s' "$info" | jq -j --arg pane "$pane_id" '
+    def field(f): [try f catch empty]
+      | if length == 0 then ""
+        else .[0] | (if type == "string" then . else tojson end) | gsub("\u0000"; "") | sub("\n+$"; "")
+        end;
+    .result as $r
+    | if ($r.type == "pane_process_info" and $r.process_info.pane_id == $pane) | not then empty
+      else
+        ($r.process_info.shell_pid | select(type == "number" and . > 1) | floor) as $shell
+        | ($r.process_info.foreground_processes | select(type == "array")) as $procs
+        | ["ok", ($shell | tostring)]
+          + [$procs[] as $p | $p | (
+              field(.pid | select(type == "number") | floor),
+              field(.name // empty),
+              field((($p.argv // [])[0]) // $p.argv0 // empty),
+              field($p.cmdline // (($p.argv // []) | join(" ")) // empty)
+            )]
+        | map(. + "\u0000") | add
+      end
+  ' 2>/dev/null)
 
   # Nothing in the foreground is a harness. A foreground that is not purely
   # shells is already `other`, whatever else the pane holds. Before calling a
