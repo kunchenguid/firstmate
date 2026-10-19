@@ -47,11 +47,10 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
 # Parked-home guard (firstmate-addons/parked-homes): a parked secondmate home
-# gets no relaunch, remote or local. Optional source: absent lib = never parked.
-fm_parked_meta() { return 1; }
-# shellcheck source=/dev/null
-[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
-fm_parked_meta "$META" "$ID" && die "relaunch refused for $ID: its home is parked (config/parked-homes); a parked home gets no relaunch"
+# gets no relaunch, remote or local. The shim answers not parked when the add-on is absent.
+# shellcheck source=bin/fm-parked-homes-lib.sh
+. "$SCRIPT_DIR/fm-parked-homes-lib.sh"
+fm_parked_refuse_meta "$META" "$ID" relaunch || exit 1
 
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {

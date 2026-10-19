@@ -12,12 +12,10 @@
 
 _FM_PARKED_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _FM_PARKED_ADDONS="${FM_ADDONS_DIR:-${FM_HOME:-$_FM_PARKED_LIB_DIR/..}/projects/firstmate-addons}"
+fm_parked_refuse_meta() { return 0; }
+fm_parked_skip_meta() { return 1; }
 if [ -f "$_FM_PARKED_ADDONS/parked-homes/bin/fm-parked-homes-lib.sh" ]; then
   # shellcheck source=/dev/null
+  # shellcheck source=bin/fm-parked-homes-lib.sh
   . "$_FM_PARKED_ADDONS/parked-homes/bin/fm-parked-homes-lib.sh"
-else
-  fm_parked_homes_file() { return 1; }
-  fm_parked_home() { return 1; }
-  fm_parked_meta_id() { return 1; }
-  fm_parked_meta() { return 1; }
 fi

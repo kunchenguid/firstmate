@@ -471,7 +471,7 @@ run_outage_fixture() {
   local case_dir=$1 state=$2 body=$3 bin
   bin="$case_dir/bin"
   mkdir -p "$bin" "$state" "$case_dir/liveness"
-  cp "$ROOT/bin/fm-model-outage-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-composer-lib.sh" "$bin/"
+  cp "$ROOT/bin/fm-model-outage-lib.sh" "$ROOT/bin/fm-parked-homes-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-composer-lib.sh" "$bin/"
   cat > "$bin/fm-backend.sh" <<'EOF'
 fm_backend_agent_state() { cat "$FAKE_LIVENESS/$4" 2>/dev/null || printf alive; }
 fm_backend_visible_capture_supported() { return 0; }

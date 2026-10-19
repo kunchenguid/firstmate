@@ -355,7 +355,7 @@ add_sm_home() {
 # make_parked_addon <w> <parked-id>...: a synthetic parked-homes add-on
 # checkout at the in-repo shim's documented resolution path
 # ($FM_HOME/projects/firstmate-addons/parked-homes/bin). It implements the
-# hook contract the shim sources - the four predicates answered from
+# hook contract the shim sources - the refuse and skip predicates answered from
 # $FM_HOME/config/parked-homes - so the sweep's parked guard is exercised
 # through the real sourcing boundary, not a stubbed function.
 make_parked_addon() {
@@ -367,13 +367,19 @@ make_parked_addon() {
     printf '%s\n' "$id" >> "$w/home/config/parked-homes"
   done
   cat > "$dir/fm-parked-homes-lib.sh" <<'SH'
-fm_parked_homes_file() { [ -f "${FM_HOME:?}/config/parked-homes" ]; }
 fm_parked_home() {
-  fm_parked_homes_file || return 1
-  grep -Fxq "${1:?}" "$FM_HOME/config/parked-homes"
+  [ -f "${FM_HOME:?}/config/parked-homes" ] && grep -Fxq "${1:?}" "$FM_HOME/config/parked-homes"
 }
-fm_parked_meta_id() { fm_parked_home "$(basename "${1%.meta}")"; }
-fm_parked_meta() { fm_parked_home "${2:?}"; }
+fm_parked_refuse_meta() {
+  if fm_parked_home "${2:?}"; then
+    printf 'error: refused for %s: its home is parked (config/parked-homes)\n' "$2" >&2
+    return 1
+  fi
+}
+fm_parked_skip_meta() {
+  fm_parked_home "${2:?}" || return 1
+  printf 'SECONDMATE_LIVENESS: secondmate %s: skipped: its home is parked (config/parked-homes)\n' "$2"
+}
 SH
 }
 

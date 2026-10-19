@@ -136,11 +136,9 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # bin/fm-wake-lib.sh's single directed expansion below; a second directive
 # here would re-expand the same transitive graph.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
-# Parked-home reader (firstmate-addons/parked-homes). Optional source: a
-# checkout or test fake root without the lib never parks anything.
-fm_parked_meta() { return 1; }
-# shellcheck source=/dev/null
-[ ! -r "$_FM_PENDING_REPLY_LIB_DIR/fm-parked-homes-lib.sh" ] || . "$_FM_PENDING_REPLY_LIB_DIR/fm-parked-homes-lib.sh"
+# Parked-home gate (firstmate-addons/parked-homes); the shim answers "not parked" without the add-on.
+# shellcheck source=bin/fm-parked-homes-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-parked-homes-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -1586,9 +1584,7 @@ fm_pending_reply_tick() {  # <state-dir>
     # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
     # recovery resend and no missed-report escalation - the request keeps its
     # record and stays as-is. No-op without the add-on checkout.
-    if fm_parked_meta "$state/${task_id}.meta" "$task_id"; then
-      continue
-    fi
+    fm_parked_skip_meta "$state/${task_id}.meta" "$task_id" pending-reply && continue
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)

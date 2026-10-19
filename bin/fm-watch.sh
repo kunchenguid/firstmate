@@ -258,11 +258,10 @@ WATCH_HOME_EXISTED=0
 # shellcheck source=bin/fm-model-outage-lib.sh
 . "$SCRIPT_DIR/fm-model-outage-lib.sh"
 # Parked-home reader (firstmate-addons/parked-homes): the shared predicate
-# every parked-home guard in the watcher calls. Optional source: absent lib =
-# never parked (stock behavior).
-fm_parked_meta() { return 1; }
-# shellcheck source=/dev/null
-[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
+# every parked-home guard in the watcher calls. The shim answers not parked
+# when the add-on is absent (stock behavior).
+# shellcheck source=bin/fm-parked-homes-lib.sh
+. "$SCRIPT_DIR/fm-parked-homes-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$SCRIPT_DIR/fm-composer-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
@@ -616,7 +615,7 @@ inbox_steer_check() {  # <window> <task>
   # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
   # doorbell ring, re-ring or unread-instruction escalation. No-op without
   # the add-on checkout.
-  if fm_parked_meta "$STATE/$task.meta" "$task"; then return 0; fi
+  fm_parked_skip_meta "$STATE/$task.meta" "$task" wake-doorbell && return 0
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -1074,11 +1073,7 @@ secondmate_wake_stall_tick() {
     # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
     # drain ring and no wake-loop-stalled check; its stale episode markers are
     # dropped so an unpark starts clean. No-op without the add-on checkout.
-    if fm_parked_meta "$meta" "$task"; then
-      rm -f "$STATE/.secondmate-wake-stall-$task" \
-        "$STATE/.secondmate-wake-progress-$task" "$STATE/.secondmate-wake-ring-$task" 2>/dev/null || true
-      continue
-    fi
+    fm_parked_skip_meta "$meta" "$task" watch-wake-stall && { rm -f "$STATE/.secondmate-wake-stall-$task" "$STATE/.secondmate-wake-progress-$task" "$STATE/.secondmate-wake-ring-$task" 2>/dev/null || true; continue; }
     home=$(fm_meta_get "$meta" home)
     [ -n "$home" ] || continue
     [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
@@ -1259,10 +1254,7 @@ secondmate_liveness_tick() {
     # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
     # liveness probe and no auto-relaunch - one triage line names the skip.
     # No-op without the add-on checkout.
-    if fm_parked_meta "$meta" "$id"; then
-      triage_log "secondmate $id liveness skipped: its home is parked (config/parked-homes)"
-      continue
-    fi
+    fm_parked_skip_meta "$meta" "$id" watch-liveness && { triage_log "secondmate $id liveness skipped: its home is parked (config/parked-homes)"; continue; }
     fm_secondmate_liveness_lock "$id" || continue
     fm_secondmate_liveness_probe "$meta" "$id" poll
     bound_marker="$STATE/.secondmate-relaunch-bound-$id"

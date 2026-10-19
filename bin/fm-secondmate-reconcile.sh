@@ -92,10 +92,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Parked-home guard (firstmate-addons/parked-homes): a parked home is never
-# reconciled. Optional source: absent lib = never parked (stock behavior).
-fm_parked_meta() { return 1; }
-# shellcheck source=/dev/null
-[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
+# reconciled. The shim answers not parked when the add-on is absent (stock behavior).
+# shellcheck source=bin/fm-parked-homes-lib.sh
+. "$SCRIPT_DIR/fm-parked-homes-lib.sh"
 
 # One nudge per home per four hours.
 FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
@@ -470,10 +469,7 @@ cmd_notify() {
     [ -n "${id:-}" ] || continue
     # Parked-home guard (firstmate-addons/parked-homes): a parked home is
     # never reconciled - no ask, no cooldown. No-op without the add-on.
-    if fm_parked_meta "$STATE/$id.meta" "$id"; then
-      printf 'skipped: %s parked\n' "$id"
-      continue
-    fi
+    fm_parked_skip_meta "$STATE/$id.meta" "$id" reconcile && continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
     if ! fm_lock_try_acquire "$reconcile_lock"; then
