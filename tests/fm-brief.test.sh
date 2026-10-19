@@ -224,7 +224,8 @@ test_ship_modes_generate_clean_briefs() {
 # The browser-session name a brief renders for a home: that home's backend tag
 # (bin/fm-backend-hometag-lib.sh) joined to the task id.
 brief_home_tag() {
-  (FM_HOME=$1 FM_ROOT=$ROOT; . "$ROOT/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag)
+  local FM_HOME=$1 FM_ROOT=$ROOT
+  (. "$ROOT/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag)
 }
 
 # Rendered chrome-devtools-axi session names in a generated brief, one per line.
