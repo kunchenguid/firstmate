@@ -1333,13 +1333,19 @@ _wedge_cap_terminal_append() {
 # the wedge path stays silent for FM_ROLLBACK_SENTINEL_TTL_SECS; the top of
 # wedge_timer_check checks it before any wake or marker logic runs, consulting
 # only the dead-endpoint probe on that silenced path.
-# _wedge_cap_rollback <key> <escalation-file> <since-file>
+# [silence]=1 is the escalation-count route, where a reset that itself succeeded
+# is not enough to return cleanly: resetting the counter cannot restore the count
+# its failed write lost, so the ceiling that count bounds stays unenforceable and
+# the sentinel is written anyway - that route therefore never returns 0. Returns 0
+# on a clean reset (default route only), 1 when the sentinel was written, and 2
+# when not even the sentinel could be written.
+# _wedge_cap_rollback <key> <escalation-file> <since-file> [silence]
 _wedge_cap_rollback() {
-  local _key=$1 _esc=$2 _since=$3 _failed=0 _sentinel _sentinel_rc=0
+  local _key=$1 _esc=$2 _since=$3 _silence=${4:-0} _failed=0 _sentinel _sentinel_rc=0
   { : > "$_esc"; } 2>/dev/null || _failed=1
   { date +%s > "$_since"; } 2>/dev/null || _failed=1
   clear_write_tracking "$_key" 2>/dev/null || true
-  [ "$_failed" -eq 0 ] && return 0
+  [ "$_failed" -eq 0 ] && [ "$_silence" -eq 0 ] && return 0
   _sentinel="$STATE/.wedge-rollback-failed-$_key"
   _sentinel_rc=0
   { printf '%s rollback-failed\n' "$(date +%s 2>/dev/null || echo 0)" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
@@ -1859,13 +1865,15 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # three, so a dead or missing endpoint is never deferred by a guard, and a home
 # without config/wedge-evidence-guards never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n reason evidence guard guard_note
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age
   _wkey=$(window_key "$win")
-  # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel
-  # (the SAME fs failure that broke the cap-marker write also broke the
-  # rollback). Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
+  # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
+  # from either route that has to defend cap state this state dir would not
+  # persist - the cap-marker write whose own rollback also failed, or the
+  # escalation-count write below, whose failed write left the ceiling that count
+  # bounds unenforceable. Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
   # no wake, no marker write - so the operator observes one failure per
   # wedge-event instead of a wake-queue flood under persistent fs failure.
   # Read only where the cap is configured: with FM_WEDGE_MAX_ESCALATIONS at its
@@ -1954,15 +1962,45 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           guard_note="; guard ${guard%%$'\037'*} still reports CRITICAL (${guard#*$'\037'}) after its consecutive-deferral cap, so recheck the lane"
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        # The count is cap state - the only state the ceiling below is computed
+        # from - so whatever the counter file holds is validated to a count here,
+        # like every other marker this ladder reads, rather than reaching the
+        # arithmetic as whatever bytes a partial write left in it.
+        prev=$(cat "$escalation_file" 2>/dev/null || true)
+        case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+        n=$(( prev + 1 ))
         # Brace-wrapped so a failed redirect's own diagnostic is captured by the
-        # wrapper's stderr rather than leaking past it, and reported through
-        # triage_log instead: a counter that cannot be written silently restarts
-        # this window's escalation count at 1 on the next poll, so both the
-        # capped and the shipped default path keep an operator-visible record
-        # that the state dir is unwritable.
-        { echo "$n" > "$escalation_file"; } 2>/dev/null \
-          || triage_log "wedge_timer_check: escalation counter write FAILED for $win ($escalation_file); the next poll restarts this window's count at 1"
+        # wrapper's stderr rather than leaking past it. With the cap OFF there
+        # is no ceiling to enforce, so the count stays a reporting aid and the
+        # failure is logged alone: the next poll restarts this window's count at
+        # 1, which is the schedule an unconfigured home has always had.
+        # With the cap ON that same failure is fatal to the ceiling rather than
+        # to the watcher: the count the cap would have stopped at was never
+        # recorded, so every later poll reads 1 again and republishes an
+        # escalation - the unbounded train this cap exists to bound, with only a
+        # triage line, in a log documented as safe to delete, to show for it. So
+        # it takes the same three-tier defence the cap-marker write below takes,
+        # ending the cycle before an escalation whose count is unrecorded can be
+        # published: roll the wedge state back, silence the path through the
+        # rollback-failure sentinel whatever that rollback managed to do, and end
+        # the cycle only when even the sentinel cannot be written. An operator
+        # can rm that sentinel to re-engage at once, exactly as on that route.
+        _wrb_cap_status=0
+        { echo "$n" > "$escalation_file"; } 2>/dev/null || _wrb_cap_status=1
+        if [ "$_wrb_cap_status" -ne 0 ]; then
+          if [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ]; then
+            triage_log "wedge_timer_check: escalation counter write FAILED for $win ($escalation_file); the next poll restarts this window's count at 1"
+          else
+            _wrb_rm_status=0
+            _wedge_cap_rollback "$_wkey" "$escalation_file" "$since_file" 1 || _wrb_rm_status=$?
+            if [ "$_wrb_rm_status" -eq 2 ]; then
+              triage_log "wedge escalation counter write FAILED AND rollback AND sentinel write ALL FAILED on $win - the cap cannot be enforced and nothing could silence the wedge path; operator MUST intervene"
+              exit 1
+            fi
+            triage_log "wedge escalation counter write FAILED on $win - cap state rolled back and the wedge path silenced (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS), since a ceiling whose count cannot be recorded cannot stop the next poll's escalation; operator can rm the sentinel for immediate re-engagement"
+            exit 1
+          fi
+        fi
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"

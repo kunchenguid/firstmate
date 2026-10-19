@@ -714,6 +714,79 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   pass "the rollback-failed sentinel silences the wedge path within FM_ROLLBACK_SENTINEL_TTL_SECS and still reports a gone endpoint"
 }
 
+# 8b. The consecutive-escalation count is the only state the ceiling is
+# computed from, so a state dir that will not take that write leaves a ceiling
+# that cannot stop anything: every poll reads 1 again and republishes an
+# escalation, which is the unbounded train this cap exists to bound, signalled
+# only by a triage line in a log documented as safe to delete. A configured cap
+# must therefore defend the count write the way the marker route defends its own
+# marker - roll back, silence the path, end the cycle only when even the sentinel
+# cannot be written - while the default uncapped path, which has no ceiling to
+# enforce, keeps escalating exactly as it always has.
+test_wedge_cap_unwritable_escalation_count_fails_safe() {
+  local dir state out capture_file window key pane_hash sig fakebin max pid round_status sentinel
+  dir=$(make_case wedge-cap-counter-fail); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-counter-fail"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-counter-fail.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-counter-fail.status"
+  sig=$(seen_sig "$state/wedge-cap-counter-fail.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-counter-fail_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=3
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+  sentinel="$state/.wedge-rollback-failed-$key"
+  # The escalation-count path is a directory, so the write every later poll reads
+  # the count from fails the way the marker route's planted blocker makes its
+  # own marker write fail.
+  mkdir -p "$state/.wedge-escalations-$key"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    FM_ROLLBACK_SENTINEL_TTL_SECS=3600 \
+    "$WATCH" > "$out" &
+  pid=$!
+  round_status=0
+  wait_for_exit "$pid" 100 || round_status=$?
+  [ "$round_status" -eq 1 ] \
+    || fail "a failed escalation-count write under a configured cap expected exit 1, got $round_status: $(cat "$out")"
+  [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
+    || fail "a wedge escalation whose count could not be recorded was published anyway: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ -e "$sentinel" ] \
+    || fail "an escalation count this state dir refuses left the wedge path unsilenced: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+
+  # The next poll has to find that silence rather than restart at escalation 1:
+  # one escalation per STALE_ESCALATE_SECS forever is exactly what this cap
+  # exists to stop, and here nothing can record the count that would stop it.
+  poll_capped_wedge_round "$dir" "$max" "" absorb \
+    || fail "the poll after an unwritable escalation count never settled: $(cat "$out")"
+  [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
+    || fail "the next poll republished a wedge escalation from a counter this state dir refuses: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
+    || fail "the silenced poll did not report the sentinel to the operator: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+
+  # With the cap OFF there is no ceiling to enforce, so the same unwritable
+  # counter must silence nothing: the unconfigured schedule is unchanged, and a
+  # leftover sentinel from the configured rounds is left unread there.
+  poll_wedge_round "$dir" 0 "FM_WATCH_HANDLING_SUCCESSOR=1"
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "an unwritable escalation count silenced a window whose cap is off: $(cat "$out")"
+  grep -F "escalation counter write FAILED" "$state/.watch-triage.log" >/dev/null \
+    || fail "the unwritable escalation count was not reported on the uncapped path either: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ -e "$sentinel" ] \
+    || fail "the uncapped path consumed the sentinel the capped rounds stood"
+  unset FM_FAKE_CREW_STATE
+  pass "an escalation count the state dir refuses fails safe under a configured cap and silences nothing without one"
+}
+
 # 9. The cap is a ceiling on CONSECUTIVE escalations: a crew that genuinely
 # resumes after the cap fired takes the watcher's wedge-bookkeeping reset with
 # it, so the cap marker goes and a pane that wedges again escalates normally
@@ -1458,6 +1531,7 @@ test_wedge_cap_expires_after_horizon
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_overrides
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
+test_wedge_cap_unwritable_escalation_count_fails_safe
 test_wedge_cap_releases_after_genuine_recovery
 test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
 test_wedge_cap_releases_after_declared_wait
