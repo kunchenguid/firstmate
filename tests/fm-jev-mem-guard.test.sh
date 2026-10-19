@@ -13,6 +13,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-mem-guard)
 export FM_HOST_MEMORY_CGROUP_ROOT="$TMP_ROOT/no-cgroup"
+export FM_ADDONS_DIR="${FM_ADDONS_DIR:-${FM_HOME:-$ROOT}/projects/firstmate-addons}"
 APP_SLICE="user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice"
 
 # fake_host <proc> <available-gb> <pressure (both 10 s and 60 s averages)> [swap-used-gb]
@@ -640,7 +641,7 @@ test_failed_alert_publication() {
     FM_HOST_MEMORY_PROC="$case/proc" FM_HOST_MEMORY_CGROUP_ROOT="$case/cgroup" bash -c "
       . \"\$1/bin/fm-wake-lib.sh\"
       . \"\$1/bin/fm-backend.sh\"
-      . \"\$1/bin/fm-host-memory-sampler.sh\"
+      . \"\$FM_ADDONS_DIR/host-memory/bin/fm-host-memory-lib.sh\"
       fm_memory_sampler_tick
       wait
     " _ "$ROOT")
@@ -773,20 +774,31 @@ SH
 
 test_verdicts_samples_and_owners
 test_cgroup_pressure
-test_fast_spike_waits_without_alert
-test_host_pressure_neither_holds_nor_wakes
 test_home_qualified_owners
 test_homes_without_ordinary_tasks
 test_remote_records_do_not_own_local_processes
-test_overridden_state_ownership
 test_finite_thresholds
-test_watcher_wakes_once_per_alert_episode
-test_alert_rearms_after_wait
-test_benign_liveness_outcomes
-test_default_home_interrupt
-test_independent_sampler_lifecycle
 test_atomic_admission_publication
-test_failed_alert_publication
-test_shutdown_during_alert_publication
 test_spawn_memory_admission
-test_default_supervision_poll
+
+# The sampler ships in the optional host-memory add-on; without it the watcher runs no sampler.
+watcher_sampler_tests=(
+  test_fast_spike_waits_without_alert
+  test_host_pressure_neither_holds_nor_wakes
+  test_overridden_state_ownership
+  test_watcher_wakes_once_per_alert_episode
+  test_alert_rearms_after_wait
+  test_benign_liveness_outcomes
+  test_default_home_interrupt
+  test_independent_sampler_lifecycle
+  test_failed_alert_publication
+  test_shutdown_during_alert_publication
+  test_default_supervision_poll
+)
+if [ ! -f "$FM_ADDONS_DIR/host-memory/bin/fm-host-memory-lib.sh" ]; then
+  echo "skip: host-memory add-on absent, ${#watcher_sampler_tests[@]} watcher sampler tests not run"
+  exit 0
+fi
+for watcher_sampler_test in "${watcher_sampler_tests[@]}"; do
+  "$watcher_sampler_test"
+done

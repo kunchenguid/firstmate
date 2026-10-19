@@ -788,8 +788,8 @@ Unreadable `app.slice` pressure is reported as not judged: pressure then holds n
 It classifies measurable memory as `OK`, `WAIT` (new agents should wait), or `ALERT`, and names the largest consumers by owning task; unavailable measurements read `UNKNOWN`.
 These controls reduce risk but cannot guarantee avoidance of an out-of-memory kill:
 
-- Each watcher starts and supervises one independent `bin/fm-host-memory-sampler.sh` per home.
-  It samples every 10 seconds by default (`FM_HOST_MEMORY_SECS`) into `state/host-memory.tsv`, even during slow recovery or custom checks.
+- When the host-memory add-on is installed, each watcher loads its `host-memory/bin/fm-host-memory-lib.sh` lifecycle functions and supervises one independent sampler per home.
+  The sampler records every 10 seconds by default (`FM_HOST_MEMORY_SECS`) into `state/host-memory.tsv`, even during slow recovery or custom checks.
   The dashboard shows the last hour's peak sustained pressure and current swap.
   The home-scoped `state/.host-memory-sampler.pid` records PID and process identity; the watcher restarts a dead sampler and stops only the exact recorded PID after verifying its identity, script, home, and state.
 - At the wait or alert level, local `bin/fm-spawn.sh` launches and `bin/fm-control.sh relaunch` refuse to start a new agent and record the reason in `state/admission-refused`, which the dashboard raises for 15 minutes for local homes only.
@@ -806,7 +806,7 @@ These controls reduce risk but cannot guarantee avoidance of an out-of-memory ki
 - Local secondmate liveness recovery checks admission before consuming its retry budget or removing a dead endpoint, so memory deferral leaves recovery eligible when pressure eases.
   Memory deferral and a no-longer-relaunchable endpoint keep the watcher polling rather than failing supervision.
 
-`config/host-memory` is optional and read only when passed with `--config`, which the sampler, `bin/fm-spawn.sh`, and `bin/fm-control.sh relaunch` always do; otherwise the helper uses its defaults.
+`config/host-memory` is optional and read only when passed with `--config`, which the add-on sampler, `bin/fm-spawn.sh`, and `bin/fm-control.sh relaunch` always do; otherwise the helper uses its defaults.
 Each setting is `key=number`, blank lines and lines beginning with `#` are ignored, and a missing file or key keeps its default:
 
 | Key | Default | Meaning |

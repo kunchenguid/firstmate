@@ -184,7 +184,7 @@
 #   check: host memory ALERT: <summary>; largest: <owner> <size>, ...; <action>
 #                          durable sampler wake; docs/configuration.md "Host
 #                          memory guard" owns admission and alert behavior;
-#                          bin/fm-host-memory-sampler.sh owns sampler lifecycle
+#                          the host-memory add-on owns sampler lifecycle
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -1177,8 +1177,9 @@ EOF
 # budget. The per-mate liveness lock serializes this tick against a concurrent
 # session-start sweep, so neither side can kill or re-probe an endpoint the
 # other is mid-relaunch on.
-# shellcheck source=bin/fm-host-memory-sampler.sh
-. "$SCRIPT_DIR/fm-host-memory-sampler.sh"
+fm_host_memory_lib="${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/host-memory/bin/fm-host-memory-lib.sh"
+# shellcheck disable=SC1090,SC1091 # The optional add-on source is installed outside this repository.
+if [ -f "$fm_host_memory_lib" ]; then . "$fm_host_memory_lib"; fi
 
 # Publication and acknowledgement remain the sampler and drain's jobs. A
 # delivered row must not immediately close the successor before it can prove
@@ -3061,7 +3062,7 @@ watcher_cleanup() {
       transition=release-lock-existing
     fi
   fi
-  [ "$owns_lock" -ne 1 ] || fm_memory_sampler_stop
+  if declare -F fm_memory_sampler_stop >/dev/null && [ "$owns_lock" -eq 1 ]; then fm_memory_sampler_stop; fi
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_capture_output_cleanup
@@ -3086,7 +3087,7 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
-fm_memory_sampler_ensure || triage_log "host memory sampler failed to start"
+if declare -F fm_memory_sampler_ensure >/dev/null; then fm_memory_sampler_ensure || triage_log "host memory sampler failed to start"; fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -3333,7 +3334,7 @@ while :; do
     exit 0
   fi
 
-  fm_memory_sampler_ensure || triage_log "host memory sampler failed to restart"
+  if declare -F fm_memory_sampler_ensure >/dev/null; then fm_memory_sampler_ensure || triage_log "host memory sampler failed to restart"; fi
   host_memory_surface_queued
   fm_model_outage_tick || triage_log "model-error observation failed"
   own_queue_resurface || { echo "watcher: own wake-queue observation failed" >&2; exit 1; }
