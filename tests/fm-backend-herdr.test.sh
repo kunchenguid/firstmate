@@ -3199,6 +3199,7 @@ printf '%s\n' "\$*" >> "$home/calls"
 exec "$ROOT/bin/fm-herdr-groups.sh" "\$@"
 SH
   chmod +x "$wrapper"
+  # shellcheck disable=SC2016 # the inner bash -c expands its own positional args.
   key=$(env FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_group_order_key "$1" "$2" api-new /p/storefront' \
     "$ROOT" "$repo_parent" "$wrapper") || fail "group order key ($name) failed"
