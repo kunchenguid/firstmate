@@ -1268,7 +1268,7 @@ wedge_episode_end() {
 _wedge_cap_marker_stands() {
   local _wkey=$1 _now _ts
   [ -e "$STATE/.wedge-permanent-$_wkey" ] || return 1
-  _now=$(date +%s)
+  fm_epoch_seconds_to _now
   _ts=$(cat "$STATE/.wedge-permanent-$_wkey" 2>/dev/null || true)
   case "$_ts" in ''|*[!0-9]*) _ts=0 ;; esac
   [ $(( _now - _ts )) -lt "$FM_CAP_HORIZON_SECS" ]
@@ -1302,12 +1302,12 @@ _wedge_cap_marker_stands() {
 # otherwise.
 # _wedge_cap_terminal_append <window> <window-key> <reason>
 _wedge_cap_terminal_append() {
-  local _win=$1 _wkey=$2 _reason=$3 _status=0 _queued _degraded=0 _had=0
+  local _win=$1 _wkey=$2 _reason=$3 _status=0 _queued _degraded=0 _had=0 _now
   _queued="$STATE/.wedge-terminal-queued-$_wkey"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 4
   if [ -e "$_queued" ]; then
     _had=1
-  elif ! { printf '%s\n' "$(date +%s)" > "$_queued"; } 2>/dev/null; then
+  elif ! { fm_epoch_seconds_to _now; printf '%s\n' "$_now" > "$_queued"; } 2>/dev/null; then
     _degraded=1
     triage_log "wedge cap for $_win could not record its episode terminal marker; duplicate suppression falls back to the queue check alone for this window"
   fi
@@ -1341,14 +1341,16 @@ _wedge_cap_terminal_append() {
 # when not even the sentinel could be written.
 # _wedge_cap_rollback <key> <escalation-file> <since-file> [silence]
 _wedge_cap_rollback() {
-  local _key=$1 _esc=$2 _since=$3 _silence=${4:-0} _failed=0 _sentinel _sentinel_rc=0
+  local _key=$1 _esc=$2 _since=$3 _silence=${4:-0} _failed=0 _sentinel _sentinel_rc=0 _now
+  fm_epoch_seconds_to _now
+  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
   { : > "$_esc"; } 2>/dev/null || _failed=1
-  { date +%s > "$_since"; } 2>/dev/null || _failed=1
+  { printf '%s\n' "$_now" > "$_since"; } 2>/dev/null || _failed=1
   clear_write_tracking "$_key" 2>/dev/null || true
   [ "$_failed" -eq 0 ] && [ "$_silence" -eq 0 ] && return 0
   _sentinel="$STATE/.wedge-rollback-failed-$_key"
   _sentinel_rc=0
-  { printf '%s rollback-failed\n' "$(date +%s 2>/dev/null || echo 0)" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
+  { printf '%s rollback-failed\n' "$_now" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
   [ "$_sentinel_rc" -eq 0 ] || return 2
   return 1
 }
@@ -1867,7 +1869,7 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
-  local _wrb_since _wrb_now _wrb_age
+  local _wrb_since _wrb_now _wrb_age _wrb_cap_ts
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
   # from either route that has to defend cap state this state dir would not
@@ -1886,7 +1888,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     case "$_wrb_ts" in
       ''|*[!0-9]*) _wrb_ts=0 ;;
     esac
-    if [ "$_wrb_ts" -ne 0 ] && [ $(( $(date +%s) - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
+    fm_epoch_seconds_to _wrb_now
+    if [ "$_wrb_ts" -ne 0 ] && [ $(( _wrb_now - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
       triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
       # A ceiling on escalations is not a ceiling on detecting a dead worker, so
       # this silence consults the same probe the cap marker consults below rather
@@ -1901,7 +1904,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         *) fm_epoch_seconds_to _wrb_now; _wrb_age=$(( _wrb_now - _wrb_since )) ;;
       esac
       wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
-        || date +%s > "$since_file"
+        || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
       return 0
     fi
     rm -f "$_wrollback_sentinel"
@@ -1941,7 +1944,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # an earlier configured run cannot silence a window once the cap is off.
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && _wedge_cap_marker_stands "$_wkey"; then
           wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task" \
-            || date +%s > "$since_file"
+            || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
           return 0
         fi
         if evidence=$(wedge_wait_evidence "$task") &&
@@ -2030,7 +2033,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             triage_log "wedge fm_wake_append FAILED for cap on $win, no cap marker written (next poll will retry)"
             exit 1
           fi
-          if ! { date +%s > "$STATE/.wedge-permanent-$_wkey"; } 2>/dev/null; then
+          fm_epoch_seconds_to _wrb_cap_ts
+          if ! { printf '%s\n' "$_wrb_cap_ts" > "$STATE/.wedge-permanent-$_wkey"; } 2>/dev/null; then
             _wrb_rm_status=0
             _wedge_cap_rollback "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
             case "$_wrb_rm_status" in
@@ -3745,11 +3749,23 @@ EOF
               mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
               wake "$stale_reason"
             fi
-          elif [ -e "$ssf" ]; then
-            # This exact hash was already overridden as provably-working (a
-            # wedge timer is running for it) - keep treating it that way
-            # without re-reading the crew state every poll, and without
-            # letting the still-captain-relevant log line re-surface it.
+          elif [ -e "$ssf" ] \
+            || { [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ -e "$STATE/.wedge-permanent-$key" ]; }; then
+            # This exact hash was already overridden as provably-working - keep
+            # treating it that way without re-reading the crew state every poll,
+            # and without letting the still-captain-relevant log line re-surface
+            # it. A fired cap is the other way this hash belongs on the ladder:
+            # the cap fire ends the episode and so drops this wedge timer, but
+            # it keeps the window silent, so the marker it left standing is the
+            # record that this hash is still the ladder's. Re-entering through it
+            # is what keeps the dead-record probe consulted for the rest of the
+            # horizon, on this route as on the three that reach the ladder
+            # unconditionally. The gate asks whether that marker is there, not
+            # how old it is: the horizon belongs to the ladder, which reads the
+            # marker itself, so an elapsed horizon hands the window back to the
+            # ordinary escalation ladder through this same gate. The cap being
+            # configured is what keeps a leftover marker from holding a window
+            # here once the operator has turned the cap back off.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task" "$h" "$dialog"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of

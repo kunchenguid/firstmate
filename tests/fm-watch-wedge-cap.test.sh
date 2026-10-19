@@ -1542,3 +1542,98 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood
 test_wedge_cap_releases_on_every_first_sight_route
 test_wedge_cap_releases_after_nonterminal_stale_episode
 test_wedge_cap_off_ignores_leftover_markers
+
+# The dead-record guarantee has to hold on the one wedge route that reaches the
+# ladder through a GATE. The terminal-status route is entered on a repeated hash
+# only while a wedge timer is running for it, and a fired cap ends the episode by
+# dropping exactly that timer while keeping the window silent - so the gate alone
+# left this hash with no ladder at all, and an agent that then exited behind a
+# byte-identical frame was never reported for the rest of the horizon. Drive the
+# cap on THIS route: a captain-relevant status log the crew state overrides, then
+# the endpoint gone under the marker the cap left behind and with no idle timer
+# re-armed for it, which is what that window looks like for the whole horizon.
+test_wedge_cap_reports_gone_endpoint_on_terminal_override_route() {
+  local dir state out capture_file window key pane_hash pid fakebin max statusf round
+  dir=$(make_case wedge-cap-terminal-override); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-terminal-override"
+  statusf="$state/wedge-cap-terminal-override.status"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-terminal-override.meta"
+  # Captain-relevant status line, seen, so the pane is the terminal-status
+  # population: the classification the overriding crew state has to beat.
+  printf 'done: implementation complete, ready to validate\n' > "$statusf"
+  mark_status_seen "$state" "$statusf"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+
+  # The crew is provably working, so this hash is absorbed as an overridden
+  # terminal status with its wedge timer running, and the cap fires there.
+  poll_capped_wedge_round "$dir" "$max" "" exit \
+    || fail "the terminal-override route never reached its cap: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the terminal-override route did not fire PERMANENTLY-WEDGED: $(cat "$out")"
+  [ -e "$state/.wedge-permanent-$key" ] \
+    || fail "no fired cap marker is standing to hold this window silent"
+  [ ! -e "$state/.stale-since-$key" ] \
+    || fail "the fired cap did not end the wedge episode it silenced"
+
+  # The agent now exits while its pane keeps rendering the identical frame. No
+  # route re-arms the idle timer for that, so this poll plants none: the window
+  # has to get back to the dead-record probe by itself, through the marker the
+  # cap left standing, or the agent that just left is never reported. The
+  # escalation bound is short so the ladder's own re-armed timer reaches the
+  # probe within this one watcher's lifetime.
+  : > "$out"
+  env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=bash FM_FAKE_TMUX_WINDOWS=someone-elses-window \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    PATH="$fakebin:$PATH" \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 300 \
+    || { reap "$pid"; fail "the capped terminal-override window never reported its gone endpoint: $(cat "$out")"; }
+  grep -F "agent missing" "$out" >/dev/null \
+    || fail "the capped terminal-override window did not report the gone endpoint: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the gone endpoint was escalated as a wedge instead of reported: $(cat "$out")"
+  [ "$(queued_wakes_carrying "$state" "$window" "agent missing")" -eq 1 ] \
+    || fail "the capped terminal-override window did not queue exactly one gone-endpoint report"
+
+  # The window stays on the ladder's own cadence after that: the death is
+  # delivered once, not once per poll, and no terminal wake is re-published.
+  : > "$out"
+  env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=bash FM_FAKE_TMUX_WINDOWS=someone-elses-window \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    PATH="$fakebin:$PATH" \
+    "$WATCH" > "$out" &
+  pid=$!
+  round=1
+  while [ "$round" -le 2 ]; do
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "capped poll $round surfaced a wake: $(cat "$out")"; }
+    round=$((round + 1))
+  done
+  reap "$pid"
+  [ "$(queued_wakes_carrying "$state" "$window" "agent missing")" -eq 1 ] \
+    || fail "the capped terminal-override window repeated the gone-endpoint report"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "a capped poll on the terminal-override route re-fired the terminal wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a cap fired on the terminal-override route still reports a gone endpoint exactly once"
+}
+
+test_wedge_cap_reports_gone_endpoint_on_terminal_override_route
