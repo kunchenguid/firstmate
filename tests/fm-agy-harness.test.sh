@@ -3,9 +3,10 @@
 #
 # The facts pinned here are the ones an agy release could silently change and
 # the ones a wrong guess would make dangerous:
-#   1. agy publishes no harness-identity marker of its own (a live 1.2.0 TUI
-#      carries no AGY_* variable; AGENT=1 there is inherited launcher state),
-#      so detection is ancestry alone on the anchored process name `agy`.
+#   1. agy publishes no harness-identity marker of its own (live 1.2.0 and 1.3.3
+#      TUIs carry no AGY_* variable; AGENT=1 there is inherited launcher state),
+#      so detection is ancestry alone on the anchored process names `agy` and
+#      `antigravity`.
 #   2. The anchored match must never claim unrelated commands containing the
 #      fragment, and a structural agy ancestor now outranks a retained or
 #      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the

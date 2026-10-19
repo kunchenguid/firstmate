@@ -147,7 +147,7 @@ fm_control_interrupt_transport() {  # <harness>
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,
 # 202609.1.2). agy cancels on a single Escape, printing the Interrupted row
-# with an idle composer and no repollution (verified live, agy 1.2.0 through
+# with an idle composer and no repollution (verified live on agy 1.2.0 and 1.3.3,
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
 # through Herdr).

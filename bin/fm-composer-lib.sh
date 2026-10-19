@@ -427,7 +427,7 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # agy (Antigravity CLI) renders a pinned status row while a turn runs: the
 # `esc to cancel` token on the left and the model cell on the right (verified
-# live, agy 1.2.0; the idle row shows `? for shortcuts` instead). The
+# live on agy 1.2.0 and 1.3.3; the idle row shows `? for shortcuts` instead). The
 # `Generating...` spinner word beside it is a free-floating output line and is
 # deliberately not matched, so echoed worker output cannot fake an
 # acknowledgement. Delivery guard only; recorded worker state comes from the

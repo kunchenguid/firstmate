@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.3.3`; historical 1.2.0 and 1.2.1 observations remain identified where they explain version-specific behavior |
+| Verified | 2026-10-12; initially verified 2026-09-10 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable on the 1.2.0 host; on the 1.3.3 re-verification host `/home/ubuntu/.local/bin/agy` is a POSIX sh wrapper that `exec`s the vendor binary `antigravity` |
 | Platform | Linux x64 (Arch, kernel 7.2.3) for 1.2.0; Linux x64 (kernel 5.15.0-1081-oracle) for the 1.3.3 re-verification |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |

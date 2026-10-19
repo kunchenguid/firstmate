@@ -230,10 +230,10 @@ harness_process_verdict() {  # <pid>
     # args glob would otherwise claim it if that subtree were ever walked.
     omp) echo "comm omp"; return ;;
     # agy (Antigravity CLI) publishes no harness-identity marker of its own
-    # (verified on a live 1.2.0 TUI and re-verified on 1.3.3: no AGY_* or
-    # ANTIGRAVITY_* variable; AGENT=1 seen there is an inherited launcher
-    # value, not an agy identity), so like muse it is detected by ancestry
-    # alone. Both of its process names are anchored, never globbed. agy 1.2.0
+    # (verified on live 1.2.0 and 1.3.3 TUIs: no AGY_* or ANTIGRAVITY_*
+    # variable; AGENT=1 seen there is an inherited launcher value, not an agy
+    # identity), so like muse it is detected by ancestry alone. Both of its
+    # process names are anchored, never globbed. agy 1.2.0
     # was a Go-compiled single binary whose comm was exactly `agy` (verified:
     # `ps -o comm=` reported agy with argv[0]=agy), while on agy 1.3.3 the
     # installed launcher /home/<user>/.local/bin/agy is a POSIX sh wrapper

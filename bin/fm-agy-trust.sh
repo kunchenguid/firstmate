@@ -9,7 +9,7 @@
 #   <project>   the primary checkout that worktree belongs to
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
-# WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
+# WHY THIS EXISTS. agy 1.3.3 (and 1.2.0) gates a folder it has never seen behind
 # "Do you trust the contents of this project?" and no launch flag suppresses
 # it (`agy --help` lists none). Answering appends the folder to the
 # `trustedWorkspaces` array of ${HOME}/.gemini/antigravity-cli/settings.json,

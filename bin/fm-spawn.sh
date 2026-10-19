@@ -2303,8 +2303,9 @@ omp_model_validate() { # <omp-bin> <model>
   return 1
 }
 
-# agy pre-launch model validation. `agy models` (agy 1.2.0) prints one model per
-# line as "<id>\t<label>" for the account's catalog only; model ids are bare
+# agy pre-launch model validation. `agy models` (agy 1.3.3; same catalog shape as
+# 1.2.0) prints one model per line as "<id>\t<label>" for the account's catalog
+# only; model ids are bare
 # (gemini-3.8-flash-high), never provider-prefixed. A requested model absent
 # from a reachable listing is concrete unsupported evidence and refuses the
 # spawn, so a stale id (the unlisted bare gemini-3.8-flash) fails loudly here
