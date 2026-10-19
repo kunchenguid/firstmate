@@ -115,58 +115,50 @@ The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, 
 
 ## Native Codex task-worker launch boundary
 
-Verified on 2026-10-17 on Linux with codex-cli 0.155.1.
-`bin/fm-spawn.sh` owns the native Codex task-worker launch transport; the [Codex adapter](../../.agents/skills/harness-adapters/references/harness/codex.md#task-worker-launch-input) records its scope.
+Verified on 2026-10-19 on Linux with codex-cli 0.155.1, `gpt-6-sol`, and high effort.
+`bin/fm-spawn.sh` owns the native Codex task-worker launch transport and its opt-in contract in the [usage header](../../bin/fm-spawn.sh).
+The [Codex adapter](../../.agents/skills/harness-adapters/references/harness/codex.md#task-worker-launch-input) points to that owner.
 The targeted executable regression uses an 83,828-byte synthetic intent, a larger-than-189,321-byte envelope, the generated worker role, and the exact task inbox, without product data:
 
 ```sh
-bash bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+bash bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh --per-script-timeout-secs 1800
 ```
 
-The default inline launch reproduces `bash: line 1: /usr/bin/env: Argument list too long` before the receiving executable runs. The default-off `--codex-brief-record` opt-in instead passes a bounded initial user prompt containing a worker-role/complete-read bootstrap and canonical doorbell across that same real subprocess boundary, retaining the complete encoded envelope byte-for-byte in the record without overriding configured developer instructions.
-The regression covers ship/scout launches, publication refusal, model/effort and hook/notification retention, and unchanged secondmate transport and identity.
-Other harness templates and backend lifecycle mechanisms are unchanged; the shared staged-command and launch-environment paths remain covered by that named regression.
+The oversized default inline launch reaches the executable-argument limit before the receiving executable runs.
+The record opt-in instead passes a bounded initial user prompt containing the worker-role/complete-read bootstrap and canonical doorbell across that same real subprocess boundary.
+The complete encoded envelope remains byte-identical in the record, and argv assertions verify that the launch supplies no developer-instruction override.
+The regression covers default inline and opted-in ship/scout launches, publication refusal, model/effort and hook/notification retention, and unchanged secondmate transport and identity.
+Other harness templates and backend lifecycle mechanisms are unchanged.
 
-The following historical token-free probes ran inside a fresh `unshare -Urn` namespace without external networking. They measured an earlier developer-input prototype, not the revised default-off user-prompt transport. The first executed its generated command with an isolated empty HOME and CODEX_HOME, no terminal, and `TERM=dumb`:
+The native guard executes the stock-emitted interactive command rather than substituting `codex exec`.
+With `evidence_dir` set to a private evidence directory, the recorded command was:
 
 ```sh
-env -i HOME="$probe_home" CODEX_HOME="$probe_codex_home" PATH="$PATH" TERM=dumb \
-  bash -c "$launch" < /dev/null
+FM_CODEX_FULL_BRIEF_LIVE=1 FM_CODEX_FULL_BRIEF_EVIDENCE="$evidence_dir" \
+  bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh --per-script-timeout-secs 1800
 ```
 
-The complete 200,223-byte synthetic record retained `# Current worker role contract` as its first body line.
-The installed native CLI exited 1 with `Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY)`, not an executable-argument error.
-Its local prompt renderer separately accepted the earlier prototype's bootstrap configuration and doorbell:
-
-```sh
-codex debug prompt-input -c "$bootstrap_config" "$doorbell"
-```
-
-The resulting JSON contained the byte-identical bootstrap as developer input and the byte-identical doorbell as user input.
-Those historical probes establish parsing and safe refusal for that prototype only; they are neither revised-source launch nor model-processing evidence.
-
-The credentialed guard extends the existing native hook subject rather than substituting `codex exec` for the interactive worker:
-
-```sh
-FM_CODEX_FULL_BRIEF_LIVE=1 FM_CODEX_FULL_BRIEF_MODEL=gpt-6-sol \
-  bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
-```
-
-It requires existing code-assistant authentication and spends model tokens only on a synthetic task in a generated non-default Herdr lab, with the helper's default-session tripwire and guarded cleanup.
-It executes the stock-emitted native command, checks the complete envelope against the canonical encoder, and requires three independently sampled receipt values distributed through an 83,828-byte intent, worker identity, the exact inbox, and the normal native turn-end notification.
-The following observation predates the default-off revision and does not prove its native behavior. Observed with codex-cli 0.155.1 and `gpt-6-sol`, high effort:
+It uses existing code-assistant authentication and synthetic instructions in a generated non-default Herdr lab, with the helper's default-session tripwire and guarded cleanup.
+The native start verifies the canonical envelope and requires beginning/middle/end receipt values, worker identity, the exact inbox, and normal turn-end notification.
+The public same-task relaunch verb runs against the controlled tmux endpoint, and its newly emitted launch runs natively in the same guarded Herdr pane.
+The relaunch verifies a fresh complete record, changed instructions, retained intent, HEAD and dirty state, and a native receipt containing the unfinished-work token.
+The publication-failure case makes the canonical inbox a regular file and requires a refusal before any launch command reaches the endpoint, without an inline fallback.
+The start record contained 205278 bytes and the fresh relaunch record contained 206117 bytes.
+The focused run printed:
 
 ```text
-# native full-record bytes=205256 model=gpt-6-sol effort=high version=codex-cli 0.155.1
+# native full-record bytes=205278 model=gpt-6-sol effort=high version=codex-cli 0.155.1
 ok - codex codex-cli 0.155.1 consumed beginning/middle/end of the complete synthetic launch record and emitted normal turn-end notification
+ok - codex codex-cli 0.155.1 relaunched the same worker from a fresh complete record that kept its intent, changed instructions and unfinished work
+# publication-failure spawn exit=1 launch-bytes=0
+ok - codex codex-cli 0.155.1 complete-record publication failure refused with zero native launches and no inline fallback
+FM_TEST_END 2026-10-19T05:23:45Z tests/fm-codex-hook-layer-live-e2e.test.sh exit=0 duration_ms=143940 gate_skip=false
 ```
 
-The default, token-free mode of that same guard replays the actual emitted flags against native `features list` and confirms hooks remain disabled.
-`tests/fm-control-relaunch.test.sh` additionally exercises normal same-task replacement twice, proving each current complete record is fresh while the endpoint, retained copy, HEAD, dirty work, and original intent survive.
-Its existing live/ambiguous-ownership refusal cases remain unchanged.
-The historical compatibility probe for codex-cli 0.162.1 accepted the earlier prototype's bootstrap and doorbell with empty temporary HOME/CODEX_HOME; that is prototype parsing evidence, not a target-host model turn.
-Revised-source native receipts for complete-record consumption with preserved operator configuration, same-worker relaunch, and publication-failure zero-launch remain outstanding.
-No business payload, product task recovery, installed-home adoption, or later validation-intent transport was tested or changed.
+The default token-free mode replays the emitted flags against native `features list` and confirms hooks remain disabled.
+`tests/fm-control-relaunch.test.sh` additionally covers repeated same-task replacement, retained copy and metadata, and refusal of incompatible harness changes before stopping the running worker.
+The native evidence verifies codex-cli 0.155.1 only; other versions require their own guard run.
+These synthetic checks do not exercise business payloads, product-task recovery, installed-home adoption, or a validation engine's separate intent channel.
 
 ## tmux
 

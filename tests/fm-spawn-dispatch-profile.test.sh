@@ -145,6 +145,57 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+# Pin the default transport through the emitted process argv and canonical
+# protocol consumers, independently of the opted-in large-record checks.
+test_codex_brief_record_defaults_off() {
+  local kind id rec out launch brief_kind expected
+  for kind in ship scout; do
+    id="codex-default-$kind"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+for arg do
+  case "$arg" in
+    developer_instructions=*) exit 73 ;;
+  esac
+  printf '%s' "$arg" > "$FM_CAPTURE_PROMPT"
+done
+SH
+    chmod +x "$FAKEBIN_DIR/codex"
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    fi
+    expect_code 0 "$?" "default Codex $kind spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    FM_CAPTURE_PROMPT="$CASE_DIR/prompt" PATH="$FAKEBIN_DIR:$PATH" \
+      bash -c "$launch" || fail "default Codex $kind launch failed or overrode developer instructions"
+    brief_kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$CASE_DIR/prompt") ||
+      fail "default Codex $kind did not receive an inline launch-brief envelope"
+    [ "$brief_kind" = launch-brief ] || fail "default Codex $kind received the wrong inline kind"
+    # Match the existing inline template's command-substitution boundary.
+    expected=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/launch-brief.md") ||
+      fail "could not encode the default Codex $kind launch brief"
+    printf '%s' "$expected" > "$CASE_DIR/expected"
+    cmp -s "$CASE_DIR/prompt" "$CASE_DIR/expected" || fail "default Codex $kind changed the complete inline envelope"
+    "$ROOT/bin/fm-operational-input.sh" body < "$CASE_DIR/prompt" > "$CASE_DIR/body" ||
+      fail "default Codex $kind inline envelope cannot be decoded"
+    assert_grep '# Current worker role contract' "$CASE_DIR/body" "default Codex $kind lost the worker role"
+    assert_grep "$HOME_DIR/state/$id.inbox" "$CASE_DIR/body" "default Codex $kind lost its exact inbox"
+    if grep -q '^codex_brief_record=' "$HOME_DIR/state/$id.meta"; then
+      fail "default Codex $kind persisted an unrequested record opt-in"
+    fi
+    [ -z "$(find "$HOME_DIR/state/operational-inbox" -name '*.msg' -print 2>/dev/null)" ] ||
+      fail "default Codex $kind published an unrequested launch record"
+    if FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-operational-input.sh" doorbell-kind < "$CASE_DIR/prompt" >/dev/null; then
+      fail "default Codex $kind received a record doorbell"
+    fi
+  done
+  pass "native Codex ship/scout brief records are default-OFF and preserve inline role delivery"
+}
+
 # Exercise the actual exec boundary, not just the short staged shell command.
 # The capturing executable is deliberately not evidence of native processing.
 test_codex_full_brief_crosses_exec_boundary() {
@@ -2093,6 +2144,7 @@ SH
   done
 }
 
+test_codex_brief_record_defaults_off
 test_codex_full_brief_crosses_exec_boundary
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
