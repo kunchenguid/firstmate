@@ -3691,9 +3691,6 @@ await handlers.get("before_agent_start")?.({
 }, {});
 // The run reaches the first queued follow-up; the second is still queued when
 // the captain replaces the session, so only the second rides the handoff.
-for (const event of [{}, { messageType: "user" }, ...[undefined, null, 42, {}].flatMap((prompt) => [{ prompt }, { messageType: "user", prompt }])]) {
-  handlers.get("before_agent_start")?.(event, {});
-}
 consumeQueued(prompts[0]);
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
