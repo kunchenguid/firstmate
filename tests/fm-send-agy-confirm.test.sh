@@ -155,6 +155,16 @@ expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
   "agy typed send with long-brief late busy footer confirms and exits 0"
 pass "agy typed send: long-brief render (15th poll) still confirms idle-to-busy"
 
+# antigravity is the vendor binary basename that agy 1.3.3's installed
+# launcher execs, so a task launched from that raw command records
+# harness=antigravity. The send retry resolution must map it to the agy
+# family and apply the same raised budget; without the alias the shared
+# 3-retry default would refuse this late-busy pane for a message that landed.
+out=$(run_send antigravity 6)
+expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "antigravity-recorded typed send resolves to the agy family and exits 0"
+pass "agy typed send: antigravity-recorded harness gets the agy retry budget"
+
 # claude on the identical late-busy pane: the shared 3-retry default is
 # untouched, so the same latency still refuses - the raised budget is
 # agy-scoped, not a global slowdown.

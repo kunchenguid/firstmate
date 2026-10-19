@@ -209,6 +209,12 @@ test_agy_busy_tail_needs_the_pinned_status_row() {
 test_agy_busy_signatures_are_harness_scoped() {
   printf 'esc to cancel\n' | fm_busy_lines_match agy \
     || fail "harness=agy must match its own esc token"
+  # A raw antigravity relaunch records the vendor binary basename as its
+  # harness, so the delivery guard must resolve it to the same agy signature.
+  printf 'esc to cancel\n' | fm_busy_lines_match antigravity \
+    || fail "harness=antigravity must match the agy esc token"
+  printf 'Ctrl+c:cancel\n' | fm_busy_lines_match antigravity \
+    && fail "harness=antigravity must never borrow grok's token" || true
   printf 'esc to cancel\n' | fm_busy_lines_match grok \
     && fail "harness=grok must never borrow agy's esc token" || true
   printf 'Ctrl+c:cancel\n' | fm_busy_lines_match agy \
@@ -229,7 +235,15 @@ esc to cancel                                                           Gemini 3
   idle=$(fm_busy_classify tmux fake:win agy agy-case-2 "$statedir" 'reply landed
 ? for shortcuts                                                         Gemini 3.8 Flash · low')
   [ "$idle" = "unknown agy-regex" ] || fail "a scrolled-out marker must classify unknown, got '$idle'"
-  pass "fm-busy-lib: agy classifies busy on its marker and unknown without it"
+  # A task recorded as `antigravity` (the vendor binary agy 1.3.3's launcher
+  # execs) must fold through the same agy arm, busy and unknown alike.
+  busy=$(fm_busy_classify tmux fake:win antigravity antigravity-case-1 "$statedir" 'turn running
+esc to cancel                                                           Gemini 3.8 Flash · low')
+  [ "$busy" = "busy agy-regex" ] || fail "antigravity must classify busy agy-regex, got '$busy'"
+  idle=$(fm_busy_classify tmux fake:win antigravity antigravity-case-2 "$statedir" 'reply landed
+? for shortcuts                                                         Gemini 3.8 Flash · low')
+  [ "$idle" = "unknown agy-regex" ] || fail "antigravity must classify unknown agy-regex, got '$idle'"
+  pass "fm-busy-lib: agy and antigravity classify busy on the marker and unknown without it"
 }
 
 test_agy_tmux_names_the_native_binary_an_agent() {
