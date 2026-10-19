@@ -393,7 +393,7 @@ Keep additions task-specific rather than repeating lifecycle instructions, and a
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
-Crews and scouts close every Chrome/Chromium session they start, including chrome-devtools-axi sessions, Playwright or other automation browsers, tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers they did not start.
+Every ship and scout brief must retain the scaffold's browser-session cleanup rule.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 

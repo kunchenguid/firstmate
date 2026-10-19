@@ -302,8 +302,6 @@ case "$BRANCH_PREFIX" in
   *' '*) echo "error: --branch-prefix must not contain a space (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
   -*) echo "error: --branch-prefix must not start with '-' (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
 esac
-BROWSER_CLEANUP_RULE="Close every Chrome/Chromium session you start, including chrome-devtools-axi sessions and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start."
-
 # The forge is validated against the same closed set the renderers enforce, so a
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
@@ -325,11 +323,11 @@ if [ "$KIND" = ship ]; then
   # forge-CLI rule names it instead of gh-axi; an external review tool has no
   # forge CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
+    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
   elif [ "$FORGE" = external ]; then
-    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
   else
-    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
+    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -447,6 +445,8 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(shell_quote "$ID") chrome-devtools-axi"
+BROWSER_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -773,7 +773,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-3. $FORGE_RULE_LINE
+3. $FORGE_RULE_LINE $BROWSER_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
