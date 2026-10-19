@@ -170,6 +170,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -445,7 +447,18 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
-BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(shell_quote "$ID") chrome-devtools-axi"
+browser_session_name() {
+  local name=$1 hash
+  local LC_ALL=C
+  case "$name" in
+    *[!A-Za-z0-9._-]*) ;;
+    *) [ "${#name}" -gt 64 ] || { printf '%s' "$name"; return 0; } ;;
+  esac
+  hash=$(printf '%s' "$name" | cksum | awk '{printf "%08x", $1}')
+  name=${name//[!A-Za-z0-9._-]/-}
+  printf '%s-%s' "${name:0:55}" "$hash"
+}
+BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "$(fm_backend_hometag)-$ID") chrome-devtools-axi"
 BROWSER_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
 
 # The receive-and-ack half of the steering-inbox contract, included in every

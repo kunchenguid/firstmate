@@ -11,6 +11,8 @@
 # (docs/cmux-backend.md) and this same tag mechanism was later ported to
 # zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
 # tab titles").
+# bin/fm-brief.sh reuses the same tag to name each worker's chrome-devtools-axi
+# session, whose names share one per-user namespace across every home.
 #
 # fm_backend_hometag() derives a short, stable tag: a readable prefix
 # ("firstmate" for the primary home, "2ndmate-<id>" for a secondmate home
