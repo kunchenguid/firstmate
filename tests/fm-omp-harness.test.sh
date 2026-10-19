@@ -155,18 +155,16 @@ test_lock_identity_and_liveness_classification() {
 # `ps`, no live tree. `bun <...>/bin/omp` matches; ompd/comp and bare `bun`
 # never do.
 test_detection_bun_shim_script_token() {
-  # shellcheck source=bin/fm-harness.sh
-  . "$ROOT/bin/fm-harness.sh"
-  ancestry_arg_has_omp_script "bun /Users/tien/.bun/bin/omp --profile opencode-free --prewalk-into @dev" \
+  fm_harness_bun_omp_args bun "bun /Users/tien/.bun/bin/omp --profile opencode-free --prewalk-into @dev" \
     || fail "the script token must match a live bun-shim omp argv"
-  ancestry_arg_has_omp_script "bun /x/omp" || fail "the script token must match a bare bun /x/omp argv"
-  ! ancestry_arg_has_omp_script "bun /x/ompd --y" || fail "the script token must not match a bun-shim ompd"
-  ! ancestry_arg_has_omp_script "bun /x/comp --y" || fail "the script token must not match a bun-shim comp"
-  ! ancestry_arg_has_omp_script "bun run dev --cwd /Users/x/omp" || fail "the script token must not match an omp path in a later argument"
-  ! ancestry_arg_has_omp_script "bun test /repo/omp --watch" || fail "the script token must not match an omp path in a later argument"
-  ! ancestry_arg_has_omp_script "bun /x/ompd --root /y/omp" || fail "the script token must not match a decoy script with an omp later argument"
-  ! ancestry_arg_has_omp_script "bun run dev" || fail "the script token must not match an unrelated bun process"
-  ! ancestry_arg_has_omp_script "node /x/omp --y" || fail "the script token must not match a non-bun interpreter"
+  fm_harness_bun_omp_args bun "bun /x/omp" || fail "the script token must match a bare bun /x/omp argv"
+  ! fm_harness_bun_omp_args bun "bun /x/ompd --y" || fail "the script token must not match a bun-shim ompd"
+  ! fm_harness_bun_omp_args bun "bun /x/comp --y" || fail "the script token must not match a bun-shim comp"
+  ! fm_harness_bun_omp_args bun "bun run dev --cwd /Users/x/omp" || fail "the script token must not match an omp path in a later argument"
+  ! fm_harness_bun_omp_args bun "bun test /repo/omp --watch" || fail "the script token must not match an omp path in a later argument"
+  ! fm_harness_bun_omp_args bun "bun /x/ompd --root /y/omp" || fail "the script token must not match a decoy script with an omp later argument"
+  ! fm_harness_bun_omp_args bun "bun run dev" || fail "the script token must not match an unrelated bun process"
+  ! fm_harness_bun_omp_args node "node /x/omp --y" || fail "the script token must not match a non-bun interpreter"
   pass "fm-harness: the bun-shim script token matches omp and only omp"
 }
 

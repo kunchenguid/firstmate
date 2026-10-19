@@ -58,6 +58,16 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# True for a bun-shim omp: the process is bun and the first argv token after it
+# is a script whose basename is exactly `omp`. ompd/comp and an `omp` path in a
+# later argument never match.
+fm_harness_bun_omp_args() {  # <comm> <args>
+  local script
+  [ "$(basename -- "${1:-}")" = bun ] || return 1
+  read -r _ script _ <<<"${2:-}"
+  [ "$(basename -- "${script:-}")" = omp ]
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -72,16 +82,6 @@ fm_harness_path_name() {  # <path>
 #   bun carries only the omp script token (the first argv token after bun, with
 #   basename exactly `omp`): a *omp* glob would claim ompd/comp, so no other
 #   harness rides the bun arm.
-# True for a bun-shim omp: the process is bun and the first argv token after it
-# is a script whose basename is exactly `omp`. ompd/comp and an `omp` path in a
-# later argument never match.
-fm_harness_bun_omp_args() {  # <comm> <args>
-  local script
-  [ "$(basename -- "${1:-}")" = bun ] || return 1
-  read -r _ script _ <<<"${2:-}"
-  [ "$(basename -- "${script:-}")" = omp ]
-}
-
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name

@@ -76,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -157,21 +159,9 @@ harness_marker() {
   return 0
 }
 
-# True when <args> is a bun-shim omp: the argv token right after `bun` must be
-# the omp script itself (`bun <...>/bin/omp ...`; verified: `bun install -g`
-# lays a `#!/usr/bin/env bun` script at ~/.bun/bin/omp, so the live process is
-# `comm=bun` with the omp path in argv). Its basename must be exactly `omp`, so
-# ompd/comp and an `omp` path in a LATER argument (`bun run dev --cwd /x/omp`)
-# never match.
-ancestry_arg_has_omp_script() {  # <args>
-  local interp script
-  read -r interp script _ <<<"$1"
-  [ "$(basename -- "$interp")" = bun ] && [ "$(basename -- "${script:-}")" = omp ]
-}
-
 # True when an `omp` process sits within eight parents of this one: either a
 # natively-named `omp` (Bun-compiled single binary, verified omp 18.1.11) or a
-# bun-shim omp (see ancestry_arg_has_omp_script). Kept separate from the
+# bun-shim omp (see fm_harness_bun_omp_args). Kept separate from the
 # ancestry walk below so the marker precedence above can demand real process
 # evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
@@ -182,7 +172,7 @@ ancestry_names_omp() {
     [ "$base" = omp ] && return 0
     if [ "$base" = bun ]; then
       args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
-      ancestry_arg_has_omp_script "$args" && return 0
+      fm_harness_bun_omp_args "$comm" "$args" && return 0
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
@@ -257,7 +247,7 @@ harness_process_verdict() {  # <pid>
     # reason, and the script-token match is what keeps ompd/comp out.
     bun)
       args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
-      ancestry_arg_has_omp_script "$args" && { echo "args omp"; return; } ;;
+      fm_harness_bun_omp_args "$comm" "$args" && { echo "args omp"; return; } ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
