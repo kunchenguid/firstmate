@@ -622,9 +622,52 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
   pass "an away entry over quiet mode records away, and a quiet entry never masks a standing away record"
 }
 
+# The spend cap entry records without --spend is the parallelism already
+# standing in this home, counted exactly the way the later refusal counts it, so
+# away mode never narrows work that is already under way. The earlier default
+# stays a floor, and a secondmate is a persistent home rather than spend.
+test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
+  local home out i
+  home=$(make_home spend-live-above)
+  for i in 1 2 3 4 5 6; do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  [ "$(contract "$home" live-workers)" = 6 ] \
+    || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
+  out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
+    || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
+  assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
+
+  home=$(make_home spend-live-below)
+  fm_write_meta "$home/state/task-1.meta" "window=fm-task-1" "kind=ship"
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  out=$(contract "$home" enter --words 'quiet lane' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+    || fail "a home below the floor did not keep the default cap: $(contract "$home" field spend_max_concurrent_workers)"
+
+  home=$(make_home spend-live-empty)
+  out=$(contract "$home" enter --words 'nothing running' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" live-workers)" = 0 ] || fail "an empty home did not count zero workers"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+    || fail "an empty home recorded a cap other than the default floor"
+
+  home=$(make_home spend-live-explicit)
+  for i in 1 2 3 4 5 6; do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  contract "$home" enter --words 'hold it down' --spend 2 >/dev/null 2>&1 || fail "explicit entry failed"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] \
+    || fail "an explicit --spend lost to the live count"
+  pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
+test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
 test_retired_two_step_entry_is_refused_by_name
 test_enter_removes_a_legacy_proposal_without_promoting_it
 test_same_turn_entry_pre_authorizes_nothing_on_the_never_set
