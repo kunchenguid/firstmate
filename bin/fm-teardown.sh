@@ -298,19 +298,20 @@
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
-#     started under the worktree (or its per-task tasktmp) does not receive the
-#     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
-#     process group, so it survives reparented to init (observed 2026-08-03:
-#     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
-#     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
+#     started under the worktree (or its per-task tasktmp) by the task's own
+#     endpoint shell does not receive the SIGHUP/SIGTERM that closing the
+#     backend pane sends to its own foreground process group (observed
+#     2026-08-03: two `go test` binaries, deadlines blown past by ~100x,
+#     pinning CPU for hours). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches.
 #     Cwd alone is not ownership: only descendants of the live endpoint shell
-#     or members of its dedicated process group are signaled. Unproven
-#     processes are reported individually and refuse worktree/tasktmp removal.
+#     or members of its dedicated process group are signaled. Every other
+#     process (a foreign session shell, a reparented orphan, any backend
+#     without an endpoint pid) is spared and reported individually; it never
+#     blocks teardown, which goes on to close the pane.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2409,16 +2410,9 @@ task_process_is_owned() {  # <pid>
     }'
 }
 
-task_reap_unowned_refusal() {
-  [ -z "$TASK_UNOWNED_PIDS" ] && return 0
-  echo "REFUSED: process ownership is unproven for $ID; preserving the worktree/tasktmp and every unowned process." >&2
-  return 1
-}
-
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  TASK_UNOWNED_PIDS=
   local dir dir_pids pid command pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
@@ -2439,7 +2433,6 @@ $dir_pids"
         kill -0 "$pid" 2>/dev/null || continue
         command="<unavailable>"
       fi
-      TASK_UNOWNED_PIDS="${TASK_UNOWNED_PIDS}${TASK_UNOWNED_PIDS:+$'\n'}$pid"
       if ! task_pid_list_contains "$TASK_REAP_REPORTED" "$pid"; then
         echo "teardown: spared unowned process $pid: $command" >&2
         TASK_REAP_REPORTED="${TASK_REAP_REPORTED}${TASK_REAP_REPORTED:+$'\n'}$pid"
@@ -2504,7 +2497,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED="" TASK_UNOWNED_PIDS=""
+  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED=""
   TASK_REAP_LEADER=$(task_reap_endpoint_pid) || TASK_REAP_LEADER=
   case "$TASK_REAP_LEADER" in ''|*[!0-9]*|0|1) TASK_REAP_LEADER= ;; esac
   TASK_REAP_LEADER_IDENTITY=$(task_process_identity "${TASK_REAP_LEADER:-0}") || TASK_REAP_LEADER=
@@ -2518,7 +2511,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
       return 1
     fi
     pids=$TASK_PIDS
-    if [ -z "$pids" ]; then task_reap_unowned_refusal; return $?; fi
+    if [ -z "$pids" ]; then return 0; fi
     tracked_pids=()
     tracked_identities=()
     while IFS= read -r pid; do
@@ -2599,7 +2592,7 @@ EOF
     echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1
   fi
-  if [ -z "$TASK_PIDS" ]; then task_reap_unowned_refusal; return $?; fi
+  if [ -z "$TASK_PIDS" ]; then return 0; fi
   echo "REFUSED: leaked $label processes for $ID remain after $max_passes reap attempts; preserving the worktree/tasktmp for manual inspection or retry." >&2
   return 1
 }

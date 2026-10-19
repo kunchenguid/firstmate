@@ -5139,11 +5139,9 @@ PYTHON
     fail "foreign-session: task-owned child survived"
   fi
   [ "$survived" -eq 1 ] || fail "foreign-session: teardown killed an unowned shell"
-  expect_code 1 "$rc" "foreign-session: unproven ownership should refuse cleanup"
-  assert_grep "spared unowned process $foreign:.*bash" "$case_dir/stderr" \
+  expect_code 0 "$rc" "foreign-session: unproven ownership must not block teardown"
+  assert_grep "spared unowned process $foreign: bash" "$case_dir/stderr" \
     "foreign-session: teardown did not report the foreign pid and command"
-  assert_present "$case_dir/state/task-x1.meta" "foreign-session: task metadata was removed"
-  assert_present "$case_dir/wt" "foreign-session: worktree was removed"
   pass "foreign TTY shell survives and is reported while the task-owned child is reaped"
 }
 
