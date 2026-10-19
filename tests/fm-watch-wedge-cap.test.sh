@@ -323,10 +323,11 @@ test_wedge_cap_silences_subsequent_polls_for_same_hash() {
     pid=$!
     # A post-cap poll short-circuits inside wedge_timer_check on the
     # window-scoped marker and returns 0 without waking; the watcher keeps
-    # polling until the next event. wait_poll_cycle confirms it is alive AND
-    # did not fire.
-    if wait_poll_cycle "$state" "$pid" 200 2>/dev/null; then
-      :
+    # polling until the next event. A watcher that exited with a wake of its own
+    # fails this rather than passing quietly.
+    if ! wait_poll_cycle "$state" "$pid" 200; then
+      reap "$pid"
+      fail "post-cap poll $i did not stay alive and silent: $(cat "$out")"
     fi
     reap "$pid"
     ack_stopped_cycle "$state" || true
@@ -1177,50 +1178,136 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
   pass "an unwritable terminal episode marker narrows suppression instead of flooding the queue"
 }
 
-# The cap's release invariant is "every reset that ends a wedge episode releases
-# the cap markers". That invariant was first wired at two inline sites and two
-# more were missed, one of them the hot path, so a real pause-and-resume could
-# leave the cap engaged for the whole horizon. It is now enforced by a single
-# choke point, wedge_episode_end. This assertion is what makes that structural
-# rather than merely intended: any future site that removes the episode marker
-# without going through the choke point fails here, loudly, instead of silently
-# reintroducing the defect.
-test_wedge_cap_episode_end_is_the_only_way_to_end_an_episode() {
-  local lineno text outside=0 in_choke
+# The release boundary is a wedge EPISODE, so the first-sight routes have to
+# honour it as strictly as the reset routes do: each ends the episode the cap
+# fired in and opens a new one on the very next render, and a window left capped
+# across that boundary would answer the crew's next genuine wedge with silence
+# for the rest of FM_CAP_HORIZON_SECS. The routes driven here are the ones that
+# need a crew-state verdict to pick between them - a captain-relevant status log
+# outranked by a live run, that same log with nothing overriding it, and a
+# non-terminal pane absorbed because the crew is provably working. The reset
+# routes are the ones the recovery and declared-wait cases drive: a pane that
+# leaves the stale path, and a declared wait and its lift.
+drive_first_sight_release() {  # <route>
+  local route=$1 dir state fakebin out capture_file window key statusf
+  local fire_verdict route_verdict mode pid fresh_hash
+  dir=$(make_case "wedge-cap-release-$route")
+  state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-release-$route"
+  statusf="$state/wedge-cap-release-$route.status"
+  case "$route" in
+    provably-working-terminal)
+      printf 'done: implementation complete, ready to validate\n' > "$statusf"
+      fire_verdict='state: working · source: run-step · validating (running)'
+      route_verdict=$fire_verdict
+      mode="absorb"
+      ;;
+    surface-terminal)
+      printf 'done: implementation complete, ready to validate\n' > "$statusf"
+      fire_verdict='state: working · source: run-step · validating (running)'
+      route_verdict='state: unknown · source: none · no run, no busy pane'
+      mode="exit"
+      ;;
+    provably-working-nonterminal)
+      printf 'working: still wedged\n' > "$statusf"
+      fire_verdict='state: working · source: run-step · validating (running)'
+      route_verdict=$fire_verdict
+      mode="absorb"
+      ;;
+    *) fail "unknown first-sight release route: $route" ;;
+  esac
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-release-$route.meta"
+  printf 'wedged render the cap fires on' > "$capture_file"
+  mark_status_seen "$state" "$statusf"
+  printf '%s' "$(hash_text 'wedged render the cap fires on')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'wedged render the cap fires on')" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
 
-  in_choke=$(grep -n '^wedge_episode_end() {' "$WATCH" | head -1 | cut -d: -f1)
-  [ -n "$in_choke" ] \
-    || fail "bin/fm-watch.sh no longer defines wedge_episode_end, so the cap release has no choke point"
+  # Fire this window's cap against its live endpoint, so the marker under test
+  # is one the watcher really wrote rather than one this case planted.
+  export FM_FAKE_CREW_STATE="$fire_verdict"
+  poll_capped_wedge_round "$dir" 1 "" exit \
+    || fail "the $route case never reached the wedge path: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the $route case did not fire its cap: $(cat "$out")"
+  [ -e "$state/.wedge-permanent-$key" ] \
+    || fail "the $route case left no fired cap marker to release"
 
-  while IFS= read -r lineno; do
-    lineno=${lineno%%:*}
-    # Skip contract comments: neither is code.
-    text=$(sed -n "${lineno}p" "$WATCH")
-    case "$text" in
-      *'#'*) continue ;;
-    esac
-    # Inside the choke point, a .stale-since- occurrence is either its own removal
-    # or its own read. Outside it, a removal is the defect this assertion exists
-    # to catch.
-    case "$text" in
-      *'rm -f'*'stale-since-'*)
-        if [ "$lineno" -lt "$in_choke" ] || [ "$lineno" -gt $((in_choke + 40)) ]; then
-          outside=$((outside + 1))
-          printf '  %s: %s\n' "$lineno" "$text" >&2
-        fi
-        ;;
-    esac
-  done < <(grep -n 'stale-since-' "$WATCH")
+  # The first sight of the next render on a window whose episode the cap has just
+  # ended. The watcher is told the fresh render is already its recorded hash so
+  # this poll classifies it as stably stale, which is the population these
+  # routes live in.
+  fresh_hash=$(hash_text 'the render that ends the capped episode')
+  printf 'the render that ends the capped episode' > "$capture_file"
+  printf '%s' "$fresh_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE="$route_verdict"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=1 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 150 \
+      || { reap "$pid"; fail "the $route first-sight poll never settled: $(cat "$out")"; }
+    grep -F "stale: $window" "$out" >/dev/null \
+      || { reap "$pid"; fail "the $route first-sight poll did not surface the render: $(cat "$out")"; }
+  else
+    wait_poll_cycle "$state" "$pid" 200 \
+      || { reap "$pid"; fail "the $route first-sight poll did not survive its cycle: $(cat "$out")"; }
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  [ ! -e "$state/.wedge-permanent-$key" ] \
+    || fail "the $route first-sight route ended the wedge episode but left the cap marker standing, so the next genuine wedge would answer with silence until the horizon"
+  [ ! -e "$state/.wedge-terminal-queued-$key" ] \
+    || fail "the $route first-sight route kept the terminal-wake episode marker, so the next episode's own terminal wake would be suppressed"
 
-  [ "$outside" -eq 0 ] \
-    || fail "$outside removal(s) of the wedge-episode marker sit outside wedge_episode_end; every end of a wedge episode must release the cap markers, and a site added here would silently re-arm the defect"
-  pass "every removal of the wedge-episode marker routes through the wedge_episode_end choke point"
+  # A later render the recovered crew then goes quiet on opens a fresh wedge
+  # episode, and the wedge behind it has to reach the supervisor - exactly what a
+  # cap left standing across the boundary would have swallowed.
+  fresh_hash=$(hash_text 'the render the recovered crew goes quiet on')
+  printf 'the render the recovered crew goes quiet on' > "$capture_file"
+  printf '%s' "$fresh_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=1 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 200 \
+    || { reap "$pid"; fail "the fresh episode after the $route route did not survive its cycle: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  [ -e "$state/.stale-since-$key" ] \
+    || fail "the $route route left no fresh wedge episode for the recovered crew to wedge against: $(cat "$out")"
+  poll_wedge_round "$dir" 2 ""
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "the wedge behind the released $route cap stayed silent: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "the wedge behind the released $route cap fired the cap again instead of escalating normally"
+  unset FM_FAKE_CREW_STATE
 }
 
-# The behavioural proof of the same invariant: the hot path
-# surface_nonterminal_stale ended the episode marker on every non-terminal stale
-# poll without releasing the cap, so a genuine new wedge after a pause-and-resume
-# stayed silent for the full horizon. Drive that exact sequence and assert the
+test_wedge_cap_releases_on_every_first_sight_route() {
+  drive_first_sight_release provably-working-terminal
+  drive_first_sight_release surface-terminal
+  drive_first_sight_release provably-working-nonterminal
+  pass "every first-sight route that ends a wedge episode releases that episode's cap and lets the next wedge escalate"
+}
+
+# The hot non-terminal first-sight surface is the one that ends the episode
+# marker on every non-terminal stale poll, so it is the route whose episode the
+# cap has to be released on most often. Drive that exact sequence and assert the
 # fresh wedge escalates immediately.
 test_wedge_cap_releases_after_nonterminal_stale_episode() {
   local dir state out capture_file window key pane_hash sig pid fakebin max n statusf
@@ -1248,11 +1335,12 @@ test_wedge_cap_releases_after_nonterminal_stale_episode() {
   [ -e "$state/.wedge-permanent-$key" ] || fail "window-scoped marker missing after cap fire"
 
   # Now a non-terminal stale poll on a FRESH hash. That takes the first-sight
-  # branch into surface_nonterminal_stale, which ends the wedge episode on the
-  # hot path - the route that used to leave the cap marker standing, so a
-  # genuine new wedge stayed silent for the whole horizon.
+  # branch into surface_nonterminal_stale, the hottest of the episode-ending
+  # routes: it ends the wedge episode on every non-terminal stale poll, so a cap
+  # left standing here would keep a genuinely re-wedged pane silent for the whole
+  # horizon.
   # pause_state_class must NOT be working or paused here, or the poll takes the
-  # provably-working absorb or the declared-wait branch instead of the hot path.
+  # provably-working absorb or the declared-wait branch instead of that surface.
   export FM_FAKE_CREW_STATE='state: idle · source: none'
   printf 'a different pane body entirely' > "$capture_file"
   rm -f "$state/.stale-$key" "$state/.wedge-escalations-$key"
@@ -1299,5 +1387,5 @@ test_wedge_cap_reports_gone_endpoint_while_capped
 test_wedge_cap_new_episode_publishes_its_own_terminal_wake
 test_wedge_cap_probe_keeps_its_cadence_while_capped
 test_wedge_cap_unwritable_terminal_marker_does_not_flood
-test_wedge_cap_episode_end_is_the_only_way_to_end_an_episode
+test_wedge_cap_releases_on_every_first_sight_route
 test_wedge_cap_releases_after_nonterminal_stale_episode

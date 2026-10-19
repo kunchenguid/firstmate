@@ -504,12 +504,12 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .wedge-permanent-, .wedge-rollback-failed-, .paused-*,
-# .writing-*, .waiting-*), and live homes hold those markers on disk under the
-# current format, so the format lives here alone: a second copy is how a future
-# change to it silently orphans a window's markers instead of clearing them. The
-# helpers below take the derived key rather than re-deriving it, so one poll of one
-# window derives it once.
+# .wedge-escalations-, .wedge-permanent-, .wedge-terminal-queued-,
+# .wedge-rollback-failed-, .paused-*, .writing-*, .waiting-*), and live homes
+# hold those markers on disk under the current format, so the format lives here
+# alone: a second copy is how a future change to it silently orphans a window's
+# markers instead of clearing them. The helpers below take the derived key
+# rather than re-deriving it, so one poll of one window derives it once.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -1199,12 +1199,12 @@ case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL
 
 # _wedge_cap_markers_clear: drop every cap marker a fired cap wrote for one
 # window - the window-scoped cap marker, the terminal-row episode marker, and the
-# rollback-failure sentinel. Called from the recovery boundary that already
-# resets the wedge timer and escalation count, so a crew that resumes and wedges
-# again escalates from scratch rather than inheriting a window the cap left
-# silent. A route that only restarts the escalation count while the wedge timer
-# keeps aging is not that boundary: the window is still the same episode, and
-# clearing there would reopen the loop the cap exists to bound.
+# rollback-failure sentinel. Owned by wedge_episode_end below, the one call that
+# ends a wedge episode, so a crew that resumes and wedges again escalates from
+# scratch rather than inheriting a window an earlier episode left silent. The
+# cap-fire route is the one caller that keeps these markers instead of calling it
+# here: they are the ceiling it has just published, so the episode it ends must
+# leave them standing.
 # _wedge_cap_markers_clear <window-key>
 _wedge_cap_markers_clear() {
   local key=$1
@@ -1213,30 +1213,28 @@ _wedge_cap_markers_clear() {
     "$STATE/.wedge-rollback-failed-$key"
 }
 
-# wedge_episode_end: THE choke point for ending a wedge episode.
+# wedge_episode_end: THE choke point for ENDING a wedge episode.
 #
-# .stale-since-<key> is the marker that DEFINES a wedge episode, so every removal
-# of it in this file must go through here. The helper removes the episode marker,
-# removes the escalation count unless the caller says the counter is being
-# restarted while the wedge timer keeps aging, and then clears the cap markers.
-# The cap release is therefore structural rather than enumerated: a route that
-# ends an episode cannot forget to release the cap, because forgetting would mean
-# not calling this function at all, and the completeness assertion in
-# tests/fm-watch-wedge-cap.test.sh fails on any direct rm of .stale-since-.
+# .stale-since-<key> is the marker that defines one, and the boundary where a
+# window stops counting as wedged is where the cap that episode fired has to go,
+# so every route that ends an episode calls this: a pane that leaves the stale
+# path, a declared wait and its lift, a first-sight absorb, a surface. The cap
+# release is then structural rather than a list of sites to keep in step - a new
+# episode-ending route is one call, and it cannot drop the episode marker without
+# dropping the cap with it.
 #
-# That enumeration is not hypothetical. The release was first wired at two inline
-# sites and two more were missed, one of them surface_nonterminal_stale, which is
-# the hot path - it ends the episode marker on every non-terminal stale poll - so
-# a genuine new wedge after a pause-and-resume stayed silent for the whole
-# horizon. The choke point exists so that failure cannot recur silently.
+# The ladder's own timer reset inside wedge_timer_check is deliberately NOT an
+# episode end and keeps its own removal of the marker: that pane is still wedged,
+# and its escalation count must keep climbing.
 #
-# keep-counter=1 marks a route that only restarts the escalation count while the
-# wedge timer keeps aging. That is the same episode, not a new one, so the cap
-# markers must NOT be cleared there; an existing triage test pins that behaviour.
-# wedge_episode_end <window-key> [keep-counter]
+# keep-cap=1 is the cap-fire route itself. It ends the episode and resets the
+# escalation count itself, but the cap markers it has just written are the whole
+# point of that route and outlive the episode they silenced - that is what holds
+# the window quiet until the horizon, a recovery, or the operator intervenes.
+# wedge_episode_end <window-key> [keep-cap]
 wedge_episode_end() {
-  local key=$1 keep=${2:-0}
-  if [ "$keep" = 1 ]; then
+  local key=$1 keep_cap=${2:-0}
+  if [ "$keep_cap" = 1 ]; then
     rm -f "$STATE/.stale-since-$key"
   else
     rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -1964,7 +1962,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
               *) triage_log "wedge cap-marker write FAILED on $win - cap state rolled back"; exit 1 ;;
             esac
           fi
-          rm -f "$since_file"
+          wedge_episode_end "$_wkey" 1
           clear_write_tracking "$_wkey"
           : > "$escalation_file"
           rm -f "$STATE/.wedge-rollback-failed-$_wkey"
@@ -1974,6 +1972,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
         fm_wake_append stale "$win" "$reason" || exit 1
+        # The ladder's own step, not an episode end: this pane is still wedged,
+        # so the idle timer restarts for the next rung of the same escalation
+        # count and the cap that fired stays exactly where it is.
         rm -f "$since_file"
         clear_write_tracking "$_wkey"
         wake "$reason"
@@ -2104,8 +2105,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # pause tracking stays unwritten here, exactly as the idle away-mode handoff
       # leaves it, because the daemon owns that bookkeeping.
       key=$(window_key "$win")
-      rm -f "$since_file" "$escalation_file"
-      _wedge_cap_markers_clear "$key"
+      wedge_episode_end "$key"
       clear_write_tracking "$key"
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if captain_held_silenced "$(status_declared_wait_line "$statusf")"; then
@@ -3636,6 +3636,7 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
+              wedge_episode_end "$key"
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
@@ -3648,7 +3649,7 @@ EOF
               # and a new hash after it alarms again. A stable hash stays as inert
               # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              wedge_episode_end "$key"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
@@ -3656,7 +3657,7 @@ EOF
               fm_wake_append stale "$w" "$stale_reason" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              wedge_episode_end "$key"
               clear_write_tracking "$key"
               stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
@@ -3698,6 +3699,7 @@ EOF
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
+                wedge_episode_end "$key"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
@@ -3735,9 +3737,8 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
         else
-          rm -f "$ssf" "$ewf"
+          wedge_episode_end "$key"
           clear_write_tracking "$key"
-          _wedge_cap_markers_clear "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -3754,9 +3755,8 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
       else
-        rm -f "$ssf" "$ewf"
+        wedge_episode_end "$key"
         clear_write_tracking "$key"
-        _wedge_cap_markers_clear "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
