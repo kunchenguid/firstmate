@@ -180,10 +180,6 @@ ancestry_names_omp() {
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     base=$(basename -- "$comm")
     [ "$base" = omp ] && return 0
-    # A decoy launcher (`ompd`, `comp`) ends the walk: it is the nearest
-    # harness-shaped ancestor, and any bun-shim omp further up belongs to the
-    # outer session, not to this process tree.
-    case "$base" in ompd|comp) return 1 ;; esac
     if [ "$base" = bun ]; then
       args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
       ancestry_arg_has_omp_script "$args" && return 0
@@ -262,9 +258,6 @@ harness_process_verdict() {  # <pid>
     bun)
       args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
       ancestry_arg_has_omp_script "$args" && { echo "args omp"; return; } ;;
-    # A decoy launcher ends the verdict like the gate above: `ompd`/`comp`
-    # must never fall through to an outer bun-shim omp in the same walk.
-    ompd|comp) return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
@@ -314,14 +307,10 @@ harness_process_verdict() {  # <pid>
 # nothing when the walk finds none. The nearest match wins, so a worker nested
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
-  local pid=${1:-$$} verdict base
+  local pid=${1:-$$} verdict
   for _ in 1 2 3 4 5 6 7 8; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
-    # A decoy launcher is terminal: the walk must not pass through `ompd` or
-    # `comp` to an outer bun-shim omp that owns a different process tree.
-    base=$(basename -- "$(ps -o comm= -p "$pid" 2>/dev/null)" 2>/dev/null)
-    case "$base" in ompd|comp) return 0 ;; esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     # Stop only once the walk has EXAMINED the top of the chain. Inside a PID
     # namespace the harness itself is pid 1 - a container, or the `codex sandbox`

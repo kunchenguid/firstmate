@@ -104,6 +104,12 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
   else
     by_argv0=$by_name
   fi
+  # A `bun install -g` omp reports the bun interpreter as its process name with
+  # the omp script as the first argv token, so only the command line names it.
+  if [ -n "$args" ] && fm_harness_bun_omp_args "${name:-$argv0}" "$args"; then
+    printf 'agent'
+    return 0
+  fi
   if [ -n "$pid" ] && fm_gemini_pid_is_gemini "$pid"; then
     printf 'agent'
     return 0
