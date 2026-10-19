@@ -246,6 +246,20 @@ esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
   ambiguous) "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255 ;;
+  # The remote retirement really runs, then reports what its forced secondmate
+  # teardown reports for a lost child slot: tests/fm-teardown.test.sh owns that
+  # remote-side exit 4.
+  retire-lost-slot)
+    rc=0
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$command_name:$_command_action" = fm-remote-secondmate-control.sh:retire ]; then
+      printf 'warning: treehouse return left pool slot 3 (/remote/slot-3) dirty or unverified; the pool lost this slot. Remaining paths:\n' >&2
+      printf '  ?? left-behind-clone/\n' >&2
+      printf 'teardown ios finished its cleanup and removed its task record, but a returned pool slot did not come back clean\n' >&2
+      exit 4
+    fi
+    exit "$rc"
+    ;;
   *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
 esac
 SH
@@ -264,7 +278,18 @@ publish_healthy_watcher_identity() { # <state> <home> <watch-script>
   touch "$state/.last-watcher-beat"
 }
 
+# Every remote leg here runs the real entrypoint and job worker on this
+# machine, which on a loaded runner can outlast the production per-mate
+# convergence budget; tests/fm-bootstrap-network-parallel.test.sh owns that
+# budget's behavior, so this suite gives convergence ample time.
+# The inheritance push overlaps its sends to hide real SSH round trips, but
+# this fixture's transport has none and its job worker still runs one home's
+# commands one at a time, so overlap only adds submission overhead to every
+# remote spawn here; the suite sends one item at a time and leaves the
+# overlapped scheduler to tests/fm-bootstrap-network-parallel.test.sh.
 remote_env() {
+  FM_SECONDMATE_CONVERGENCE_TIMEOUT="${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900}" \
+  FM_REMOTE_INHERIT_PUSH_JOBS=1 \
   FM_HOME="$PARENT" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
@@ -1291,7 +1316,7 @@ while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
 done
 if kill -0 "$watch_pid" 2>/dev/null; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within the bound"
+  fail "the watcher did not exit on its auto-relaunch wake within the bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
@@ -1562,7 +1587,8 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
-remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
+FM_FAKE_SSH_MODE=retire-lost-slot remote_env "$ROOT/bin/fm-teardown.sh" ios \
+  > "$TMP_ROOT/teardown-serialized.out" 2> "$TMP_ROOT/teardown-serialized.err" &
 teardown_pid=$!
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active remote respawn"
@@ -1576,10 +1602,21 @@ sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
-if ! wait "$teardown_pid"; then
-  printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" >&2
-  fail "safe remote retirement failed after handoff serialization"
+teardown_rc=0
+wait "$teardown_pid" || teardown_rc=$?
+if [ "$teardown_rc" -ne 4 ]; then
+  printf 'serialized retirement output:\n%s\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" \
+    "$(cat "$TMP_ROOT/teardown-serialized.err")" >&2
+  fail "remote retirement with a lost child slot did not exit 4 (exit $teardown_rc)"
 fi
+assert_grep 'teardown ios complete (remote ' "$TMP_ROOT/teardown-serialized.out" \
+  "remote retirement with a lost child slot did not report its local completion on stdout"
+assert_grep 'pool slot 3 (/remote/slot-3) dirty or unverified; the pool lost this slot' "$TMP_ROOT/teardown-serialized.err" \
+  "remote retirement did not forward the remote lost-slot warning"
+assert_grep 'left-behind-clone' "$TMP_ROOT/teardown-serialized.err" \
+  "remote retirement did not forward the lost slot's remaining paths"
+assert_no_grep 'teardown ios ' "$TMP_ROOT/teardown-serialized.err" \
+  "remote retirement forwarded remote completion text to stderr"
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \

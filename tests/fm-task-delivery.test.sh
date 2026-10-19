@@ -35,6 +35,7 @@ make_home() {  # <name> [<registry-line>...]
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
+  git -c user.name=test -c user.email=test@example.com -C "$projects/proj" commit -q --allow-empty -m init || fail "could not commit project fixture"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   if [ "$#" -gt 0 ]; then
@@ -1039,6 +1040,7 @@ forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)
 forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
 forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
 forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+an external review forge on direct-PR|- fp [direct-PR forge=external] - fixture (added 2026-01-01)|direct-PR off|external
 a project with no forge keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|none
 a keyed token that is not the forge is ignored|- fp [direct-PR owner=me] - fixture (added 2026-01-01)|direct-PR off|none
 an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|none
@@ -1189,6 +1191,25 @@ EOF
   assert_contains "$out" "--yolo on is refused" "the promotion refusal did not name the refused flag"
   grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
   pass "forge=gerrit: yolo is refused with its reason, never silently dropped"
+}
+
+# A scout launches without the push guard and task record a forge=external
+# ship carries, so promoting one onto such a project is refused outright rather
+# than handing it a contract nothing enforces.
+test_forge_external_refuses_promotion() {
+  local rec home proj fakebin meta out status
+  rec=$(make_home forge-external-promote "- proj [direct-PR forge=external] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  meta="$home/state/forge-ext-p1.meta"
+  printf 'window=fm-forge-ext-p1\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$proj" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" forge-ext-p1 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a promotion onto a forge=external project was accepted"
+  assert_contains "$out" "promotion is refused for forge=external" "the promotion refusal did not say why"
+  grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
+  pass "forge=external: promoting a scout is refused because only a ship spawn installs the push guard"
 }
 
 # The point of binding the forge is that it changes what no-mistakes MEANS for the
@@ -1520,6 +1541,59 @@ STUB
   pass "fm-promote: a promoted worker receives the project's registered forge contract with no flag to remember"
 }
 
+# forgejo is a value of the same binding, so the spawn's agreement check and
+# promotion's registry read carry it exactly as they carry gerrit, while its
+# contract differs only in naming tea and keeping +yolo: a Forgejo pull request
+# is merged through the ordinary merge authority, not an attributed vote.
+test_forge_forgejo_rides_the_same_binding() {
+  local rec home proj fakebin out status sendroot meta payload id
+  rec=$(make_home forge-forgejo "- proj [direct-PR +yolo forge=forgejo] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" forge-forgejo-s1 direct-PR
+  out=$(run_spawn "$home" "$fakebin" forge-forgejo-s1 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a forgejo project launched on a brief that records no forge"
+  assert_contains "$out" "forge mismatch for forge-forgejo-s1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "fm-brief.sh forge-forgejo-s1 proj --mode direct-PR --forge forgejo" \
+    "the refusal did not print the forgejo re-scaffold command"
+  assert_absent "$home/state/forge-forgejo-s1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" forge-forgejo-s2 proj --mode direct-PR --forge forgejo >/dev/null \
+    || fail "a forgejo direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/forge-forgejo-s2/brief.md" "Open the pull request." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-forgejo-s2 "$proj" claude --mode direct-PR --yolo on 2>&1)
+  assert_not_contains "$out" "forge mismatch" "an agreeing forgejo brief and registry were reported as drift"
+  assert_not_contains "$out" "--yolo on is refused" "yolo was refused on forgejo, where only gerrit deactivates it"
+
+  sendroot="$TMP_ROOT/forge-forgejo/sendroot"
+  mkdir -p "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+  id="forge-forgejo-p1"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1) \
+    || fail "promotion should take the forgejo binding and keep yolo: $out"
+  payload="$TMP_ROOT/forge-forgejo/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "promotion's delivery command did not run"
+  grep -qx "Delivery contract: mode=direct-PR forge=forgejo" "$payload" \
+    || fail "the promoted worker did not receive the forgejo delivery contract"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'open a PR with `tea`' "$payload" "the promoted forgejo worker was not told to open the PR with tea"
+  pass "forge=forgejo: spawn agreement and promotion carry the binding, name tea, and keep yolo"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -1640,6 +1714,7 @@ test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
 test_forge_gerrit_refuses_yolo
+test_forge_external_refuses_promotion
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
@@ -1647,6 +1722,7 @@ test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
+test_forge_forgejo_rides_the_same_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"
