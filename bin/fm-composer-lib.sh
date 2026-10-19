@@ -1103,7 +1103,7 @@ EOF
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces title effort model
+  local family=$1 inner=$2 expected=$3 dash spaces title
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -1117,6 +1117,16 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  # Grok 1.0.52 appends the active mode to the title as ` · always-approve`.
+  # The middle dot is one column wide but not ASCII, so read it as a space,
+  # and only when the whole title is the typed Grok shape.
+  case "$spaces" in
+    *' · '*)
+      title=${spaces%" · "*}
+      fm_composer_normalize_trim_var title
+      _fm_composer_grok_title_ok "$title" && spaces=${spaces/" · "/"   "}
+      ;;
+  esac
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -1134,6 +1144,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   [ "$spaces" = "$expected$overhang" ] || return 1
   title=${inner//"$dash"/}
   fm_composer_normalize_trim_var title
+  _fm_composer_grok_title_ok "$title"
+}
+
+# 0 when <title> is the typed Grok model/effort title, `Grok <model> (<effort>)`.
+_fm_composer_grok_title_ok() {  # <title>
+  local title=$1 effort model
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;
@@ -1917,6 +1933,10 @@ EOF
 # and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+# Recorded 2026-10-19 on Grok Build 1.0.52: a folder it has not trusted opens a
+# trust dialog whose Enter accepts Yes, proceed and whose typed y or n answers
+# it, so text typed into it (a steer's doorbell) would answer it by accident.
+# That dialog has no composer, and its last non-blank row is the version footer.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -1927,6 +1947,17 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*Do you trust the contents of this directory\?[ \t\r]*$/ { heading = 1 }
+    heading && /^[ \t]*Grok Build may run or modify contents in this directory,[ \t\r]*$/ { warned = 1 }
+    warned && /^[ \t]*Yes, proceed[ \t]+y[ \t\r]*$/ { yes = 1 }
+    yes && /^[ \t]*No, quit[ \t]+n[ \t\r]*$/ { no = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(no && last ~ /^[ \t]*Grok Build[ \t]+[0-9][0-9.]*[ \t]+\[[a-z]+\][ \t\r]*$/) }
+  '; then
+    printf '%s' 'Grok folder-trust dialog'
     return 0
   fi
   return 1

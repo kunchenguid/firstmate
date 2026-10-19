@@ -1005,6 +1005,97 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+# Grok Build 1.0.52 and 1.0.62 panes captured live in the Herdr lab on
+# 2026-10-19 (tests/fixtures/grok-<version>; the fleet's installed Grok
+# auto-updated from the first to the second that day, and both render the same
+# shapes). The idle composer keeps the persistent "Help
+# improve Grok" opt-in banner above it, ends its title with the active mode
+# (` · always-approve`), and lines up the bottom border with the top one. The
+# trust dialog has no composer at all.
+GROK_FIXTURE_VERSIONS='1.0.52 1.0.62'
+grok_1052_fixture() {  # <version> <name> <ext>
+  cat "$ROOT/tests/fixtures/grok-$1/$2.$3"
+}
+
+# Zero-based row of the composer's content row in a plain capture.
+grok_1052_composer_row() {  # <plain-capture>
+  printf '%s\n' "$1" | awk '/^ *│ ❯/ { print NR - 1; exit }'
+}
+
+test_matrix_grok_1052_idle_composer_with_banner() {
+  local v plain ansi row typed
+  for v in $GROK_FIXTURE_VERSIONS; do
+    plain=$(grok_1052_fixture "$v" idle-composer-banner txt)
+    ansi=$(grok_1052_fixture "$v" idle-composer-banner ansi)
+    row=$(grok_1052_composer_row "$plain")
+    [ -n "$row" ] || fail "the $v idle fixture should hold a composer content row"
+    assert_screen "grok $v idle banner on tmux" empty "$CAPS_TMUX" "$ansi" "$row"
+    assert_screen "grok $v idle banner on herdr" empty "$CAPS_STYLED" "$ansi"
+    assert_screen "grok $v idle banner on zellij" empty "$CAPS_STYLED_NOID" "$ansi"
+    assert_screen "grok $v idle banner on cmux/orca" empty "$CAPS_PLAIN" "$plain"
+    # Typed text in the same box, same width, must still read as typed text.
+    typed=${plain/❯ ??????????????/❯ deploy the fix}
+    [ "$typed" != "$plain" ] || fail "the $v typed variant should differ from the idle fixture"
+    assert_screen "grok $v typed on tmux" pending "$CAPS_TMUX" "$typed" "$row"
+    assert_screen "grok $v typed on herdr" pending "$CAPS_STYLED" "$typed"
+  done
+  pass "matrix: grok 1.0.52 and 1.0.62 idle composers with the opt-in banner and mode title read empty while typed text stays pending"
+}
+
+test_matrix_grok_1052_title_mode_suffix() {
+  local rule_width=63 title_text screen out
+  # grok_1052_box <left-rule-columns> <title> <right-rule-columns>
+  grok_1052_box() {
+    local left=$1 title=$2 right=$3 rule fill i
+    rule=""; fill=""
+    for ((i = 0; i < rule_width; i++)); do rule+='─'; fill+=' '; done
+    printf '  ╭%s╮\n  │ ❯%s│\n  ╰' "$rule" "${fill:2}"
+    for ((i = 0; i < left; i++)); do printf '─'; done
+    printf ' %s ' "$title"
+    for ((i = 0; i < right; i++)); do printf '─'; done
+    printf '╯'
+  }
+  title_text='Grok 4.7 (high) · always-approve'
+  # One column per character: the rule fills the title's width exactly.
+  screen=$(grok_1052_box 28 "$title_text" 1)
+  assert_screen "grok mode suffix aligned" empty "$CAPS_TMUX" "$screen" 1
+  assert_screen "grok mode suffix aligned on herdr" empty "$CAPS_STYLED" "$screen"
+  # A bottom rule a column too wide is a different shape, never proof.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(grok_1052_box 29 "$title_text" 1)")
+  [ "$out" != empty ] || fail "a misaligned mode-suffix title must not read empty, got '$out'"
+  # A mode suffix on a title that is not Grok's typed shape is not accepted.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(grok_1052_box 32 'Deploy now · always-approve' 1)")
+  [ "$out" != empty ] || fail "a non-Grok title with a mode suffix must not read empty, got '$out'"
+  pass "matrix: grok's mode-suffixed title is accepted only when aligned and typed as Grok's model title"
+}
+
+test_matrix_grok_1052_trust_dialog_is_not_a_composer() {
+  local v plain ansi idle out rc
+  for v in $GROK_FIXTURE_VERSIONS; do
+    plain=$(grok_1052_fixture "$v" trust-dialog txt)
+    ansi=$(grok_1052_fixture "$v" trust-dialog ansi)
+    idle=$(grok_1052_fixture "$v" idle-composer-banner txt)
+    assert_screen "grok $v trust dialog on tmux" unknown "$CAPS_TMUX" "$ansi" 1
+    assert_screen "grok $v trust dialog on herdr" unknown "$CAPS_STYLED" "$ansi"
+    assert_screen "grok $v trust dialog on zellij" unknown "$CAPS_STYLED_NOID" "$ansi"
+    assert_screen "grok $v trust dialog on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+    out=$(fm_composer_blocking_dialog "$ansi"); rc=$?
+    [ "$rc" -eq 0 ] || fail "the $v trust dialog should be a blocking dialog"
+    [ "$out" = 'Grok folder-trust dialog' ] || fail "dialog name was '$out'"
+    out=$(fm_composer_blocking_dialog "$plain"); rc=$?
+    [ "$rc" -eq 0 ] || fail "the plain $v trust dialog should be a blocking dialog"
+    out=$(fm_composer_blocking_dialog "$idle"); rc=$?
+    [ "$rc" -eq 1 ] || fail "the idle $v composer is not a blocking dialog"
+    [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+    # The dialog's strings quoted above a live composer are not a live dialog.
+    out=$(fm_composer_blocking_dialog "$plain"$'\n'"$idle"); rc=$?
+    [ "$rc" -eq 1 ] || fail "$v dialog text above a live composer must not match"
+  done
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' 'Do you trust the contents of this directory?' 'Yes, proceed   y' 'No, quit   n')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the dialog's rows without its warning and version footer must not match"
+  pass "matrix: grok 1.0.52 and 1.0.62 folder-trust dialogs are never a composer and are named as a blocking dialog"
+}
+
 test_matrix_claude_titled_top_rule() {
   # A named Claude Code session draws its title into the composer's TOP rule
   # (issues #5601 and #5558; observed on herdr as
@@ -1311,6 +1402,9 @@ test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_1052_idle_composer_with_banner
+test_matrix_grok_1052_title_mode_suffix
+test_matrix_grok_1052_trust_dialog_is_not_a_composer
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump

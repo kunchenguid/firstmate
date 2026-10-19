@@ -112,6 +112,77 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
+# Wrap the spawn tmux so a pane capture shows the given fixture screen.
+# Everything else, including the launch logging, is the stock fake.
+grok_fake_pane() {  # <fakebin> <fixture-txt-or-empty> <cursor-row>
+  local fakebin=$1 screen=$2 cursor=$3
+  [ -e "$fakebin/tmux-base" ] || mv "$fakebin/tmux" "$fakebin/tmux-base"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *cursor_y*) printf '%s\n' '$cursor'; exit 0 ;;
+esac
+case "\${1:-}" in
+  capture-pane) [ -z '$screen' ] || cat '$screen'; exit 0 ;;
+esac
+exec '$fakebin/tmux-base' "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+test_grok_spawn_surfaces_trust_dialog_without_typing() {
+  local v rec case_dir home proj wt fakebin grok_home id out status launches
+  for v in 1.0.52 1.0.62; do
+    rec=$(make_spawn_case "trust-$v")
+    IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/trust-dialog.txt" 1
+    : > "$case_dir/launch.log"
+    out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" FM_GROK_POLL_INTERVAL=0 \
+      run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+    status=$?
+    expect_code 0 "$status" "a spawn parked on the grok $v trust dialog should still succeed"
+    assert_contains "$out" "spawned $id harness=grok" "the $v spawn did not report success"
+    assert_contains "$out" "Grok folder-trust dialog is open" "the $v spawn did not surface the trust dialog"
+    assert_contains "$out" "fm-send.sh $id --key Enter" "the $v spawn did not name the sanctioned answer"
+    assert_grep 'blocked [key=grok-trust-dialog] [at=' "$home/state/$id.status" "the $v spawn did not record the open blocker"
+    launches=$(grep -c . "$case_dir/launch.log" || true)
+    [ "$launches" -eq 1 ] || fail "the $v spawn typed more than the launch command: $(cat "$case_dir/launch.log")"
+  done
+  pass "grok spawn surfaces the 1.0.52 and 1.0.62 trust dialogs as an open blocker and types nothing into them"
+}
+
+test_grok_spawn_is_quiet_on_a_trusted_folder() {
+  local v rec case_dir home proj wt fakebin grok_home id out status row
+  for v in 1.0.52 1.0.62; do
+    rec=$(make_spawn_case "idle-$v")
+    IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+    row=$(awk '/^ *│ ❯/ { print NR - 1; exit }' "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.txt")
+    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.txt" "$row"
+    out=$(FM_GROK_POLL_INTERVAL=0 run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+    status=$?
+    expect_code 0 "$status" "a spawn onto the grok $v idle composer should succeed"
+    assert_not_contains "$out" "trust dialog" "the $v idle composer was reported as a trust dialog"
+    [ ! -e "$home/state/$id.status" ] || assert_no_grep 'grok-trust-dialog' "$home/state/$id.status" "the $v idle composer recorded a trust blocker"
+  done
+  # A pane that shows nothing for the whole budget is not a dialog either.
+  rec=$(make_spawn_case blank)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  grok_fake_pane "$fakebin" '' 1
+  out=$(FM_GROK_TRUST_POLLS=3 FM_GROK_POLL_INTERVAL=0 run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 0 "$status" "a spawn onto a blank pane should succeed"
+  [ ! -e "$home/state/$id.status" ] || assert_no_grep 'grok-trust-dialog' "$home/state/$id.status" "a blank pane recorded a trust blocker"
+  pass "grok spawn reports nothing on an idle composer or a blank pane"
+}
+
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
+test_grok_spawn_surfaces_trust_dialog_without_typing
+test_grok_spawn_is_quiet_on_a_trusted_folder
 test_fm_lock_recognizes_grok_holder
