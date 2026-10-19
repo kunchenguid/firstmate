@@ -239,7 +239,37 @@ Text.'
   assert_equals 'untitled' \
     "$(payload_of "$page" | jq -r '.[] | select(.id == "untitled") | .title')" \
     "a report without a heading must fall back to its id"
+  write_report "$home" later 'Text before heading.
+
+# A later heading is content, not the list title.'
+  build "$home" >/dev/null || fail "rebuild failed"
+  assert_equals 'later' \
+    "$(payload_of "$page" | jq -r '.[] | select(.id == "later") | .title')" \
+    "a report without a first-line heading must fall back to its id"
   pass "the list title comes from the first heading, else the id"
+}
+
+test_unsafe_link_and_image_schemes_are_rejected() {
+  local home page html
+  home=$(new_home)
+  write_report "$home" schemes '# Schemes
+
+[javascript](javascript:alert(1)) [vbscript](vbscript:alert(1)) [file](file:///etc/passwd)
+[obfuscated](java&#58;script:alert(1))
+![bad data](data:text/html,alert(1)) ![bad file](file:///etc/passwd)
+[good](https://example.test/path)'
+  build "$home" >/dev/null || fail "build failed"
+  page="$home/state/reports.html"
+  html=$(html_of "$page" schemes)
+  assert_not_contains "$html" 'href="javascript:' "javascript links must be inert"
+  assert_not_contains "$html" 'href="vbscript:' "vbscript links must be inert"
+  assert_not_contains "$html" 'href="file:' "file links must be inert"
+  assert_not_contains "$html" 'href="javascript&#58;' "entity-obfuscated schemes must be inert"
+  assert_not_contains "$html" 'src="data:' "unsafe data images must be inert"
+  assert_not_contains "$html" 'src="file:' "file images must be inert"
+  assert_contains "$html" 'href="https://example.test/path"' "https links must remain usable"
+  assert_contains "$html" 'bad data' "rejected images must leave their alt text visible"
+  pass "unsafe link and image schemes are rejected"
 }
 
 test_hard_break_becomes_a_line_break() {
@@ -312,17 +342,21 @@ test_build_refuses_without_a_home() {
   pass "build refuses without a home"
 }
 
-# The build refuses a template that does not carry exactly one of each slot, so
-# the shipped template has to satisfy that contract or no home can build at all.
-# Naming the path here is also what maps a template change to this suite.
-test_shipped_template_carries_exactly_one_of_each_slot() {
-  local template="$ROOT/.agents/skills/reports-page/assets/page-template.html"
-  assert_present "$template" "the shipped page template must exist"
-  assert_equals 1 "$(grep -cxF '__FM_REPORTS_DATA__' "$template")" \
-    "the shipped template must carry exactly one data slot"
-  assert_equals 1 "$(grep -cxF 'const BUILT = "__FM_REPORTS_BUILT__";' "$template")" \
-    "the shipped template must carry exactly one build stamp"
-  pass "the shipped page template carries exactly one of each slot"
+# Exercise the shipped template at its public build interface. Keep its path
+# explicit so changed-file test mapping associates template edits with this test.
+test_shipped_template_build_replaces_both_slots() {
+  local home page
+  home=$(new_home)
+  write_report "$home" shipped '# Shipped payload'
+  FM_HOME="$home" FM_REPORTS_PAGE_TEMPLATE="$ROOT/.agents/skills/reports-page/assets/page-template.html" \
+    bash "$PAGE_SH" build >/dev/null || fail "build with shipped template failed"
+  page="$home/state/reports.html"
+  assert_equals 1 "$(payload_of "$page" | jq 'length')" "the shipped template must carry the built payload"
+  assert_contains "$(payload_of "$page")" 'Shipped payload' "the payload slot must be replaced"
+  assert_not_contains "$(cat "$page")" '__FM_REPORTS_' "no template slot may survive the build"
+  assert_not_contains "$(cat "$page")" 'const BUILT = "__FM_REPORTS_BUILT__"' "the stamp slot must be replaced"
+  assert_contains "$(cat "$page")" 'const BUILT = "' "the built page must carry a timestamp"
+  pass "the shipped template builds with both slots replaced"
 }
 
 test_build_refuses_a_template_without_a_slot() {
@@ -371,6 +405,7 @@ test_symlinked_report_is_not_read
 test_path_prints_the_page_path
 test_link_proves_the_report_exists
 test_build_refuses_without_a_home
-test_shipped_template_carries_exactly_one_of_each_slot
+test_unsafe_link_and_image_schemes_are_rejected
+test_shipped_template_build_replaces_both_slots
 test_build_refuses_a_template_without_a_slot
 test_page_fetches_nothing

@@ -40,6 +40,18 @@ def clean_inline:
   | gsub("`|\\*|~~"; "")
   | gsub("^[[:space:]]+|[[:space:]]+$"; "");
 
+def unsafe_url($url; $image):
+  ($url
+   | gsub("(?i)&amp;"; "&")
+   | gsub("(?i)&#(?:0*58|x0*3a);"; ":")
+   | gsub("(?i)&colon;"; ":")
+   | explode | map(select(. > 32 and (. < 127 or . > 159))) | implode
+   | ascii_downcase) as $check
+  | if ($check | test("^(javascript|vbscript|file):")) then true
+    elif ($check | test("^data:")) then
+      (if $image then ($check | test("^data:image/(png|gif|jpeg|webp|avif);")) else false end) | not
+    else false end;
+
 def emph:
   gsub("\\*\\*(?<x>[^*]+)\\*\\*"; "<strong>\(.x)</strong>")
   | gsub("(?<![A-Za-z0-9_])__(?<x>[^_]+)__(?![A-Za-z0-9_])"; "<strong>\(.x)</strong>")
@@ -84,7 +96,9 @@ def inline_links:
         | if $m.offset < .cur then .
           else
             .s += $t[(.cur):($m.offset)]
-            | park(if $bang == "!"
+            | park(if unsafe_url($url; ($bang == "!")) then
+                (if $bang == "!" then ($txt | gsub("[0-9]+"; "")) else ($txt | emph) end)
+              elif $bang == "!"
                 then "<img src=\"" + $url + "\" alt=\"" + ($txt | gsub("[0-9]+"; "")) + "\" loading=\"lazy\">"
                 else "<a href=\"" + $url + "\">" + ($txt | emph) + "</a>" end)
             | .cur = ($m.offset + $m.length)
@@ -304,7 +318,7 @@ def md_to_html:
   | .out | join("\n");
 
 def title_of($md; $id):
-  (($md | gsub("\r"; "") | (match("(?m)^#[ \\t]+(?<t>.+)$") // null)) as $m
+  (($md | gsub("\\r"; "") | split("\n") | .[0] | (match("^#[ \\t]+(?<t>.+)$") // null)) as $m
    | if $m == null then "" else ($m.captures[0].string // "") end
    | clean_inline) as $t
   | if $t == "" then $id else $t end;

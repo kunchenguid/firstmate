@@ -12,7 +12,7 @@
   text through textContent or its html through one container, never through
   string concatenation into the document.
 -->
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -207,14 +207,14 @@ body.no-index:not(.drawer) aside { display: none; }
 <body>
 <aside>
   <div class="head">
-    <h1>Reports</h1>
-    <input type="search" id="q" placeholder="Search (title and body)" autocomplete="off" aria-label="Search reports">
+    <h1>Berichte</h1>
+    <input type="search" id="q" placeholder="Suchen (Titel und Inhalt)" autocomplete="off" aria-label="Berichte suchen">
     <select id="sort" aria-label="Sort reports">
-      <option value="new">Newest first</option>
-      <option value="old">Oldest first</option>
-      <option value="az">Title A to Z</option>
-      <option value="za">Title Z to A</option>
-      <option value="file">File name</option>
+      <option value="new">Neueste zuerst</option>
+      <option value="old">Aelteste zuerst</option>
+      <option value="az">Titel A bis Z</option>
+      <option value="za">Titel Z bis A</option>
+      <option value="file">Dateiname</option>
     </select>
     <div class="count" id="count"></div>
   </div>
@@ -296,8 +296,8 @@ function current() {
 function paint() {
   const needle = el.q.value.trim().toLowerCase();
   shown = order(REPORTS.filter((r, i) => matches(i, needle)));
-  el.count.textContent = shown.length + " of " + REPORTS.length +
-    (BUILT ? " · built " + BUILT : "");
+  el.count.textContent = shown.length + " von " + REPORTS.length +
+    (BUILT ? " · erzeugt " + BUILT : "");
   el.list.textContent = "";
   if (!shown.length) {
     const none = document.createElement("div");

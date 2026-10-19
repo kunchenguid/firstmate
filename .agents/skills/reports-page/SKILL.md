@@ -40,9 +40,9 @@ Inside a report, a link to one of its own headings jumps to that heading and sta
 
 These are the properties the page relies on; they are what a report should already look like.
 
-- One report per task, at `data/<id>/report.md`, and that `<id>` is the anchor.
+- One report per task, at `data/<id>/report.md`; the anchor `<id>` uses only lowercase letters, digits, and hyphens.
 - First line `# <title>`, which becomes the list title; without one the list shows the id instead.
 - Raw HTML in a report is shown as text, never rendered, so a report can quote markup safely.
 - The rendered markdown subset is owned by `bin/fm-reports-render.jq`: headings, paragraphs, hard line breaks, lists, tables, quotes, fenced and inline code, emphasis, links, images, and bare URLs.
 - A cross-reference to another report needs that report's own link; a bare `#<other-id>` inside a report is treated as a heading jump and does not change the report.
-- Reports stay free of credentials and keys, exactly as before: the page makes them easier to find, not safer to store.
+- Never include credentials, keys, or passwords in a report: the page makes them easier to find, not safer to store.
