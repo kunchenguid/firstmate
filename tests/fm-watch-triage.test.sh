@@ -6160,6 +6160,45 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
 
+# A drain acknowledgement without `handled` leaves the result for reconcile to
+# re-announce. That queued copy waits for the next drain: it must not re-wake
+# every cycle as recovery, while a genuine downtime still resurfaces once.
+test_procevent_acknowledged_unhandled_result_does_not_rewake() {
+  local dir state out pid copies
+  dir=$(make_case procevent-acked-unhandled); state="$dir/state"; out="$dir/watch.out"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "main could not acknowledge the first process-event wake"
+
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! { wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid"; }; then
+    fail "a re-announced, acknowledged process-event result re-woke the watcher: $(cat "$out")"
+  fi
+  copies=$(grep -c 'procevent lavish delivery-src 1' "$state/.wake-queue" 2>/dev/null)
+  [ "$copies" = 1 ] || fail "the unhandled result should stay queued once for the next drain, found $copies copies"
+  reap "$pid"
+
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a genuine watcher downtime did not resurface: $(cat "$out")"
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "the downtime did not resurface as recovery: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "main could not acknowledge the downtime recovery"
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! { wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid"; }; then
+    fail "an acknowledged downtime resurfaced again: $(cat "$out")"
+  fi
+  reap "$pid"
+  pass "an acknowledged but unhandled process-event result waits for the next drain without a recovery loop"
+}
+
 test_procevent_marker_keys_are_injective() {
   local dir state out pid marker_count
   dir=$(make_case procevent-marker-identity); state="$dir/state"; out="$dir/watch.out"
@@ -7091,6 +7130,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
+test_procevent_acknowledged_unhandled_result_does_not_rewake
 test_procevent_marker_keys_are_injective
 test_procevent_headlines_classify_queue_keys
 test_procevent_launch_failed_episodes_are_each_delivered
