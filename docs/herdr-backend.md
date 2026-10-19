@@ -310,6 +310,7 @@ Every task runs in a linked git worktree of its project clone that the pane's ro
 The parent is resolved or created before the task workspace exists, so it is older than every child Herdr could otherwise elect as the repository's group source.
 It counts as a member of its home's contiguous block for ordering and for the restart binding only once its first child has attached and it carries Herdr's own non-linked provenance; a fresh parent is an unrelated row to both, so the ordering move puts its first child in the home block ahead of it.
 A missing parent is therefore created only when that guarded workspace move is available, and otherwise the task stays flat with one warning; when the move lands, a parent whose attach never happened cannot strand any later task's ordering or binding.
+When a task is grouped under a repo parent, adopted or freshly created, that parent group decides its position: the ordering move ignores the [project-group](#project-groups) order key and keeps the block-end target, while a task without a repo parent keeps project-group placement unchanged.
 When the ordering does not place the task ahead of the parent it just created, because the move failed at runtime, came back unverifiable, or the layout read as ambiguous, the same spawn removes exactly that parent again while it is still childless and leaves the task in its flat row with the ordering warning plus one line naming the removed parent.
 The removal is never a workspace close: the parent's one seeded pane is closed through the focus-preserving pane path, so Herdr removes the emptied workspace through its pane-death path under the focus snapshot and restore.
 This keeps a parent without provenance from standing ahead of a child, where later ordering would read the layout as ambiguous and later bindings would fail; the next task on that repository creates the parent afresh.
@@ -655,6 +656,7 @@ With project groups on, a new projected task is placed inside its owning parent'
 A child without that token counts as sorting before it, so untagged children never move behind a new task.
 Everything else is [Ordering](#ordering) unchanged: one verified move of the new workspace only, never an existing child, a parent, or a foreign workspace, and every ambiguity leaves the new task where Herdr created it.
 A task whose group changes later keeps its position until it ends.
+When a task is grouped under a [repo parent](#repository-worktree-groups), that parent group decides its position and the project-group order key is not used for that move; otherwise project-group placement is unchanged.
 
 ### Verification status
 

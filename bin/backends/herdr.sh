@@ -1514,6 +1514,18 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   printf '%s\n' "$shell_pid"
 }
 
+# fm_backend_herdr_projection_group_order_key: print the opt-in project-group
+# order key the spawn hands to fm_backend_herdr_projection_order_best_effort.
+# Repo-parent precedence: a non-empty <repo-parent-workspace-id> means the task
+# is grouped under that repo parent, which decides its position, so nothing is
+# printed (block-end placement) and <groups-script> is never consulted.
+# Otherwise it prints `<groups-script> order-key <task-id> <project>` and
+# returns that command's status. The caller checks the project-groups setting.
+fm_backend_herdr_projection_group_order_key() {  # <repo-parent-workspace-id> <groups-script> <task-id> <project>
+  [ -z "$1" ] || return 0
+  "$2" order-key "$3" "$4" 2>/dev/null
+}
+
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.

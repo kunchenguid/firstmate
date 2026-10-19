@@ -3184,6 +3184,48 @@ test_projection_order_group_key_places_new_task_inside_its_group() {
   pass "herdr presentation ordering: a group key places only the new workspace inside its group, untagged children stay ahead"
 }
 
+# With config/herdr-project-groups on, the spawn computes its ordering key
+# through fm_backend_herdr_projection_group_order_key with the real
+# bin/fm-herdr-groups.sh. Layout for both cases: home, two tagged children
+# (001.Web, 003.Other), then a fresh repo parent wF with no provenance yet.
+group_order_key_case() {  # <name> <repo-parent-workspace-id>: prints "<key>|<groups calls>"
+  local name=$1 repo_parent=$2 home wrapper key
+  home="$TMP_ROOT/group-key-$name"; mkdir -p "$home/state" "$home/config"
+  printf 'Web task:web\nBackend task:api\nOther task:zzz\n' > "$home/config/herdr-project-groups"
+  wrapper="$home/groups"; : > "$home/calls"
+  cat > "$wrapper" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/calls"
+exec "$ROOT/bin/fm-herdr-groups.sh" "\$@"
+SH
+  chmod +x "$wrapper"
+  key=$(env FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_group_order_key "$1" "$2" api-new /p/storefront' \
+    "$ROOT" "$repo_parent" "$wrapper") || fail "group order key ($name) failed"
+  printf '%s|%s' "$key" "$(cat "$home/calls")"
+}
+
+test_projection_group_key_yields_to_a_repo_parent() {
+  local children got at
+  children='[{"workspace_id":"w2","label":"└ a · p:AbCdEfGhIjKlMnOpQrStU1","tokens":{"fm_group_order":"001.Web"}},
+             {"workspace_id":"w3","label":"└ c · p:AbCdEfGhIjKlMnOpQrStU3","tokens":{"fm_group_order":"003.Other"}},
+             {"workspace_id":"wF","label":"foo"}]'
+  # A repo parent applies: the ordering call gets an empty key without the
+  # groups script being consulted, so the first child takes the block end,
+  # which is ahead of its fresh parent.
+  got=$(group_order_key_case with-repo-parent wF)
+  [ "$got" = "|" ] || fail "with a repo parent the ordering key must be empty and the groups script unused, got: $got"
+  at=$(run_group_order_case repo-parent-precedence "${got%%|*}" "$children")
+  [ "$at" = 3 ] || fail "with a repo parent the first child must land at the block end ahead of its fresh parent, got index: $at"
+  # No repo parent: the upstream project-group key is still passed and
+  # honoured inside the block.
+  got=$(group_order_key_case without-repo-parent '')
+  [ "$got" = "002.Backend|order-key api-new /p/storefront" ] || fail "without a repo parent the project-group key must be passed, got: $got"
+  at=$(run_group_order_case no-repo-parent "${got%%|*}" "$children")
+  [ "$at" = 2 ] || fail "without a repo parent the group key must place the task inside its group, got index: $at"
+  pass "herdr presentation ordering: a repo parent takes precedence over the project-group key; without one the key is honoured"
+}
+
 test_projection_order_secondmate_parent_block() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order-secondmate"; mkdir -p "$dir/responses"
@@ -6963,6 +7005,7 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_group_key_places_new_task_inside_its_group
+test_projection_group_key_yields_to_a_repo_parent
 test_projection_order_foreign_legacy_child_is_read_only
 test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets

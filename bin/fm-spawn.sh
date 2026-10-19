@@ -4460,9 +4460,10 @@ else
             # or fresh), the repo parent group decides its position, so the
             # move gets an empty key and keeps the block-end placement.
             HERDR_GROUP_ORDER_KEY=
-            [ ! -e "$CONFIG/herdr-project-groups" ] || [ -n "$HERDR_REPO_PARENT_WORKSPACE_ID" ] ||
+            [ ! -e "$CONFIG/herdr-project-groups" ] ||
               HERDR_GROUP_ORDER_KEY=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
-                "$SCRIPT_DIR/fm-herdr-groups.sh" order-key "$ID" "$PROJ_ABS" 2>/dev/null) || HERDR_GROUP_ORDER_KEY=
+                fm_backend_herdr_projection_group_order_key "$HERDR_REPO_PARENT_WORKSPACE_ID" \
+                "$SCRIPT_DIR/fm-herdr-groups.sh" "$ID" "$PROJ_ABS") || HERDR_GROUP_ORDER_KEY=
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" \
               "$HERDR_GROUP_ORDER_KEY"
