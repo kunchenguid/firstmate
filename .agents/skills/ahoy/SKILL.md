@@ -27,7 +27,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    Never infer captain authorship merely because a synthetic message appears in the user-role transcript.
    Do not exclude an ordinary captain message merely because it begins with U+2063 followed by other text, contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or embeds a current operational message after ordinary captain text, quotes or mentions the legacy session-start payload, or adds any text to that payload.
    Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message: `Captain quote: ` followed by that current prefix is a captain boundary.
-   The legacy session-start exclusion applies only to the verbatim payload above; for example, `Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.` is a captain boundary.
+   The legacy session-start exclusion applies only to the verbatim payload above; for example, ``Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` is a captain boundary.
 3. If no prior real captain message exists, load [`../bearings/SKILL.md`](../bearings/SKILL.md) and follow it exactly.
    Bearings alone owns its gathering, artifact, and response contract.
    Do not restate that contract or combine a session recap with Bearings output.
