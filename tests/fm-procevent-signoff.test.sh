@@ -38,12 +38,14 @@ case "${1-}" in
   --version) echo 'sign-off-axi stub' ;;
   raise)
     shift
-    key='' title='' about='' close=''
+    [ -z "${SIGNOFF_REFUSE-}" ] || { echo 'error: refused by the stub'; exit 1; }
+    key='' title='' about='' close='' why=''
     while [ "$#" -gt 1 ]; do
       case "$1" in
         --key) key=$2 ;;
         --title) title=$2 ;;
         --about) about=$2 ;;
+        --why) why=$2 ;;
         --close) close=$2 ;;
       esac
       shift 2
@@ -52,8 +54,8 @@ case "${1-}" in
       echo 'already answered'
       exit 0
     fi
-    jq --arg k "$key" --arg t "$title" --arg a "$about" --arg c "$close" \
-      '.[$k] = {answer: null, label: "", close: $c, at: null, title: $t, about: $a}' \
+    jq --arg k "$key" --arg t "$title" --arg a "$about" --arg c "$close" --arg w "$why" \
+      '.[$k] = {answer: null, label: "", close: $c, at: null, title: $t, about: $a, why: $w}' \
       "$SIGNOFF_BOARD" > "$SIGNOFF_BOARD.tmp" && mv "$SIGNOFF_BOARD.tmp" "$SIGNOFF_BOARD"
     echo raised
     ;;
@@ -146,6 +148,106 @@ delivered | grep -qF "T3" || fail "a permanently skipped answer was not recorded
 printf '0' > "$INTAKE_RC"
 pass "a batch whose every skip is permanent is acknowledged and not offered again"
 
+# The installed sign-off-axi is the contract: a raise it refuses must break here.
+if command -v sign-off-axi >/dev/null 2>&1; then
+  real_signoff=$(command -v sign-off-axi)
+  mkdir -p "$TMP_ROOT/realbin"
+  ln -s "$real_signoff" "$TMP_ROOT/realbin/sign-off-axi"
+  hold_as '2026-10-12T13:00:00Z#0'
+  # The tool is armed by the source file alone; $HOME is the throwaway one, so its default board is private.
+  PATH="$TMP_ROOT/realbin:$PATH" FM_ROOT_OVERRIDE="$ROOTCOPY" FM_HOME="$FM_HOME_DIR" \
+    FM_STATE_OVERRIDE="$FM_HOME_DIR/state" FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims" \
+    "$ROOTCOPY/bin/fm-procevent-signoff.sh" raise live 'Live contract' \
+    'Does the live contract hold up? More detail follows.' 'done' >/dev/null 2>"$TMP_ROOT/real-stderr" \
+    || fail "the installed sign-off-axi refused the card: $(cat "$TMP_ROOT/real-stderr")"
+  grep -qF 'Does the live contract hold up?' "$HOME/.sign-off/decisions.json" \
+    || fail "the installed sign-off-axi holds no card for the hold"
+  pass "the installed sign-off-axi accepts the card a hold raises"
+
+  raise_live() {  # <task-id> <reason>
+    PATH="$TMP_ROOT/realbin:$PATH" FM_ROOT_OVERRIDE="$ROOTCOPY" FM_HOME="$FM_HOME_DIR" \
+      FM_STATE_OVERRIDE="$FM_HOME_DIR/state" FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims" \
+      "$ROOTCOPY/bin/fm-procevent-signoff.sh" raise "$1" 'Live task' "$2" 'done' >/dev/null 2>"$TMP_ROOT/real-stderr"
+  }
+  card_titled() { jq -e --arg t "$1" '[.. | objects | select(.title? == $t)] | length > 0' "$HOME/.sign-off/decisions.json" >/dev/null; }
+
+  hold_as '2026-10-12T14:00:00Z#0'
+  raise_live noq 'needs a call' || fail "the installed sign-off-axi refused a card for a reason with no question: $(cat "$TMP_ROOT/real-stderr")"
+  card_titled 'needs a call?' || fail "the card for a reason with no question has no title"
+  pass "a reason with no question raises a card with a question title"
+
+  hold_as '2026-10-12T14:01:00Z#0'
+  raise_live long 'Should we move the card raise to the nightly job after the migration lands on main?' \
+    || fail "the installed sign-off-axi refused a card for a question over 12 words: $(cat "$TMP_ROOT/real-stderr")"
+  card_titled 'Should we move the card raise to the nightly job after the?' \
+    || fail "the card for a question over 12 words kept more than 12 words in its title"
+  pass "a question over 12 words raises a card whose title is cut to 12 words"
+else
+  echo "skip: sign-off-axi is not installed; the live raise contract was not checked"
+fi
+
+# A refused raise must be loud: the adapter exits nonzero with the tool's own text.
+cat > "$TMP_ROOT/refusebin-sign-off-axi" <<'SH'
+#!/usr/bin/env bash
+echo 'error: --why is required'; exit 1
+SH
+mkdir -p "$TMP_ROOT/refusebin"; mv "$TMP_ROOT/refusebin-sign-off-axi" "$TMP_ROOT/refusebin/sign-off-axi"; chmod +x "$TMP_ROOT/refusebin/sign-off-axi"
+out=$(PATH="$TMP_ROOT/refusebin:$PATH" FM_ROOT_OVERRIDE="$ROOTCOPY" FM_HOME="$FM_HOME_DIR" \
+  FM_STATE_OVERRIDE="$FM_HOME_DIR/state" FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims" \
+  "$ROOTCOPY/bin/fm-procevent-signoff.sh" raise T9 'Ship T9' 'needs a call' 'done' 2>&1) \
+  && fail "a refused raise exited zero"
+case "$out" in *"--why is required"*) : ;; *) fail "the refusal text was lost: $out" ;; esac
+pass "a refused raise exits nonzero with the sign-off-axi error text"
+
+cat > "$TMP_ROOT/refusebin/sign-off-axi" <<'SH'
+#!/usr/bin/env bash
+echo 'error: key already holds a different question'; exit 1
+SH
+out=$(PATH="$TMP_ROOT/refusebin:$PATH" FM_ROOT_OVERRIDE="$ROOTCOPY" FM_HOME="$FM_HOME_DIR" \
+  FM_STATE_OVERRIDE="$FM_HOME_DIR/state" FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims" \
+  "$ROOTCOPY/bin/fm-procevent-signoff.sh" raise T9 'Ship T9' 'Changed reason?' 'done' 2>&1) \
+  || fail "a re-raise of an existing card with a changed question exited nonzero: $out"
+case "$out" in *"already exists with another question"*) : ;; *) fail "the kept card was not reported: $out" ;; esac
+pass "a re-raise of an existing card with a changed question keeps the card and exits zero"
+
+hold_as '2026-10-12T13:10:00Z#0'
+adapter raise T10 'Ship T10' 'Pick route? Ship v1 or v2? Reply by Friday.' 'done' >/dev/null 2>&1 \
+  || fail "a card for a reason with several questions was not raised"
+jq -e '.[] | select(.title == "Ship v1 or v2?" and .why == "Pick route? Ship v1 or v2? Reply by Friday. Answer yes or no. The hold stays open until you answer.")' "$SIGNOFF_BOARD" >/dev/null \
+  || fail "the card dropped reason text: $(jq -c . "$SIGNOFF_BOARD")"
+hold_as '2026-10-12T13:11:00Z#0'
+adapter raise T11 'Ship T11' 'Captain hold:' 'done' >/dev/null 2>&1 \
+  || fail "a card for a reason that is only the hold prefix was not raised"
+jq -e '.[] | select(.why == "Captain hold: Answer yes or no. The hold stays open until you answer.")' "$SIGNOFF_BOARD" >/dev/null \
+  || fail "the card for a prefix-only reason has no why"
+pass "a card keeps every sentence of the reason and falls back to the raw reason for why"
+
+if ! command -v tasks-axi >/dev/null 2>&1; then
+  echo "skip: tasks-axi is not installed; the refused-card hold was not checked"
+else
+  md_home="$TMP_ROOT/md-home"
+  mkdir -p "$md_home/data" "$md_home/config" "$md_home/projects" "$md_home/state"
+  printf '# Backlog\n\n## Backlog\n\n## In flight\n\n## Done\n' > "$md_home/data/backlog.md"
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' > "$md_home/.tasks.toml"
+  md_env() {
+    PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$md_home" FM_STATE_OVERRIDE="$md_home/state" \
+      FM_DATA_OVERRIDE="$md_home/data" FM_CONFIG_OVERRIDE="$md_home/config" FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/md-claims" "$@"
+  }
+  md_env "$ROOT/bin/fm-procevent-signoff.sh" arm >/dev/null || fail "the markdown home did not arm the sign-off adapter"
+  (cd "$md_home" && BEADS_ACTOR=fixture tasks-axi add fm-sample-refused "Refused card") >/dev/null 2>&1 \
+    || fail "could not create the refused-card work item"
+  export SIGNOFF_REFUSE=1
+  if err=$(md_env "$ROOT/bin/fm-captain-hold.sh" hold fm-sample-refused --title "Refused card" --reason "needs a call" 2>&1 >/dev/null); then
+    unset SIGNOFF_REFUSE
+    fail "a hold whose card was refused exited zero"
+  fi
+  unset SIGNOFF_REFUSE
+  case "$err" in *"refused by the stub"*) : ;; *) fail "the card refusal text was lost: $err" ;; esac
+  show=$(cd "$md_home" && BEADS_ACTOR=fixture tasks-axi show fm-sample-refused --full 2>&1)
+  case "$show" in *"held: yes"*) : ;; *) fail "a refused card released the hold: $show" ;; esac
+  pass "a hold whose card is refused exits nonzero with the sign-off error and stays held"
+fi
+
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 probe_tasks_axi_beads() {
@@ -224,15 +326,16 @@ real_env "$real_home" "$ROOT/bin/fm-captain-hold.sh" hold fm-sample-later \
   || fail "the dated deferral was not held"
 [ "$(board_count)" = "$before" ] || fail "a dated deferral raised a card: $(cat "$SIGNOFF_BOARD")"
 
-q=$(card_for "Pick the route")
+q=$(card_for "Which route?")
 [ -n "$q" ] || fail "the held question raised no card: $(cat "$SIGNOFF_BOARD")"
 jq -e --arg k "$q" '.[$k] | .about == "Which route?" and .close == "done"' "$SIGNOFF_BOARD" >/dev/null \
   || fail "the question card lost its reason or close: $(cat "$SIGNOFF_BOARD")"
-w=$(card_for "Gated work")
+w=$(card_for "captain approves the work")
 [ -n "$w" ] || fail "the held existing work item raised no card: $(cat "$SIGNOFF_BOARD")"
 jq -e --arg k "$w" '.[$k] | .about == "captain approves the work" and .close == "release"' "$SIGNOFF_BOARD" >/dev/null \
   || fail "the work card lost its reason or close: $(cat "$SIGNOFF_BOARD")"
 pass "a new question raises a done card and an existing work item a release card, each with its title and reason; a dated deferral raises none"
+
 
 jq --arg k "$q" '.[$k] += {answer: "reconcile", label: "", close: "done", at: "2026-10-12T23:00:00Z"}' \
   "$SIGNOFF_BOARD" > "$SIGNOFF_BOARD.tmp" && mv "$SIGNOFF_BOARD.tmp" "$SIGNOFF_BOARD"

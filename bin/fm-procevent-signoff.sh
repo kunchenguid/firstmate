@@ -23,7 +23,7 @@
 #            live card; the hold reason is its `about` and the given close
 #            mode; otherwise it is a silent no-op. A failure, including a missing
 #            sign-off-axi, exits nonzero with sign-off's own output; the caller
-#            warns and keeps the hold.
+#            fails the hold command with that output (the hold stays recorded).
 # poll       The blocking child the runner executes; never run it in a
 #            conversational turn. It prints one JSON object per line for each
 #            deliverable answer, `{"key","answer","label","close","at"}` with the
@@ -62,7 +62,7 @@
 # being handed another home's answer, and the stamp gives each hold occurrence
 # its own card. sign-off-axi must be on PATH: without it `arm`
 # refuses, and `raise` prints an install hint and fails, so a hold is kept and
-# only warns. Cards and answers use sign-off's default board
+# fails the hold command. Cards and answers use sign-off's default board
 # (~/.sign-off/decisions.json), the one `sign-off-axi open` shows.
 # ponytail: one default board per machine; add a board option when a home needs its own.
 # sign-off-axi has no command to withdraw a card, so a hold answered through
@@ -123,24 +123,76 @@ cmd_retire() {
   "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$SOURCE_ID" >/dev/null || exit 1
 }
 
+ANSWER_NOTE='Answer yes or no. The hold stays open until you answer.'
+
+# Card text per sign-off's question standard.
+strip_tags() {
+  local s=$1 prev=
+  while [ "$s" != "$prev" ]; do
+    prev=$s
+    s=$(printf '%s' "$s" | sed -E 's/^[[:space:]]*(\[[^]]*\]|[Cc][Aa][Pp][Tt][Aa][Ii][Nn] [Hh][Oo][Ll][Dd]:|[Cc][Aa][Pp][Tt][Aa][Ii][Nn]:|[Ss][Aa][Yy] [Yy][Ee][Ss] [Oo][Rr] [Nn][Oo]:)[[:space:]]*//')
+  done
+  printf '%s' "$s"
+}
+
+card_flat() {
+  printf '%s' "$1" | tr '\t\n' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+card_title() {  # <reason>; prints the last question sentence, or the first sentence when it has none; empty when nothing is left
+  local flat head sentence
+  flat=$(card_flat "$1")
+  head=$(printf '%s' "$flat" | sed -nE 's/^(.*\?)( |$).*/\1/p')
+  if [ -n "$head" ]; then
+    sentence=$(printf '%s' "${head%\?}" | sed -E 's/^(.*(\. |\? ))?//')
+  else
+    sentence=$(printf '%s' "$flat" | sed -E 's/[.!] .*$//')
+  fi
+  title=$(strip_tags "$sentence" | sed -E 's/[[:space:].?!]+$//' | awk '{n = NF < 12 ? NF : 12; for (i = 1; i <= n; i++) printf "%s%s", $i, i < n ? " " : ""}')
+  [ -n "$title" ] && printf '%s?' "$title"
+  return 0
+}
+
+card_why() {  # <reason>
+  printf '%s %s' "$(card_flat "$1" | cut -c1-$((200 - ${#ANSWER_NOTE} - 1)))" "$ANSWER_NOTE"
+}
+
+built_title() {  # <task-title>
+  local words
+  words=$(strip_tags "$(card_flat "$1")" | tr -d '?' | awk '{n = NF < 6 ? NF : 6; for (i = 1; i <= n; i++) printf "%s%s", $i, i < n ? " " : ""}')
+  printf 'What is your call on %s?' "$words"
+}
+
 cmd_raise() {
   [ "$#" -eq 4 ] || usage
-  local out identity
+  local out identity title rc=0
   cmd_enabled || return 0
   identity=$("$SCRIPT_DIR/fm-captain-hold.sh" open "$1" --identity 2>/dev/null) || {
     printf 'sign-off card not raised: the hold identity of %s could not be read\n' "$1" >&2
     return 1
   }
-  out=$(signoff raise --key "$(home_key_prefix)$1-$(stamp_token "${identity%%#*}")" --title "$2" --about "$3" --close "$4" 2>&1) || {
+  title=$(card_title "$3")
+  [ -n "$title" ] || title=$(built_title "$2")
+  out=$(signoff raise --key "$(home_key_prefix)$1-$(stamp_token "${identity%%#*}")" \
+    --title "$title" --about "$3" --why "$(card_why "$3")" \
+    --outcome yes="Answer recorded: yes." \
+    --outcome no="Answer recorded: no." \
+    --recommend yes --recommend-reason "The hold records no recommendation." \
+    --default no --close "$4" 2>&1) || rc=$?
+  case "$out" in
+    *"already answered"*)
+      printf 'sign-off card for %s is already answered; reusing it\n' "$1" >&2
+      return 0
+      ;;
+    *"already holds a different question"*)
+      printf 'sign-off card for %s already exists with another question; keeping it\n' "$1" >&2
+      return 0
+      ;;
+  esac
+  [ "$rc" -eq 0 ] || {
     printf 'sign-off-axi raise failed: %s\n' "$out" >&2
     return 1
   }
-  case "$out" in
-    *"already answered"*)
-      printf 'sign-off already holds an answered card under %s; this hold has no live card\n' "$1" >&2
-      return 1
-      ;;
-  esac
   printf 'sign-off card on the board for %s\n' "$1" >&2
 }
 

@@ -59,7 +59,7 @@
 # When this home has armed bin/fm-procevent-signoff.sh, an undated `hold` also
 # raises a sign-off board card keyed by this home's tag, the task id and the hold
 # stamp; that adapter owns the card,
-# and a card it cannot raise is a warning, never a failed hold.
+# and a card it cannot raise fails the command (the hold stays recorded).
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -1018,11 +1018,11 @@ command_hold() {
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   # Optional sign-off card: a no-op unless bin/fm-procevent-signoff.sh is armed
   # here. A created question closes on answer, held work is released; a dated
-  # deferral gets no live card, and a card failure never fails the hold.
+  # deferral gets no live card, and a card failure exits nonzero (the hold stays recorded).
   if [ -z "$until" ]; then
     release_task_control_lock
     "$SCRIPT_DIR/fm-procevent-signoff.sh" raise "$id" "$(show_field_value "$show" title)" "$reason" "$card_close" \
-      || printf 'warning: task %s is held, but no sign-off card was raised for it\n' "$id" >&2
+      || { printf 'error: task %s is held, but no sign-off card was raised for it\n' "$id" >&2; exit 1; }
   fi
   printf '%s\n' "$id"
 }
