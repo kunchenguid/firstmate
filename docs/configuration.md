@@ -879,6 +879,8 @@ The verified adapter evidence - each harness's busy-state source, interrupt and 
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 A Claude worker's launch brief is published as an operational record in the receiving home's state and delivered as a printable doorbell; if publication fails, the spawn reports the failure and launches nothing rather than sending a marker that Claude Code would strip.
+Native Codex ship and scout workers may opt into complete record-backed launch briefs with `--codex-brief-record`; this is off by default, persists across same-task relaunches, and refuses non-Codex harnesses, raw launch commands, and secondmates.
+If record publication fails, the worker is not launched and there is no inline fallback; the [spawn usage header](../bin/fm-spawn.sh) owns the flag and launch mechanics, and [native verification](verification/runtime-backends.md#native-codex-task-worker-launch-boundary) records the tested boundary.
 Other harnesses retain the typed operational-marker launch path.
 
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
