@@ -2488,7 +2488,7 @@ reap_task_backend_process_group() {  # <label>
 }
 
 # Reap proven task-owned processes with cwd under the worktree or tasktmp.
-# Report unowned processes and refuse removal while any remain. TERM
+# Report and spare unowned processes; they never block removal. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
