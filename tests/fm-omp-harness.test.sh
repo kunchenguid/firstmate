@@ -89,6 +89,43 @@ test_detection_anchored_name_and_marker_precedence() {
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
+# A `bun install -g` omp is `comm=bun` running a script file named `omp`. Build
+# that shape with real processes: a `bun` symlink to the system shell plus
+# script files whose body runs the harness probe as a child (the trailing no-op
+# keeps bash from exec-optimizing the child away). `comp` is the outermost
+# launcher in the negative cases so the walk ends there and a live outer omp
+# session running this suite can never leak into the verdict.
+test_detection_bun_shim_process_tree() {
+  local dir=$TMP_ROOT/bunshim out name
+  mkdir -p "$dir/bin"
+  ln -sf /bin/bash "$dir/bun"
+  ln -sf /bin/bash "$dir/comp"
+  for name in omp ompd run; do
+    printf '%s\n' '"$FM_PROBE"; :' >"$dir/bin/$name"
+  done
+  export FM_PROBE=$HARNESS
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/bun" "$dir/bin/omp" --profile x)
+  [ "$out" = omp ] || fail "a bun-shim omp must outrank an inherited CLAUDECODE, got '$out'"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$dir/bun" "$dir/bin/omp" --profile x)
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS under a bun-shim omp must detect as omp, got '$out'"
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/comp" -c '"$1" "$2" dev /x/omp; :' _ "$dir/bun" "$dir/bin/run")
+  [ "$out" = claude ] || fail "a bun process with an omp path in a later argument must not detect as omp, got '$out'"
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/comp" -c '"$1" "$2" --root /y/omp; :' _ "$dir/bun" "$dir/bin/ompd")
+  [ "$out" = claude ] || fail "a bun-shim ompd must not detect as omp, got '$out'"
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$dir/comp" -c '"$1" "$2" dev /x/omp; :' _ "$dir/bun" "$dir/bin/run")
+  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS under a non-omp bun process must not relabel a claude worker, got '$out'"
+  unset FM_PROBE
+  pass "fm-harness: a bun-shim omp detects through the real process tree and only omp does"
+}
+
 test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches omp '' || fail "session-lock identity must accept the exact omp name"
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
@@ -891,6 +928,7 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_detection_bun_shim_script_token
+test_detection_bun_shim_process_tree
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
