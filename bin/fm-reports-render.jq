@@ -140,8 +140,11 @@ def align_of:
 def cell_open($tag; $align):
   "<" + $tag + (if $align == "" then "" else " style=\"text-align:" + $align + "\"" end) + ">";
 
+# The fence run of a fence line, leading indent skipped. The indent is matched
+# as part of ONE pattern rather than stripped first: jq 1.6 explodes a gsub
+# whose pattern can match the empty string, and "^[[:space:]]*" can.
 def fence_of:
-  gsub("^[[:space:]]*"; "") | match("^(`{3,}|~{3,})") | .string;
+  match("^[[:space:]]*(`{3,}|~{3,})") | .captures[0].string;
 
 def fence_lang:
   gsub("^[[:space:]]*(`{3,}|~{3,})"; "")

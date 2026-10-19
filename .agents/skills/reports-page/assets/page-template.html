@@ -120,6 +120,10 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overf
   border-bottom: 1px solid var(--line);
 }
 .bar button {
+  /* Never shrink: the bar is a flex row whose file-and-date line takes the
+     remaining space, and a shrinking button clips its own label - "Index" at
+     phone width was cut mid-word before this. The label ellipsises instead. */
+  flex: 0 0 auto;
   font: inherit;
   color: inherit;
   background: var(--bg);

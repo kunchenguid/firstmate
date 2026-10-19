@@ -45,8 +45,9 @@
 # payload back out of the finished page and refuses a page the browser could
 # not parse.
 #
-# The data directory is read-only to this script. It writes exactly one file,
-# the page, and its own staging file beside it.
+# The data directory is read-only to this script. Inside the home it writes
+# exactly one file, the page, and its own staging file beside it; its rows and
+# payload are staged under TMPDIR and removed on every path out.
 #
 # FM_REPORTS_PAGE_TEMPLATE overrides the shipped template path (tests only).
 set -u
@@ -109,7 +110,7 @@ mask_built_line() {  # reads a page on stdin
 }
 
 command_build() {
-  local page tmp dir id ts payload rows count built extracted
+  local page tmp dir id ts payload rows count built
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   require_home
   command -v jq >/dev/null 2>&1 || fail "jq is required"
@@ -139,40 +140,63 @@ command_build() {
 
   # One render pass over all reports: the renderer is a map over the array and
   # sorts it newest first.
-  payload=$(jq -cs -f "$RENDERER" "$rows") || { rm -f -- "$rows"; fail "cannot render the reports"; }
+  #
+  # The payload stays a FILE and is never held in a shell variable. `<` never
+  # appears in JSON syntax outside strings, and U+2028/U+2029 are literal line
+  # terminators to a browser's parser but ordinary characters to JSON, so
+  # escaping all three keeps the payload valid JSON that no report can break
+  # out of - but bash substitutes a pattern over a megabyte of reports in
+  # minutes, while the same three substitutions cost milliseconds in the
+  # stream. The escapes run on raw bytes so neither line separator has to sit
+  # in this source as an invisible character.
+  payload=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-reports-payload.XXXXXX") \
+    || { rm -f -- "$rows"; fail "cannot stage the report payload"; }
+  # pipefail is set for this one pipeline only: without it a failing renderer
+  # would be hidden behind a perl that happily copied nothing.
+  if ! ( set -o pipefail
+         jq -cs -f "$RENDERER" "$rows" \
+           | perl -pe 's/</\\u003c/g;
+                       s/\xe2\x80\xa8/\\u2028/g;
+                       s/\xe2\x80\xa9/\\u2029/g;' ) > "$payload"
+  then
+    rm -f -- "$rows" "$payload"
+    fail "cannot render the reports"
+  fi
   rm -f -- "$rows"
-  # `<` never appears in JSON syntax outside strings, and U+2028/U+2029 are
-  # literal line terminators to a browser's parser but ordinary characters to
-  # JSON, so escaping all three keeps the payload valid JSON that no report can
-  # break out of.
-  payload=${payload//</\\u003c}
-  # U+2028 and U+2029 written as their utf-8 bytes, so neither sits in this
-  # source as an invisible line separator.
-  payload=${payload//$'\xe2\x80\xa8'/\\u2028}
-  payload=${payload//$'\xe2\x80\xa9'/\\u2029}
+  [ -s "$payload" ] || { rm -f -- "$payload"; fail "the renderer produced nothing"; }
 
   page=$(page_path)
-  (umask 077; mkdir -p "${page%/*}") || fail "cannot create ${page%/*}"
+  (umask 077; mkdir -p "${page%/*}") \
+    || { rm -f -- "$payload"; fail "cannot create ${page%/*}"; }
   built=$(date '+%d.%m.%Y %H:%M')
-  tmp=$(umask 077; mktemp "${page%/*}/.reports.XXXXXX") || fail "cannot stage the page"
-  # The build stamp is replaced BEFORE the data, so a report that contains the
-  # literal stamp slot in its own text cannot become a substitution target.
-  if ! REPORTS_BUILT="$built" REPORTS_DATA="$payload" perl -pe '
+  tmp=$(umask 077; mktemp "${page%/*}/.reports.XXXXXX") \
+    || { rm -f -- "$payload"; fail "cannot stage the page"; }
+  # The data slot line is replaced by the payload file read whole, so no report
+  # text is ever itself scanned for a slot and no report can become a
+  # substitution target of the pass that injects it.
+  if ! REPORTS_BUILT="$built" REPORTS_DATA_FILE="$payload" perl -pe '
         s/^\Q'"$BUILT_LINE"'\E$/const BUILT = "$ENV{REPORTS_BUILT}";/;
-        s/^\Q'"$DATA_SLOT"'\E$/$ENV{REPORTS_DATA}/;
+        if (/^\Q'"$DATA_SLOT"'\E$/) {
+          open(my $fh, "<", $ENV{REPORTS_DATA_FILE}) or die "payload: $!";
+          local $/;
+          $_ = <$fh>;
+          close($fh);
+        }
       ' "$TEMPLATE" > "$tmp"; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp" "$payload"
     fail "cannot inject the reports data"
   fi
+  rm -f -- "$payload"
   if grep -qxF "$DATA_SLOT" "$tmp" || grep -qxF "$BUILT_LINE" "$tmp"; then
     rm -f -- "$tmp"
     fail "a page slot survived injection"
   fi
   # Read the payload back out of the finished page, so a page the browser could
-  # not parse fails here instead of in the captain's hands.
-  extracted=$(sed -n '/<script id="reports-data" type="application\/json">/,/<\/script>/p' "$tmp" \
-    | sed '1d;$d')
-  if ! printf '%s\n' "$extracted" | jq -e --argjson n "$count" 'length == $n' >/dev/null 2>&1; then
+  # not parse fails here instead of in the captain's hands. The extract is piped
+  # rather than captured: a shell variable would hold every report again.
+  if ! sed -n '/<script id="reports-data" type="application\/json">/,/<\/script>/p' "$tmp" \
+       | sed '1d;$d' \
+       | jq -e --argjson n "$count" 'length == $n' >/dev/null 2>&1; then
     rm -f -- "$tmp"
     fail "the built page does not carry a readable payload of $count reports"
   fi
