@@ -302,6 +302,8 @@ case "$BRANCH_PREFIX" in
   *' '*) echo "error: --branch-prefix must not contain a space (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
   -*) echo "error: --branch-prefix must not start with '-' (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
 esac
+BROWSER_CLEANUP_RULE="Close every Chrome/Chromium session you start, including chrome-devtools-axi sessions and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start."
+
 # The forge is validated against the same closed set the renderers enforce, so a
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
@@ -323,11 +325,11 @@ if [ "$KIND" = ship ]; then
   # forge-CLI rule names it instead of gh-axi; an external review tool has no
   # forge CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
   elif [ "$FORGE" = external ]; then
-    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
   else
-    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE"
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -695,7 +697,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

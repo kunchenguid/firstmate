@@ -236,18 +236,24 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-default some-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "a ship brief with no --forge should still scaffold"
   brief="$home/data/brief-forge-default/brief.md"
-  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
-    "a brief with no --forge must render the exact pre-existing gh-axi Rule 3 line"
+  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Close every Chrome/Chromium session you start, including chrome-devtools-axi sessions and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start." "$brief" \
+    "a brief with no --forge must render the browser-session cleanup rule in Rule 3"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
     "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
   grep -qx "Delivery contract: mode=direct-PR" "$brief" \
     || fail "a brief with no --forge must keep the bare delivery contract line"
 
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "a scout brief should still scaffold"
+  brief="$home/data/brief-forge-scout/brief.md"
+  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Close every Chrome/Chromium session you start, including chrome-devtools-axi sessions and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start." "$brief" \
+    "a scout brief must render the browser-session cleanup rule in Rule 3"
+
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a direct-PR ship brief"
   brief="$home/data/brief-forge-forgejo/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations. Close every Chrome/Chromium session you start," "$brief" \
     "--forge forgejo must render the tea Rule 3 line"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `tea`' "$brief" \
@@ -268,7 +274,7 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-nm some-proj --mode no-mistakes --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a no-mistakes ship brief"
   brief="$home/data/brief-forge-nm/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations. Close every Chrome/Chromium session you start," "$brief" \
     "a no-mistakes --forge forgejo brief must render the tea Rule 3 line"
   grep -qx "Delivery contract: mode=no-mistakes forge=forgejo" "$brief" \
     || fail "a no-mistakes --forge forgejo brief must mark the delivery contract line"
