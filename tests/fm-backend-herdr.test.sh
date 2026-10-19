@@ -4250,6 +4250,102 @@ SH
   pass "herdr repo grouping: a fresh parent whose first child did not land ahead of it is removed by exact id through its seeded pane while still childless, and later spawns order and bind normally"
 }
 
+# bin/fm-spawn.sh's own repo-parent block, from the grouping capability check
+# through the not-placed removal, runs here unchanged with every Herdr step it
+# calls stubbed. An ensure that created parent wF but could not verify focus
+# fails without a parent id, yet the spawn must still remove exactly wF when
+# the ordering move did not place the task, or record wF for the next spawn
+# when that removal is refused, and never leave a parent id for the attach.
+test_spawn_removes_a_focus_unverified_fresh_parent_when_not_placed() {
+  local block stubs case_name out err stub_log expected
+  block="$TMP_ROOT/spawn-repo-parent-block.sh"
+  {
+    printf 'spawn_repo_parent_block() {\n'
+    awk 'index($0, "if fm_backend_herdr_worktree_group_capable \"$HERDR_SES\"; then") { on = 1 }
+      index($0, "HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity") { on = 0 }
+      on' "$ROOT/bin/fm-spawn.sh"
+    printf '}\n'
+  } > "$block"
+  grep -q 'fm_backend_herdr_projection_repo_parent_close_fresh' "$block" \
+    || fail "could not locate the spawn's repo-parent block in bin/fm-spawn.sh"
+  stubs="$TMP_ROOT/spawn-repo-parent-stubs.sh"
+  cat > "$stubs" <<'SH'
+fm_backend_herdr_worktree_group_capable() { return 0; }
+fm_backend_herdr_projection_repo_parent_retry() { return 0; }
+fm_backend_herdr_projection_repo_parent_ensure() {
+  FM_BACKEND_HERDR_REPO_PARENT_LABEL=foo
+  case "$ENSURE_CASE" in
+    unverified)
+      FM_BACKEND_HERDR_REPO_PARENT_CREATED=wF
+      FM_BACKEND_HERDR_REPO_PARENT_ID=""
+      echo "warning: herdr repo grouping created 'foo' but could not verify exact active focus; leaving this task's space flat" >&2
+      return 1
+      ;;
+    adopted)
+      FM_BACKEND_HERDR_REPO_PARENT_CREATED=""
+      FM_BACKEND_HERDR_REPO_PARENT_ID=wP
+      printf wP
+      ;;
+  esac
+}
+fm_backend_herdr_projection_journal_create() { printf 'ZyXwVuTsRqPoNmLkJiHgFe'; }
+fm_backend_herdr_projection_workspace_label() { printf '└ %s · p:%s' "$1" "$2"; }
+fm_backend_herdr_projection_create_task() {
+  FM_BACKEND_HERDR_PROJECTION_SESSION=fmtest
+  FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=w6
+  FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=w6:t1
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=w6:t1:p1
+  FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=""
+}
+fm_backend_herdr_projection_order_best_effort() { FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED=0; }
+fm_backend_herdr_projection_repo_parent_close_fresh() {
+  printf 'close %s %s\n' "$1" "$2" >> "$STUB_LOG"
+  [ "$CLOSE_OK" = 1 ] && return 0
+  FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=wF:t1:p1
+  return 1
+}
+fm_backend_herdr_projection_repo_parent_retry_record() {
+  printf 'record %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$STUB_LOG"
+}
+SH
+  mkdir -p "$TMP_ROOT/spawn-repo-parent-state" "$TMP_ROOT/spawn-repo-parent-config" "$TMP_ROOT/spawn-repo-parent-clone"
+  for case_name in unverified:1 unverified:0 adopted:1; do
+    stub_log="$TMP_ROOT/spawn-repo-parent-${case_name%%:*}-${case_name#*:}.log"; : > "$stub_log"
+    err="$TMP_ROOT/spawn-repo-parent-${case_name%%:*}-${case_name#*:}.err"
+    out=$(ENSURE_CASE=${case_name%%:*} CLOSE_OK=${case_name#*:} STUB_LOG="$stub_log" \
+      bash -c 'set -eu; . "$0/bin/backends/herdr.sh"; . "$1"; . "$2"
+        HERDR_SES=fmtest STATE=$3/spawn-repo-parent-state CONFIG=$3/spawn-repo-parent-config
+        PROJ_ABS=$3/spawn-repo-parent-clone HERDR_PARENT_LABEL=firstmate HERDR_PARENT_WORKSPACE_ID=w1
+        ID=task HERDR_LABEL_HOME=$FM_HOME W=$3/spawn-repo-parent-clone SCRIPT_DIR=$0/bin
+        HERDR_REPO_PARENT_WORKSPACE_ID="" HERDR_REPO_PARENT_CREATED="" HERDR_REPO_PARENT_LABEL=""
+        spawn_repo_parent_block
+        printf "id=%s created=%s" "$HERDR_REPO_PARENT_WORKSPACE_ID" "$HERDR_REPO_PARENT_CREATED"' \
+      "$ROOT" "$stubs" "$block" "$TMP_ROOT" 2>"$err") \
+      || fail "the spawn's repo-parent block failed for $case_name: $(cat "$err")"
+    case "$case_name" in
+      unverified:1)
+        [ "$out" = "id= created=" ] || fail "a removed focus-unverified fresh parent left '$out' for the attach"
+        [ "$(cat "$stub_log")" = "close fmtest wF" ] \
+          || fail "the spawn did not remove exactly the focus-unverified fresh parent wF: $(cat "$stub_log")"
+        assert_contains "$(cat "$err")" "closed the repo parent wF it created for this task" "removing the focus-unverified fresh parent did not warn"
+        ;;
+      unverified:0)
+        [ "$out" = "id= created=" ] || fail "a refused focus-unverified fresh parent left '$out' for the attach"
+        expected="close fmtest wF"$'\n'"record $TMP_ROOT/spawn-repo-parent-state fmtest wF foo $TMP_ROOT/spawn-repo-parent-clone wF:t1:p1"
+        [ "$(cat "$stub_log")" = "$expected" ] \
+          || fail "a refused removal of the focus-unverified fresh parent was not recorded for exactly wF: $(cat "$stub_log")"
+        assert_contains "$(cat "$err")" "recorded the repo parent wF left standing" "recording the refused fresh parent did not warn"
+        ;;
+      *)
+        [ "$out" = "id=wP created=" ] || fail "an adopted parent whose child was not placed reported '$out', expected it kept for the attach"
+        [ ! -s "$stub_log" ] || fail "the spawn removed or recorded an adopted parent: $(cat "$stub_log")"
+        ;;
+    esac
+  done
+  pass "herdr repo grouping: the spawn removes, or records on refusal, exactly the fresh parent whose focus restore was unverified, never an adopted one, and leaves no parent id for the attach"
+}
+
 test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
   local state clone clone_real dir log resp fb out status record stub_env
   local wt_one wt_stranded tabs_one panes_one pane_info pane_gone list_with list_without list_relabelled
@@ -7025,6 +7121,7 @@ test_attach_worktree_requires_exact_open_workspace_and_already_open
 test_projection_order_repo_parent_counts_as_home_block_member
 test_live_binding_accepts_repo_parent_between_home_and_child
 test_fresh_repo_parent_is_closed_when_its_first_child_is_not_placed
+test_spawn_removes_a_focus_unverified_fresh_parent_when_not_placed
 test_refused_fresh_parent_removal_is_retried_by_the_next_spawn
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
