@@ -101,7 +101,9 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+if [ "${1:-}" = display-message ] && [ "${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PID:-}"
+fi
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -646,6 +648,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
+  FM_FAKE_PANE_PID="${FM_FAKE_PANE_PID:-$$}" \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
@@ -5074,6 +5077,76 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+test_foreign_session_survives_and_is_reported() {
+  local case_dir rc endpoint owned foreign launcher survived=0 i foreign_tty endpoint_tty foreign_command owned_command
+  case_dir=$(make_case foreign-session)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { chdir $dir or die; exec "sleep", "300"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  python3 - "$case_dir/wt" "$case_dir/foreign.pid" <<'PYTHON' &
+import os
+import pty
+import sys
+import time
+
+pid, master = pty.fork()
+if pid == 0:
+    os.chdir(sys.argv[1])
+    os.execlp("bash", "bash", "--noprofile", "--norc", "--login", "-c", "read -r unused")
+with open(sys.argv[2], "w") as stream:
+    stream.write(str(pid))
+time.sleep(300)
+PYTHON
+  launcher=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/foreign.pid" ] || [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: fixture processes did not start"
+  foreign=$(cat "$case_dir/foreign.pid")
+  owned=$(cat "$case_dir/owned.pid")
+  for ((i=0; i<100; i++)); do
+    foreign_tty=$(ps -p "$foreign" -o tty= 2>/dev/null | tr -d '[:space:]')
+    case "$foreign_tty" in ''|'?'|'??') sleep 0.1; continue ;; esac
+    foreign_command=$(ps -p "$foreign" -o comm= 2>/dev/null | tr -d '[:space:]')
+    owned_command=$(ps -p "$owned" -o comm= 2>/dev/null | tr -d '[:space:]')
+    if [ "${foreign_command##*/}" = bash ] && [ "${owned_command##*/}" = sleep ]; then break; fi
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: shell has no TTY"
+  endpoint_tty=$(ps -p "$endpoint" -o tty= | tr -d '[:space:]')
+  [ "$foreign_tty" != "$endpoint_tty" ] || fail "foreign-session: shell shares the endpoint TTY"
+  [ "$(ps -p "$foreign" -o pgid= | tr -d '[:space:]')" = "$foreign" ] \
+    || fail "foreign-session: shell does not have its own process group"
+
+  rc=0
+  FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$foreign" 2>/dev/null && survived=1
+  kill -KILL "$foreign" "$launcher" "$endpoint" 2>/dev/null || true
+  wait "$launcher" "$endpoint" 2>/dev/null || true
+  if kill -0 "$owned" 2>/dev/null; then
+    kill -KILL "$owned" 2>/dev/null || true
+    fail "foreign-session: task-owned child survived"
+  fi
+  [ "$survived" -eq 1 ] || fail "foreign-session: teardown killed an unowned shell"
+  expect_code 1 "$rc" "foreign-session: unproven ownership should refuse cleanup"
+  assert_grep "spared unowned process $foreign:.*bash" "$case_dir/stderr" \
+    "foreign-session: teardown did not report the foreign pid and command"
+  assert_present "$case_dir/state/task-x1.meta" "foreign-session: task metadata was removed"
+  assert_present "$case_dir/wt" "foreign-session: worktree was removed"
+  pass "foreign TTY shell survives and is reported while the task-owned child is reaped"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -5302,6 +5375,11 @@ printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -axo ]; then
+  "$REAL_PS_FOR_TEST" "$@"
+  printf '%s %s %s\n' "$FM_FAKE_PERSISTENT_PID" "$FM_FAKE_PANE_PID" "$FM_FAKE_PERSISTENT_PID"
+  exit 0
+fi
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
    && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
   printf 'Tue Aug  4 10:00:00 2026\n'
@@ -6309,6 +6387,7 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_foreign_session_survives_and_is_reported
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

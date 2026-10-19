@@ -307,10 +307,10 @@
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches.
+#     Cwd alone is not ownership: only descendants of the live endpoint shell
+#     or members of its dedicated process group are signaled. Unproven
+#     processes are reported individually and refuse worktree/tasktmp removal.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2372,10 +2372,54 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+task_reap_endpoint_pid() {
+  local info
+  case "$BACKEND" in
+    tmux) tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null ;;
+    herdr)
+      fm_backend_herdr_parse_target "$T" || return 1
+      info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+        --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      printf '%s\n' "$info" | jq -er --arg pane "$FM_BACKEND_HERDR_PANE" '
+        select(.result.type == "pane_process_info"
+          and .result.process_info.pane_id == $pane)
+        | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+task_process_is_owned() {  # <pid>
+  local rows own_pgid
+  [ -n "$TASK_REAP_LEADER" ] || return 1
+  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY" || return 1
+  rows=$(LC_ALL=C ps -axo pid=,ppid=,pgid= 2>/dev/null) || return 1
+  own_pgid=$(printf '%s\n' "$rows" | awk -v self="$$" '$1 == self { print $3 }')
+  printf '%s\n' "$rows" | awk -v candidate="$1" -v leader="$TASK_REAP_LEADER" -v own="$own_pgid" '
+    { parent[$1] = $2; group[$1] = $3 }
+    END {
+      if (!(leader in parent) || !(candidate in parent)) exit 1
+      if (group[leader] == leader && group[candidate] == leader && group[leader] != own) exit 0
+      pid = candidate
+      while (pid > 1 && !seen[pid]++) {
+        if (pid == leader) exit 0
+        pid = parent[pid]
+      }
+      exit 1
+    }'
+}
+
+task_reap_unowned_refusal() {
+  [ -z "$TASK_UNOWNED_PIDS" ] && return 0
+  echo "REFUSED: process ownership is unproven for $ID; preserving the worktree/tasktmp and every unowned process." >&2
+  return 1
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
+  TASK_UNOWNED_PIDS=
+  local dir dir_pids pid command pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -2385,7 +2429,25 @@ task_pids_under_roots() {  # <dir>...
     pids="$pids
 $dir_pids"
   done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  TASK_PIDS=
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if task_process_is_owned "$pid"; then
+      TASK_PIDS="${TASK_PIDS}${TASK_PIDS:+$'\n'}$pid"
+    else
+      if ! command=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null); then
+        kill -0 "$pid" 2>/dev/null || continue
+        command="<unavailable>"
+      fi
+      TASK_UNOWNED_PIDS="${TASK_UNOWNED_PIDS}${TASK_UNOWNED_PIDS:+$'\n'}$pid"
+      if ! task_pid_list_contains "$TASK_REAP_REPORTED" "$pid"; then
+        echo "teardown: spared unowned process $pid: $command" >&2
+        TASK_REAP_REPORTED="${TASK_REAP_REPORTED}${TASK_REAP_REPORTED:+$'\n'}$pid"
+      fi
+    fi
+  done <<EOF
+$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+EOF
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -2413,8 +2475,8 @@ reap_task_backend_process_group() {  # <label>
   esac
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
   own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
-  if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+  if [ "$pgid" != "$leader" ] || [ "$pgid" = "$own_pgid" ]; then
+    echo "warning: lsof is unavailable; refusing to signal a process group not dedicated to the task endpoint for $ID" >&2
     return 0
   fi
   task_process_identity_matches "$leader" "$leader_start" || return 0
@@ -2432,8 +2494,8 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
+# Reap proven task-owned processes with cwd under the worktree or tasktmp.
+# Report unowned processes and refuse removal while any remain. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
@@ -2442,6 +2504,10 @@ reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
+  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED="" TASK_UNOWNED_PIDS=""
+  TASK_REAP_LEADER=$(task_reap_endpoint_pid) || TASK_REAP_LEADER=
+  case "$TASK_REAP_LEADER" in ''|*[!0-9]*|0|1) TASK_REAP_LEADER= ;; esac
+  TASK_REAP_LEADER_IDENTITY=$(task_process_identity "${TASK_REAP_LEADER:-0}") || TASK_REAP_LEADER=
   if ! command -v lsof >/dev/null 2>&1; then
     reap_task_backend_process_group "$label"
     return 0
@@ -2452,7 +2518,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
       return 1
     fi
     pids=$TASK_PIDS
-    [ -n "$pids" ] || return 0
+    if [ -z "$pids" ]; then task_reap_unowned_refusal; return $?; fi
     tracked_pids=()
     tracked_identities=()
     while IFS= read -r pid; do
@@ -2487,7 +2553,8 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && task_process_identity_matches "$pid" "$identity" \
+         && task_process_is_owned "$pid"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -2503,7 +2570,8 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && task_process_identity_matches "$pid" "$identity" \
+         && task_process_is_owned "$pid"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
@@ -2519,7 +2587,8 @@ EOF
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
+           && task_process_identity_matches "$pid" "$identity" \
+           && task_process_is_owned "$pid"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
@@ -2530,7 +2599,7 @@ EOF
     echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1
   fi
-  [ -z "$TASK_PIDS" ] && return 0
+  if [ -z "$TASK_PIDS" ]; then task_reap_unowned_refusal; return $?; fi
   echo "REFUSED: leaked $label processes for $ID remain after $max_passes reap attempts; preserving the worktree/tasktmp for manual inspection or retry." >&2
   return 1
 }
