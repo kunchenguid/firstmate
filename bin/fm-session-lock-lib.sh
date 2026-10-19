@@ -26,7 +26,10 @@ unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
+# omp 18.1.11), and a substring match would claim ompd or comp. A `bun
+# install -g` omp instead runs as `comm=bun` with the omp script path in argv
+# (verified 2026-10-19), so the bun arm below keys on that same anchored
+# script token rather than the regex.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -65,8 +68,12 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#      A bun-shim omp (`comm=bun`, argv `bun <...>/bin/omp`) matches here too:
+#      `bin/omp` is an exact `omp` path component, while `bin/ompd` is not.
+#   3. a bare interpreter (node, python, bun) running a harness script path.
+#   bun carries only the anchored omp script token (` omp `, `/omp `, or `/omp`
+#   at end): a *omp* glob would claim ompd/comp, so no other harness rides the
+#   bun arm.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -81,13 +88,22 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (node, python): match the harness name in its script path.
+  # bun: match only the anchored omp script token, never the regex - a `bun
+  # install -g` omp runs as `comm=bun` (verified 2026-10-19) and the regex's
+  # ^omp$ never fires inside a full command line, while *omp* would claim
+  # ompd/comp.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
+      ;;
+    *bun*)
+      case " $args " in
+        *" omp "*|*"/omp "*|*" omp"|*"/omp") return 0 ;;
+      esac
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree

@@ -113,17 +113,16 @@ harness_marker() {
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
   # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
-  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
-  # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
-  # process environment. FM_OMP_HARNESS=omp is therefore a Firstmate-OWNED
-  # launch marker, established by bin/fm-spawn.sh at the omp launch boundary
-  # (which also clears every foreign marker) and by the README's primary launch
-  # command. It is a PRECEDENCE override, never evidence on its own: it wins
-  # over an inherited CLAUDECODE only when an omp process is genuinely in the
-  # ancestry, so `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies
-  # as omp, while the same variable leaking from an omp secondmate into that
-  # home's claude worker (whose ancestry holds no omp) changes nothing. The
-  # anchored ancestry arm below covers a plain hand-started `omp` by itself.
+  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary. OMP_PROFILE and
+  # PI_CODING_AGENT_DIR describe the selected profile, not which harness owns
+  # this process tree, so they are never identity markers: a live bun-shim omp
+  # session carries both (verified 2026-10-19). FM_OMP_HARNESS=omp is therefore a
+  # Firstmate-OWNED launch marker, established by bin/fm-spawn.sh at the omp launch boundary
+  # (which also clears every foreign marker) and by the README's primary launch command. It is a PRECEDENCE override,
+  # never evidence on its own: it wins over an inherited CLAUDECODE only when an omp process is genuinely in the ancestry, so
+  # `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies as omp, while the same variable leaking from an omp secondmate
+  # into that home's claude worker (whose ancestry holds no omp) changes nothing. The anchored ancestry arm below covers a plain hand-started
+  # `omp` by itself, whether native or bun-shim.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
     return
@@ -155,20 +154,49 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an `omp` process sits within eight parents of this one: either a
+# natively-named `omp` (Bun-compiled single binary, verified omp 18.1.11) or a
+# bun-shim `bun <...>/bin/omp` (verified: `bun install -g` lays a `#!/usr/bin/env
+# bun` script at ~/.bun/bin/omp, so the live process is `comm=bun` with the omp
+# path in argv). The shim match demands the exact script token `/omp` followed
+# by space or end - ` omp `, `/omp `, or `/omp` at end - so ompd/comp never
+# match (they carry `/ompd`/`/comp`). Kept separate from the ancestry walk so
+# the marker precedence above can demand real process evidence before trusting
+# FM_OMP_HARNESS.
+ancestry_arg_has_omp_script() {
+  # The argv token right after the interpreter must be the omp script itself
+  # (`bun <...>/bin/omp ...`): matching anywhere in the line would also fire
+  # on the harness probe's own ancestry (a `... fm-harness.sh` child of the
+  # shim carries the shim path in its parent's line, not as a script it runs).
+  # Decoys (`.../ompd`, `.../comp`) never match: the token must end after
+  # `omp`, followed by space or end.
+  case "$1" in
+    bun\ /omp\ *|bun\ /omp|bun\ omp\ *|bun\ omp) return 0 ;;
+  esac
+  case "$1" in
+    bun\ */omp\ *|bun\ */omp) return 0 ;;
+  esac
+  return 1
+}
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args base
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    base=$(basename -- "$comm")
+    [ "$base" = omp ] && return 0
+    # A decoy launcher (`ompd`, `comp`) ends the walk: it is the nearest
+    # harness-shaped ancestor, and any bun-shim omp further up belongs to the
+    # outer session, not to this process tree.
+    case "$base" in ompd|comp) return 1 ;; esac
+    if [ "$base" = bun ]; then
+      args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+      ancestry_arg_has_omp_script "$args" && return 0
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
   return 1
 }
-
 # Print "<strength> <harness>" when one process identifies a harness, or nothing.
 # Strength records how the match was made:
 #   comm - the ancestor's own executable name identifies the harness. This is a
@@ -228,7 +256,17 @@ harness_process_verdict() {  # <pid>
     # optional claude-bridge extension runs a nested executable literally
     # named `claude` with its own node child, and that fallback's *claude*
     # args glob would otherwise claim it if that subtree were ever walked.
-    omp) echo "comm omp"; return ;;
+    # A `bun install -g` omp is a `#!/usr/bin/env bun` script, so the live
+    # process is `comm=bun` with the omp path in argv (verified 2026-10-19:
+    # `bun /Users/tien/.bun/bin/omp ...`). It sits beside the native arm
+    # above - above the interpreter fallback - for the same claude-bridge
+    # reason, and the script-token match is what keeps ompd/comp out.
+    bun)
+      args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
+      ancestry_arg_has_omp_script "$args" && { echo "args omp"; return; } ;;
+    # A decoy launcher ends the verdict like the gate above: `ompd`/`comp`
+    # must never fall through to an outer bun-shim omp in the same walk.
+    ompd|comp) return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
@@ -260,10 +298,14 @@ harness_process_verdict() {  # <pid>
 # nothing when the walk finds none. The nearest match wins, so a worker nested
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
-  local pid=${1:-$$} verdict
+  local pid=${1:-$$} verdict base
   for _ in 1 2 3 4 5 6 7 8; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
+    # A decoy launcher is terminal: the walk must not pass through `ompd` or
+    # `comp` to an outer bun-shim omp that owns a different process tree.
+    base=$(basename -- "$(ps -o comm= -p "$pid" 2>/dev/null)" 2>/dev/null)
+    case "$base" in ompd|comp) return 0 ;; esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     # Stop only once the walk has EXAMINED the top of the chain. Inside a PID
     # namespace the harness itself is pid 1 - a container, or the `codex sandbox`
@@ -282,7 +324,6 @@ harness_ancestry() {  # [<pid>]
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
 # is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
-# or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0
@@ -420,7 +461,10 @@ supervision_primary_pin() {
 #     CURSOR_AGENT from renaming a claude worker nested under cursor.
 #   - Different harness, interpreter-args ancestor only: the marker wins, because
 #     a harness-shaped path in some node process's arguments is weaker evidence
-#     than a harness publishing its own identity.
+#     than a harness publishing its own identity. The one exception is the
+#     bun-shim omp above: `bun <...>/bin/omp` is omp's real launcher, not a
+#     stray path in some unrelated process's arguments, so it outranks an
+#     inherited marker exactly like a structural ancestor.
 # The supervision-branch primary pin, when it applies, answers before either
 # evidence layer is read.
 detect_own() {
@@ -440,6 +484,11 @@ detect_own() {
     echo "$marker"
     return
   fi
+  # The bun-shim omp is launcher evidence, not a stray args path: a `bun
+  # <...>/bin/omp` ancestor outranks an inherited marker exactly like a
+  # structural one. Without this the args-strength shim below would hand every
+  # bun-installed omp session back to a multiplexer-retained CLAUDECODE.
+  if [ "$harness" = omp ]; then echo "$harness"; return; fi
   if [ "$strength" = comm ]; then echo "$harness"; else echo "$marker"; fi
 }
 
