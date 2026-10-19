@@ -252,10 +252,11 @@ watcher_cycle() {
     wait "$pid" 2>/dev/null || true
     rc=alive
   else
-    set +e
-    wait "$pid"
+    # No `set -e` on the way out: this script opts into `set -u` only, so
+    # turning errexit on inside a helper would silently change the error
+    # semantics of every later step of the run.
+    wait "$pid" 2>/dev/null
     rc=$?
-    set -e
   fi
   rm -f "$beat"
   local reason

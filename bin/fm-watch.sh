@@ -1205,7 +1205,8 @@ case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL
 # scratch rather than inheriting a window an earlier episode left silent. The
 # cap-fire route is the one caller that keeps these markers instead of calling it
 # here: they are the ceiling it has just published, so the episode it ends must
-# leave them standing.
+# leave them standing. The away-posture first sight is the one caller that
+# releases them WITHOUT ending an episode, and says so at its own call site.
 # _wedge_cap_markers_clear <window-key>
 _wedge_cap_markers_clear() {
   local key=$1
@@ -1223,6 +1224,14 @@ _wedge_cap_markers_clear() {
 # turn-end churn absorb. The cap release is then structural rather than a list of
 # sites to keep in step - a new episode-ending route is one call, and it cannot
 # drop the episode marker without dropping the cap with it.
+#
+# One first-sight route is not an episode end: the away-posture branch, where the
+# away daemon owns the one-shot per stale hash. It classifies a fresh render
+# without arming or dropping any wedge timer - the first poll after the
+# away-posture record goes picks the episode it was already in back up on that
+# hash - so it releases the cap markers alone, through
+# _wedge_cap_markers_clear. Dropping the timer and count there would leave a hash
+# the daemon already surfaced with no wedge timer behind it at all.
 #
 # Non-zero when a reset could not be written, so a caller that has to undo an
 # absorb of its own on a failed reset (signal_turnend_panes_churned) can see it.
@@ -1291,10 +1300,10 @@ _wedge_cap_marker_stands() {
 # marker is unwritable, for this window) and the append was skipped, 4 when the
 # append lock itself could not be taken or held, and the append's own status
 # otherwise.
-# _wedge_cap_terminal_append <window> <reason>
+# _wedge_cap_terminal_append <window> <window-key> <reason>
 _wedge_cap_terminal_append() {
-  local _win=$1 _reason=$2 _status=0 _queued _degraded=0 _had=0
-  _queued="$STATE/.wedge-terminal-queued-$(window_key "$_win")"
+  local _win=$1 _wkey=$2 _reason=$3 _status=0 _queued _degraded=0 _had=0
+  _queued="$STATE/.wedge-terminal-queued-$_wkey"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 4
   if [ -e "$_queued" ]; then
     _had=1
@@ -1324,9 +1333,9 @@ _wedge_cap_terminal_append() {
 # the wedge path stays silent for FM_ROLLBACK_SENTINEL_TTL_SECS; the top of
 # wedge_timer_check checks it before any wake or marker logic runs, consulting
 # only the dead-endpoint probe on that silenced path.
-# _wedge_cap_rollback <window> <key> <escalation-file> <since-file>
+# _wedge_cap_rollback <key> <escalation-file> <since-file>
 _wedge_cap_rollback() {
-  local _win=$1 _key=$2 _esc=$3 _since=$4 _failed=0 _sentinel _sentinel_rc=0
+  local _key=$1 _esc=$2 _since=$3 _failed=0 _sentinel _sentinel_rc=0
   { : > "$_esc"; } 2>/dev/null || _failed=1
   { date +%s > "$_since"; } 2>/dev/null || _failed=1
   clear_write_tracking "$_key" 2>/dev/null || true
@@ -1894,7 +1903,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     ''|*[!0-9]*)
       # Publish the repaired timer only after its old write-deferral chain is
       # gone, so observers cannot mistake a new idle window for the old chain.
-      clear_write_tracking "$(window_key "$win")"
+      clear_write_tracking "$_wkey"
       date +%s > "$since_file"
       triage_log "absorbed $label timer reset: $win"
       ;;
@@ -1973,7 +1982,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           _wrb_cap_reason="$reason, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wedge escalations for this WINDOW while its cap marker stands: until FM_CAP_HORIZON_SECS elapses, the crew resumes, or the operator manually removes STATE/.wedge-permanent-<key>"
           _wrb_cap_reason=$(stale_reason_naming_dialog "$_wrb_cap_reason" "$dialog")
           _wrb_cap_status=0
-          _wedge_cap_terminal_append "$win" "$_wrb_cap_reason" || _wrb_cap_status=$?
+          _wedge_cap_terminal_append "$win" "$_wkey" "$_wrb_cap_reason" || _wrb_cap_status=$?
           if [ "$_wrb_cap_status" -eq 3 ]; then
             triage_log "wedge cap for $win already has an unacknowledged PERMANENTLY-WEDGED wake queued; suppressing the duplicate terminal wake"
           elif [ "$_wrb_cap_status" -eq 4 ]; then
@@ -1985,7 +1994,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           if ! { date +%s > "$STATE/.wedge-permanent-$_wkey"; } 2>/dev/null; then
             _wrb_rm_status=0
-            _wedge_cap_rollback "$win" "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
+            _wedge_cap_rollback "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
             case "$_wrb_rm_status" in
               2) triage_log "wedge cap-marker write FAILED AND rollback AND sentinel write ALL FAILED on $win - no queue-flood suppression; operator MUST intervene"; exit 1 ;;
               1) triage_log "wedge cap-marker write FAILED AND rollback ALSO FAILED on $win - sentinel set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification"; exit 1 ;;
@@ -3645,6 +3654,7 @@ EOF
             stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
             fm_wake_append stale "$w" "$stale_reason" || exit 1
             printf '%s' "$h" > "$sf"
+            _wedge_cap_markers_clear "$key"
             wake "$stale_reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then

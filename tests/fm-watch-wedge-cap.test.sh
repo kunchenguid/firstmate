@@ -663,10 +663,10 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
     "$WATCH" > "$out" &
   pid=$!
-  set +e
+  # No `set -e` on either side: this script opts into `set -u` only, so enabling
+  # errexit inside a case would change the error semantics of every case after it.
   wait_for_exit "$pid" 100
   round_status=$?
-  set -e
   [ "$round_status" -eq 1 ] || fail "cap-fire round expected exit 1 on the failed marker write, got $round_status: $(cat "$out")"
   [ -e "$sentinel" ] || fail "rollback-failed sentinel was not written after the rollback itself failed"
   unset FM_FAKE_CREW_STATE
@@ -695,7 +695,23 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "expected the sentinel short-circuit triage line; got triage: $(cat "$state/.watch-triage.log" 2>/dev/null) and watch.out: $(cat "$out")"
   [ -e "$sentinel" ] || fail "the sentinel was removed by the short-circuit poll; it must hold until TTL expiry or an operator rm"
-  pass "the rollback-failed sentinel silences the wedge path within FM_ROLLBACK_SENTINEL_TTL_SECS"
+
+  # The sentinel silences ESCALATIONS, not detection: the agent exits while its
+  # pane keeps rendering the identical frame, so the session inventory no longer
+  # lists the recorded window and the endpoint reads as missing. A wedge path
+  # that silenced that report too would hide a dead worker for the whole TTL.
+  local gone
+  gone="FM_FAKE_TMUX_CURRENT_COMMAND=bash FM_FAKE_TMUX_WINDOWS=someone-elses-window"
+  poll_capped_wedge_round "$dir" "$max" "$gone" exit \
+    || fail "the sentinel never reported the endpoint that went missing while it held: $(cat "$out")"
+  grep -F "agent missing" "$out" >/dev/null \
+    || fail "the gone endpoint was not reported while the sentinel held: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the gone endpoint was escalated as a wedge instead of reported: $(cat "$out")"
+  [ "$(queued_wakes_carrying "$state" "$window" "agent missing")" -eq 1 ] \
+    || fail "the sentinel reported the gone endpoint more than once"
+  [ -e "$sentinel" ] || fail "reporting the gone endpoint consumed the sentinel; it must hold until TTL expiry or an operator rm"
+  pass "the rollback-failed sentinel silences the wedge path within FM_ROLLBACK_SENTINEL_TTL_SECS and still reports a gone endpoint"
 }
 
 # 9. The cap is a ceiling on CONSECUTIVE escalations: a crew that genuinely
@@ -1178,25 +1194,84 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
   pass "an unwritable terminal episode marker narrows suppression instead of flooding the queue"
 }
 
+# 16. The cap is OFF by default, so it has to be inert when it is off. Nothing
+# sweeps its markers at startup and nothing clears them while a window keeps
+# rendering the identical frame, so a leftover from a run where the cap WAS
+# configured is exactly the state an operator is in after turning the cap back
+# off: both the window-scoped cap marker and the rollback-failure sentinel must
+# be left unread while FM_WEDGE_MAX_ESCALATIONS is not above 0.
+test_wedge_cap_off_ignores_leftover_markers() {
+  local dir state out capture_file window key pane_hash sig marker sentinel
+  dir=$(make_case wedge-cap-off-leftover); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"
+  window="test:fm-wedge-cap-off-leftover"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-off-leftover.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-off-leftover.status"
+  sig=$(seen_sig "$state/wedge-cap-off-leftover.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-off-leftover_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker="$state/.wedge-permanent-$key"
+  sentinel="$state/.wedge-rollback-failed-$key"
+
+  # A cap marker written by an earlier run while the cap was configured. The
+  # window must escalate again on the first poll, and must escalate normally
+  # rather than fire a ceiling that is not configured.
+  date +%s > "$marker"
+  poll_wedge_round "$dir" 0 "FM_WATCH_HANDLING_SUCCESSOR=1"
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "a leftover cap marker silenced the window with the cap turned off: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "the cap fired while FM_WEDGE_MAX_ESCALATIONS was off: $(cat "$out")"
+  rm -f "$marker"
+
+  # The rollback-failure sentinel next, which stands ahead of every other wedge
+  # check. The counter has to keep climbing across both rounds, so this one has
+  # to be escalation 2 - a round that read the sentinel would publish nothing.
+  printf '%s rollback-failed\n' "$(date +%s)" > "$sentinel"
+  poll_wedge_round "$dir" 0 "FM_WATCH_HANDLING_SUCCESSOR=1"
+  grep -F "escalation 2" "$out" >/dev/null \
+    || fail "a leftover rollback-failure sentinel silenced the window with the cap turned off: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the window left the ordinary wedge path with the cap turned off: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "with the cap off, a leftover cap marker or rollback-failure sentinel silences nothing"
+}
+
 # The release boundary is a wedge EPISODE, so the first-sight routes have to
 # honour it as strictly as the reset routes do: each ends the episode the cap
 # fired in and opens a new one on the very next render, and a window left capped
 # across that boundary would answer the crew's next genuine wedge with silence
 # for the rest of FM_CAP_HORIZON_SECS. The routes driven here are the ones that
 # need a crew-state verdict to pick between them - a captain-relevant status log
-# outranked by a live run, that same log with nothing overriding it, and a
-# non-terminal pane absorbed because the crew is provably working. The reset
+# outranked by a live run, that same log with nothing overriding it, a
+# non-terminal pane absorbed because the crew is provably working, and the
+# away-posture one-shot the supervise daemon owns. The reset
 # routes are the ones the recovery and declared-wait cases drive: a pane that
 # leaves the stale path, and a declared wait and its lift.
 drive_first_sight_release() {  # <route>
   local route=$1 dir state fakebin out capture_file window key statusf
-  local fire_verdict route_verdict mode pid fresh_hash
+  local fire_verdict route_verdict mode pid fresh_hash away_record=0
   dir=$(make_case "wedge-cap-release-$route")
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-release-$route"
   statusf="$state/wedge-cap-release-$route.status"
   case "$route" in
+    away-first-sight)
+      # The away-posture record makes the watcher hand the stale identity to the
+      # supervise daemon, which owns the one-shot per hash: the surface is the
+      # daemon handoff, and it takes no crew-state verdict at all.
+      printf 'working: still wedged\n' > "$statusf"
+      fire_verdict='state: working · source: run-step · validating (running)'
+      route_verdict=$fire_verdict
+      mode="exit"
+      away_record=1
+      ;;
     provably-working-terminal)
       printf 'done: implementation complete, ready to validate\n' > "$statusf"
       fire_verdict='state: working · source: run-step · validating (running)'
@@ -1244,6 +1319,7 @@ drive_first_sight_release() {  # <route>
   printf '%s' "$fresh_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE="$route_verdict"
+  [ "$away_record" -eq 0 ] || date +%s > "$state/.afk"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1262,9 +1338,10 @@ drive_first_sight_release() {  # <route>
       || { reap "$pid"; fail "the $route first-sight poll did not survive its cycle: $(cat "$out")"; }
   fi
   reap "$pid"
+  rm -f "$state/.afk"
   ack_stopped_cycle "$state" || true
   [ ! -e "$state/.wedge-permanent-$key" ] \
-    || fail "the $route first-sight route ended the wedge episode but left the cap marker standing, so the next genuine wedge would answer with silence until the horizon"
+    || fail "the $route first-sight route left the cap marker standing, so the next genuine wedge would answer with silence until the horizon"
   [ ! -e "$state/.wedge-terminal-queued-$key" ] \
     || fail "the $route first-sight route kept the terminal-wake episode marker, so the next episode's own terminal wake would be suppressed"
 
@@ -1302,6 +1379,7 @@ test_wedge_cap_releases_on_every_first_sight_route() {
   drive_first_sight_release provably-working-terminal
   drive_first_sight_release surface-terminal
   drive_first_sight_release provably-working-nonterminal
+  drive_first_sight_release away-first-sight
   pass "every first-sight route that ends a wedge episode releases that episode's cap and lets the next wedge escalate"
 }
 
@@ -1389,3 +1467,4 @@ test_wedge_cap_probe_keeps_its_cadence_while_capped
 test_wedge_cap_unwritable_terminal_marker_does_not_flood
 test_wedge_cap_releases_on_every_first_sight_route
 test_wedge_cap_releases_after_nonterminal_stale_episode
+test_wedge_cap_off_ignores_leftover_markers
