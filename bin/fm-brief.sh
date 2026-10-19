@@ -447,6 +447,13 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+# Ship and scout briefs tell the worker to run chrome-devtools-axi under one
+# named session and stop only that session. Session names share one per-user
+# namespace across every home, and an unnamed session is the shared "default"
+# one firstmate itself uses, so the name joins this home's tag to the task id
+# and is never "default". chrome-devtools-axi accepts 1-64 characters from
+# [A-Za-z0-9._-]; a longer or out-of-charset name keeps a readable prefix plus a
+# hash of the full name, so distinct tasks stay distinct.
 browser_session_name() {
   local name=$1 hash
   local LC_ALL=C

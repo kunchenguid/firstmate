@@ -19,9 +19,9 @@
 # carrying .fm-secondmate-home) plus a short hash of the resolved FM_ROOT
 # path, so distinct installations - including multiple primaries on one
 # machine - never collide even though they share one backend-global
-# namespace. Callers source this file AFTER resolving their own
-# FM_HOME/FM_ROOT fallbacks (both adapters already do this for their own
-# purposes before any other function runs).
+# namespace. Callers invoke fm_backend_hometag only AFTER resolving their own
+# FM_HOME/FM_ROOT fallbacks (both adapters resolve them before sourcing this
+# file; bin/fm-brief.sh resolves them before its call).
 #
 # Moving/relocating a firstmate installation changes its FM_ROOT path and
 # therefore its tag; titles created under the old tag simply stop matching -
