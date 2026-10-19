@@ -116,13 +116,16 @@ harness_marker() {
   # omp 18.1.11 that PI_CODING_AGENT is absent from the binary. OMP_PROFILE and
   # PI_CODING_AGENT_DIR describe the selected profile, not which harness owns
   # this process tree, so they are never identity markers: a live bun-shim omp
-  # session carries both (verified 2026-10-19). FM_OMP_HARNESS=omp is therefore a
-  # Firstmate-OWNED launch marker, established by bin/fm-spawn.sh at the omp launch boundary
-  # (which also clears every foreign marker) and by the README's primary launch command. It is a PRECEDENCE override,
-  # never evidence on its own: it wins over an inherited CLAUDECODE only when an omp process is genuinely in the ancestry, so
-  # `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies as omp, while the same variable leaking from an omp secondmate
-  # into that home's claude worker (whose ancestry holds no omp) changes nothing. The anchored ancestry arm below covers a plain hand-started
-  # `omp` by itself, whether native or bun-shim.
+  # session carries both (verified 2026-10-19). FM_OMP_HARNESS=omp is therefore
+  # a Firstmate-OWNED launch marker, established by bin/fm-spawn.sh at the omp
+  # launch boundary (which also clears every foreign marker) and by the
+  # README's primary launch command. It is a PRECEDENCE override, never
+  # evidence on its own: it wins over an inherited CLAUDECODE only when an omp
+  # process is genuinely in the ancestry, so `FM_OMP_HARNESS=omp omp` started
+  # from a Claude pane identifies as omp, while the same variable leaking from
+  # an omp secondmate into that home's claude worker (whose ancestry holds no
+  # omp) changes nothing. The anchored ancestry arm below covers a plain
+  # hand-started `omp` by itself, whether native or bun-shim.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
     return

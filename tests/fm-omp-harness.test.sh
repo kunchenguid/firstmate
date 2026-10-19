@@ -63,6 +63,7 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 }
 
 # --- 1. Detection --------------------------------------------------------------
+
 test_detection_anchored_name_and_marker_precedence() {
   local bin out
   bin=$(make_named_shells "$TMP_ROOT/named")
