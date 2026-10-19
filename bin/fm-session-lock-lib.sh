@@ -68,8 +68,6 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#      A bun-shim omp (`comm=bun`, argv `bun <...>/bin/omp`) matches here too:
-#      `bin/omp` is an exact `omp` path component, while `bin/ompd` is not.
 #   3. a bare interpreter (node, python, bun) running a harness script path.
 #   bun carries only the omp script token (the first argv token after bun, with
 #   basename exactly `omp`): a *omp* glob would claim ompd/comp, so no other
