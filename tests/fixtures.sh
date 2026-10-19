@@ -97,7 +97,9 @@ fm_test_fake_gh_axi() {
 # set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
 # is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
 # carry no -l) is appended there instead, one per line in send order. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. Optional
+# FM_FAKE_PANE_COMMAND_FILE holds the pane's foreground command for endpoint
+# reads, and each logged launch rewrites it to FM_FAKE_PANE_BECOMES when set.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -109,6 +111,9 @@ fm_test_fake_tmux_spawn() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    [ -z "${FM_FAKE_PANE_COMMAND_FILE:-}" ] || { cat "$FM_FAKE_PANE_COMMAND_FILE"; exit 0; }
+    ;;
 esac
 window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
@@ -161,6 +166,8 @@ case "${1:-}" in
               ;;
           esac
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          [ -z "${FM_FAKE_PANE_COMMAND_FILE:-}" ] || [ -z "${FM_FAKE_PANE_BECOMES:-}" ] ||
+            printf '%s\n' "$FM_FAKE_PANE_BECOMES" > "$FM_FAKE_PANE_COMMAND_FILE"
         fi
         prev=$a
       done
