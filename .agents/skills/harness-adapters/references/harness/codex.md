@@ -22,10 +22,9 @@ The decision persists for the repository, so later worktrees of the same project
 
 ## Task-worker launch input
 
-[`bin/fm-spawn.sh`](../../../../../bin/fm-spawn.sh) owns native Codex ship/scout launch transport and its per-invocation `developer_instructions` bootstrap.
-It publishes the complete launch envelope through the existing operational-input record carrier rather than placing large instructions in one executable argument.
-The initial doorbell is transport, not replacement captain intent: the worker must read the entire record before project work and retain its complete authorized intent for later validation.
-The launch overrides Codex's configured `developer_instructions` for that worker invocation; secondmate launches remain unchanged.
+[`bin/fm-spawn.sh`](../../../../../bin/fm-spawn.sh) retains the default inline native Codex ship/scout launch. Task workers may opt in with `--codex-brief-record` to publish the complete launch envelope through the existing operational-input record carrier rather than placing large instructions in one executable argument.
+The initial user prompt combines a worker-role and complete-read bootstrap with the canonical doorbell. The doorbell is transport, not replacement captain intent: the worker must read the entire record before project work and retain its complete authorized intent for later validation.
+This does not override configured `developer_instructions`; secondmate launches remain unchanged.
 
 ## Hook trust
 

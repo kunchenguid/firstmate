@@ -2720,7 +2720,7 @@ if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini 
   exit 1
 fi
 
-if [ "$CODEX_BRIEF_RECORD" = 1 ] && { [ "$HARNESS" != codex ] || [ "$KIND" = secondmate ]; }; then
+if [ "$CODEX_BRIEF_RECORD" = 1 ] && { [ "$HARNESS" != codex ] || [ "$KIND" = secondmate ] || [ "$RAW_LAUNCH" -ne 0 ]; }; then
   echo "error: --codex-brief-record requires a native Codex task worker" >&2
   exit 1
 fi
@@ -5836,6 +5836,7 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$CODEX_BRIEF_RECORD" != 1 ] || echo "codex_brief_record=1"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"

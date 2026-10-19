@@ -145,11 +145,12 @@ json.dump(codes, open(sys.argv[2], 'w'))
 PY
   : > "$launchlog"
   FM_FAKE_LAUNCH_LOG="$launchlog" fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" \
-    --model "${FM_CODEX_FULL_BRIEF_MODEL:-gpt-6-sol}" --effort high --mode no-mistakes --yolo off \
+    --model "${FM_CODEX_FULL_BRIEF_MODEL:-gpt-6-sol}" --effort high --mode no-mistakes --yolo off --codex-brief-record \
     > "$case_dir/spawn.log" 2>&1 || fail "codex $CODEX_VERSION: cannot emit full-record launch"
   launch=$(cat "$launchlog")
   eval "set -- ${launch#*codex }"
   for arg do doorbell=$arg; done
+  doorbell=${doorbell##*$'\n'}
   . "$ROOT/bin/fm-operational-input.sh"
   fm_operational_doorbell_kind "$doorbell" "$home/state" arg || fail "native prompt lost home-bound record"
   fm_operational_doorbell_path "$doorbell" record || fail "native prompt names no canonical record"
