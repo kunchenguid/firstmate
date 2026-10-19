@@ -123,13 +123,11 @@ The targeted executable regression uses an 83,828-byte synthetic intent, a large
 bash bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The old stock launch reproduced `bash: line 1: /usr/bin/env: Argument list too long` before the receiving executable ran.
-The record-backed launch passes only a bounded doorbell across that same real subprocess boundary and retains the complete encoded envelope byte-for-byte in the canonical record.
+The default inline launch reproduces `bash: line 1: /usr/bin/env: Argument list too long` before the receiving executable runs. The default-off `--codex-brief-record` opt-in instead passes a bounded initial user prompt containing a worker-role/complete-read bootstrap and canonical doorbell across that same real subprocess boundary, retaining the complete encoded envelope byte-for-byte in the record without overriding configured developer instructions.
 The regression covers ship/scout launches, publication refusal, model/effort and hook/notification retention, and unchanged secondmate transport and identity.
 Other harness templates and backend lifecycle mechanisms are unchanged; the shared staged-command and launch-environment paths remain covered by that named regression.
 
-Both token-free native probes ran inside a fresh `unshare -Urn` namespace without external networking.
-The first executed the stock-generated command with an isolated empty HOME and CODEX_HOME, no terminal, and `TERM=dumb`:
+The following historical token-free probes ran inside a fresh `unshare -Urn` namespace without external networking. They measured an earlier developer-input prototype, not the revised default-off user-prompt transport. The first executed its generated command with an isolated empty HOME and CODEX_HOME, no terminal, and `TERM=dumb`:
 
 ```sh
 env -i HOME="$probe_home" CODEX_HOME="$probe_codex_home" PATH="$PATH" TERM=dumb \
@@ -138,14 +136,14 @@ env -i HOME="$probe_home" CODEX_HOME="$probe_codex_home" PATH="$PATH" TERM=dumb 
 
 The complete 200,223-byte synthetic record retained `# Current worker role contract` as its first body line.
 The installed native CLI exited 1 with `Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY)`, not an executable-argument error.
-Its local prompt renderer separately accepted the exact bootstrap configuration and doorbell captured from that stock-generated command:
+Its local prompt renderer separately accepted the earlier prototype's bootstrap configuration and doorbell:
 
 ```sh
 codex debug prompt-input -c "$bootstrap_config" "$doorbell"
 ```
 
 The resulting JSON contained the byte-identical bootstrap as developer input and the byte-identical doorbell as user input.
-Those token-free probes establish native configuration parsing and safe refusal only; they are not model-processing evidence.
+Those historical probes establish parsing and safe refusal for that prototype only; they are neither revised-source launch nor model-processing evidence.
 
 The credentialed guard extends the existing native hook subject rather than substituting `codex exec` for the interactive worker:
 
@@ -156,7 +154,7 @@ FM_CODEX_FULL_BRIEF_LIVE=1 FM_CODEX_FULL_BRIEF_MODEL=gpt-6-sol \
 
 It requires existing code-assistant authentication and spends model tokens only on a synthetic task in a generated non-default Herdr lab, with the helper's default-session tripwire and guarded cleanup.
 It executes the stock-emitted native command, checks the complete envelope against the canonical encoder, and requires three independently sampled receipt values distributed through an 83,828-byte intent, worker identity, the exact inbox, and the normal native turn-end notification.
-Observed with codex-cli 0.155.1 and `gpt-6-sol`, high effort:
+The following observation predates the default-off revision and does not prove its native behavior. Observed with codex-cli 0.155.1 and `gpt-6-sol`, high effort:
 
 ```text
 # native full-record bytes=205256 model=gpt-6-sol effort=high version=codex-cli 0.155.1
@@ -166,8 +164,8 @@ ok - codex codex-cli 0.155.1 consumed beginning/middle/end of the complete synth
 The default, token-free mode of that same guard replays the actual emitted flags against native `features list` and confirms hooks remain disabled.
 `tests/fm-control-relaunch.test.sh` additionally exercises normal same-task replacement twice, proving each current complete record is fresh while the endpoint, retained copy, HEAD, dirty work, and original intent survive.
 Its existing live/ambiguous-ownership refusal cases remain unchanged.
-The source-version compatibility probe supplied for target codex-cli 0.162.1 accepted the same bootstrap and doorbell with empty temporary HOME/CODEX_HOME; that is target-version parsing evidence, not a target-host model turn.
-The real model-consumption proof above covers local codex-cli 0.155.1 only.
+The historical compatibility probe for codex-cli 0.162.1 accepted the earlier prototype's bootstrap and doorbell with empty temporary HOME/CODEX_HOME; that is prototype parsing evidence, not a target-host model turn.
+Revised-source native receipts for complete-record consumption with preserved operator configuration, same-worker relaunch, and publication-failure zero-launch remain outstanding.
 No business payload, product task recovery, installed-home adoption, or later validation-intent transport was tested or changed.
 
 ## tmux

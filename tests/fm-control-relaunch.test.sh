@@ -364,6 +364,30 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_codex_record_relaunch_rejects_harness_switch_before_stop() {
+  local dir id=rl-record-switch out rc
+  dir=$(new_case record-switch "$id")
+  . "$ROOT/tests/fixtures.sh"
+  fm_test_spawn_home "$dir/home" codex
+  fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
+  fm_test_spawn_brief "$dir/home" "$id"
+  : > "$dir/fake/windows"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  out=$(run_spawn "$dir" "$id" "$dir/proj" --mode no-mistakes --yolo off --harness codex --codex-brief-record); rc=$?
+  expect_code 0 "$rc" "initial opted-in spawn failed: $out"
+  [ "$(meta_field "$dir" "$id" codex_brief_record)" = 1 ] || fail "spawn did not persist Codex record opt-in"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --harness claude --note "retain synthetic task"); rc=$?
+  expect_code 1 "$rc" "incompatible record relaunch should refuse"
+  assert_contains "$out" "Codex brief record" "refusal should identify incompatible transport"
+  [ ! -s "$dir/fake/literal" ] || fail "refusal sent lifecycle input to the worker"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "refusal stopped the existing worker"
+  [ "$(meta_field "$dir" "$id" codex_brief_record)" = 1 ] || fail "refusal changed task opt-in"
+  pass "Codex record task rejects incompatible relaunch before stopping its worker"
+}
+
 test_codex_relaunch_publishes_current_complete_record() {
   local dir id=rl-full-record out rc before_head before_dirty round launch command arg doorbell record prior=
   dir=$(new_case full-record "$id")
@@ -2820,6 +2844,7 @@ SH
 }
 
 test_relaunch_off_opencode_removes_tracked_wiring
+test_codex_record_relaunch_rejects_harness_switch_before_stop
 test_codex_relaunch_publishes_current_complete_record
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
