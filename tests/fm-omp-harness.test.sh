@@ -63,14 +63,6 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 }
 
 # --- 1. Detection --------------------------------------------------------------
-#
-# NOTE (session-local): the live probes below walk the REAL process tree, so
-# under a live bun-shim omp session (e.g. this adapter itself, `bun
-# .../bin/omp`) the decoy/leak probes see the outer launcher past their
-# fixture and answer omp. CI has no such ancestor and stays green. Decoy
-# hermeticity lives in test_detection_bun_shim_script_token plus the
-# fm_harness_process_matches bun vectors in test_lock_identity - pure argv
-# asserts no live tree can pollute.
 test_detection_anchored_name_and_marker_precedence() {
   local bin out
   bin=$(make_named_shells "$TMP_ROOT/named")
@@ -109,6 +101,9 @@ test_lock_identity_and_liveness_classification() {
   ! fm_harness_process_matches bun "bun /x/ompd --y" || fail "session-lock identity must not accept a bun-shim ompd"
   ! fm_harness_process_matches bun "bun /x/comp --y" || fail "session-lock identity must not accept a bun-shim comp"
   ! fm_harness_process_matches bun "bun run dev" || fail "session-lock identity must not accept an unrelated bun process"
+  ! fm_harness_process_matches bun "bun run dev --cwd /Users/x/omp" || fail "session-lock identity must not accept an omp path in a later bun argument"
+  ! fm_harness_process_matches bun "bun /x/ompd --root /y/omp" || fail "session-lock identity must not accept a decoy script with an omp later argument"
+  ! fm_harness_process_matches /home/ubuntu/bin/x "/home/ubuntu/bin/x /repo/omp --y" || fail "session-lock identity must not treat a path containing bun as the bun interpreter"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -130,6 +125,9 @@ test_detection_bun_shim_script_token() {
   ancestry_arg_has_omp_script "bun /x/omp" || fail "the script token must match a bare bun /x/omp argv"
   ! ancestry_arg_has_omp_script "bun /x/ompd --y" || fail "the script token must not match a bun-shim ompd"
   ! ancestry_arg_has_omp_script "bun /x/comp --y" || fail "the script token must not match a bun-shim comp"
+  ! ancestry_arg_has_omp_script "bun run dev --cwd /Users/x/omp" || fail "the script token must not match an omp path in a later argument"
+  ! ancestry_arg_has_omp_script "bun test /repo/omp --watch" || fail "the script token must not match an omp path in a later argument"
+  ! ancestry_arg_has_omp_script "bun /x/ompd --root /y/omp" || fail "the script token must not match a decoy script with an omp later argument"
   ! ancestry_arg_has_omp_script "bun run dev" || fail "the script token must not match an unrelated bun process"
   ! ancestry_arg_has_omp_script "node /x/omp --y" || fail "the script token must not match a non-bun interpreter"
   pass "fm-harness: the bun-shim script token matches omp and only omp"

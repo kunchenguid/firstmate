@@ -154,30 +154,23 @@ harness_marker() {
   return 0
 }
 
+# True when <args> is a bun-shim omp: the argv token right after `bun` must be
+# the omp script itself (`bun <...>/bin/omp ...`; verified: `bun install -g`
+# lays a `#!/usr/bin/env bun` script at ~/.bun/bin/omp, so the live process is
+# `comm=bun` with the omp path in argv). Its basename must be exactly `omp`, so
+# ompd/comp and an `omp` path in a LATER argument (`bun run dev --cwd /x/omp`)
+# never match.
+ancestry_arg_has_omp_script() {  # <args>
+  local interp script
+  read -r interp script _ <<<"$1"
+  [ "$(basename -- "$interp")" = bun ] && [ "$(basename -- "${script:-}")" = omp ]
+}
+
 # True when an `omp` process sits within eight parents of this one: either a
 # natively-named `omp` (Bun-compiled single binary, verified omp 18.1.11) or a
-# bun-shim `bun <...>/bin/omp` (verified: `bun install -g` lays a `#!/usr/bin/env
-# bun` script at ~/.bun/bin/omp, so the live process is `comm=bun` with the omp
-# path in argv). The shim match demands the exact script token `/omp` followed
-# by space or end - ` omp `, `/omp `, or `/omp` at end - so ompd/comp never
-# match (they carry `/ompd`/`/comp`). Kept separate from the ancestry walk so
-# the marker precedence above can demand real process evidence before trusting
-# FM_OMP_HARNESS.
-ancestry_arg_has_omp_script() {
-  # The argv token right after the interpreter must be the omp script itself
-  # (`bun <...>/bin/omp ...`): matching anywhere in the line would also fire
-  # on the harness probe's own ancestry (a `... fm-harness.sh` child of the
-  # shim carries the shim path in its parent's line, not as a script it runs).
-  # Decoys (`.../ompd`, `.../comp`) never match: the token must end after
-  # `omp`, followed by space or end.
-  case "$1" in
-    bun\ /omp\ *|bun\ /omp|bun\ omp\ *|bun\ omp) return 0 ;;
-  esac
-  case "$1" in
-    bun\ */omp\ *|bun\ */omp) return 0 ;;
-  esac
-  return 1
-}
+# bun-shim omp (see ancestry_arg_has_omp_script). Kept separate from the
+# ancestry walk below so the marker precedence above can demand real process
+# evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
   local pid=$$ comm args base
   for _ in 1 2 3 4 5 6 7 8; do
@@ -197,6 +190,7 @@ ancestry_names_omp() {
   done
   return 1
 }
+
 # Print "<strength> <harness>" when one process identifies a harness, or nothing.
 # Strength records how the match was made:
 #   comm - the ancestor's own executable name identifies the harness. This is a
@@ -256,6 +250,7 @@ harness_process_verdict() {  # <pid>
     # optional claude-bridge extension runs a nested executable literally
     # named `claude` with its own node child, and that fallback's *claude*
     # args glob would otherwise claim it if that subtree were ever walked.
+    omp) echo "comm omp"; return ;;
     # A `bun install -g` omp is a `#!/usr/bin/env bun` script, so the live
     # process is `comm=bun` with the omp path in argv (verified 2026-10-19:
     # `bun /Users/tien/.bun/bin/omp ...`). It sits beside the native arm
@@ -342,6 +337,7 @@ harness_ancestry() {  # [<pid>]
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
 # is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
+# or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0

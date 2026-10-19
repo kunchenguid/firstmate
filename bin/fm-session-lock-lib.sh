@@ -71,9 +71,9 @@ fm_harness_path_name() {  # <path>
 #      A bun-shim omp (`comm=bun`, argv `bun <...>/bin/omp`) matches here too:
 #      `bin/omp` is an exact `omp` path component, while `bin/ompd` is not.
 #   3. a bare interpreter (node, python, bun) running a harness script path.
-#   bun carries only the anchored omp script token (` omp `, `/omp `, or `/omp`
-#   at end): a *omp* glob would claim ompd/comp, so no other harness rides the
-#   bun arm.
+#   bun carries only the omp script token (the first argv token after bun, with
+#   basename exactly `omp`): a *omp* glob would claim ompd/comp, so no other
+#   harness rides the bun arm.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -89,10 +89,10 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   # Bare interpreter (node, python): match the harness name in its script path.
-  # bun: match only the anchored omp script token, never the regex - a `bun
-  # install -g` omp runs as `comm=bun` (verified 2026-10-19) and the regex's
-  # ^omp$ never fires inside a full command line, while *omp* would claim
-  # ompd/comp.
+  # bun: match only an omp script as the first argv token after bun, never the
+  # regex - a `bun install -g` omp runs as `comm=bun` (verified 2026-10-19) and
+  # the regex's ^omp$ never fires inside a full command line, while *omp* would
+  # claim ompd/comp.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
@@ -100,12 +100,11 @@ fm_harness_process_matches() {  # <comm> <args>
         return 0
       fi
       ;;
-    *bun*)
-      case " $args " in
-        *" omp "*|*"/omp "*|*" omp"|*"/omp") return 0 ;;
-      esac
-      ;;
   esac
+  if [ "$base" = bun ]; then
+    read -r _ name _ <<<"$args"
+    [ "$(basename -- "${name:-}")" = omp ] && return 0
+  fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
