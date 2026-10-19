@@ -82,8 +82,9 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, `devin` and
-# `commandcode` are exact as well, and an unrecognized value returns nonzero rather than being guessed into a family.
+# matches only its exact names `agy` and `antigravity` for the same reason on an
+# even shorter name, `devin` and `commandcode` are exact as well, and an
+# unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
