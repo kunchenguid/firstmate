@@ -66,6 +66,12 @@ LAB_TMUX_DIR=''
 LAB_SOCKET=''
 SESSION=''
 TRANSCRIPT=''
+# The tmux server, the lab home, and the registered temp root, in that order:
+# fm_test_cleanup is the sweep lib.sh's own EXIT trap would have run, and this
+# guard replaces that trap with its own, so calling it here is what keeps the
+# cycle outputs and the transcript from outliving the run. The transcript is
+# reprinted to stdout before this runs, so removing the file costs the run
+# nothing it still needs.
 cleanup() {
   if [ -n "$LAB_SOCKET" ] && [ -n "$SESSION" ]; then
     tmux -S "$LAB_SOCKET" kill-server >/dev/null 2>&1 || true
@@ -74,6 +80,7 @@ cleanup() {
     "$ROOT/bin/fm-lab-home.sh" teardown "$LAB_HOME" >/dev/null 2>&1 || true
     rm -rf "$LAB_HOME"
   fi
+  fm_test_cleanup
 }
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
 trap cleanup EXIT
