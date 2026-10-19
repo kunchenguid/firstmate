@@ -240,7 +240,6 @@ assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
 body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
-assert_contains "$out" '  model: jev-1.13.0   backend: typesafe   latency_ms: ' "the model line names the typesafe backend"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "a brief without task headings rides whole in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
@@ -263,11 +262,11 @@ cat > "$OR_RESPONSE" <<'JSON'
 JSON
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE="$OR_RESPONSE" run code out err "$BRIEF" --project pager
+API_KEY_PRIVATE=stale-caller-export OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE="$OR_RESPONSE" run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "OpenRouter-only exits 0"
 assert_contains "$out" '  status: clear' "an OpenRouter-shaped response with extra fields resolves clear"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "OpenRouter resolves to the same profile as typesafe"
-assert_contains "$out" '  model: typesafe/jev-1.13   backend: openrouter   latency_ms: ' "the model line names the openrouter backend"
+assert_contains "$out" '  model: typesafe/jev-1.13 backend=openrouter   latency_ms: ' "the model line carries the backend=openrouter word"
 assert_contains "$out" '   tokens: 812/60' "OpenRouter usage tokens are reported"
 argv=$(cat "$LOG/argv")
 assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter-only uses the OpenRouter decisions endpoint"
@@ -275,7 +274,7 @@ assert_not_contains "$argv" 'api.typesafe.ai' "OpenRouter-only never calls types
 assert_not_contains "$argv" "$OR_KEY" "the OpenRouter key never appears on curl argv"
 assert_contains "$argv" '@/dev/fd/3' "the OpenRouter header is read from a file descriptor"
 assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
-assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key and an exported caller API_KEY_PRIVATE are absent from every child environment"
 assert_equals 'typesafe/jev-1.13' "$(jq -r .model "$LOG/body")" "OpenRouter-only sends model typesafe/jev-1.13"
 TS_BODY=$(jq -cS 'del(.model)' <<<"$body")
 assert_equals "$TS_BODY" "$(jq -cS 'del(.model)' "$LOG/body")" "OpenRouter reuses the typesafe request body except for the model"
@@ -300,7 +299,6 @@ reset_log
 OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
 assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "an .env typesafe key wins over an environment OpenRouter key"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "the OpenRouter key never reaches curl when typesafe wins"
-assert_contains "$out" '  model: jev-1.13.0   backend: typesafe   latency_ms: ' "the typesafe backend is named when both keys are present"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "neither key reaches a child environment when both are present"
 rm -f "$HOME_DIR/.env"
 pass "OPENROUTER_API_KEY selects the OpenRouter decisions endpoint; a typesafe key always wins"

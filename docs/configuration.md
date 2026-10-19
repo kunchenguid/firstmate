@@ -1360,7 +1360,7 @@ The key selects which service answers; the request body, response checks, and ev
 A `TYPESAFE_API_KEY` from either source always wins, so a home holding both keys keeps using typesafe.ai and never sends the OpenRouter key.
 OpenRouter serves Jev only through its decisions endpoint, not chat completions, and returns the same answer shape plus extra fields such as `id`, `provider`, and `usage.cost`, which the resolver ignores.
 One OpenRouter decision costs a few thousandths of a cent (about 800 input and 100 output tokens, $0.00003, in the live runs recorded in [the verification record](verification/dispatch-resolve.md)); OpenRouter's model page owns current pricing.
-The output's `model:` line names the backend that answered.
+The output's `model:` line carries one `backend=<name>` word naming the backend that answered.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.

@@ -20,7 +20,7 @@
 #   https://api.typesafe.ai/v1/systemone; openrouter POSTs model
 #   typesafe/jev-1.13 to https://openrouter.ai/api/alpha/decisions. The request
 #   body and response validation are otherwise identical, and the model line
-#   names the backend that answered.
+#   carries one backend=<name> word naming the backend that answered.
 #
 # What it does when on with at least one rule: one POST to the selected
 #   backend with the project name and the brief's
@@ -57,7 +57,7 @@
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
-#     model/backend/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
+#     model backend=<name>/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
@@ -83,7 +83,7 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY OPENROUTER_API_KEY
+unset TYPESAFE_API_KEY OPENROUTER_API_KEY API_KEY_PRIVATE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -373,7 +373,7 @@ quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg backend "$BACKEND" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -485,7 +485,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg backend "$BACKEND" --argjso
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
   def when_of($c): (if rule_at($c) == null then $none_criterion else rule_at($c).when end | .[0:60]);
   {
-    model: $r.model, backend: $backend, latency_ms: $lat, tokens: ($r.usage // null),
+    model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $picked,
     rule_when: when_of($picked),
     confidence: $a.confidence, probabilities: $a.probabilities
@@ -517,13 +517,13 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg backend "$BACKEND" --argjso
     end
   end') || emit_error "resolution failed"
 
-TEXT=$(jq -r '
+TEXT=$(jq -r --arg backend "$BACKEND" '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def shell_arg: flat | @sh;
   "dispatch-resolve:",
   "  status: \(.status | flat)",
-  "  model: \(show(.model))   backend: \(.backend | flat)   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
+  "  model: \(show(.model)) backend=\($backend | flat)   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
   (if .fallback then "  fallback: \(.fallback | flat)" else empty end),
