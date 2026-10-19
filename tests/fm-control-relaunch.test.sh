@@ -82,6 +82,7 @@ case "${1:-}" in
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+          printf '%s\n' "$payload" > "$D/latest-launch"
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -410,7 +411,7 @@ test_codex_relaunch_publishes_current_complete_record() {
     printf '\nCurrent specification token: %s\n' "$round" >> "$dir/home/data/$id/brief.md"
     out=$(run_control "$dir" "$id" relaunch --note "continue $round synthetic record"); rc=$?
     expect_code 0 "$rc" "Codex same-task relaunch failed: $out"
-    launch=$(tail -1 "$dir/fake/literal")
+    launch=$(cat "$dir/fake/latest-launch")
     command=$(fm_test_launch_command "$launch")
     eval "set -- ${command#*codex }"
     for arg do doorbell=$arg; done
