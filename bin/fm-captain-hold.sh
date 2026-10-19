@@ -30,6 +30,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
@@ -196,6 +197,12 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `answered` is the read-only predicate bin/fm-tasks-axi.sh asks before it lets a
+# `[captain-ask]` row leave the backlog: exit 0 when the task body carries a
+# recorded captain answer (an evidence-only `reconciled` record does not count),
+# 1 when it does not, and any other non-zero status when the task cannot be read.
+# It prints nothing.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1985,6 +1992,16 @@ EOF
   done
 }
 
+command_answered() {  # <task-id>
+  local show body
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  task_show "$1" || exit 2
+  show=$TASK_SHOW_OUTPUT
+  body=$(show_field "$show" body)
+  body_has_resolution_record "$body" || return 1
+  [ "$(recorded_resolution_mode "$body" || true)" != reconciled ]
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -2067,6 +2084,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  answered) shift; command_answered "$@" ;;
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;

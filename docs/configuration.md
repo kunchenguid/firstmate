@@ -363,6 +363,8 @@ Either would place a row In flight without a task record, status file, or inbox,
 The wrapper still passes through the documented direct transition `tasks-axi start <id>`.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 
+The same wrapper also refuses to remove, close, or park-hold a `[captain-ask]` row, or to drop its tag through `update` or `edit --title`, until `bin/fm-captain-hold.sh answered <id>` finds the captain's recorded answer or the row links a merged pull request; the refusal names the row and exits 2. The guard covers only commands run through the wrapper, and the automatic dispatch and completion transitions do not use it ([`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) owns the complete refusal list).
+
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 
 ### Which backlog receives a transition

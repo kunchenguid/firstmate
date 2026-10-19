@@ -524,7 +524,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
-- The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call. The backlog wrapper's own `[captain-ask]` refusal reads the same record through `answered` ([`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) owns it).
 
 ### Answers, stamps, and deferral
 
