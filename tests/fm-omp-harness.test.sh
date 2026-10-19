@@ -99,7 +99,7 @@ test_detection_bun_shim_process_tree() {
   mkdir -p "$dir/bin"
   ln -sf /bin/bash "$dir/bun"
   for name in omp ompd run; do
-    printf '%s\n' '"$FM_PROBE"; :' >"$dir/bin/$name"
+    printf '%s\n' "\"\$FM_PROBE\"; :" >"$dir/bin/$name"
   done
   export FM_PROBE=$HARNESS
   out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
