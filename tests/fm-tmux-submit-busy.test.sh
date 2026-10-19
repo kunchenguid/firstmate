@@ -426,7 +426,7 @@ test_typed_submit_on_grok_trust_dialog_types_nothing() {
   # answers the dialog and Enter accepts it.
   for v in 1.0.52 1.0.62; do
     rc=0
-    cp "$ROOT/tests/fixtures/grok-$v/trust-dialog.txt" "$composer"
+    cp "$ROOT/tests/fixtures/grok-$v/trust-dialog.plain" "$composer"
     before=$(cat "$composer")
     : > "$sent"
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \

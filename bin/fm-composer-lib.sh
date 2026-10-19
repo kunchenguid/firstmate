@@ -592,6 +592,14 @@ fm_composer_strip_braille() {
 # also uses this value as the minimum Ctrl+U clear budget after a refused proof.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
+# The row window for the blocking-dialog guard alone. A dialog's heading sits
+# far above its footer on a tall screen (Grok's folder-trust dialog is 39 rows
+# with the heading 24 above the footer), so the 20-row tail above cannot see it
+# on the tail-capture backends, while the guard's own structure check
+# (fm_composer_blocking_dialog) already refuses scrollback that is not the live
+# screen. Widening only this read leaves every composer verdict untouched.
+FM_COMPOSER_DIALOG_CAPTURE_LINES=${FM_COMPOSER_DIALOG_CAPTURE_LINES:-60}
+
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.

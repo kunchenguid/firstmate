@@ -56,6 +56,7 @@ On 2026-10-19 Grok 1.0.52 and 1.0.62 rendered the same dialog, "Do you trust the
 A bare scratch repository launched straight to the composer in the lab, and the dialog appeared once the folder held `AGENTS.md` and `.grok/settings.json`, so which project file triggers it is unverified.
 Typed text answers it, because `y` and `n` are hotkeys: on 2026-10-13 a steer's doorbell reached the dialog seconds after the spawn and the worker quit 8 seconds after start.
 `fm_composer_blocking_dialog` in `../../../bin/fm-composer-lib.sh` now names this dialog, so a typed steer or doorbell is refused with `blocked on a prompt: Grok folder-trust dialog` before anything is typed, and `../../../bin/fm-control.sh` refuses its exit command the same way.
+The dialog is 39 rows tall with its heading 24 rows above the footer, beyond the 20-row tail that the Orca, cmux, and zellij composer reads take, so `fm_backend_note_wide_dialog` in `../../../bin/fm-backend.sh` makes one extra `FM_COMPOSER_DIALOG_CAPTURE_LINES` (default 60) read for the dialog check alone before a typed submit or `/exit`; `../../../tests/fm-backend-orca.test.sh` pins it.
 After launching Grok, `../../../bin/fm-spawn.sh` polls the pane for up to `FM_GROK_TRUST_POLLS` reads (default 20, `FM_GROK_POLL_INTERVAL` apart).
 A named dialog ends the poll with an open `blocked [key=grok-trust-dialog]` status line and a `waiting:` notice on stderr, and the spawn still succeeds.
 The spawn never answers the dialog itself.

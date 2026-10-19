@@ -137,7 +137,7 @@ test_grok_spawn_surfaces_trust_dialog_without_typing() {
     IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
 EOF
-    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/trust-dialog.txt" 1
+    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/trust-dialog.plain" 1
     : > "$case_dir/launch.log"
     out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" FM_GROK_POLL_INTERVAL=0 \
       run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
@@ -160,8 +160,8 @@ test_grok_spawn_is_quiet_on_a_trusted_folder() {
     IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
 EOF
-    row=$(awk '/^ *│ ❯/ { print NR - 1; exit }' "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.txt")
-    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.txt" "$row"
+    row=$(awk '/^ *│ ❯/ { print NR - 1; exit }' "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.plain")
+    grok_fake_pane "$fakebin" "$ROOT/tests/fixtures/grok-$v/idle-composer-banner.plain" "$row"
     out=$(FM_GROK_POLL_INTERVAL=0 run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
     status=$?
     expect_code 0 "$status" "a spawn onto the grok $v idle composer should succeed"

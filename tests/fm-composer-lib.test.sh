@@ -1025,7 +1025,7 @@ grok_1052_composer_row() {  # <plain-capture>
 test_matrix_grok_1052_idle_composer_with_banner() {
   local v plain ansi row typed
   for v in $GROK_FIXTURE_VERSIONS; do
-    plain=$(grok_1052_fixture "$v" idle-composer-banner txt)
+    plain=$(grok_1052_fixture "$v" idle-composer-banner plain)
     ansi=$(grok_1052_fixture "$v" idle-composer-banner ansi)
     row=$(grok_1052_composer_row "$plain")
     [ -n "$row" ] || fail "the $v idle fixture should hold a composer content row"
@@ -1072,9 +1072,9 @@ test_matrix_grok_1052_title_mode_suffix() {
 test_matrix_grok_1052_trust_dialog_is_not_a_composer() {
   local v plain ansi idle out rc
   for v in $GROK_FIXTURE_VERSIONS; do
-    plain=$(grok_1052_fixture "$v" trust-dialog txt)
+    plain=$(grok_1052_fixture "$v" trust-dialog plain)
     ansi=$(grok_1052_fixture "$v" trust-dialog ansi)
-    idle=$(grok_1052_fixture "$v" idle-composer-banner txt)
+    idle=$(grok_1052_fixture "$v" idle-composer-banner plain)
     assert_screen "grok $v trust dialog on tmux" unknown "$CAPS_TMUX" "$ansi" 1
     assert_screen "grok $v trust dialog on herdr" unknown "$CAPS_STYLED" "$ansi"
     assert_screen "grok $v trust dialog on zellij" unknown "$CAPS_STYLED_NOID" "$ansi"
