@@ -368,6 +368,7 @@ test_codex_relaunch_publishes_current_complete_record() {
   local dir id=rl-full-record out rc before_head before_dirty round launch command arg doorbell record prior=
   dir=$(new_case full-record "$id")
   add_ship_task "$dir" "$id" codex
+  printf 'codex_brief_record=1\n' >> "$dir/home/state/$id.meta"
   printf codex > "$dir/fake/command"
   printf codex > "$dir/fake/becomes"
   {
@@ -389,6 +390,7 @@ test_codex_relaunch_publishes_current_complete_record() {
     command=$(fm_test_launch_command "$launch")
     eval "set -- ${command#*codex }"
     for arg do doorbell=$arg; done
+    doorbell=${doorbell##*$'\n'}
     . "$ROOT/bin/fm-operational-input.sh"
     fm_operational_doorbell_kind "$doorbell" "$dir/home/state" arg || fail "replacement lost home-bound record"
     fm_operational_doorbell_path "$doorbell" record || fail "replacement prompt lost canonical record"

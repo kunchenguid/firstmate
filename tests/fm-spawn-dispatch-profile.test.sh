@@ -173,15 +173,15 @@ printf '%s' "$arg" > "$FM_CAPTURE_PROMPT"
 SH
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = ship ]; then
-      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model test-model --effort high)
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model test-model --effort high --codex-brief-record)
     else
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model test-model --effort high)
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model test-model --effort high --codex-brief-record)
     fi
     expect_code 0 "$?" "full Codex $kind stock spawn failed: $out"
     launch=$(cat "$LAUNCH_LOG")
     FM_CAPTURE_ARGS="$CASE_DIR/args" FM_CAPTURE_PROMPT="$CASE_DIR/prompt" PATH="$FAKEBIN_DIR:$PATH" \
       bash -c "$launch" || fail "full Codex $kind launch did not cross the exec boundary"
-    doorbell=$(cat "$CASE_DIR/prompt")
+    doorbell=$(tail -n 1 "$CASE_DIR/prompt")
     [ "${#doorbell}" -lt 2048 ] || fail "Codex received an oversized argv prompt"
     # Use the public parser; the envelope must remain in this home's inbox.
     . "$ROOT/bin/fm-operational-input.sh"
@@ -196,8 +196,8 @@ SH
     cmp -s "$CASE_DIR/authored-before" "$HOME_DIR/data/$id/brief.md" || fail "authored intent was rewritten"
     assert_grep '# Current worker role contract' "$CASE_DIR/body" "role missing from full record"
     assert_grep "$HOME_DIR/state/$id.inbox" "$CASE_DIR/body" "exact safe inbox missing"
-    assert_grep 'developer_instructions=' "$CASE_DIR/args" "native launch omitted task-channel authority"
-    assert_grep 'Before any project work' "$CASE_DIR/args" "native bootstrap omitted complete-read requirement"
+    assert_not_contains "$(cat "$CASE_DIR/args")" "developer_instructions=" "native launch overrode operator configuration"
+    assert_grep 'Before project work' "$CASE_DIR/prompt" "native bootstrap omitted complete-read requirement"
     assert_grep 'test-model' "$CASE_DIR/args" "model changed"
     assert_grep 'model_reasoning_effort="high"' "$CASE_DIR/args" "effort changed"
     assert_grep 'hooks' "$CASE_DIR/args" "hook disablement lost"
@@ -207,7 +207,7 @@ SH
     rec=$(make_spawn_case "$id" codex "$id")
     read_case_record "$rec"
     : > "$HOME_DIR/state/operational-inbox"
-    if out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); then
+    if out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --codex-brief-record 2>&1); then
       fail "unpublishable full brief was accepted"
     fi
     assert_contains "$out" "could not publish the launch brief" "publication refusal missing"
@@ -2132,9 +2132,9 @@ printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
 SH
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = scout ]; then
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --codex-brief-record)
     else
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off --codex-brief-record)
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
     launch=$(cat "$LAUNCH_LOG")
