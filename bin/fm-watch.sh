@@ -679,10 +679,11 @@ inbox_steer_check() {  # <window> <task>
 #
 # NOT a pure read: one bounded pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
-# .stale- classification and wedge-escalation count are cleared because churn
-# begins a new quiet interval; retaining either would make the new interval
-# inherit the prior one. Reached only for a non-afk, no-captain-verb signal, so
-# it never runs on the ordinary per-wake path.
+# .stale- classification and wedge episode are cleared because churn begins a new
+# quiet interval; retaining either would make the new interval inherit the prior
+# one. The episode release goes through wedge_episode_end, so a cap that episode
+# fired goes with the rest of its bookkeeping. Reached only for a non-afk,
+# no-captain-verb signal, so it never runs on the ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
@@ -821,7 +822,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" || ! wedge_episode_end "$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1218,10 +1219,13 @@ _wedge_cap_markers_clear() {
 # .stale-since-<key> is the marker that defines one, and the boundary where a
 # window stops counting as wedged is where the cap that episode fired has to go,
 # so every route that ends an episode calls this: a pane that leaves the stale
-# path, a declared wait and its lift, a first-sight absorb, a surface. The cap
-# release is then structural rather than a list of sites to keep in step - a new
-# episode-ending route is one call, and it cannot drop the episode marker without
-# dropping the cap with it.
+# path, a declared wait and its lift, a first-sight absorb, a surface, and the
+# turn-end churn absorb. The cap release is then structural rather than a list of
+# sites to keep in step - a new episode-ending route is one call, and it cannot
+# drop the episode marker without dropping the cap with it.
+#
+# Non-zero when a reset could not be written, so a caller that has to undo an
+# absorb of its own on a failed reset (signal_turnend_panes_churned) can see it.
 #
 # The ladder's own timer reset inside wedge_timer_check is deliberately NOT an
 # episode end and keeps its own removal of the marker: that pane is still wedged,
@@ -1233,13 +1237,14 @@ _wedge_cap_markers_clear() {
 # the window quiet until the horizon, a recovery, or the operator intervenes.
 # wedge_episode_end <window-key> [keep-cap]
 wedge_episode_end() {
-  local key=$1 keep_cap=${2:-0}
+  local key=$1 keep_cap=${2:-0} status=0
   if [ "$keep_cap" = 1 ]; then
-    rm -f "$STATE/.stale-since-$key"
+    rm -f "$STATE/.stale-since-$key" || status=1
   else
-    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-    _wedge_cap_markers_clear "$key"
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" || status=1
+    _wedge_cap_markers_clear "$key" || status=1
   fi
+  return "$status"
 }
 
 # _wedge_cap_marker_stands: 0 while the cap marker a fired cap wrote for this
@@ -1317,7 +1322,8 @@ _wedge_cap_terminal_append() {
 # amplify a single write failure into a wake-queue flood. On rollback
 # failure a transient `.wedge-rollback-failed-<key>` sentinel is written so
 # the wedge path stays silent for FM_ROLLBACK_SENTINEL_TTL_SECS; the top of
-# wedge_timer_check checks it before any wake or marker logic runs.
+# wedge_timer_check checks it before any wake or marker logic runs, consulting
+# only the dead-endpoint probe on that silenced path.
 # _wedge_cap_rollback <window> <key> <escalation-file> <since-file>
 _wedge_cap_rollback() {
   local _win=$1 _key=$2 _esc=$3 _since=$4 _failed=0 _sentinel _sentinel_rc=0
@@ -1836,27 +1842,49 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # silences escalations only and must never silence a death the operator still
 # needs; the caller re-arms the shared timer on its not-dead outcome, so the
 # probe keeps that same once-per-STALE_ESCALATE_SECS cadence even though no
-# escalation follows here to clear it for it. The opt-in operator guard consult
+# escalation follows here to clear it for it. The rollback-failure sentinel is
+# the same contract one step earlier: it silences from the top of this function,
+# where it still consults that probe before returning rather than short-circuiting
+# ahead of it. The opt-in operator guard consult
 # (wedge_guard_evidence) runs after all
 # three, so a dead or missing endpoint is never deferred by a guard, and a home
 # without config/wedge-evidence-guards never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n reason evidence guard guard_note
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
+  local _wrb_since _wrb_now _wrb_age
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel
   # (the SAME fs failure that broke the cap-marker write also broke the
   # rollback). Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
   # no wake, no marker write - so the operator observes one failure per
   # wedge-event instead of a wake-queue flood under persistent fs failure.
+  # Read only where the cap is configured: with FM_WEDGE_MAX_ESCALATIONS at its
+  # default 0 neither this sentinel nor the cap marker below is ever written, so
+  # a leftover from an earlier configured run must not keep silencing a window
+  # whose operator has turned the cap back off.
   _wrollback_sentinel="$STATE/.wedge-rollback-failed-$_wkey"
-  if [ -e "$_wrollback_sentinel" ]; then
+  if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ -e "$_wrollback_sentinel" ]; then
     _wrb_ts=$(head -1 "$_wrollback_sentinel" 2>/dev/null | awk '{print $1}')
     case "$_wrb_ts" in
       ''|*[!0-9]*) _wrb_ts=0 ;;
     esac
     if [ "$_wrb_ts" -ne 0 ] && [ $(( $(date +%s) - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
-      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); cap silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
+      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
+      # A ceiling on escalations is not a ceiling on detecting a dead worker, so
+      # this silence consults the same probe the cap marker consults below rather
+      # than returning ahead of it: an agent that exits while its pane keeps
+      # rendering the identical frame is still reported once for the TTL. The
+      # probe re-arms the shared idle timer on its not-dead outcome, keeping the
+      # backend read on its once-per-STALE_ESCALATE_SECS cadence instead of one
+      # per poll, and it owns its own once-per-incarnation absorb.
+      _wrb_since=$(cat "$since_file" 2>/dev/null || true)
+      case "$_wrb_since" in
+        ''|*[!0-9]*) _wrb_age=0 ;;
+        *) fm_epoch_seconds_to _wrb_now; _wrb_age=$(( _wrb_now - _wrb_since )) ;;
+      esac
+      wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
+        || date +%s > "$since_file"
       return 0
     fi
     rm -f "$_wrollback_sentinel"
@@ -1892,7 +1920,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # across the whole horizon instead of paying a backend read per poll.
         # Every deferral and the cap fire itself stay behind this check, so no
         # re-surface wake or duplicate terminal row can slip through the cap.
-        if _wedge_cap_marker_stands "$_wkey"; then
+        # The marker is read only where the cap is configured, so a leftover from
+        # an earlier configured run cannot silence a window once the cap is off.
+        if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && _wedge_cap_marker_stands "$_wkey"; then
           wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task" \
             || date +%s > "$since_file"
           return 0
@@ -1965,7 +1995,6 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_episode_end "$_wkey" 1
           clear_write_tracking "$_wkey"
           : > "$escalation_file"
-          rm -f "$STATE/.wedge-rollback-failed-$_wkey"
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
           [ "$_wrb_cap_status" -eq 3 ] || wake "$_wrb_cap_reason"
           return 0
