@@ -184,11 +184,18 @@ def flush_item:
   if .item == null then .
   else .out += [(.item | join("\n") | inline) + "</li>"] | .item = null end;
 
+def flush_parent_item:
+  if .item == null then .
+  else .out += [(.item | join("\n") | inline)] | .item = null | .stack[-1].item_open = true end;
+
 def pop_list:
-  flush_item | .out += ["</" + .stack[-1].t + ">"] | .stack |= .[0:-1];
+  flush_item | .out += ["</" + .stack[-1].t + ">"] | .stack |= .[0:-1]
+  | if (.stack | length) > 0 and .stack[-1].item_open
+    then .out += ["</li>"] | .stack[-1].item_open = false
+    else . end;
 
 def close_lists($to_ind):
-  until((.stack | length) == 0 or .stack[-1].ind < $to_ind; pop_list);
+  until((.stack | length) == 0 or .stack[-1].ind <= $to_ind; pop_list);
 
 def close_all_lists:
   until((.stack | length) == 0; pop_list);
@@ -290,7 +297,7 @@ def md_to_html:
           | flush_candidate | flush_para | flush_quote | flush_table | .blank = false
           | close_lists($m.ind)
           | (if (.stack | length) == 0 or .stack[-1].ind < $m.ind
-             then flush_item | .out += ["<" + $m.t + ">"] | .stack += [{t: $m.t, ind: $m.ind}]
+             then flush_parent_item | .out += ["<" + $m.t + ">"] | .stack += [{t: $m.t, ind: $m.ind, item_open: false}]
              elif .stack[-1].t != $m.t
              then flush_item | .out += ["</" + .stack[-1].t + ">", "<" + $m.t + ">"]
                | .stack = (.stack | .[0:-1]) + [{t: $m.t, ind: $m.ind}]

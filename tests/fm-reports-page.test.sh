@@ -298,6 +298,22 @@ Text.'
   pass "a heading carries an id"
 }
 
+test_nested_list_dedent_and_reindent_keep_siblings_at_their_level() {
+  local home html
+  home=$(new_home)
+  write_report "$home" nested '# Nested
+
+- Eltern
+  - Kind
+- Geschwister
+  - Weiter eingerueckt'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" nested | tr -d '\n')
+  assert_contains "$html" '<ul><li>Eltern<ul><li>Kind</li></ul></li><li>Geschwister<ul><li>Weiter eingerueckt</li></ul></li></ul>' \
+    "dedenting must close the child list before a sibling, and a later indent must nest under that sibling"
+  pass "nested lists preserve sibling levels after dedent and reindent"
+}
+
 test_symlinked_report_is_not_read() {
   local home out
   home=$(new_home)
@@ -401,6 +417,7 @@ test_report_cannot_impersonate_a_page_slot
 test_title_comes_from_the_first_heading
 test_hard_break_becomes_a_line_break
 test_heading_gets_an_id_to_jump_to
+test_nested_list_dedent_and_reindent_keep_siblings_at_their_level
 test_symlinked_report_is_not_read
 test_path_prints_the_page_path
 test_link_proves_the_report_exists

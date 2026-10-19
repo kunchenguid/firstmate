@@ -16,7 +16,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reports</title>
+<title>Berichte</title>
 <style>
 :root {
   --bg: #ffffff;
@@ -302,7 +302,7 @@ function paint() {
   if (!shown.length) {
     const none = document.createElement("div");
     none.className = "none";
-    none.textContent = REPORTS.length ? "No report matches." : "No report yet.";
+    none.textContent = REPORTS.length ? "Kein Bericht passt." : "Noch kein Bericht.";
     el.list.append(none);
     return;
   }
@@ -333,18 +333,18 @@ function show() {
       location.replace("#" + encodeURIComponent(newest.id));
       return;
     }
-    document.title = "Reports";
+    document.title = "Berichte";
     el.where.textContent = "";
     el.report.textContent = "";
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent = "No report in this home yet. Build the page again once one exists.";
+    p.textContent = "In diesem Zuhause gibt es noch keinen Bericht. Baue die Seite erneut, sobald einer vorhanden ist.";
     el.report.append(p);
     paint();
     return;
   }
-  document.title = r.title + " · Reports";
-  el.where.textContent = r.file + " · updated " + r.updated;
+  document.title = r.title + " · Berichte";
+  el.where.textContent = r.file + " · Stand " + r.updated;
   // The html comes from fm-reports-render.jq, which escaped every byte of the
   // report before building any markup, so no report text reaches the parser as
   // markup.
