@@ -2282,7 +2282,7 @@ fm_wake_append() {
 # their own write, then release.
 fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker reannounce=0 surfaced queued tmp
+  local recovery_marker reannounce=0 surfaced tmp
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -2295,19 +2295,14 @@ fm_wake_append_locked() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  # Once a drain has acknowledged every copy of an already-surfaced process-event
-  # result, its re-announcement waits for the next drain instead of opening a
-  # recovery episode, one queued copy at a time (docs/watcher-continuity.md
-  # "Announcement"). A copy still awaiting acknowledgement keeps the ordinary path.
+  # An already-surfaced process-event result never opens a recovery episode on
+  # re-announcement: a queued copy of it is drained anyway, and otherwise one
+  # copy waits for the next drain (docs/watcher-continuity.md "Announcement").
   if _fm_wake_is_reannouncement "$kind" "$clean_key"; then
+    awk -F '\t' -v key="$clean_key" 'NF >= 5 && $3 == "check" && $4 == key { found = 1; exit } END { exit !found }' \
+      "$FM_WAKE_QUEUE" 2>/dev/null && return 0
     surfaced=$(fm_wake_procevent_surfaced_marker "$clean_key")
-    queued=$(awk -F '\t' -v key="$clean_key" 'NF >= 5 && $3 == "check" && $4 == key { printf "%s%s", sep, $2; sep = " " }' \
-      "$FM_WAKE_QUEUE" 2>/dev/null)
-    if [ -z "$queued" ]; then
-      reannounce=1
-    elif [ "$queued" = "$(cat "$surfaced" 2>/dev/null)" ]; then
-      return 0
-    fi
+    reannounce=1
   fi
   if [ "$reannounce" -eq 1 ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
