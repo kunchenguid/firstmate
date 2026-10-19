@@ -186,6 +186,66 @@ poll_capped_wedge_round() {  # <dir> <max> <extra-env> <exit|absorb>
   return 0
 }
 
+# log_tmux_inventory_calls <fakebin> <log>: wrap the case's fake tmux so every
+# session-inventory read is logged. A watcher's ordinary per-poll traffic is
+# capture-pane, so this log counts dead-endpoint probe attempts and nothing else.
+log_tmux_inventory_calls() {
+  local fakebin=$1 log=$2
+  : > "$log"
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'PROBEWRAP'
+#!/usr/bin/env bash
+[ "${1:-}" = list-windows ] && printf 'probe\n' >> "${FM_FAKE_TMUX_INVENTORY_LOG:-/dev/null}"
+exec "$FM_FAKE_TMUX_REAL" "$@"
+PROBEWRAP
+  chmod +x "$fakebin/tmux"
+  export FM_FAKE_TMUX_REAL="$fakebin/tmux-real"
+  export FM_FAKE_TMUX_INVENTORY_LOG="$log"
+}
+
+inventory_calls() {  # <log>
+  local n
+  n=$(grep -c '^probe$' "$1" 2>/dev/null) || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$n"
+}
+
+# hold_capped_polls <dir> <max> <stale-secs> <timer-age-secs> <cycles> [env]:
+# ONE watcher over <cycles> whole poll cycles on a pane already absorbed at its
+# recorded hash, with the idle timer planted <timer-age-secs> old against a
+# <stale-secs> threshold, so a case can place a window just under or well past
+# that threshold and watch what each poll costs it. The endpoint reads live
+# (FM_FAKE_TMUX_CURRENT_COMMAND=grok), so nothing here reports a death;
+# <env> overrides the pane's verdict instead. Returns non-zero unless every
+# cycle settles with the watcher still running - which is what a silenced window
+# does - leaving <dir>/watch.out for the caller to read.
+hold_capped_polls() {  # <dir> <max> <stale-secs> <timer-age-secs> <cycles> [extra-env]
+  local dir=$1 max=$2 stale_secs=$3 timer_age=$4 cycles=$5 extra_env=${6-}
+  local state fakebin out capture_file window key pid i
+  state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  echo $(( $(date +%s) - timer_age )) > "$state/.stale-since-$key"
+  : > "$out"
+  # shellcheck disable=SC2086
+  env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=$stale_secs FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    PATH="$fakebin:$PATH" $extra_env \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=1
+  while [ "$i" -le "$cycles" ]; do
+    wait_poll_cycle "$state" "$pid" 200 || { reap "$pid"; return 1; }
+    i=$((i + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
 # Count the queued stale wakes for <window> whose payload carries <needle>.
 queued_wakes_carrying() {  # <state> <window> <needle>
   awk -F '\t' -v w="$2" -v needle="$3" \
@@ -787,6 +847,65 @@ test_wedge_cap_unwritable_escalation_count_fails_safe() {
   pass "an escalation count the state dir refuses fails safe under a configured cap and silences nothing without one"
 }
 
+# 8c. The rollback-failure sentinel silences escalations, not detection - but
+# the detection it keeps is the SAME dead-endpoint probe every other wedge route
+# runs behind the STALE_ESCALATE_SECS threshold, paced by the idle timer the
+# probe itself re-arms. Read from the top of the function, as its silence has to
+# be, that probe had no threshold to sit behind: a window the sentinel held ran
+# it on every poll for the whole TTL, so with the defaults a silenced window
+# paid a backend read every 15s instead of every 240s, for an hour, while
+# publishing nothing at all. Count the inventory reads the probe starts with,
+# once below the threshold and once at it.
+test_wedge_cap_sentinel_probe_keeps_its_cadence() {
+  local dir state out capture_file window key pane_hash sig fakebin max sentinel inventory below at
+  dir=$(make_case wedge-cap-sentinel-cadence); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-sentinel-cadence"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-sentinel-cadence.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-sentinel-cadence.status"
+  sig=$(seen_sig "$state/wedge-cap-sentinel-cadence.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-sentinel-cadence_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+
+  # A cap-state write this state dir refused, already rolled back as far as it
+  # could: the sentinel the wedge path silences itself through for the TTL. The
+  # window is wedged and already absorbed, and its endpoint reads live, so the
+  # only thing the silence can still do here is consult the probe.
+  sentinel="$state/.wedge-rollback-failed-$key"
+  printf '%s rollback-failed\n' "$(date +%s)" > "$sentinel"
+  inventory="$dir/inventory.log"
+  log_tmux_inventory_calls "$fakebin" "$inventory"
+
+  # Below the threshold the probe has nothing to decide: five whole polls, no
+  # endpoint read, still no wake.
+  hold_capped_polls "$dir" "$max" 240 5 5 \
+    || fail "the silenced window did not stay silent and alive below the threshold: $(cat "$out")"
+  below=$(inventory_calls "$inventory")
+  [ "$below" -eq 0 ] \
+    || fail "a window silenced below the escalation threshold read its endpoint $below times across five polls; the dead-endpoint probe belongs behind the same threshold every other wedge route runs it behind"
+  [ -e "$sentinel" ] || fail "a poll below the threshold consumed the sentinel; it must hold until TTL expiry or an operator rm"
+
+  # At the threshold the probe is owed its one read, and its own re-arm of the
+  # shared idle timer is what keeps the rest of the polls off the backend.
+  : > "$inventory"
+  hold_capped_polls "$dir" "$max" 240 500 5 \
+    || fail "the silenced window did not stay silent and alive at the threshold: $(cat "$out")"
+  at=$(inventory_calls "$inventory")
+  [ "$at" -le 1 ] \
+    || fail "a window silenced at the escalation threshold read its endpoint $at times across five polls; the probe must keep its once-per-STALE_ESCALATE_SECS cadence there too"
+  [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
+    || fail "the sentinel published a wedge wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ -e "$sentinel" ] || fail "a poll at the threshold consumed the sentinel; it must hold until TTL expiry or an operator rm"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_REAL FM_FAKE_TMUX_INVENTORY_LOG
+  pass "a window silenced by the rollback-failure sentinel keeps the probe on its escalation cadence, not once per poll"
+}
+
 # 9. The cap is a ceiling on CONSECUTIVE escalations: a crew that genuinely
 # resumes after the cap fired takes the watcher's wedge-bookkeeping reset with
 # it, so the cap marker goes and a pane that wedges again escalates normally
@@ -1140,7 +1259,7 @@ test_wedge_cap_new_episode_publishes_its_own_terminal_wake() {
 # horizon - and the canonical capped pane is one whose agent is provably still
 # there, which is exactly the verdict that leaves the timer alone.
 test_wedge_cap_probe_keeps_its_cadence_while_capped() {
-  local dir state out capture_file window key pane_hash sig pid fakebin max rounds inventory
+  local dir state out capture_file window key pane_hash sig fakebin max probes inventory
   dir=$(make_case wedge-cap-probe-cadence); state="$dir/state"; capture_file="$dir/pane.txt"
   out="$dir/watch.out"; fakebin="$dir/fakebin"
   window="test:fm-wedge-cap-probe-cadence"
@@ -1164,41 +1283,15 @@ test_wedge_cap_probe_keeps_its_cadence_while_capped() {
     || fail "the cap did not fire against a live endpoint: $(cat "$out")"
   [ -e "$state/.wedge-permanent-$key" ] || fail "the cap marker is missing after the cap fired"
 
-  # Count the session-inventory read the probe starts with. The fixture's fake
-  # tmux is wrapped so every list-windows call is logged; a poll's ordinary
-  # traffic is capture-pane, so this counts probe attempts.
   inventory="$dir/inventory.log"
-  : > "$inventory"
-  mv "$fakebin/tmux" "$fakebin/tmux-real"
-  cat > "$fakebin/tmux" <<'PROBEWRAP'
-#!/usr/bin/env bash
-[ "${1:-}" = list-windows ] && printf 'probe\n' >> "${FM_FAKE_TMUX_INVENTORY_LOG:-/dev/null}"
-exec "$FM_FAKE_TMUX_REAL" "$@"
-PROBEWRAP
-  chmod +x "$fakebin/tmux"
-  export FM_FAKE_TMUX_REAL="$fakebin/tmux-real"
-  export FM_FAKE_TMUX_INVENTORY_LOG="$inventory"
+  log_tmux_inventory_calls "$fakebin" "$inventory"
 
   # The pane is already past a long escalation bound, and the cap marker stands,
   # so every poll reaches the at-threshold branch where the probe runs. The
   # window must stay silent while the probe keeps to its own cadence.
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_WATCH_HANDLING_SUCCESSOR=1 \
-    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
-    "$WATCH" > "$out" &
-  pid=$!
-  rounds=1
-  while [ "$rounds" -le 5 ]; do
-    wait_poll_cycle "$state" "$pid" 200 \
-      || { reap "$pid"; fail "capped poll $rounds did not stay silent and alive: $(cat "$out")"; }
-    rounds=$((rounds + 1))
-  done
-  reap "$pid"
-  probes=$(grep -c '^probe$' "$inventory" 2>/dev/null || printf '0')
+  hold_capped_polls "$dir" "$max" 240 500 5 \
+    || fail "a capped poll did not stay silent and alive: $(cat "$out")"
+  probes=$(inventory_calls "$inventory")
   [ "$probes" -le 1 ] \
     || fail "the capped window probed its endpoint $probes times across ten poll cycles; a cap that silences escalations must not turn the dead-endpoint probe into a per-poll backend read"
   grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "a capped poll re-fired the terminal wake"
@@ -1532,6 +1625,7 @@ test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_overrides
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
 test_wedge_cap_unwritable_escalation_count_fails_safe
+test_wedge_cap_sentinel_probe_keeps_its_cadence
 test_wedge_cap_releases_after_genuine_recovery
 test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
 test_wedge_cap_releases_after_declared_wait

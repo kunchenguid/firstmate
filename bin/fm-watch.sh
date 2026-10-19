@@ -1862,14 +1862,16 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # escalation follows here to clear it for it. The rollback-failure sentinel is
 # the same contract one step earlier: it silences from the top of this function,
 # where it still consults that probe before returning rather than short-circuiting
-# ahead of it. The opt-in operator guard consult
+# ahead of it, and behind the same gate - nothing escalates after it either, so
+# there too the probe's own re-arm of the shared idle timer is what paces it.
+# The opt-in operator guard consult
 # (wedge_guard_evidence) runs after all
 # three, so a dead or missing endpoint is never deferred by a guard, and a home
 # without config/wedge-evidence-guards never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
-  local _wrb_since _wrb_now _wrb_age _wrb_cap_ts
+  local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
   # from either route that has to defend cap state this state dir would not
@@ -1890,21 +1892,38 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     esac
     fm_epoch_seconds_to _wrb_now
     if [ "$_wrb_ts" -ne 0 ] && [ $(( _wrb_now - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
-      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
       # A ceiling on escalations is not a ceiling on detecting a dead worker, so
       # this silence consults the same probe the cap marker consults below rather
       # than returning ahead of it: an agent that exits while its pane keeps
-      # rendering the identical frame is still reported once for the TTL. The
-      # probe re-arms the shared idle timer on its not-dead outcome, keeping the
-      # backend read on its once-per-STALE_ESCALATE_SECS cadence instead of one
-      # per poll, and it owns its own once-per-incarnation absorb.
+      # rendering the identical frame is still reported once for the TTL. That
+      # probe sits behind the same STALE_ESCALATE_SECS gate the uncapped ladder
+      # escalates behind, and its own re-arm of the shared idle timer - the
+      # caller's on its not-dead outcome here, its own on the death it reports -
+      # is what advances that gate, so a silenced window pays one backend read
+      # and one line here per STALE_ESCALATE_SECS rather than one of each per
+      # poll for the whole TTL. An unreadable idle timer is repaired and probed
+      # at once, exactly as the uncapped ladder below repairs and absorbs it: a
+      # sentinel must never be the reason a silenced window stops learning
+      # whether its worker is alive, and the repair is what lets the gate bound
+      # that probe afterwards.
+      _wrb_gate=1
+      _wrb_age=0
       _wrb_since=$(cat "$since_file" 2>/dev/null || true)
       case "$_wrb_since" in
-        ''|*[!0-9]*) _wrb_age=0 ;;
-        *) fm_epoch_seconds_to _wrb_now; _wrb_age=$(( _wrb_now - _wrb_since )) ;;
+        ''|*[!0-9]*)
+          clear_write_tracking "$_wkey"
+          { printf '%s\n' "$_wrb_now" > "$since_file"; } 2>/dev/null || true
+          ;;
+        *)
+          _wrb_age=$(( _wrb_now - _wrb_since ))
+          [ "$_wrb_age" -ge "$STALE_ESCALATE_SECS" ] || _wrb_gate=0
+          ;;
       esac
-      wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
-        || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
+      if [ "$_wrb_gate" -eq 1 ]; then
+        triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
+        wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
+          || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
+      fi
       return 0
     fi
     rm -f "$_wrollback_sentinel"
