@@ -89,8 +89,10 @@
 #   the backend confirms it is gone)
 #                          a vanished pane's orphaned per-pane markers were
 #                          pruned after one authoritative absence verdict; the
-#                          pane is gone from every later poll by construction,
-#                          so this is one notice, never a new escalation series
+#                          key is recorded in state/.pruned-panes (bounded to
+#                          the last 1024 keys) before this notice, so a re-created
+#                          sidecar is pruned silently: one notice, never a new
+#                          escalation series
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
@@ -1952,8 +1954,28 @@ clear_pause_tracking() {  # <window-key>
 # the record's fate belongs to firstmate's record reconciliation, and its gone
 # agent already has wedge_dead_record's bounded once-only report. The prune
 # removes every marker the key owns, including the sidecar itself, and emits
-# at most one final notice before the key is gone - the absence of state is
-# what makes the notice impossible to repeat.
+# at most one final notice for that key.
+#
+# Removing the sidecar is not enough to make the notice once-only: a later poll
+# can write the same .tracked- sidecar again for a record race (the poll still
+# saw a record this sweep did not), and a re-armed watcher then prunes and
+# announces the same vanished window over and over (observed live: one pane
+# announced three times). state/.pruned-panes is the durable memory of keys
+# whose notice was already emitted. It is written before the notice, never
+# cleared by clear_pause_tracking, and bounded by key count so it cannot grow
+# without limit. A later prune of a remembered key still clears any re-created
+# markers but stays silent; a different window key gets its own notice.
+pruned_panes_seen() {  # <key>
+  [ -s "$STATE/.pruned-panes" ] && grep -qxF -- "$1" "$STATE/.pruned-panes"
+}
+
+pruned_panes_record() {  # <key>
+  local ledger="$STATE/.pruned-panes" tmp="$STATE/.pruned-panes.next"
+  grep -qxF -- "$1" "$ledger" 2>/dev/null && return 0
+  printf '%s\n' "$1" >> "$ledger" || return 1
+  tail -n 1024 "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+}
+
 phantom_pane_prune() {
   local tracked key w backend verdict reason
   for tracked in "$STATE"/.tracked-*; do
@@ -1971,6 +1993,10 @@ phantom_pane_prune() {
       "$STATE/.dead-reported-$key" "$STATE/.truth-read-$key" "$STATE/.truth-raised-$key" \
       "$STATE/.activity-$key" "$STATE/.activity-observed-$key" "$STATE/.activity-observed-$key.next" || continue
     rm -f "$tracked" || continue
+    # A sidecar re-created after this key's notice (a later poll, a record race,
+    # a re-armed watcher) was pruned silently above; never announce it twice.
+    pruned_panes_seen "$key" && continue
+    pruned_panes_record "$key" || true
     reason="stale: $w (pane vanished, state pruned: no task record owns it and the backend confirms it is gone)"
     fm_wake_append stale "$w" "$reason" || exit 1
     wake "$reason"

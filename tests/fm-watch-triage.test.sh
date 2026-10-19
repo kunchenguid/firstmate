@@ -7482,6 +7482,50 @@ test_phantom_pane_state_pruned_once_vanished() {
   pass "a vanished record-less pane is pruned on one authoritative absence verdict, notices once, and never alarms again"
 }
 
+test_pruned_pane_recreated_sidecar_stays_silent() {
+  local dir state fakebin out window key pid
+  window="test:fm-phantom-repeat"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(make_case phantom-repeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+
+  # Phase A: no record owns the pane, its forward map and an old escalation
+  # series exist, and the backend confirms the pane is gone - one prune, one
+  # notice, and the key is remembered.
+  printf '%s\t%s\n' "$window" tmux > "$state/.tracked-$key"
+  phantom_prune_seed_markers "$state" "$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="fm-unrelated" FM_FAKE_TMUX_FORBIDDEN_TARGET="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the watcher stayed up after pruning a vanished pane: $(cat "$out")"; }
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the first prune queued $(wedge_stale_wakes "$state" "$window") notices instead of one"
+  phantom_prune_assert_markers "$state" "$key" gone "the first vanished-pane prune"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first prune notice"
+
+  # Phase B: a later poll or record race re-creates the .tracked- sidecar for
+  # the same vanished window and its old markers. The prune may clean them up
+  # again, but the window's one notice is already spent: no second notice and
+  # no wake.
+  printf '%s\t%s\n' "$window" tmux > "$state/.tracked-$key"
+  phantom_prune_seed_markers "$state" "$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="fm-unrelated" FM_FAKE_TMUX_FORBIDDEN_TARGET="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a re-created sidecar: $(cat "$out")"; }
+  reap "$pid"
+  grep -F 'pane vanished, state pruned' "$out" >/dev/null \
+    && fail "a re-created .tracked- sidecar re-announced the same vanished pane: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a re-created sidecar queued a second wake: $(cat "$state/.wake-queue")"
+  phantom_prune_assert_markers "$state" "$key" gone "a re-created sidecar's re-pruned markers"
+  [ -e "$state/.tracked-$key" ] && fail "a re-created sidecar survived the silent re-prune"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the silent re-prune cycle"
+  pass "a re-created .tracked- sidecar for an already-pruned pane stays silent"
+}
+
 test_record_owned_pane_state_never_pruned() {
   local dir state fakebin out window key pid
   window="test:fm-owned"; key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -7837,6 +7881,7 @@ test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
 test_phantom_pane_state_pruned_once_vanished
+test_pruned_pane_recreated_sidecar_stays_silent
 test_record_owned_pane_state_never_pruned
 test_record_owned_pane_still_escalates_normally
 test_stuck_busy_record_with_idle_pane_is_not_working
