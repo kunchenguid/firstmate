@@ -119,10 +119,18 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# collision itself, whichever record is stale. Two exceptions rest on the slot's
+# owner claim (below). A claim naming another task makes this teardown
+# records-only, touching nothing under the slot, so the scan is skipped rather
+# than stranding the stale record and, with it, the claimant's own teardown.
+# A claim naming THIS task lets the claimant finish past a record it superseded:
+# the slot's previous holder, left naming it after its worker exited and the pool
+# handed the slot on. superseded_slot_record owns that proof - same home, not a
+# secondmate home, an older spawn_gen= incarnation, an endpoint that reads dead
+# or missing, and a lifecycle lock held until this teardown exits so no relaunch
+# can return its worker to the slot. The superseded record, its branch, and its
+# state stay untouched for separate reconciliation; anything that proof cannot
+# establish keeps the refusal.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -474,6 +482,7 @@ SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
+SUPERSEDED_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -488,6 +497,10 @@ teardown_release_locks() {
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
   DESCENDANT_LOCK_PATHS=()
+  for ((i=${#SUPERSEDED_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${SUPERSEDED_LOCK_PATHS[$i]}" || true
+  done
+  SUPERSEDED_LOCK_PATHS=()
   if [ -n "${HANDOFF_WAKE_RETIRE_LOCK:-}" ]; then
     fm_lock_release "$HANDOFF_WAKE_RETIRE_LOCK" || true
     HANDOFF_WAKE_RETIRE_LOCK=
@@ -2434,16 +2447,90 @@ collect_local_firstmate_states() {
   TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+# The epoch second a record's spawn_gen= incarnation was minted
+# (bin/fm-spawn.sh writes s<epoch>.<pid>.<random> on every spawn and relaunch).
+# A missing, repeated, or legacy-stamped incarnation has no order to compare.
+teardown_spawn_gen_epoch() {  # <meta>
+  local gen epoch
+  gen=$(fm_backend_meta_exact_value "$1" spawn_gen) || return 1
+  case "$gen" in s[0-9]*.*) ;; *) return 1 ;; esac
+  epoch=${gen#s}
+  epoch=${epoch%%.*}
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$epoch"
+}
+
+# A colliding record this task's own slot claim superseded: the slot was handed
+# to this task after that record's worker let it go, and the record was never
+# reconciled. Its claimant's cleanup is then safe to finish, because the slot
+# holds nothing of that task's - its committed work lives on its branch ref,
+# which a return never deletes. Every condition below is positive evidence, and
+# each failure leaves the collision refusal in force:
+#   - the record lives in this same home, whose lifecycle lock can hold it still;
+#   - it is a ship or scout copy, never a secondmate home;
+#   - its lifecycle lock is free, and is then held until this teardown exits, so
+#     no relaunch can put its worker back into the slot mid-cleanup;
+#   - its spawn_gen= incarnation is strictly older than this record's, so it was
+#     published before this task took the slot (a relaunch mints a new one);
+#   - its recorded endpoint reads dead or missing, so no worker of its is live.
+# Sets SUPERSEDED_SLOT_REASON when it cannot prove supersession; each lock it
+# takes joins SUPERSEDED_LOCK_PATHS, which teardown_release_locks releases.
+SUPERSEDED_SLOT_REASON=
+superseded_slot_record() {  # <record-meta> <record-state> <other-meta> <other-state> <other-id>
+  local record_meta=$1 record_state=$2 other=$3 other_state=$4 other_id=$5
+  local kind lock own_epoch other_epoch endpoint_state
+  SUPERSEDED_SLOT_REASON=
+  if ! [ "$other_state" -ef "$record_state" ]; then
+    SUPERSEDED_SLOT_REASON="that record belongs to another Firstmate home, whose own cleanup must reconcile it"
+    return 1
+  fi
+  kind=$(fm_meta_get "$other" kind)
+  if [ "$kind" = secondmate ]; then
+    SUPERSEDED_SLOT_REASON="that record is a secondmate home"
+    return 1
+  fi
+  lock="$other_state/.control-$other_id.lock"
+  if ! fm_lock_try_acquire "$lock"; then
+    SUPERSEDED_SLOT_REASON="a lifecycle action is running for $other_id"
+    return 1
+  fi
+  SUPERSEDED_LOCK_PATHS+=("$lock")
+  if ! own_epoch=$(teardown_spawn_gen_epoch "$record_meta") \
+     || ! other_epoch=$(teardown_spawn_gen_epoch "$other"); then
+    SUPERSEDED_SLOT_REASON="the two records do not both carry one spawn_gen= incarnation to order them by"
+    return 1
+  fi
+  if [ "$other_epoch" -ge "$own_epoch" ]; then
+    SUPERSEDED_SLOT_REASON="$other_id's record was not published before this task took the slot"
+    return 1
+  fi
+  # A subshell keeps the other record's validation from replacing this task's
+  # own validated endpoint globals.
+  endpoint_state=$(
+    fm_backend_validate_task_endpoint "$other" "$other_id" >/dev/null 2>&1 || {
+      printf 'unreadable'
+      exit 0
+    }
+    fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"
+  )
+  case "$endpoint_state" in
+    dead|missing) return 0 ;;
+  esac
+  SUPERSEDED_SLOT_REASON="$other_id's recorded endpoint reads ${endpoint_state:-unreadable}, not gone"
+  return 1
+}
+
+require_exclusive_worktree_slot_record() {  # <meta> <task-id> <state> <worktree> [supersede]
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 supersede=${5:-}
+  local slot state_dir other other_id field other_path other_slot owner
   slot=$(canonical_existing_dir "$worktree") || return 0
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
   # the slot is then no hazard, and refusing would strand this stale record and
   # block the claimant's own teardown behind it.
   fm_treehouse_slot_owner_state "$slot" "$record_id"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  owner=$FM_TREEHOUSE_SLOT_OWNER
+  [ "$owner" != other ] || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2459,7 +2546,15 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        SUPERSEDED_SLOT_REASON=
+        if [ "$supersede" = supersede ] && [ "$owner" = mine ] && [ "$field" = worktree ] \
+           && superseded_slot_record "$record_meta" "$record_state" "$other" "$state_dir" "$other_id"; then
+          echo "warning: task $other_id's record still names $slot, but $record_id's claim on that pool slot superseded it: $other_id's record predates $record_id taking the slot and its endpoint is gone. Cleanup continues for $record_id; $other_id's record, branch, and state are left untouched for separate reconciliation (bin/fm-crew-state.sh $other_id)." >&2
+          continue
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
+        [ -z "$SUPERSEDED_SLOT_REASON" ] \
+          || echo "$record_id's own claim on the slot cannot retire $other_id's record: $SUPERSEDED_SLOT_REASON." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
         return 1
@@ -2471,7 +2566,7 @@ require_exclusive_worktree_slot_record() {
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" supersede
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote

@@ -1020,6 +1020,228 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
 }
 
+# The duplicate-record shape that blocked cleanup of merged work: a paused
+# task's worker exited, the pool handed its slot to a newer task that claimed
+# it, and the paused task's record was never reconciled, so both records name
+# the slot. The stale task still has committed work on its own branch and a
+# live backlog thread; neither cleanup may lose any of it.
+SUPERSEDED_STALE_GEN=s1791464351.101.1
+SUPERSEDED_CLAIMANT_GEN=s1792426279.202.2
+
+stage_superseded_slot() {  # <case> <stale-id> <claimant-id> [stale-spawn-gen]
+  local dir=$1 stale=$2 claimant=$3 stale_gen=${4-$SUPERSEDED_STALE_GEN}
+  local stale_meta=("window=firstmate:fm-$stale" "endpoint_task_id=$stale"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    "branch=fm/$stale")
+  mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/project" remote add origin "$dir/origin.git"
+  git -C "$dir/project" branch "fm/$stale"
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit-tree -p "fm/$stale" -m stale-unlanded-work "fm/$stale^{tree}" \
+    | xargs git -C "$dir/project" update-ref "refs/heads/fm/$stale"
+  git -C "$dir/project" rev-parse "fm/$stale" > "$dir/stale-head"
+  # The claimant's merged work: its branch is checked out in the slot and pushed.
+  git -C "$dir/worktree" checkout -q -b "fm/$claimant"
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm claimant-landed-work
+  git -C "$dir/worktree" push -q origin "fm/$claimant"
+  [ -z "$stale_gen" ] || stale_meta+=("spawn_gen=$stale_gen")
+  fm_write_meta "$dir/home/state/$stale.meta" "${stale_meta[@]}"
+  fm_write_meta "$dir/home/state/$claimant.meta" \
+    "window=firstmate:fm-$claimant" "endpoint_task_id=$claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "branch=fm/$claimant" "spawn_gen=$SUPERSEDED_CLAIMANT_GEN"
+  printf 'paused [at=1791838074]: idle awaiting steering\n' > "$dir/home/state/$stale.status"
+  mkdir -p "$dir/home/state/$stale.inbox/handled"
+  cp "$dir/home/state/$stale.meta" "$dir/stale-meta-before"
+  claim_pool_slot "$dir" "$claimant"
+}
+
+# Everything that belongs to the stale task survives either task's cleanup.
+assert_stale_task_preserved() {  # <case> <stale-id> <description>
+  local dir=$1 stale=$2 description=$3
+  cmp -s "$dir/stale-meta-before" "$dir/home/state/$stale.meta" \
+    || fail "$description: the stale task's record changed or vanished"
+  assert_present "$dir/home/state/$stale.status" "$description: the stale task's status log was removed"
+  assert_present "$dir/home/state/$stale.inbox" "$description: the stale task's steering inbox was removed"
+  [ "$(git -C "$dir/project" rev-parse --verify -q "refs/heads/fm/$stale")" = "$(cat "$dir/stale-head")" ] \
+    || fail "$description: the stale task's branch and its unlanded commit were not preserved"
+  assert_absent "$dir/home/state/.control-$stale.lock" \
+    "$description: the stale task's lifecycle lock was left held"
+}
+
+test_claimant_tears_down_past_a_superseded_stale_record() {
+  local dir stale=paused-task claimant=merged-task
+
+  dir=$(make_case slot-superseded-claimant)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$claimant" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the claimant's cleanup of merged work refused past a superseded stale record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$claimant.meta" "claimant cleanup left its own record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant cleanup left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "claimant cleanup did not return its own pool slot: $(cat "$dir/runtime.log")"
+  ! git -C "$dir/project" rev-parse --verify -q "refs/heads/fm/$claimant" >/dev/null \
+    || fail "claimant cleanup did not drop its own landed branch"
+  assert_stale_task_preserved "$dir" "$stale" "claimant cleanup past a superseded record"
+  assert_contains "$(cat "$dir/stderr")" "$stale" \
+    "the warning should name the superseded record's task"
+  assert_contains "$(cat "$dir/stderr")" "superseded" \
+    "the warning should name supersession as the reason the collision did not refuse"
+
+  pass "fm-teardown: merged work on a claimed slot cleans up past a superseded stale record, preserving that task"
+}
+
+# The same two records from the stale task's side: the slot is the claimant's,
+# so the stale task's own cleanup is records-only and leaves the slot, the
+# claimant's record and claim, and the stale task's branch exactly as they were.
+test_stale_record_cleanup_on_reassigned_slot_preserves_both_tasks() {
+  local dir stale=paused-task claimant=merged-task
+
+  dir=$(make_case slot-superseded-stale-side)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+  cp "$dir/home/state/$claimant.meta" "$dir/claimant-meta-before"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$stale" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the stale record's records-only cleanup on a reassigned slot failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$claimant" "stale ship record on a reassigned slot"
+  cmp -s "$dir/claimant-meta-before" "$dir/home/state/$claimant.meta" \
+    || fail "the stale record's cleanup changed the claimant's record"
+  [ "$(git -C "$dir/worktree" rev-parse --abbrev-ref HEAD)" = "fm/$claimant" ] \
+    || fail "the stale record's cleanup moved the claimant's copy off its branch"
+  [ "$(git -C "$dir/project" rev-parse --verify -q "refs/heads/fm/$stale")" = "$(cat "$dir/stale-head")" ] \
+    || fail "the stale record's cleanup lost its own branch and unlanded commit"
+
+  pass "fm-teardown: a stale record's cleanup on a reassigned slot preserves the claimant and its own branch"
+}
+
+assert_superseded_refusal() {  # <case> <claimant-id> <stale-id> <reason> <description>
+  local dir=$1 claimant=$2 stale=$3 reason=$4 description=$5 rc
+  set +e
+  run_case "$dir" "$claimant" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: the claimant returned a slot whose other record is not proved superseded"
+  assert_present "$dir/home/state/$claimant.meta" "$description: the claimant's record was removed on refusal"
+  assert_present "$dir/pool/1/.fm-slot-owner" "$description: the slot claim was removed on refusal"
+  [ "$(git -C "$dir/worktree" rev-parse --abbrev-ref HEAD)" = "fm/$claimant" ] \
+    || fail "$description: the refused cleanup touched the slot's copy"
+  assert_no_grep "kill-window" "$dir/runtime.log" "$description: a refused cleanup closed an endpoint"
+  assert_no_grep "treehouse" "$dir/runtime.log" "$description: a refused cleanup returned the slot"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded" \
+    "$description: the refusal should name the colliding record"
+  assert_contains "$(cat "$dir/stderr")" "$reason" \
+    "$description: the refusal should say why supersession was not proved"
+}
+
+# Supersession is a proof, not a tiebreak: every condition it cannot establish
+# keeps the collision refusal, even with --force.
+test_unproved_supersession_keeps_the_collision_refusal() {
+  local dir stale=paused-task claimant=merged-task holder i
+
+  # The other record is not older than the claimant's: it may be a relaunch
+  # into the slot after the claim, so it is not proved stale.
+  dir=$(make_case slot-superseded-newer)
+  stage_superseded_slot "$dir" "$stale" "$claimant" s1792426300.303.3
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "was not published before" "newer stale record"
+  assert_stale_task_preserved "$dir" "$stale" "newer stale record"
+
+  dir=$(make_case slot-superseded-same-second)
+  stage_superseded_slot "$dir" "$stale" "$claimant" s1792426279.303.3
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "was not published before" "same-second stale record"
+
+  # A record predating spawn generations cannot be ordered at all.
+  dir=$(make_case slot-superseded-no-gen)
+  stage_superseded_slot "$dir" "$stale" "$claimant" ''
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "spawn_gen" "stale record without an incarnation"
+  assert_stale_task_preserved "$dir" "$stale" "stale record without an incarnation"
+
+  # The older record's worker is still live, so returning the slot could
+  # destroy it: a misrecorded claim is not proof it left the slot.
+  dir=$(make_case slot-superseded-live-endpoint)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case "\$*" in
+  list-windows*) printf '%s\n' 'fm-$stale' 'fm-$claimant' ;;
+  *pane_current_command*) printf 'claude\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "endpoint reads alive" "live stale endpoint"
+  assert_stale_task_preserved "$dir" "$stale" "live stale endpoint"
+
+  # A lifecycle action already running for the stale task could put its worker
+  # back into the slot, so it is not held still and proves nothing.
+  dir=$(make_case slot-superseded-lifecycle-busy)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$dir/home/state/.control-$stale.lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/home/state/.control-$stale.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/home/state/.control-$stale.lock" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage the stale task's held lifecycle lock"
+  }
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "lifecycle action is running" "busy stale lifecycle"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  # A secondmate home naming the slot is a whole live home, never superseded.
+  dir=$(make_case slot-superseded-secondmate)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=secondmate" \
+    "spawn_gen=$SUPERSEDED_STALE_GEN"
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "secondmate home" "older secondmate record"
+
+  pass "fm-teardown: a colliding record not proved superseded still refuses the claimant's cleanup"
+}
+
+# The same older, endpoint-gone record held by another local Firstmate home:
+# this home cannot hold that home's lifecycle still, so it is never superseded.
+test_superseded_record_in_another_home_still_refuses() {
+  local dir stale=mate-task claimant=merged-task second_home second_project
+  dir=$(make_case slot-superseded-cross-home)
+  stage_superseded_slot "$dir" "$stale" "$claimant"
+  second_home="$dir/secondmate-home"
+  second_project="$second_home/projects/project"
+  mkdir -p "$second_home/projects" "$second_home/state" "$second_home/data"
+  git clone -q "$dir/project" "$second_project"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  sed "s#^project=.*#project=$second_project#" "$dir/home/state/$stale.meta" \
+    > "$second_home/state/$stale.meta"
+  rm -f "$dir/home/state/$stale.meta"
+
+  assert_superseded_refusal "$dir" "$claimant" "$stale" "another Firstmate home" "older record in another home"
+  assert_present "$second_home/state/$stale.meta" "the other home's record was removed"
+  assert_absent "$second_home/state/.control-$stale.lock" "the other home's lifecycle lock was taken"
+
+  pass "fm-teardown: a superseded-looking record in another Firstmate home still refuses"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1441,6 +1663,10 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_claimant_tears_down_past_a_superseded_stale_record
+test_stale_record_cleanup_on_reassigned_slot_preserves_both_tasks
+test_unproved_supersession_keeps_the_collision_refusal
+test_superseded_record_in_another_home_still_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
