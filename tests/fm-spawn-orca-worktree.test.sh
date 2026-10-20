@@ -594,15 +594,15 @@ EOF
       fb=$(make_orca_fakebin "$case_dir")
       printf '#!/bin/sh\necho "GH_TOKEN=synthetic-interrupt-token"\n' > "$fb/tmux"
       chmod +x "$fb/tmux"
-      # A background job ignores SIGINT on entry; restore the default so the
-      # spawn receives INT as an interactive caller would deliver it.
+      # Background jobs ignore INT, and nohup runners also ignore HUP. Restore
+      # both defaults so the spawn receives the signals this case exercises.
       FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
         FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
         FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
         FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" \
         FM_TEST_ORCA_LOG="$case_dir/terminal.log" \
         FM_TEST_ORCA_HOLD_TEXT="$([ "$phase" = enter ] && echo 1 || echo 0)" \
-        PATH="$fb:$PATH" python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+        PATH="$fb:$PATH" python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
         "$SPAWN" "$id" "$case_dir/project" --mode direct-PR --yolo off --backend orca \
         --harness "touch '$case_dir/worker-ran'" > "$case_dir/spawn.log" 2>&1 &
       pid=$!
@@ -696,7 +696,7 @@ SH
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" \
       FM_TEST_ORCA_LOG="$case_dir/terminal.log" \
-      PATH="$fb:$PATH" python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+      PATH="$fb:$PATH" python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
       "$SPAWN" "$id" "$case_dir/project" --mode direct-PR --yolo off --backend orca \
       --harness "touch '$case_dir/worker-ran'" > "$case_dir/spawn.log" 2>&1 &
     pid=$!

@@ -2967,6 +2967,16 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+# Each case owns its fixture processes until its assertions finish. Retaining
+# them until suite exit makes completed cases keep scanning beside later ones.
+: > "$HOMES_FILE"
+while IFS= read -r test_case; do
+  first_home=$(( $(wc -l < "$HOMES_FILE") + 1 ))
+  "$test_case"
+  while IFS= read -r home; do
+    [ -n "$home" ] && stop_home_processes "$home"
+  done < <(tail -n "+$first_home" "$HOMES_FILE")
+done <<'TEST_CASES'
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
@@ -3042,3 +3052,4 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_superseded_host_leaves_the_owner_untouched
+TEST_CASES
