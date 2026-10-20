@@ -582,9 +582,31 @@ test_sol_report_under_an_existing_claim_keeps_the_row() {
   assert_equals "$out" "recorded" "the keep case did not confirm"
   assert_equals "$(registry_row_field "$case_dir" task-c 3)" "$old_start" \
     "a Sol report under an existing claim rewrote the live row"
-  assert_equals "$(registry_row_field "$case_dir" task-c 2)" "claude-sonnet" \
-    "a Sol report under an existing claim rewrote the recorded model"
-  pass "a Sol report under an existing claim keeps the claim it already holds"
+  assert_equals "$(registry_row_field "$case_dir" task-c 4)" "0" \
+    "a Sol report under an existing claim rewrote the live claim's pid"
+  assert_equals "$(registry_row_field "$case_dir" task-c 2)" "gpt-6-sol" \
+    "a Sol report under an existing claim did not reconcile the recorded model"
+  pass "a Sol report under an existing claim keeps the claim and reconciles the model"
+}
+
+# A row whose model the captain has dropped from the declaration holds no
+# capacity: the count does not see that row either, so treating it as
+# occupancy would make the release path wait on a slot that does not exist.
+test_a_row_whose_model_was_dropped_holds_no_occupancy() {
+  local case_dir
+  case_dir=$(make_case dropped-model task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0 gpt-6-sol
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  if (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+    . "$ROOT/bin/fm-sol-cap-lib.sh"
+    FM_HOME="$case_dir/home"
+    fm_sol_cap_has_owned_occupancy task-c "$case_dir/home/state"
+  ); then
+    fail "a row whose model the declaration dropped still held occupancy"
+  fi
+  pass "a row whose model the declaration dropped holds no occupancy"
 }
 
 # A structured row that cannot prove its session key refuses every dispatch
@@ -1002,6 +1024,7 @@ test_declared_model_set_is_the_only_capped_set
 test_the_documented_declaration_parses
 test_a_home_that_drops_its_declaration_owns_no_occupancy
 test_a_reused_row_follows_the_current_declaration
+test_a_row_whose_model_was_dropped_holds_no_occupancy
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

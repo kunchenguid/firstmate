@@ -549,7 +549,7 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
         # claims, under the admission lock already held, so the row keeps
         # naming the model that actually holds the slot.
         if [ "$existing_model" != "$model" ]; then
-          if ! fm_sol_cap_registry_claim "$registry" "$id" "$model" "$existing_start"; then
+          if ! fm_sol_cap_registry_claim "$registry" "$id" "$model" "$existing_start" "$existing_pid"; then
             FM_SOL_CAP_REFUSAL="error: Sol ceiling: the reuse of task $id could not be recorded in $registry; the dispatch was refused rather than launched uncounted"
             fm_lock_release "$lock" || true
             return 1
@@ -598,7 +598,7 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
 # Returns 0 when the task owns occupancy, 1 when it does not, and 2 when the
 # declaration is malformed and the question cannot be answered.
 fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
-  local id=$1 state=$2 model registry occupancy config
+  local id=$1 state=$2 model registry occupancy config row_model
   registry=$state/$FM_SOL_REGISTRY_NAME
   # The owning home's own declaration decides whether it holds capped
   # occupancy at all: a home that declared no ceiling owns none, and a home
@@ -613,6 +613,14 @@ fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
   occupancy=$(awk -F'\t' -v id="$id" '$1 == id {print "pid:" $4; exit}' "$registry" 2>/dev/null || true)
   if [ -n "$occupancy" ]; then
     occupancy=${occupancy#pid:}
+    # A row whose model the declaration no longer covers holds no capacity:
+    # the count does not see that row either, so treating it as occupancy
+    # would make the release path wait on the admission boundary for a
+    # slot that does not exist.
+    row_model=$(awk -F'\t' -v id="$id" '$1 == id {print $2; exit}' "$registry" 2>/dev/null || true)
+    if [ -n "$row_model" ] && ! fm_sol_cap_model_capped "$row_model"; then
+      return 1
+    fi
     case "$occupancy" in
       -1) return 1 ;;
       -2 | 0 | '' | *[!0-9]*) return 0 ;;
@@ -713,7 +721,7 @@ fm_sol_cap_record_actual() {  # <id> <actual-model> <state-dir>
 # occupied claims keep their released shape only through proven stops. Sets
 # FM_SOL_CAP_REFUSAL on failure.
 fm_sol_cap_record_actual_locked() {  # <id> <actual-model> <state-dir>
-  local id=$1 model=$2 state=$3 registry existing_pid existing_start
+  local id=$1 model=$2 state=$3 registry existing_pid existing_start existing_model
   FM_SOL_CAP_REFUSAL=
   if ! fm_sol_cap_model_capped "$model"; then
     fm_sol_cap_has_owned_occupancy "$id" "$state" || return 0
@@ -723,7 +731,19 @@ fm_sol_cap_record_actual_locked() {  # <id> <actual-model> <state-dir>
   registry=$state/$FM_SOL_REGISTRY_NAME
   existing_pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$registry" 2>/dev/null || true)
   existing_start=$(awk -F'\t' -v id="$id" '$1 == id {print $3; exit}' "$registry" 2>/dev/null || true)
+  existing_model=$(awk -F'\t' -v id="$id" '$1 == id {print $2; exit}' "$registry" 2>/dev/null || true)
   if fm_sol_cap_entry_live "$existing_start" "$existing_pid"; then
+    if [ "$existing_model" != "$model" ]; then
+      # The endpoint's own record names the model this session runs, so the
+      # row must name it too. A row that kept a model the declaration no
+      # longer covers would hold capacity the count never sees, and the
+      # next admission would exceed the ceiling. The claim itself is
+      # untouched: the same pid and the same start epoch.
+      if ! fm_sol_cap_registry_claim "$registry" "$id" "$model" "$existing_start" "$existing_pid"; then
+        FM_SOL_CAP_REFUSAL="error: Sol ceiling: the reported model of task $id could not be recorded in $registry; the confirmed route's record stands for the next admission to reconcile"
+        return 1
+      fi
+    fi
     return 0
   fi
   fm_epoch_seconds_to FM_SOL_CAP_NOW
