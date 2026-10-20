@@ -307,9 +307,11 @@
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches.
-#     Cwd alone is not ownership: only descendants of the live endpoint shell,
-#     members of its dedicated process group, and members of the session it
-#     leads (so an init-reparented leaked child is still reaped) are signaled.
+#     Cwd alone is not ownership: only descendants of the live endpoint shell
+#     and members of the session it leads (so an init-reparented leaked child
+#     is still reaped) are signaled. Ownership is decided once per process
+#     and kept, so killing the endpoint shell (signaled last) never turns its
+#     other task processes into spared ones.
 #     The session id comes from /proc or, where /proc is absent, python3's
 #     os.getsid; an unreadable session id proves nothing, so that process is
 #     spared.
@@ -323,7 +325,9 @@
 #     with a spared process still in it is not force-returned: the return
 #     waits until after the pane close, re-scans the worktree, and the
 #     worktree is kept (surviving pids named) only if a spared process with
-#     the same identity still has its cwd there.
+#     the same identity still has its cwd there. Without lsof teardown cannot
+#     list the processes in the worktree, so it keeps the worktree the same way
+#     and reports that.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2402,25 +2406,17 @@ task_reap_endpoint_pid() {
   esac
 }
 
-task_process_is_owned() {  # <pid>
-  local rows own_pgid
-  [ -n "$TASK_REAP_LEADER" ] || return 1
-  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY" || return 1
-  rows=$(LC_ALL=C ps -axo pid=,ppid=,pgid= 2>/dev/null) || return 1
-  own_pgid=$(printf '%s\n' "$rows" | awk -v self="$$" '$1 == self { print $3 }')
-  printf '%s\n' "$rows" | awk -v candidate="$1" -v leader="$TASK_REAP_LEADER" -v own="$own_pgid" '
-    { parent[$1] = $2; group[$1] = $3 }
-    END {
-      if (!(leader in parent) || !(candidate in parent)) exit 1
-      if (group[leader] == leader && group[candidate] == leader && group[leader] != own) exit 0
-      pid = candidate
-      while (pid > 1 && !seen[pid]++) {
-        if (pid == leader) exit 0
-        pid = parent[pid]
-      }
-      exit 1
-    }' && return 0
-  task_process_in_endpoint_session "$1"
+task_ownership_context() {
+  TASK_SCAN_ROWS=
+  TASK_SCAN_LEADER_SID=
+  TASK_SCAN_OWN_SID=
+  TASK_SCAN_LEADER_LIVE=0
+  [ -n "$TASK_REAP_LEADER" ] || return 0
+  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY" || return 0
+  TASK_SCAN_ROWS=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || return 0
+  TASK_SCAN_LEADER_SID=$(task_process_session "$TASK_REAP_LEADER") || TASK_SCAN_LEADER_SID=
+  TASK_SCAN_OWN_SID=$(task_process_session "$$") || TASK_SCAN_OWN_SID=
+  TASK_SCAN_LEADER_LIVE=1
 }
 
 task_process_session() {  # <pid>
@@ -2438,15 +2434,31 @@ task_process_session() {  # <pid>
   python3 -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$pid" 2>/dev/null
 }
 
-task_process_in_endpoint_session() {  # <pid>
-  local leader_sid candidate_sid own_sid
-  leader_sid=$(task_process_session "$TASK_REAP_LEADER") || return 1
-  [ "$leader_sid" = "$TASK_REAP_LEADER" ] || return 1
-  own_sid=$(task_process_session "$$") || return 1
-  [ "$own_sid" != "$leader_sid" ] || return 1
-  candidate_sid=$(task_process_session "$1") || return 1
-  [ "$candidate_sid" = "$leader_sid" ] || return 1
-  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY"
+task_process_is_owned() {  # <pid>
+  local pid=$1 identity="" candidate_sid
+  if printf '%s\n' "$TASK_REAP_OWNED" | grep -q "^$pid"$'\t'; then
+    identity=$(task_process_identity "$pid") || return 1
+    printf '%s\n' "$TASK_REAP_OWNED" | grep -Fxq "$pid"$'\t'"$identity" && return 0
+  fi
+  [ "$TASK_SCAN_LEADER_LIVE" = 1 ] || return 1
+  if ! printf '%s\n' "$TASK_SCAN_ROWS" | awk -v candidate="$pid" -v leader="$TASK_REAP_LEADER" '
+    { parent[$1] = $2 }
+    END {
+      if (!(leader in parent) || !(candidate in parent)) exit 1
+      p = candidate
+      while (p > 1 && !seen[p]++) {
+        if (p == leader) exit 0
+        p = parent[p]
+      }
+      exit 1
+    }'; then
+    [ "$TASK_SCAN_LEADER_SID" = "$TASK_REAP_LEADER" ] || return 1
+    [ -n "$TASK_SCAN_OWN_SID" ] && [ "$TASK_SCAN_OWN_SID" != "$TASK_SCAN_LEADER_SID" ] || return 1
+    candidate_sid=$(task_process_session "$pid") || return 1
+    [ "$candidate_sid" = "$TASK_SCAN_LEADER_SID" ] || return 1
+  fi
+  [ -n "$identity" ] || identity=$(task_process_identity "$pid") || return 0
+  TASK_REAP_OWNED="${TASK_REAP_OWNED}${TASK_REAP_OWNED:+$'\n'}$pid"$'\t'"$identity"
 }
 
 teardown_process_log() {  # <pid> <verdict> <reason> [command]
@@ -2470,11 +2482,13 @@ task_spare_reason() {
 
 TEARDOWN_SPARED_PIDS=
 TEARDOWN_RETURN_DEFERRED=0
+TEARDOWN_CWD_UNLISTABLE=0
 
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
   local dir dir_pids pid command identity pids=""
+  task_ownership_context
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -2562,14 +2576,16 @@ reap_task_backend_process_group() {  # <label>
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
 # scan error refuses before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
+  local label=$1 pids pid identity current_pids i pass=1 max_passes=3 leader_identity=
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED=""
+  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED="" TASK_REAP_OWNED=""
+  local TASK_SCAN_ROWS TASK_SCAN_LEADER_SID TASK_SCAN_OWN_SID TASK_SCAN_LEADER_LIVE=0
   TASK_REAP_LEADER=$(task_reap_endpoint_pid) || TASK_REAP_LEADER=
   case "$TASK_REAP_LEADER" in ''|*[!0-9]*|0|1) TASK_REAP_LEADER= ;; esac
   TASK_REAP_LEADER_IDENTITY=$(task_process_identity "${TASK_REAP_LEADER:-0}") || TASK_REAP_LEADER=
   if ! command -v lsof >/dev/null 2>&1; then
+    TEARDOWN_CWD_UNLISTABLE=1
     reap_task_backend_process_group "$label"
     return 0
   fi
@@ -2595,11 +2611,20 @@ reap_task_worktree_processes() {  # <label> <dir>...
         fi
         continue
       fi
+      if [ "$pid" = "$TASK_REAP_LEADER" ]; then
+        leader_identity=$identity
+        continue
+      fi
       tracked_pids+=("$pid")
       tracked_identities+=("$identity")
     done <<EOF
 $pids
 EOF
+    if [ -n "$leader_identity" ]; then
+      tracked_pids+=("$TASK_REAP_LEADER")
+      tracked_identities+=("$leader_identity")
+      leader_identity=
+    fi
     if [ "${#tracked_pids[@]}" -eq 0 ]; then
       pass=$((pass + 1))
       continue
@@ -2614,8 +2639,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity" \
-         && task_process_is_owned "$pid"; then
+         && task_process_identity_matches "$pid" "$identity"; then
         teardown_process_log "$pid" killed "task-owned via endpoint $TASK_REAP_LEADER"
         kill -TERM "$pid" 2>/dev/null || true
       fi
@@ -2632,8 +2656,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity" \
-         && task_process_is_owned "$pid"; then
+         && task_process_identity_matches "$pid" "$identity"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
@@ -2649,8 +2672,7 @@ EOF
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity" \
-           && task_process_is_owned "$pid"; then
+           && task_process_identity_matches "$pid" "$identity"; then
           teardown_process_log "$pid" force-killed "task-owned via endpoint $TASK_REAP_LEADER"
           kill -KILL "$pid" 2>/dev/null || true
         fi
@@ -4099,6 +4121,11 @@ EOF
 
 teardown_finish_treehouse_return() {  # early|final
   local survivors waits=0
+  if [ "$TEARDOWN_CWD_UNLISTABLE" = 1 ]; then
+    echo "teardown: worktree kept: cannot list processes in it (lsof missing)" >&2
+    teardown_process_log - kept "worktree kept: cannot list processes in it (lsof missing)" "$WT"
+    return 0
+  fi
   survivors=$(teardown_spared_pids_in_worktree)
   if [ "$1" = final ]; then
     while [ -n "$survivors" ] && [ "$waits" -lt 20 ]; do

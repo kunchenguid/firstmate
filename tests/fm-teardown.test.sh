@@ -5227,6 +5227,43 @@ test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree() {
   pass "an unproven agent that ends at pane close does not keep the worktree"
 }
 
+test_term_resistant_owned_children_are_reaped_with_the_leader() {
+  local case_dir rc endpoint child i
+  case_dir=$(make_case term-resistant-owned)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    chdir $dir or die;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { exec "sh", "-c", "trap \"\" TERM; while :; do sleep 1; done"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "term-resistant-owned: fixture did not start"
+  child=$(cat "$case_dir/owned.pid")
+
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$child" "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  expect_code 0 "$rc" "term-resistant-owned: teardown should succeed"
+  grep -Eq "^[^	]+	task-x1	$child	force-killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "term-resistant-owned: owned child was not force-killed: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  if grep -Eq "^[^	]+	task-x1	$child	spared	" "$case_dir/state/teardown-processes.log"; then
+    fail "term-resistant-owned: owned child was reported as spared after the leader was signaled"
+  fi
+  pass "TERM-resistant task-owned processes are force-killed without being spared when the endpoint shell dies"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -5251,10 +5288,16 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "lsof-absent-process-group-reap: treehouse return ran although processes in the worktree could not be listed"
+  assert_grep "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/stderr" \
+    "lsof-absent-process-group-reap: kept worktree not reported"
+  grep -q "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/state/teardown-processes.log" \
+    || fail "lsof-absent-process-group-reap: kept worktree not logged durably"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "lsof-absent-process-group-reap: tmux process group survived teardown"
@@ -5409,7 +5452,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
 
   perl -e '
       my ($dir, $file, $worker_file) = @ARGV;
-      setpgrp(0, 0);
+      require POSIX;
+      POSIX::setsid();
       my $worker = fork();
       die "fork" unless defined $worker;
       if (!$worker) {
@@ -6484,6 +6528,7 @@ test_leaked_tasktmp_process_is_reaped
 test_foreign_session_survives_and_is_reported
 test_reparented_child_in_endpoint_session_is_reaped
 test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree
+test_term_resistant_owned_children_are_reaped_with_the_leader
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
