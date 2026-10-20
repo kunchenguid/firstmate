@@ -5152,7 +5152,7 @@ PYTHON
     || fail "foreign-session: the spared shell was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
   grep -Eq "^[^	]+	task-x1	$owned	killed	[^	]+	.*sleep" "$case_dir/state/teardown-processes.log" \
     || fail "foreign-session: the reaped child was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
-  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*$foreign[^	]*	.*$case_dir" "$case_dir/state/teardown-processes.log" \
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${foreign}[^	]*	.*$case_dir" "$case_dir/state/teardown-processes.log" \
     || fail "foreign-session: the kept worktree was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
   pass "foreign TTY shell survives and is reported while the task-owned child is reaped, and both are logged durably"
 }
