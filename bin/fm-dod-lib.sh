@@ -171,32 +171,9 @@ fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
   return 1
 }
 
-# The optional home merge gate (docs/configuration.md "Merge gate"). When
-# <config>/merge-gate exists and is executable, both landing entrypoints run
-# `merge-gate <task-id> <worktree> <head> <pr-url|->` with FM_HOME set, after
-# their own live checks and before the merge command, and print its output; a
-# nonzero exit refuses the merge. An absent file changes nothing; a file that
-# exists but is not executable refuses the merge, naming it. The gate runs under
-# FM_MERGE_GATE_TIMEOUT seconds (default 600) because it runs inside the task's
-# control lock; a gate that outlives the bound is killed and refuses the merge.
-fm_dod_merge_gate() {  # <config-dir> <home> <id> <meta> <candidate-head> <pr-url|->
-  local gate=$1/merge-gate worktree out seconds=${FM_MERGE_GATE_TIMEOUT:-600} rc=0
-  [ -e "$gate" ] || [ -L "$gate" ] || return 0
-  [ -x "$gate" ] || { echo "merge refused: $gate is not executable"; return 1; }
-  case $seconds in ''|0*|*[!0-9]*)
-    echo "merge refused: FM_MERGE_GATE_TIMEOUT must be a positive number of seconds"; return 1 ;;
-  esac
-  worktree=$(fm_dod_meta_value "$4" worktree)
-  out=$(fm_run_timed "$seconds" env FM_HOME="$2" "$gate" "$3" "${worktree:--}" "$5" "$6" 2>&1) || rc=$?
-  [ -z "$out" ] || printf '%s\n' "$out"
-  [ "$rc" -ne 0 ] || return 0
-  if fm_timed_out "$rc"; then
-    echo "merge refused: merge gate timed out after ${seconds}s or exited $rc"
-    return 1
-  fi
-  echo "merge refused by config/merge-gate (exit $rc)"
-  return 1
-}
+# Optional merge-card add-on: defines fm_dod_merge_gate and fm_merge_post_hook.
+# shellcheck source=/dev/null
+[ ! -r "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh" ] || . "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3

@@ -1182,24 +1182,6 @@ It runs before the AI-trailer step in "Commit attribution", so `GIT_CONFIG_*` en
 A nonzero exit, or an export the pane shell cannot source, stops the launch before the worker runs; an absent file changes nothing, and a present but non-executable file prints a warning at spawn and the launch proceeds without it.
 The hook's content is home-local policy, for example the firstmate-addons `git-identity` add-on, which pins a lane's git identity and pre-push identity check; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the invocation mechanics.
 
-## Merge gate (config/merge-gate)
-
-The optional local, gitignored `config/merge-gate` is an executable that hard-blocks a task merge, for example until a proof tool such as done-done passes for the exact head being merged.
-When the file exists and is executable, `bin/fm-merge-local.sh` runs `config/merge-gate <task-id> <worktree> <head> -` right before its fast-forward, and `bin/fm-pr-merge.sh` runs `config/merge-gate <task-id> <worktree> <head> <pr-url>` right before the forge merge, both with `FM_HOME` set.
-`<worktree>` is the task's recorded worktree, or `-` when none is recorded, and `<head>` is the exact commit the merge will land.
-`-` means no worktree: a gate must treat it as a plain argument and must not `cd` into it (`cd -` changes to the previous directory, or fails with `OLDPWD not set`).
-The gate runs under `FM_MERGE_GATE_TIMEOUT` seconds (default `600`), because it runs while the task's control lock is held; a gate that outlives the bound is killed and refuses the merge with `merge gate timed out after Ns or exited <rc>` (a gate that exits 124 or 137 on its own gets the same wording), so the lock is always released.
-The gate's output is printed whether it passes or refuses, so a report-only gate can show its verdict; a nonzero exit refuses the merge, an absent file leaves merge behavior unchanged, and a file that exists, including a dangling symlink, but is not executable refuses the merge and names the file.
-On the pull-request path the gate runs after the live merge checks and before the completion-receipt check; on the local-only path it runs after the completion-receipt check, right before the fast-forward. The gate can only add a refusal, never waive one.
-The gate's content is home-local policy; [`fm_dod_merge_gate`](../bin/fm-dod-lib.sh) owns the invocation mechanics, and the README's "Proof and decision tools" section installs done-done-axi's shipped gate script.
-
-## Post-merge hook (config/post-merge)
-
-The optional local, gitignored `config/post-merge` is an executable that runs once after a confirmed merge, for example to post the merge's evidence card to a sign-off board.
-When the file exists and is executable, `bin/fm-merge-local.sh` runs `config/post-merge <task-id> <worktree|-> <head> -` after its fast-forward when the fast-forward moved the branch, and the shared PR merge outcome runs `config/post-merge <task-id> <worktree|-> - <pr-url>` the first time it records a merge, whether this home merged it or its merge poll saw it, both with `FM_HOME` set.
-The merge has already landed, so the hook can never undo or refuse it: its output is printed, and a failure, a timeout after `FM_POST_MERGE_TIMEOUT` seconds (default `120`), or a file that is not executable is reported and otherwise ignored.
-The hook's content is home-local policy; [`fm_merge_post_hook`](../bin/fm-merge-outcome-lib.sh) owns the invocation mechanics.
-
 ## Home brief include (config/brief-include.md)
 
 The optional gitignored `config/brief-include-shared.md` and home-local `config/brief-include.md` add standing worker instructions to every ship and scout brief.

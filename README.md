@@ -229,7 +229,7 @@ cp "$(npm root -g)/done-done-axi/integrations/firstmate/merge-gate" "$FM_HOME/co
 Run the `cat >>` line once: each run appends the brief include again, duplicating it in every brief.
 
 - `config/brief-include.md` is appended to every ship and scout brief, so every worker proves its change with done-done ([details](docs/configuration.md#home-brief-include-configbrief-includemd)).
-- `config/merge-gate` runs `done-done check` against the task's PR, or its `data/<task-id>/checks.md` when there is no PR, with the default-branch rules, then `receipt --verify <head>`. A nonzero exit refuses the merge and shows its output ([details](docs/configuration.md#merge-gate-configmerge-gate)). Run `git fetch origin` first, since the gate reads local origin refs.
+- `config/merge-gate` is enforced by the merge-card add-on when it is installed; without the add-on, core does not check it. The gate runs `done-done check` against the task's PR, or its `data/<task-id>/checks.md` when there is no PR, with the default-branch rules, then `receipt --verify <head>`. A nonzero exit refuses the merge and shows its output. Run `git fetch origin` first, since the gate reads local origin refs.
 
 **[sign-off](https://github.com/umeranjum17/sign-off) - answer decisions with one click.**
 Install its skill with `npx skills add umeranjum17/sign-off --skill sign-off-axi`.

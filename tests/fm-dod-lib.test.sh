@@ -571,66 +571,15 @@ test_completion_receipt_gates() {
   grep -v '^receipt_required=' "$meta" > "$home/meta.new"
   printf 'receipt_required=1\n' >> "$home/meta.new"
   mv "$home/meta.new" "$meta"
-  # The optional home merge gate sees the proved candidate and refuses with its
-  # own words; with no gate file the landing is unchanged.
-  cat > "$home/config/merge-gate" <<'EOF'
-#!/usr/bin/env bash
-printf '%s|%s\n' "$FM_HOME" "$*" > "$FM_HOME/gate.args"
-echo "done-done: proof missing for this head"
-exit 3
-EOF
-  chmod +x "$home/config/merge-gate"
-  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    && fail "local landing ignored a refusing merge gate"
-  assert_grep 'done-done: proof missing for this head' "$home/merge.out" "merge gate output was not shown"
-  assert_grep 'merge refused by config/merge-gate (exit 3)' "$home/merge.out" "merge gate refusal was not named"
-  [ "$(cat "$home/gate.args")" = "$home|receipt $wt $(git -C "$wt" rev-parse HEAD) -" ] \
-    || fail "merge gate got wrong arguments: $(cat "$home/gate.args")"
-  [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "gate-refused landing changed main"
-  rm "$home/config/merge-gate"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/config/merge-gate"
-  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    && fail "local landing ignored a non-executable merge gate"
-  assert_grep 'merge-gate is not executable' "$home/merge.out" "non-executable merge gate was not named"
-  [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "non-executable gate landing changed main"
-  rm "$home/config/merge-gate"
-  ln -s "$home/no-such-gate" "$home/config/merge-gate"
-  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    && fail "local landing ignored a dangling merge-gate symlink"
-  assert_grep 'merge-gate is not executable' "$home/merge.out" "dangling merge gate was not named"
-  [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "dangling gate landing changed main"
-  rm "$home/config/merge-gate"
-  printf '#!/usr/bin/env bash\nsleep 30\n' > "$home/config/merge-gate"
-  chmod +x "$home/config/merge-gate"
-  fm_run_timed 60 env FM_MERGE_GATE_TIMEOUT=1 FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    && fail "local landing ignored a timed-out merge gate"
-  assert_grep 'merge refused: merge gate timed out after 1s' "$home/merge.out" "timed-out merge gate was not named"
-  [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "timed-out gate landing changed main"
-  # A passing gate's output is shown too, and the optional post-merge hook runs
-  # once after the fast-forward; its failure leaves the landing standing.
-  printf '#!/usr/bin/env bash\necho "done-done: inconclusive"\n' > "$home/config/merge-gate"
-  # shellcheck disable=SC2016  # the hook script expands its own arguments
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$FM_HOME/post.args"\nexit 5\n' > "$home/config/post-merge"
-  chmod +x "$home/config/merge-gate" "$home/config/post-merge"
-  fm_run_timed 60 env FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    || fail "valid local landing failed after a timed-out merge gate released the lock: $(cat "$home/merge.out")"
+  fm_run_timed 60 env FM_ADDONS_DIR="$home/no-addons" FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
+    || fail "valid local landing failed: $(cat "$home/merge.out")"
   [ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$wt" rev-parse HEAD)" ] \
     || fail "valid local landing did not land proved candidate"
-  assert_grep 'done-done: inconclusive' "$home/merge.out" "passing merge gate output was not shown"
-  [ "$(cat "$home/post.args")" = "receipt $wt $(git -C "$wt" rev-parse HEAD) -" ] \
-    || fail "post-merge hook got wrong arguments or ran more than once: $(cat "$home/post.args")"
-  assert_grep 'post-merge hook failed (exit 5); the merge stands' "$home/merge.out" "post-merge hook failure was not named"
-  # Repeating the landing is a fast-forward no-op, so the hook must not rerun.
-  fm_run_timed 60 env FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
-    || fail "repeat local landing of an unchanged default branch failed: $(cat "$home/merge.out")"
-  [ "$(cat "$home/post.args")" = "receipt $wt $(git -C "$wt" rev-parse HEAD) -" ] \
-    || fail "repeat landing reran the post-merge hook: $(cat "$home/post.args")"
-  rm "$home/config/merge-gate" "$home/config/post-merge"
   # Legacy tasks remain compatible when no receipt exists.
   grep -v '^receipt_required=' "$meta" > "$home/state/legacy.meta"
   fm_dod_receipt_accept "$home/state" legacy "$home/state/legacy.meta" "$head" \
     || fail "legacy absent receipt refused"
-  pass "durable completion evidence and the optional merge gate bind candidate, mode and incarnation and gate local landing, and the post-merge hook runs after it"
+  pass "durable completion evidence binds candidate, mode and incarnation and gates local landing"
 }
 
 # A scout spawned on a named base keeps that base through promotion: the ship
@@ -717,26 +666,6 @@ test_worker_role_names_skill_and_fallback_file() {
 }
 
 test_worker_role_names_skill_and_fallback_file
-
-# A local-only task with no recorded worktree hands the gate "-" in the worktree
-# slot; the gate must treat it as "no worktree" and never cd into it.
-test_merge_gate_gets_dash_without_worktree() {
-  local home meta
-  home="$TMP_ROOT/gate-no-worktree-home"
-  mkdir -p "$home/config"
-  meta="$TMP_ROOT/gate-no-worktree.meta"
-  printf 'mode=local-only\n' > "$meta"
-  # shellcheck disable=SC2016  # the gate script's $* and $FM_HOME must expand when the gate runs, not now
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" > "$FM_HOME/gate.args"' 'exit 0' > "$home/config/merge-gate"
-  chmod +x "$home/config/merge-gate"
-  fm_dod_merge_gate "$home/config" "$home" fm-T1 "$meta" abc123 - \
-    || fail "merge gate refused a passing local-only merge without a worktree"
-  [ "$(cat "$home/gate.args")" = "fm-T1 - abc123 -" ] \
-    || fail "merge gate got wrong arguments without a worktree: $(cat "$home/gate.args")"
-  pass "merge gate receives - for the worktree when the task records none"
-}
-
-test_merge_gate_gets_dash_without_worktree
 
 test_completion_receipt_gates
 

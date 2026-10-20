@@ -104,9 +104,6 @@
 #
 # Completion evidence is checked by bin/fm-dod-lib.sh against the verified
 # forge head before either merge command, independently of forge check waivers.
-# The optional config/merge-gate (fm_dod_merge_gate) runs against that same
-# verified head and the PR URL after the live checks pass; a nonzero exit
-# refuses the merge before the away record is locked or any forge command runs.
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
 # true, and the combined commit status at the exact current head, read across
@@ -1667,7 +1664,7 @@ case "$PROVIDER" in
       fi
       exit 1
     fi
-    fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$FM_PR_MERGE_HEAD" "$URL" >&2 || exit 1
+    if declare -F fm_dod_merge_gate >/dev/null; then fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$FM_PR_MERGE_HEAD" "$URL" >&2 || exit 1; fi
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1
@@ -1720,7 +1717,7 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
-    fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$FM_PR_MERGE_HEAD" "$URL" >&2 || exit 1
+    if declare -F fm_dod_merge_gate >/dev/null; then fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$FM_PR_MERGE_HEAD" "$URL" >&2 || exit 1; fi
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;

@@ -2781,10 +2781,6 @@ test_main_home_merge_leaves_a_durable_wake() {
   case_dir=$(make_home_case main-merge-wake)
   add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
   : >"$case_dir/gh-axi.log"
-  # The optional post-merge hook fails on purpose: the merge must stand.
-  # shellcheck disable=SC2016  # the hook script expands its own arguments
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$FM_HOME/post.args"\nexit 5\n' >"$case_dir/home/config/post-merge"
-  chmod +x "$case_dir/home/config/post-merge"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "main-merge-wake: merge failed"
@@ -2795,14 +2791,7 @@ test_main_home_merge_leaves_a_durable_wake() {
     || fail "main-merge-wake: one merge produced more than one durable record"
   assert_absent "$case_dir/state/parent-replies.status" \
     "main-merge-wake: a main home wrote a parent reply channel it does not have"
-  assert_grep 'post-merge hook failed (exit 5); the merge stands' "$case_dir/stderr" \
-    "main-merge-wake: the post-merge hook failure was not reported"
-  # The same merge again records nothing new, so the hook does not run twice.
-  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
-    >"$case_dir/stdout2" 2>"$case_dir/stderr2" || fail "main-merge-wake: repeat merge failed"
-  [ "$(cat "$case_dir/home/post.args")" = "task-x1 $case_dir/wt - $url" ] \
-    || fail "main-merge-wake: post-merge hook got wrong arguments or ran twice: $(cat "$case_dir/home/post.args")"
-  pass "a merge a main home performs itself leaves one durable wake naming the PR and runs the post-merge hook once"
+  pass "a merge a main home performs itself leaves one durable wake naming the PR"
 }
 
 test_queued_github_merge_leaves_the_poll_armed() {
