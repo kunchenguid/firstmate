@@ -347,6 +347,23 @@ test_declared_model_set_is_the_only_capped_set() {
 
 
 
+# A replacement dispatched while the guard is off must not leave the prior
+# incarnation's row behind: that row names this task's id while describing a
+# session that has exited, and adoption skips it, so a later declaration would
+# leave the replacement uncounted.
+test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row() {
+  local case_dir out
+  case_dir=$(make_case off-replacement task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 99999999
+  fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
+  rm -f -- "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
+  assert_equals "$out" "not-capped" "an undeclared home claimed a slot"
+  [ ! "$(registry_row_field "$case_dir" task-c 1)" ] ||
+    fail "a replacement while the guard is off left the prior incarnation's row behind"
+  pass "a replacement while the guard is off invalidates the prior incarnation's row"
+}
+
 # A reused row follows the current declaration: a session admitted on a model
 # the captain has since dropped holds no capacity, and the reuse must
 # reconcile the row's model instead of keeping the dropped one.
@@ -1025,6 +1042,7 @@ test_the_documented_declaration_parses
 test_a_home_that_drops_its_declaration_owns_no_occupancy
 test_a_reused_row_follows_the_current_declaration
 test_a_row_whose_model_was_dropped_holds_no_occupancy
+test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

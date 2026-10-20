@@ -500,6 +500,27 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
   return 0
 }
 
+# fm_sol_cap_registry_drop <registry-file> <id>
+# Remove this task id's row, keeping every other row, so a row that names a
+# session which has exited cannot stand in for a newer incarnation of the
+# same task id. A no-op when the id has no row.
+fm_sol_cap_registry_drop() {  # <registry-file> <id>
+  local file=$1 id=$2 tmp rc
+  [ -f "$file" ] || return 0
+  tmp=$file.tmp.drop.$$
+  awk -F'\t' -v id="$id" '$1 != id' "$file" > "$tmp" 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  return 0
+}
+
 # fm_sol_cap_refuse_and_claim <id> <kind> <harness> <model> <config-dir> <state-dir>
 # The guard bin/fm-spawn.sh calls once a spawn's harness/model axis is fully
 # resolved and before any endpoint, worktree, or record exists. A home that
@@ -522,7 +543,16 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; task $id with model $model was not dispatched rather than launched against an undeclared ceiling"
     return 1
   }
-  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 0
+  if [ "$FM_SOL_CAP_ACTIVE" != 1 ]; then
+    # This home declared no ceiling, so this dispatch reserves nothing. A
+    # replacement still invalidates the prior incarnation's row: a row an
+    # earlier declared incarnation left behind names this task's id while
+    # describing a session that has exited, and adoption would skip it, so
+    # a later declaration would leave this worker uncounted.
+    [ -e "$state/$id.meta" ] || return 0
+    fm_sol_cap_registry_drop "$state/$FM_SOL_REGISTRY_NAME" "$id" || return 1
+    return 0
+  fi
   [ -n "$model" ] && [ "$model" != default ] || return 0
   fm_sol_cap_model_capped "$model" || return 0
   root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$state")") || return 1
