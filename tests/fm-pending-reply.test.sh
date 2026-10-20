@@ -1243,6 +1243,70 @@ test_helper_report_resolves() {
   pass "optional helper report resolves without being required for correctness"
 }
 
+test_helper_blocked_wait_hook_is_optional() {
+  local home state sm_home addons hook capture out rc before
+  home=$(setup_parent wait-hook)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" hibit)
+  env -u FM_ADDONS_DIR FM_HOME="$sm_home" "$REPORT" blocked abcdef0123456789 'waiting for CI' \
+    || fail "missing add-on hook should be a no-op"
+  addons="$home/addons"
+  hook="$addons/status-wait-check/status-wait-check"
+  capture="$home/hook-args"
+  mkdir -p "$(dirname "$hook")"
+  cat > "$hook" <<EOF
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$1" "\$2" > "$capture"
+echo "add-on refused wait" >&2
+exit 1
+EOF
+  chmod +x "$hook"
+  before=$(cat "$state/hibit.status")
+  if out=$(FM_HOME="$sm_home" FM_ADDONS_DIR="$addons" "$REPORT" blocked abcdef0123456789 'waiting for CI' 2>&1); then
+    fail "nonzero add-on hook should refuse report"
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || fail "hook refusal should exit 2"
+  assert_contains "$out" 'add-on refused wait' "hook refusal message was lost"
+  [ "$(cat "$capture")" = 'blocked|waiting for CI' ] || fail "hook must receive verb and text"
+  [ "$(cat "$state/hibit.status")" = "$before" ] || fail "refused report must not reach the parent status file"
+  if FM_HOME="$sm_home" FM_ADDONS_DIR="$addons" "$REPORT" --doc blocked abcdef0123456789 data/x/report.md 'waiting for CI' >/dev/null 2>&1; then
+    fail "refused --doc report should exit nonzero"
+  fi
+  [ "$(cat "$state/hibit.status")" = "$before" ] || fail "refused --doc report must not reach the parent status file"
+  if FM_HOME="$sm_home" FM_ADDONS_DIR="$addons" "$REPORT" blocked: abcdef0123456789 'waiting for CI' >/dev/null 2>&1; then
+    fail "colon-suffixed blocked verb should be refused"
+  fi
+  [ "$(cat "$capture")" = 'blocked:|waiting for CI' ] || fail "hook must receive the verb exactly as typed"
+  [ "$(cat "$state/hibit.status")" = "$before" ] || fail "colon-suffixed refused report must not reach the parent status file"
+  pass "blocked-wait hook is optional, receives the verb as typed, and refusal blocks the append"
+}
+
+test_helper_blocked_wait_hook_default_path() {
+  local home state sm_home hook out rc
+  home=$(setup_parent wait-hook-default)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" hibit)
+  hook="$sm_home/projects/firstmate-addons/status-wait-check/status-wait-check"
+  mkdir -p "$(dirname "$hook")"
+  cat > "$hook" <<'EOF'
+#!/usr/bin/env bash
+echo "default-path add-on refused wait" >&2
+exit 1
+EOF
+  chmod +x "$hook"
+  if out=$(env -u FM_ADDONS_DIR FM_HOME="$sm_home" "$REPORT" blocked abcdef0123456789 'waiting for CI' 2>&1); then
+    fail "default-path add-on should refuse blocked report"
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || fail "default-path refusal should exit 2"
+  assert_contains "$out" 'default-path add-on refused wait' "default-path refusal message was lost"
+  [ ! -e "$state/hibit.status" ] || fail "default-path refused report must not reach the parent status file"
+  pass "blocked-wait hook is found at the default add-on path"
+}
+
 test_busy_idle_observation_via_backend_abstraction() {
   local home state corr
   home=$(setup_parent busy-idle)
@@ -2134,6 +2198,8 @@ test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
 test_helper_report_resolves
+test_helper_blocked_wait_hook_is_optional
+test_helper_blocked_wait_hook_default_path
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness

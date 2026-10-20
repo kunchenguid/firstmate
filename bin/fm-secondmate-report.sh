@@ -21,6 +21,10 @@
 # Examples:
 #   fm-secondmate-report.sh done abcdef0123456789 "audit clean"
 #   fm-secondmate-report.sh --doc done abcdef0123456789 data/x/report.md "see report"
+#
+# An optional firstmate-addons status-wait-check add-on (${FM_ADDONS_DIR:-<home>/projects/firstmate-addons}/status-wait-check/status-wait-check)
+# receives <verb> <note> before the append and owns the wait rules. Its output is shown and a nonzero
+# exit refuses the report with exit 2; an absent add-on is a no-op.
 set -eu
 
 CALLER_FM_HOME=${FM_HOME:-}
@@ -29,6 +33,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+
+fm_secondmate_report_status_blocked_wait() {  # <verb> <text>
+  local hook="${FM_ADDONS_DIR:-${CALLER_FM_HOME}/projects/firstmate-addons}/status-wait-check/status-wait-check"
+  [ -x "$hook" ] || return 0
+  local out rc=0
+  out=$("$hook" "$1" "$2" 2>&1) || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+  [ "$rc" -eq 0 ] || exit 2
+}
 
 usage() {
   cat <<'EOF' >&2
@@ -93,6 +106,7 @@ if [ "$DOC_MODE" = 1 ]; then
   DOC_PATH=$1
   shift
   NOTE=$*
+  fm_secondmate_report_status_blocked_wait "$VERB" "$NOTE"
   if [ -n "$NOTE" ]; then
     printf -v line '%s [%s]: %s (%s via-helper)' "$VERB" "$token" "$NOTE" "$DOC_PATH"
   else
@@ -100,6 +114,7 @@ if [ "$DOC_MODE" = 1 ]; then
   fi
 else
   NOTE=$*
+  fm_secondmate_report_status_blocked_wait "$VERB" "$NOTE"
   printf -v line '%s [%s]: %s (via-helper)' "$VERB" "$token" "$NOTE"
 fi
 printf '%s\n' "$(status_stamp_line "$line")" >> "$DESTINATION"
