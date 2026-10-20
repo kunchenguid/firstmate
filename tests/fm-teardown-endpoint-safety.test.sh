@@ -119,7 +119,7 @@ test_invalid_endpoint_records_refuse_before_mutation() {
 # The refusal itself does not change: it still names what is wrong first, still
 # preserves the record, and still refuses under --force.
 test_worktree_identity_refusal_names_the_repair_path() {
-  local dir id=repair-hint err printed
+  local dir id=repair-hint err printed shape
 
   dir=$(make_case repair-hint)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -144,6 +144,40 @@ test_worktree_identity_refusal_names_the_repair_path() {
   assert_contains "$err" ".fm-slot-owner" \
     "the repair path must say how a reassigned pool slot is proved and why restoring stays safe"
 
+  # Exercise the other two unusable shapes through the public teardown CLI.
+  # In each case the refusal must preserve the exact hand-edited record and
+  # explain how to reduce it to one correct worktree identity.
+  for shape in empty duplicate; do
+    dir=$(make_case "repair-hint-$shape")
+    if [ "$shape" = empty ]; then
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=isolated:fm-$id" "endpoint_task_id=$id" \
+        "worktree=" "project=$dir/project" "branch=fm/$id" "kind=ship"
+    else
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=isolated:fm-$id" "endpoint_task_id=$id" \
+        "worktree=$dir/worktree" "worktree=$dir/other-worktree" \
+        "project=$dir/project" "branch=fm/$id" "kind=ship"
+    fi
+    cp "$dir/home/state/$id.meta" "$dir/meta.before"
+    assert_refused_without_mutation "$dir" "$id" "$shape worktree identity"
+    cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" \
+      || fail "$shape worktree refusal changed the record"
+    err=$(cat "$dir/stderr")
+    assert_contains "$err" "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." \
+      "$shape worktree refusal must stay unchanged"
+    assert_contains "$err" "exactly one worktree= line" \
+      "$shape worktree repair must name the required end state"
+    assert_contains "$err" "add it, fill it in, or keep only the right one of several" \
+      "$shape worktree repair must explain how to fix this shape"
+    assert_contains "$err" "git -C $dir/project worktree list" \
+      "$shape worktree repair must identify the listing to inspect"
+    assert_contains "$err" "recorded branch fm/$id" \
+      "$shape worktree repair must identify the recorded branch"
+    assert_contains "$err" ".fm-slot-owner" \
+      "$shape worktree repair must explain reassigned-slot safety"
+  done
+
   # The listing is only useful if it can be copied and run as printed, which a
   # project path with a space breaks unless the command is quoted. Prove it by
   # running exactly what the refusal printed, against exactly such a path.
@@ -156,7 +190,8 @@ test_worktree_identity_refusal_names_the_repair_path() {
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   set -e
   printed=$(sed -n '/^git -C .* worktree list$/p' "$dir/stderr")
-  [ -n "$printed" ] || fail "the refusal printed no runnable worktree listing: $(cat "$dir/stderr")"
+  [ "$(printf '%s\n' "$printed" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the refusal did not print exactly one standalone worktree listing: $(cat "$dir/stderr")"
   eval "$printed" > "$dir/listing" 2> "$dir/listing-err" \
     || fail "the printed listing did not run as printed: $printed"$'\n'"$(cat "$dir/listing-err")"
   assert_contains "$(cat "$dir/listing")" "$dir/project dir" \
