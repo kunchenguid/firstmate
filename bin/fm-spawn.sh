@@ -3064,7 +3064,10 @@ model_json_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   [ "$harness" = opencode ] || return 0
-  printf ',"model":"%s"' "$(json_escape "$model")"
+  local model_json
+  model_json=$(json_escape "$model")
+  model_json=${model_json//\'/\'\\\'\'}
+  printf ',"model":"%s"' "$model_json"
 }
 
 effort_flag_for_harness() {

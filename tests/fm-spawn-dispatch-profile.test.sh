@@ -855,7 +855,7 @@ test_opencode_threads_model_and_effort_variant() {
   # the launch already writes, keyed to the resolved model on the default
   # build agent, never as a launch flag.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --prompt" \
     "opencode launch did not write the effort as the build agent's variant in its config"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
@@ -875,7 +875,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --prompt" \
     "opencode launch without effort must keep the permission-only config byte-identical"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
   pass "opencode without an effort keeps its launch config unchanged"
@@ -893,9 +893,26 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}},\"model\":\"openai/gpt-5.6-sol\"}' opencode --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
   pass "opencode emits the variant for an effort the openai family exposes"
+}
+
+test_opencode_without_model_keeps_permission_only_config() {
+  local rec id out status launch
+  id=profile-opencode-nomodel-z7e
+  rec=$(make_spawn_case profile-opencode-nomodel opencode "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode spawn without a model should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
+    "opencode launch without a model must keep the permission-only config"
+  assert_not_contains "$launch" '"model"' "opencode launch without a model must not write a model"
+  pass "opencode without a model keeps its permission-only launch config"
 }
 
 test_opencode_omits_variant_when_model_family_lacks_effort() {
@@ -910,7 +927,7 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --prompt" \
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
@@ -2315,6 +2332,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
+test_opencode_without_model_keeps_permission_only_config
 test_opencode_omits_variant_when_model_family_lacks_effort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
