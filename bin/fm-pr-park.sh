@@ -28,6 +28,11 @@
 #              relaunch note that names the pull request and its baseline and
 #              current fingerprints, and print its path.
 #
+# The fingerprint includes PR state, head commit, review decision, review and
+# comment counts, and sorted check names with their conclusion or status-context
+# state. Check runs without a conclusion remain pending, so a queued check
+# starting to run does not trigger a change.
+#
 # The watch name is park- followed by the first 54 hex digits of the SHA-256
 # of the task id (without a newline); its source id is when-park-<digest>.
 # On a wake, match the digest against task ids from state/*.park using that
