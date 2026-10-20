@@ -463,6 +463,38 @@ test_symlinked_report_is_not_read() {
   pass "a symlinked report is skipped"
 }
 
+test_symlinked_report_directory_is_not_read_or_used_for_decision_targets() {
+  local home external out entries html
+  home=$(decision_home)
+  external="$home/external"
+  mkdir -p "$external" || fail "cannot create external report fixture"
+  write_report "$home" real '# Real'
+  printf '# Linked private report\n\nOutside report content.\n' > "$external/report.md" \
+    || fail "cannot write external report fixture"
+  ln -s "$external" "$home/data/linked" || fail "cannot create the report directory symlink"
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] linked - Decision for linked report (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: bbbb1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: answered
+
+  Captain decision:
+  Keep the linked report private.'
+  out=$(build "$home") || fail "build failed: $out"
+  assert_contains "$out" 'reports: 1' "only the real report directory should be counted"
+  assert_contains "$out" 'entries: 2' "the decision must remain its own entry"
+  entries=$(entries_of "$home/state/reports.html")
+  assert_equals 'decision' \
+    "$(printf '%s' "$entries" | jq -r '.[] | select(.id == "linked") | .kind')" \
+    "a decision must not be attached to a report found only through a directory symlink"
+  html=$(printf '%s' "$entries" | jq -r 'map(.html) | join("\n")')
+  assert_not_contains "$html" 'Outside report content.' \
+    "a report reachable only through a symlink directory must not be read"
+  pass "a symlinked report directory is excluded from both read boundaries"
+}
+
 test_path_prints_the_page_path() {
   local home out
   home=$(new_home)
@@ -1047,6 +1079,7 @@ test_heading_gets_an_id_to_jump_to
 test_malformed_in_report_fragment_does_not_throw_or_navigate
 test_nested_list_dedent_and_reindent_keep_siblings_at_their_level
 test_symlinked_report_is_not_read
+test_symlinked_report_directory_is_not_read_or_used_for_decision_targets
 test_path_prints_the_page_path
 test_link_proves_the_report_exists
 test_build_refuses_without_a_home

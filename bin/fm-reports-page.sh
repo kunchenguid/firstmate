@@ -167,8 +167,8 @@ command_build() {
   rows=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-reports-rows.XXXXXX") \
     || { rm -f -- "$decisions"; fail "cannot stage the report rows"; }
   count=0
-  for dir in "$FM_HOME"/data/*/; do
-    [ -d "$dir" ] || continue
+  for dir in "$FM_HOME"/data/*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     id=${dir%/}
     id=${id##*/}
     [ -f "$dir/report.md" ] && [ ! -L "$dir/report.md" ] || continue

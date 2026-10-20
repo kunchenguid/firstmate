@@ -26,12 +26,12 @@ A home that wants the page offered as a matter of course says so in its own capt
 
 ## Invocation
 
-- Rebuild and hand over the page: `bin/fm-reports-page.sh build`, then give the captain the path it printed as a `file://` link.
+- Build the page with `bin/fm-reports-page.sh build`; it prints the filesystem path. To hand over a `file://` link to a report or decision, run `bin/fm-reports-page.sh link <id>` after the build.
 - Link one entry: `bin/fm-reports-page.sh link <id>`, where `<id>` is the report's directory name under `data/` or the task id of a recorded decision.
 - The script's header owns every mechanic, including its output lines and the only-on-change rule; `--help` prints it.
 - `bin/fm-reports-decisions.sh` owns which records count as a decision and which report one belongs to; it only ever reads.
 
-Never assemble a link by hand and never hand out a path the build did not just print.
+Never assemble a link by hand; `link` verifies the entry exists in the published page before printing its URL.
 `link` refuses any id the published page has no entry for, which is the whole reason it exists: a hand-built anchor to a deleted report, or to one written since the last build, looks live and silently shows a different entry.
 Rebuild and then link; the refusal names that.
 

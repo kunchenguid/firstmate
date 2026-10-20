@@ -186,8 +186,8 @@ command_collect() {
 
   # --- the reports that exist, for assigning a decision to one ---------------
   reports=$(
-    for path in "$home"/data/*/; do
-      [ -d "$path" ] || continue
+    for path in "$home"/data/*; do
+      [ -d "$path" ] && [ ! -L "$path" ] || continue
       id=${path%/}; id=${id##*/}
       readable_file "$path/report.md" || continue
       printf '%s\n' "$id"
