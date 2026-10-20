@@ -37,6 +37,7 @@ make_tools() { # <world>
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "${1:-}" >> "$FM_FAKE_CREW_STATE_LOG"
+[ -z "${FM_FAKE_CREW_STATE_DELAY:-}" ] || sleep "$FM_FAKE_CREW_STATE_DELAY"
 if [ -n "${FM_FAKE_CREW_STATE_LINE:-}" ]; then
   printf '%s\n' "$FM_FAKE_CREW_STATE_LINE"
   exit 0
@@ -1496,11 +1497,32 @@ test_fast_cadence_visits_only_unreported_ships() {
   pass "the fast cadence reads only unreported no-mistakes ships"
 }
 
+test_fast_cadence_resumes_after_an_exhausted_budget() {
+  local log pass
+  make_world fast-cadence-budget
+  write_unreported_ship "$MAIN" off alpha
+  write_unreported_ship "$MAIN" off bravo
+  write_unreported_ship "$MAIN" off charlie
+  log="$WORLD/crew-state.log"
+  : > "$log"
+  export FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_FAKE_CREW_STATE_DELAY=2 \
+    FM_TEST_RECONCILE_SECS=900 FM_INACTIVE_RECONCILE_BUDGET_SECS=1
+  run_reconcile "$MAIN" --startup
+  for pass in 1 2 3; do
+    set_mtime "$(( $(date +%s) - 61 ))" "$MAIN/state/.inactive-outcome-early-reconcile"
+    run_reconcile "$MAIN"
+  done
+  unset FM_FAKE_CREW_STATE_LOG FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_DELAY FM_TEST_RECONCILE_SECS FM_INACTIVE_RECONCILE_BUDGET_SECS
+  grep -Fxq charlie "$log" || fail "a later unreported ship starved behind earlier ones on the fast cadence"
+  pass "the fast cadence resumes after an exhausted budget"
+}
+
 test_green_run_wakes_before_worker_report
 test_early_readiness_requires_an_unreported_green_ship
 test_early_readiness_reaches_the_parent_once
 test_worker_reported_readiness_is_not_repeated
 test_fast_cadence_visits_only_unreported_ships
+test_fast_cadence_resumes_after_an_exhausted_budget
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
