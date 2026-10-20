@@ -11,7 +11,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ContinuationReadbackOffer } from "./lib/fm-task-continuation.ts";
-import { encodeFirstmateOperationalInput, FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
+import {
+  encodeFirstmateOperationalInput,
+  FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT,
+  FIRSTMATE_OWNED_FOLLOWUP_START_EVENT,
+  FIRSTMATE_SESSION_START_SETTLED_EVENT,
+} from "./lib/fm-operational-input.ts";
 
 type PeriodicConfig = {
   version: 1;
@@ -91,6 +96,7 @@ let activeGeneration: CoordinatorGeneration | null = null;
 let activeTools = 0;
 let blockingPrompt = false;
 let compacting = false;
+let ownedFollowups = 0;
 let lastConfigurationError = "";
 let lastReminderConfigurationError = "";
 let lastDispatchError = "";
@@ -239,7 +245,7 @@ function localAutomaticConflict(): string | null {
 }
 
 function safeBoundary(ctx: ExtensionContext): boolean {
-  if (ctx.hasPendingMessages() || activeTools > 0 || blockingPrompt || compacting) return false;
+  if (ctx.hasPendingMessages() || activeTools > 0 || blockingPrompt || compacting || ownedFollowups > 0) return false;
   try {
     return ctx.ui.getEditorText().trim() === "";
   } catch {
@@ -322,7 +328,11 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
   // A cold restart has no live queue ownership, so release an orphaned request
   // and retry only on a later clock boundary.
   if (pending && !ctx.hasPendingMessages()) {
-    generation.reminderRetryAfter = Date.now() + reminderRetryDelay();
+    const failedAt = Date.now();
+    generation.reminderRetryAfter = failedAt + reminderRetryDelay();
+    pi.appendEntry(reminderFailedType, { version: 1, reminder_id: pending.id,
+      failed_at: new Date(failedAt).toISOString(), reason: "cold-restart-orphan",
+      session_id: generation.sessionId, session_file: generation.sessionFile });
     pending = null;
   }
   generation.reminderPendingId = pending?.id ?? null;
@@ -581,6 +591,17 @@ function checkDue(pi: ExtensionAPI, ctx: ExtensionContext): void {
   dispatch(pi, ctx);
 }
 
+function runIdleBoundary(pi: ExtensionAPI, ctx: ExtensionContext, generation: CoordinatorGeneration): void {
+  if (activeGeneration !== generation || !generation.live) return;
+  checkDue(pi, ctx);
+  dispatch(pi, ctx);
+  pi.events.emit("firstmate:heartbeat-tick", {});
+  queueMicrotask(() => {
+    if (activeGeneration !== generation || !generation.live) return;
+    void checkIdleReminder(pi, ctx);
+  });
+}
+
 function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const identity = sessionIdentity(ctx);
   if (!identity || !isMainEligible()) return;
@@ -589,6 +610,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
   activeTools = 0;
   blockingPrompt = false;
   compacting = false;
+  ownedFollowups = 0;
   const generation: CoordinatorGeneration = {
     token: randomUUID(), sessionId: identity.id, sessionFile: identity.file,
     live: true, timer: null, due: false, dispatching: false, lastOfferAt: 0,
@@ -599,20 +621,20 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
   activeGeneration = generation;
   restoreReminderState(pi, ctx, generation);
   generation.timer = setInterval(() => {
-    void checkIdleReminder(pi, ctx).then((claimed) => {
-      if (activeGeneration !== generation || !generation.live || claimed) return;
-      checkDue(pi, ctx);
-      pi.events.emit("firstmate:heartbeat-tick", {});
-    });
+    runIdleBoundary(pi, ctx, generation);
   }, tickMs);
-  void checkIdleReminder(pi, ctx).then((claimed) => {
-    if (activeGeneration !== generation || !generation.live || claimed) return;
-    checkDue(pi, ctx);
-    pi.events.emit("firstmate:heartbeat-tick", {});
-  });
+  runIdleBoundary(pi, ctx, generation);
 }
 
 export default function periodicStow(pi: ExtensionAPI): void {
+  pi.events.on(FIRSTMATE_OWNED_FOLLOWUP_START_EVENT, () => { ownedFollowups += 1; });
+  pi.events.on(FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT, (value: unknown) => {
+    ownedFollowups = Math.max(0, ownedFollowups - 1);
+    if (ownedFollowups > 0) return;
+    const ctx = (value as { ctx?: ExtensionContext } | undefined)?.ctx;
+    const generation = activeGeneration;
+    if (ctx && generation?.live) void checkIdleReminder(pi, ctx);
+  });
   pi.events.on("firstmate:continuation-readback", (value: unknown) => {
     const offer = value as ContinuationReadbackOffer;
     if (!offer?.ctx || typeof offer.accept !== "function" || !isMainEligible()) return;
@@ -654,6 +676,7 @@ export default function periodicStow(pi: ExtensionAPI): void {
     activeGeneration.live = false;
     if (activeGeneration.timer) clearInterval(activeGeneration.timer);
     activeGeneration.timer = null;
+    ownedFollowups = 0;
   });
   pi.on("tool_execution_start", () => { activeTools += 1; });
   pi.on("tool_execution_end", () => { activeTools = Math.max(0, activeTools - 1); });
@@ -706,11 +729,6 @@ export default function periodicStow(pi: ExtensionAPI): void {
       generation.reminderPendingId = null;
       generation.reminderRun = null;
     }
-    void checkIdleReminder(pi, ctx).then((claimed) => {
-      if (activeGeneration !== generation || !generation.live || claimed) return;
-      checkDue(pi, ctx);
-      dispatch(pi, ctx);
-      pi.events.emit("firstmate:heartbeat-tick", {});
-    });
+    runIdleBoundary(pi, ctx, generation);
   });
 }

@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT,
+  FIRSTMATE_OWNED_FOLLOWUP_START_EVENT,
+} from "./fm-operational-input.ts";
 import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
@@ -350,6 +354,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     if (!context || checking) return;
     const epoch = generation;
     const ctx = context;
+    pi.events.emit(FIRSTMATE_OWNED_FOLLOWUP_START_EVENT, { owner: "task-continuation", ctx });
     void check(ctx).then((admission) => {
       // No await between the safety owner's complete judgment and submission.
       // If unsafe, canonical reserved admission survives the next tick/reload.
@@ -384,7 +389,10 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         }
         for (const id of admission.admissions) submitted.add(id);
       }
-    }).catch(() => { /* Pending task-record progress remains available at the next tick. */ });
+    }).catch(() => { /* Pending task-record progress remains available at the next tick. */ })
+      .finally(() => {
+        pi.events.emit(FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT, { owner: "task-continuation", ctx });
+      });
   });
 
   const restoreSession = (_event: unknown, ctx: ExtensionContext) => {

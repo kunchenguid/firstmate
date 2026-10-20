@@ -410,9 +410,10 @@ The requested half-hour configuration is:
 The first interval starts from the configuration file modification time.
 Later intervals start only from a successfully settled reminder response or a successful canonical check that found no eligible work, never from the timer becoming due or from queuing a reminder request.
 Busy model work, tools, queued input, blocking UI, compaction, editor input, an unowned main-session lock, or an existing queued reminder defers the due reminder without consuming it.
+Turn-end recovery and canonical task-continuation readback bracket their owned asynchronous follow-ups; the coordinator admits an idle reminder only after those brackets drain, so optional reminder work cannot enter the queue ahead of existing recovery or continuation work.
 After a prolonged busy or offline span, the next safe idle boundary offers at most one consolidated reminder rather than replaying missed intervals.
 The handling receipt lives as a non-context custom entry in the persisted Pi session, so extension reload or process restart on that same session does not duplicate a handled reminder.
-A failed snapshot or model run preserves the due obligation but releases maintenance and continuation scheduling, then retries no sooner than a later timer boundary; a cold restart similarly releases an unowned queued request instead of retaining a permanent pending latch.
+A failed snapshot or model run preserves the due obligation but releases maintenance and continuation scheduling, then retries no sooner than a later timer boundary; a cold restart records the unowned queued request as failed before releasing it, so an intervening ordinary reply cannot become false reminder-delivery evidence.
 
 The reminder reads only `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-queued` and sends the model only its unfinished, gated, and captain-decision projections.
 That canonical projection excludes completed and archived records even when worker metadata or historical decision evidence remains.

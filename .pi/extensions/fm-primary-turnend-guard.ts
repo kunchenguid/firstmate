@@ -8,6 +8,8 @@ import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
+  FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT,
+  FIRSTMATE_OWNED_FOLLOWUP_START_EVENT,
   FIRSTMATE_SESSION_START_SETTLED_EVENT,
 } from "./lib/fm-operational-input.ts";
 
@@ -610,26 +612,31 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
-    if (guardFollowupActive) {
-      guardFollowupActive = false;
-      return;
-    }
-
-    const result = await runGuard();
-    if (result.code !== 2) return;
-
-    guardFollowupActive = true;
+  pi.on("agent_settled", async (_event, ctx) => {
+    pi.events.emit(FIRSTMATE_OWNED_FOLLOWUP_START_EVENT, { owner: "turn-end-guard", ctx });
     try {
-      const content = encodeFirstmateOperationalInput(
-        "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
-          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
-      );
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
-    } catch {
-      guardFollowupActive = false;
+      if (guardFollowupActive) {
+        guardFollowupActive = false;
+        return;
+      }
+
+      const result = await runGuard();
+      if (result.code !== 2) return;
+
+      guardFollowupActive = true;
+      try {
+        const content = encodeFirstmateOperationalInput(
+          "turn-end-guard",
+          "TURN WOULD END BLIND - supervision is off. " +
+            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+            result.stderr,
+        );
+        await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      } catch {
+        guardFollowupActive = false;
+      }
+    } finally {
+      pi.events.emit(FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT, { owner: "turn-end-guard", ctx });
     }
   });
 
