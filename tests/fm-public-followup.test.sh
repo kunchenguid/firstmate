@@ -45,7 +45,7 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid supervisor command state attempt
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
@@ -53,7 +53,46 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        # On Linux the published worker is the supervisor's --serve child.
+        # Stopping only that child makes the supervisor restart it while the
+        # fixture tree is being removed, racing rm -rf with worker writes.
+        command=$(ps -o args= -p "$pid" 2>/dev/null || true)
+        case "$command" in
+          *"$REMOTE_FIXTURE_ROOT"/bin/fm-remote-job-worker.sh*)
+            supervisor=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+            case "$supervisor" in
+              ''|*[!0-9]*) ;;
+              *)
+                command=$(ps -o args= -p "$supervisor" 2>/dev/null || true)
+                case "$command" in
+                  *"$REMOTE_FIXTURE_ROOT"/bin/fm-remote-job-worker.sh*)
+                    kill -TERM "$supervisor" 2>/dev/null || true
+                    attempt=0
+                    while [ "$attempt" -lt 50 ]; do
+                      state=$(ps -o stat= -p "$supervisor" 2>/dev/null | tr -d ' ' || true)
+                      case "$state" in ''|Z*) break ;; esac
+                      sleep 0.1
+                      attempt=$((attempt + 1))
+                    done
+                    ;;
+                esac
+                ;;
+            esac
+            kill -TERM "$pid" 2>/dev/null || true
+            attempt=0
+            while [ "$attempt" -lt 50 ]; do
+              state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+              case "$state" in ''|Z*) break ;; esac
+              sleep 0.1
+              attempt=$((attempt + 1))
+            done
+            ;;
+        esac
+        ;;
+    esac
   fi
   fm_test_cleanup
 }
