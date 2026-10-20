@@ -5345,31 +5345,44 @@ SH
 }
 
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
-  local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  local case_dir rc leader pid child_file child_pid="" parent_survived=0 child_survived=0
   case_dir=$(make_case grace-spawn-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   child_file="$case_dir/child.pid"
 
-  ( cd "$case_dir/wt" && exec perl -e '
-      my $file = shift;
-      $SIG{TERM} = sub {
-        my $child = fork();
-        die "fork" unless defined $child;
-        if (!$child) { exec "sleep", "300"; }
-        open my $fh, ">", $file or die "open";
-        print {$fh} "$child\n";
-        close $fh;
+  perl -e '
+      my ($dir, $file, $worker_file) = @ARGV;
+      setpgrp(0, 0);
+      my $worker = fork();
+      die "fork" unless defined $worker;
+      if (!$worker) {
+        chdir $dir or die;
+        open my $wf, ">", $worker_file or die;
+        print {$wf} "$$\n";
+        close $wf;
+        $SIG{TERM} = sub {
+          my $child = fork();
+          die "fork" unless defined $child;
+          if (!$child) { exec "sleep", "300"; }
+          open my $fh, ">", $file or die "open";
+          print {$fh} "$child\n";
+          close $fh;
+          exit 0;
+        };
+        sleep 300;
         exit 0;
-      };
+      }
+      $SIG{CHLD} = 'IGNORE';
       sleep 300;
-    ' "$child_file" ) &
-  pid=$!
+    ' "$case_dir/wt" "$child_file" "$case_dir/worker.pid" &
+  leader=$!
   disown
-  sleep 0.2
+  for _ in $(seq 1 50); do [ -s "$case_dir/worker.pid" ] && break; sleep 0.1; done
+  pid=$(cat "$case_dir/worker.pid")
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_FAKE_PANE_PID="$leader" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
   if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
@@ -5380,6 +5393,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
     parent_survived=1
     kill -KILL "$pid" 2>/dev/null || true
   fi
+  kill -KILL "$leader" 2>/dev/null || true
   expect_code 0 "$rc" "grace-spawn-convergence: teardown should converge"
   assert_present "$child_file" "grace-spawn-convergence: TERM handler did not spawn a child"
   [ "$child_survived" -eq 0 ] || fail "grace-spawn-convergence: spawned child survived"
