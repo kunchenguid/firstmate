@@ -686,6 +686,33 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# A parked worker's PR watch (bin/fm-pr-park.sh) outlives its session, so a
+# landed task's teardown must retire the watch and its record with the task.
+test_parked_task_watch_retires_with_teardown() {
+  local case_dir rc
+  case_dir=$(make_case parked-watch)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'fm-pr-park-v1\nhttps://github.com/acme/widget/pull/42\nOPEN abc 0 0 test=pending\n' > "$case_dir/state/task-x1.park"
+  chmod 0600 "$case_dir/state/task-x1.park"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-procevent-when.sh" arm park-task-x1 \
+    --interval 300 --stable 1 --condition "$ROOT/bin/fm-pr-park.sh" changed task-x1 \
+    --action "$ROOT/bin/fm-pr-park.sh" resume-note task-x1 >/dev/null \
+    || fail "parked-watch: could not arm the fixture park watch"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "parked-watch: teardown of a landed parked task should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.park" ] || fail "parked-watch: teardown left the park record"
+  ! FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-procevent.sh" list \
+    | grep -q when-park-task-x1 || fail "parked-watch: teardown left the park watch registered"
+  pass "teardown retires a parked task's PR watch and record"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -5619,6 +5646,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_parked_task_watch_retires_with_teardown
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

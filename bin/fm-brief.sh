@@ -178,6 +178,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Do not declare active implementation or reasoning as a wait.
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
    When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
+   When only a person outside this fleet can clear the wait, such as a maintainer's review or approval of fork CI on your PR, name the PR's full URL in the \`$PAUSED_VERB:\` line and end your turn instead of reattaching a blocking command, even a no-mistakes drive call: any run keeps monitoring without you, and firstmate may stop your session and relaunch you when the PR changes.
    Follow the resolution rule below when the wait clears, then resume the task.
    Use \`blocked:\` when you are stuck and need help.
 EOF
