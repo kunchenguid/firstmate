@@ -2222,7 +2222,7 @@ fm_composer_codex_mouse_noise_only() {  # <screen>
   local held rest
   held=$(fm_composer_extract_selected_content styled=0 "$1") || return 1
   [ -n "$held" ] || return 1
-  rest=$(printf '%s' "$held" | LC_ALL=C tr -d '\033' \
+  rest=$(printf '%s' "$held" | LC_ALL=C tr -d '\033[:space:]' \
     | LC_ALL=C sed -E 's/\[<[0-9]+;[0-9]+;[0-9]+[Mm]//g')
   [ -z "$(printf '%s' "$rest" | tr -d '[:space:]')" ]
 }

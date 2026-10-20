@@ -461,12 +461,14 @@ test_claude_slash_popup_demotion_only_ever_refuses() {
 }
 
 test_codex_mouse_noise_only_adapter() {
-  local noise mixed typed
+  local noise mixed typed wrapped
+  wrapped=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"$'\n\n  gpt-6 high · 100% left'
   noise=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M[<65;192;52M[<64;1;2m"$'\n\n  gpt-6 high · 100% left'
   mixed=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M x [<65;192;52M"$'\n\n  gpt-6 high · 100% left'
   typed=$'banner\n'"${ESC}[1m›${ESC}[0m hello"$'\n\n  gpt-6 high · 100% left'
   assert_screen "codex mouse noise on herdr" pending "$CAPS_STYLED" "$noise"
   fm_composer_codex_mouse_noise_only "$noise" || fail "mouse reports alone should read as noise"
+  fm_composer_codex_mouse_noise_only "$wrapped" || fail "a report cut by a row wrap should read as noise"
   fm_composer_codex_mouse_noise_only "$mixed" && fail "one extra character must keep the pending verdict"
   fm_composer_codex_mouse_noise_only "$typed" && fail "typed text is not noise"
   fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m"$'\n' && fail "an empty composer is not noise"

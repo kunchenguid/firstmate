@@ -76,7 +76,7 @@ case "${1:-}" in
     cleared=0
     grep -qx 'C-c' "$FM_SEND_LOG.keys" 2>/dev/null && cleared=1
     glyph=$(printf '\033[1m›\033[0m')
-    noise="$glyph [<65;192;52M[<65;192;52M[<65;192;52M[<65;192;52M"
+    noise="$glyph [<65;192;52M[<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"
     footer='  gpt-6 high · 100% left · ~/proj'
     case "${FM_FAKE_TMUX_COMPOSER:-}" in
       codex-noise | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-busy)
