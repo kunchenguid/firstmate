@@ -1107,7 +1107,7 @@ The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a f
 The named adapter is `fm_composer_codex_mouse_noise_only` in `bin/fm-composer-lib.sh`, used by `fm_task_inbox_ring` for a `codex` target only.
 It is pinned to the state recorded in issue #7296: codex-cli 0.162.1 under herdr 0.9.4 on macOS arm64, where an idle Codex composer held repeated SGR mouse wheel reports such as `[<65;192;52M`.
 In that state one `C-c` cleared the composer and the next doorbell reached the worker; `Escape` did not clear it.
-That observation comes from the issue report; it was not reproduced live for this change, and no Codex session was started.
+The clear was reproduced live on a real Codex pane in Herdr (codex-cli 0.163.0, herdr 0.9.5, macOS arm64), and all 3 scenarios passed: noise alone gets one `C-c` then the doorbell, mixed text or a busy agent gets no `C-c`, and a wrapped report is detected.
 The portable regressions in `tests/fm-composer-lib.test.sh` and `tests/fm-send-inbox.test.sh` use captured composer shapes: noise alone, including a report wrapped across composer rows, is cleared once and then rung, noise mixed with any other character is never cleared, noise that returns or an unreadable composer after the clear keeps the doorbell skipped with no second `C-c`, and a worker that turns busy before the key is not interrupted.
 A live check on a real Codex pane is still owed after any Codex or Herdr upgrade past the pinned versions; until it runs, the pattern is fixture-verified only.
 
