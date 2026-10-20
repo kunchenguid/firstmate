@@ -433,11 +433,23 @@ spawn_worker() {
   (cd "$LAB" && lab_run FM_HOME="$LAB" "$LAB/bin/fm-brief.sh" "$WORKER_ID" notes --mode local-only) >/dev/null || return 1
   TASK_TEXT="Lab gated worker for a live supervision lab. Add count_notes(), which returns how many notes are stored, to notes/__init__.py with a unit test, but only after the gate file $gate exists and you receive a message to resume." \
   SPEC_TEXT="Right after setup, append one paused status line naming the gate file $gate and end your turn. Do not poll or sleep in a foreground command. When a later message resumes you, check that $gate exists before implementing count_notes() in notes/__init__.py and a test in tests/test_notes.py; if it is absent, remain paused and end your turn again. Once the gate exists, run python3 -m unittest discover -s tests, commit, and report done. Nothing else is in scope." \
+  ACCEPTANCE_TEXT="count_notes() in notes/__init__.py returns the number of stored notes, and a unit test in tests/test_notes.py covers it." \
+  VERIFICATION_TEXT="python3 -m unittest discover -s tests" \
+  ARTIFACT_TEXT="A commit on the task branch adding notes/__init__.py and tests/test_notes.py." \
+  OUT_OF_SCOPE_TEXT="Nothing beyond the notes library is in scope." \
     python3 - "$brief" <<'PY' || return 1
 import os, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-text = text.replace("{TASK}", os.environ["TASK_TEXT"], 1).replace("{FIRSTMATE_SPEC}", os.environ["SPEC_TEXT"], 1)
+for placeholder, name in (
+    ("{TASK}", "TASK_TEXT"),
+    ("{FIRSTMATE_SPEC}", "SPEC_TEXT"),
+    ("{ACCEPTANCE_CRITERIA}", "ACCEPTANCE_TEXT"),
+    ("{VERIFICATION_PATH}", "VERIFICATION_TEXT"),
+    ("{REQUIRED_ARTIFACT}", "ARTIFACT_TEXT"),
+    ("{OUT_OF_SCOPE}", "OUT_OF_SCOPE_TEXT"),
+):
+    text = text.replace(placeholder, os.environ[name], 1)
 open(path, "w", encoding="utf-8").write(text)
 PY
   (cd "$LAB" && lab_run FM_HOME="$LAB" "$LAB/bin/fm-tasks-axi.sh" add "$WORKER_ID" "lab gated worker" --kind ship --repo notes) >/dev/null || return 1
