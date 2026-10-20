@@ -65,12 +65,31 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    else
+      printf '%s\n' "$*" >> "$FM_SEND_LOG.keys"
     fi
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    cleared=0
+    grep -qx 'C-c' "$FM_SEND_LOG.keys" 2>/dev/null && cleared=1
+    glyph=$(printf '\033[1m›\033[0m')
+    noise="$glyph [<65;192;52M[<65;192;52M[<65;192;52M[<65;192;52M"
+    footer='  gpt-6 high · 100% left · ~/proj'
+    case "${FM_FAKE_TMUX_COMPOSER:-}" in
+      codex-noise | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-busy)
+        row=$noise
+        case "$FM_FAKE_TMUX_COMPOSER" in
+          codex-noise) [ "$cleared" = 1 ] && row="$glyph" ;;
+          codex-noise-unreadable) [ "$cleared" = 1 ] && { printf 'banner\n'; exit 0; } ;;
+          codex-noise-text) row="$glyph [<65;192;52M please keep this draft" ;;
+        esac
+        [ "$FM_FAKE_TMUX_COMPOSER" = codex-noise-busy ] && footer='  Working (3s • esc to interrupt)'
+        printf 'banner\n%s\n\n%s\n' "$row" "$footer"
+        exit 0 ;;
+    esac
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     else
@@ -109,6 +128,7 @@ run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   done
   shift
   : >"$dir/send.log"
+  : >"$dir/send.log.keys"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
@@ -227,6 +247,72 @@ test_pending_composer_skips_ring_advisorily() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the skip notice should point at the re-ring"
   pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
+}
+
+codex_noise_case() { # <name> <composer-mode> -> runs fm-send, leaves send.log/send.log.keys
+  local dir err
+  dir=$(setup_case "$1" codex)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER="$2" -- t1 "wake up"
+  expect_code 0 $? "a codex noise steer should exit 0"
+  printf '%s\n' "$dir"
+}
+
+count_lines() { # <file> <fixed-pattern>
+  grep -cxF "$2" "$1" || true
+}
+
+test_codex_mouse_noise_is_cleared_once_then_rung() {
+  local dir
+  dir=$(codex_noise_case codexnoise codex-noise)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] ||
+    fail "mouse-only noise should get exactly one C-c:"$'\n'"$(cat "$dir/send.log.keys")"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
+    "the doorbell should ring once the composer reads empty"
+  pass "fm-send inbox: codex mouse-report noise is cleared once, then the doorbell rings"
+}
+
+test_codex_mouse_noise_mixed_with_text_is_never_cleared() {
+  local dir
+  dir=$(codex_noise_case codexmixed codex-noise-text)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] ||
+    fail "a composer with operator text must never be cleared"
+  [ ! -s "$dir/send.log" ] || fail "nothing may be typed onto operator text"
+  pass "fm-send inbox: mouse reports mixed with real text are left alone and the ring is skipped"
+}
+
+test_codex_mouse_noise_that_returns_is_not_typed_onto() {
+  local dir
+  dir=$(codex_noise_case codexreturns codex-noise-returns)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] ||
+    fail "noise that returns must not earn a second C-c:"$'\n'"$(cat "$dir/send.log.keys")"
+  [ ! -s "$dir/send.log" ] || fail "the doorbell was typed onto returning noise"
+  pass "fm-send inbox: noise that returns after the clear keeps the doorbell skipped, with no second C-c"
+}
+
+test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto() {
+  local dir
+  dir=$(codex_noise_case codexunreadable codex-noise-unreadable)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] || fail "expected exactly one C-c"
+  [ ! -s "$dir/send.log" ] || fail "the doorbell was typed although the clear was never proven"
+  pass "fm-send inbox: a composer that cannot be read back as empty after the clear is not typed onto"
+}
+
+test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted() {
+  local dir
+  dir=$(codex_noise_case codexbusy codex-noise-busy)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] || fail "C-c would interrupt a working codex turn"
+  pass "fm-send inbox: a busy codex pane is never sent C-c"
+}
+
+test_other_harness_mouse_noise_keeps_current_behavior() {
+  local dir err
+  dir=$(setup_case claudenoise claude)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=codex-noise -- t1 "wake up"
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] || fail "only a verified harness may be cleared"
+  [ ! -s "$dir/send.log" ] || fail "the ring should stay skipped for an unverified harness"
+  pass "fm-send inbox: harnesses without a verified clear key keep the skip"
 }
 
 test_failed_ring_is_still_sent() {
@@ -509,6 +595,12 @@ test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
+test_codex_mouse_noise_is_cleared_once_then_rung
+test_codex_mouse_noise_mixed_with_text_is_never_cleared
+test_codex_mouse_noise_that_returns_is_not_typed_onto
+test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto
+test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted
+test_other_harness_mouse_noise_keeps_current_behavior
 test_failed_ring_is_still_sent
 test_fire_and_forget_unlanded_ring_owes_one_retry
 test_fire_and_forget_retry_stays_off_without_the_flag
