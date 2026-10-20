@@ -932,6 +932,32 @@ test_same_text_without_checksums_keeps_distinct_resolution_blocks() {
   pass "identical checksum-free decisions remain distinct"
 }
 
+test_same_task_archived_twice_keeps_checksumless_blocks_distinct() {
+  local home html
+  home=$(decision_home)
+  write_note_archive "$home" '# Notes
+
+## Archived 2026-10-20
+- [x] repeated-task - Repeated task snapshot (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Resolution mode: answered
+
+  Captain decision:
+  Same archived answer.
+
+- [x] repeated-task - Repeated task snapshot (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Resolution mode: answered
+
+  Captain decision:
+  Same archived answer.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" repeated-task)
+  assert_equals 2 "$(printf '%s' "$html" | grep -o 'Same archived answer\.' | wc -l | tr -d ' ')" \
+    "same-id records in one source must not collide on block position"
+  pass "repeated archive records keep checksumless blocks distinct"
+}
+
 test_a_decision_reached_through_two_sources_appears_once() {
   local home html
   home=$(decision_home)
@@ -1124,6 +1150,7 @@ test_report_without_a_decision_carries_no_decision_section
 test_search_finds_a_phrase_only_the_decision_carries
 test_every_decision_of_one_task_appears_newest_first
 test_same_text_without_checksums_keeps_distinct_resolution_blocks
+test_same_task_archived_twice_keeps_checksumless_blocks_distinct
 test_a_decision_reached_through_two_sources_appears_once
 test_home_without_archive_files_still_builds
 test_missing_tasks_toml_uses_readable_default_sources_without_warning

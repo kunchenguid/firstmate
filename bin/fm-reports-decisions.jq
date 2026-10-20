@@ -80,9 +80,12 @@ def md_tasks:
         (if .cur == null then . else .tasks += [.cur] | .cur = null end)
       end)
   | (if .cur == null then .tasks else .tasks + [.cur] end)
-  | map((.head | capture("^(?<id>[^ ]+)(?: - (?<rest>.*))?$") // {id: .head, rest: null}) as $c
+  | to_entries
+  | map(.key as $record | .value
+        | (.head | capture("^(?<id>[^ ]+)(?: - (?<rest>.*))?$") // {id: .head, rest: null}) as $c
         | ($c.rest // "") as $rest
         | {id: $c.id,
+           record: $record,
            title: ($rest | strip_tags | trim),
            closed: (($rest | capture("\\(done (?<v>[0-9][0-9-]*)\\)") // null)
                     | if . == null then null else .v end),
@@ -167,7 +170,7 @@ def group_of:
      body: $body,
      blocks: ($body | blocks_of | to_entries
               | map(.value + {key: (.value.digest //
-                  ("undigested-" + ($task.id | tostring) + "-" + ($task.rank | tostring) + "-" + (.key | tostring)))})),
+                  ("undigested-" + ($task.source | tostring) + "-" + ($task.record | tostring) + "-" + (.key | tostring)))})),
      notes: ($body | reconciled_notes),
      haystack: (((.title // "") + "\n" + ((.links // "") | tostring) + "\n" + $body))};
 
@@ -185,8 +188,10 @@ def target_of($reports):
 
 # --- assemble ----------------------------------------------------------------
 
-[ ($store[] | toon_record | . + {rank: 0}),
-  ($files | to_entries[] | .key as $i | .value.text | md_tasks[] | . + {rank: ($i + 1)}) ]
+[ ($store | to_entries[] | .key as $record | .value | toon_record
+     | . + {rank: 0, source: "store", record: $record}),
+  ($files | to_entries[] | .key as $i | .value as $source
+     | $source.text | md_tasks[] | . + {rank: ($i + 1), source: $source.source}) ]
 | map(group_of)
 | map(select((.id // "") != ""))
 | map(select(((.blocks | length) > 0)
