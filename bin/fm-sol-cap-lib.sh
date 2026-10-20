@@ -172,24 +172,16 @@ fm_sol_cap_config() {  # <config-dir>
     FM_SOL_CAP_CONFIG_ERROR="$file must declare max, the largest concurrent session count the captain allows"
     return 1
   fi
-  case "$max" in
-    '' | *[!0-9]*)
-      FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer, not '$max'"
-      return 1
-      ;;
-  esac
-  if [ "$max" -lt 1 ]; then
-    FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer, not '$max'"
+  if ! fm_sol_cap_small_int "$max"; then
+    FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer of at most nine digits, not '$max'"
     return 1
   fi
   if [ "$seen_ceiling" = 1 ]; then
-    case "$ceiling" in
-      '' | *[!0-9]*)
-        FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max, not '$ceiling'"
-        return 1
-        ;;
-    esac
-    if [ "$ceiling" -lt 1 ] || [ "$ceiling" -gt "$max" ]; then
+    if ! fm_sol_cap_small_int "$ceiling"; then
+      FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max, not '$ceiling'"
+      return 1
+    fi
+    if [ "$ceiling" -gt "$max" ]; then
       FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max, not '$ceiling'"
       return 1
     fi
@@ -238,6 +230,22 @@ fm_sol_cap_config() {  # <config-dir>
 # Is <model> one of the models the loaded declaration covers? The declared
 # exact ids match literally; the declared pattern matches the model id. A
 # model the declaration does not name is not capped.
+# fm_sol_cap_small_int <value>
+# Zero exit when <value> is a positive integer of at most nine digits, so a
+# numeric comparison against it can never overflow: an out-of-range value
+# makes bash's comparison error out, and an erroring comparison reads as
+# "not greater", which would let a declaration through that the captain
+# never wrote.
+fm_sol_cap_small_int() {  # <value>
+  local value=$1
+  case "$value" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#value}" -le 9 ] || return 1
+  [ "$value" -ge 1 ] || return 1
+  return 0
+}
+
 fm_sol_cap_model_capped() {  # <model>
   local model=$1
   [ -n "$model" ] || return 1
@@ -503,7 +511,7 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
 # reservation. A malformed declaration, an unavailable count, or a claim lock
 # refuses loudly rather than launching possibly uncounted.
 fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <state-dir>
-  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start
+  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start existing_model
   FM_SOL_CAP_REFUSAL=
   FM_SOL_CLAIM_CREATED=
   [ -n "$id" ] || return 0
@@ -532,15 +540,33 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
   fi
   existing_pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$registry" 2>/dev/null || true)
   existing_start=$(awk -F'\t' -v id="$id" '$1 == id {print $3; exit}' "$registry" 2>/dev/null || true)
+  existing_model=$(awk -F'\t' -v id="$id" '$1 == id {print $2; exit}' "$registry" 2>/dev/null || true)
   if fm_sol_cap_entry_live "$existing_start" "$existing_pid"; then
     if [ "$reuse" = reuse ]; then
-      FM_SOL_CLAIM_CREATED=$id
+      if fm_sol_cap_model_capped "$existing_model"; then
+        # The slot is already held by a session the declaration still
+        # covers. Reconcile the row's model to the model this dispatch
+        # claims, under the admission lock already held, so the row keeps
+        # naming the model that actually holds the slot.
+        if [ "$existing_model" != "$model" ]; then
+          if ! fm_sol_cap_registry_claim "$registry" "$id" "$model" "$existing_start"; then
+            FM_SOL_CAP_REFUSAL="error: Sol ceiling: the reuse of task $id could not be recorded in $registry; the dispatch was refused rather than launched uncounted"
+            fm_lock_release "$lock" || true
+            return 1
+          fi
+        fi
+        FM_SOL_CLAIM_CREATED=$id
+        fm_lock_release "$lock" || true
+        return 0
+      fi
+      # The row's model is no longer covered by the declaration, so that row
+      # holds no capacity. The claim goes through the count like any other,
+      # and the row's model is reconciled by that claim.
+    else
+      FM_SOL_CAP_REFUSAL="error: Sol ceiling: task $id already holds a live or uncertain session; confirm its worker stopped through teardown before replacing it"
       fm_lock_release "$lock" || true
-      return 0
+      return 1
     fi
-    FM_SOL_CAP_REFUSAL="error: Sol ceiling: task $id already holds a live or uncertain session; confirm its worker stopped through teardown before replacing it"
-    fm_lock_release "$lock" || true
-    return 1
   fi
   if [ "$FM_SOL_COUNT" -ge "$FM_SOL_CAP" ]; then
     FM_SOL_CAP_REFUSAL="error: Sol ceiling reached: $FM_SOL_COUNT concurrent capped session(s) already active and this ceiling is $FM_SOL_CAP (declared in config/sol-cap); the dispatch of task $id ($harness, $model) was refused. Active sessions: $FM_SOL_ACTIVE_LIST. A session frees its slot when its worker's process ends; the dispatch contract refuses at the ceiling instead of queueing"

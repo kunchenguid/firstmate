@@ -347,6 +347,29 @@ test_declared_model_set_is_the_only_capped_set() {
 
 
 
+# A reused row follows the current declaration: a session admitted on a model
+# the captain has since dropped holds no capacity, and the reuse must
+# reconcile the row's model instead of keeping the dropped one.
+test_a_reused_row_follows_the_current_declaration() {
+  local case_dir out
+  case_dir=$(make_case reuse-model task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0 gpt-6-sol
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(
+    . "$ROOT/bin/fm-wake-lib.sh"
+    . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+    . "$ROOT/bin/fm-sol-cap-lib.sh"
+    FM_HOME="$case_dir/home"
+    fm_sol_cap_refuse_and_claim task-c secondmate codex gpt-6.1-sol \
+      "$case_dir/home/config" "$case_dir/home/state" reuse || { echo "$FM_SOL_CAP_REFUSAL"; exit 1; }
+    echo "claimed"
+  ) || fail "the reuse was refused: $out"
+  assert_equals "$out" "claimed" "the reuse did not claim the slot"
+  assert_equals "$(registry_row_field "$case_dir" task-c 2)" "gpt-6.1-sol" \
+    "the reused row kept a model the declaration no longer covers"
+  pass "a reused row follows the current declaration and its model is reconciled"
+}
+
 # The declaration the documentation ships must parse as written: an example
 # a captain copies has to be a valid declaration, not a refusal.
 test_the_documented_declaration_parses() {
@@ -597,6 +620,15 @@ test_malformed_declaration_refuses_loudly() {
   printf 'max=4\nmodels=gpt-6.1-sol\nunknown=1\n' > "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
   assert_contains "$out" "unknown key" "an unknown declaration key was accepted"
+  # An out-of-range count makes a numeric comparison error out, and an
+  # erroring comparison reads as "not greater": the declaration must be
+  # refused before any comparison runs.
+  printf 'max=4\nmodels=gpt-6.1-sol\nceiling=18446744073709551616\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
+  assert_contains "$out" "ceiling unavailable" "an out-of-range ceiling was accepted"
+  printf 'max=18446744073709551616\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
+  assert_contains "$out" "ceiling unavailable" "an out-of-range maximum was accepted"
   printf 'max=4\nmodels=gpt-6.1-sol\nmodel-pattern=*bad(\n' > "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
   assert_contains "$out" "unusable model-pattern" "an unusable declared pattern was accepted"
@@ -969,6 +1001,7 @@ test_no_declaration_leaves_the_guard_inert
 test_declared_model_set_is_the_only_capped_set
 test_the_documented_declaration_parses
 test_a_home_that_drops_its_declaration_owns_no_occupancy
+test_a_reused_row_follows_the_current_declaration
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim
