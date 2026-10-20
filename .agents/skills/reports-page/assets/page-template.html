@@ -343,7 +343,7 @@ function order(rows) {
   else if (by === "old") out.sort((a, b) => a.ts - b.ts);
   else if (by === "az") out.sort((a, b) => a.title.localeCompare(b.title));
   else if (by === "za") out.sort((a, b) => b.title.localeCompare(a.title));
-  else out.sort((a, b) => a.file.localeCompare(b.file));
+  else out.sort((a, b) => (a.file || a.id).localeCompare(b.file || b.id));
   return out;
 }
 

@@ -30,6 +30,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the renderer)"; exit 0; }
 command -v perl >/dev/null 2>&1 || { echo "skip: perl not found (required by the page injection)"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "skip: node not found (required by the page behavior check)"; exit 0; }
 
 PAGE_SH="$ROOT/bin/fm-reports-page.sh"
 
@@ -521,6 +522,75 @@ test_decision_without_a_report_becomes_its_own_entry() {
   pass "a decision that gated no report becomes its own anchored entry"
 }
 
+test_filename_sort_keeps_decisions_without_reports() {
+  local home page
+  home=$(decision_home)
+  write_report "$home" fremder-bericht '# Fremder Bericht'
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] luefterfrage-20261017 - Luefter ueber das OS regeln? (kind: captain) (done 2026-10-17) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 1234123412341234123412341234123412341234123412341234123412341234
+  Resolution mode: answered
+
+  Captain decision:
+  Den Fremdtreiber versuchen.'
+  build "$home" >/dev/null || fail "build failed"
+  page="$home/state/reports.html"
+  node - "$page" <<'NODE' || fail "built page behavior failed"
+const fs = require("fs");
+const vm = require("vm");
+const page = fs.readFileSync(process.argv[2], "utf8");
+const payload = page.match(/<script id="reports-data" type="application\/json">([\s\S]*?)<\/script>/)[1];
+const script = page.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+const listeners = {};
+function element(tagName = "DIV") {
+  return {
+    tagName, children: [], classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener(type, fn) { listeners[this.id + ":" + type] = fn; },
+    append(...items) { this.children.push(...items); }, setAttribute() {},
+    setPointerCapture() {}, releasePointerCapture() {}, focus() {}, select() {},
+    style: { setProperty() {}, removeProperty() {} },
+    set textContent(value) { this._text = value; if (this.id === "list") this.children = []; },
+    get textContent() { return this._text || ""; }
+  };
+}
+const ids = ["reports-data", "q", "sort", "count", "list", "report", "where", "scroll", "grip", "scrim", "gaps", "toggle", "prev", "next"];
+const elements = Object.fromEntries(ids.map(id => {
+  const el = element();
+  el.id = id;
+  return [id, el];
+}));
+elements["reports-data"].textContent = payload;
+elements.sort.tagName = "SELECT";
+elements.sort.value = "new";
+elements.q.tagName = "INPUT";
+elements.q.value = "";
+const document = {
+  body: element(), documentElement: element(), title: "",
+  getElementById(id) { return elements[id]; },
+  createElement(tag) { return element(tag.toUpperCase()); },
+  addEventListener() {}
+};
+const context = {
+  document, location: { hash: "#fremder-bericht", replace() {} },
+  window: { addEventListener() {}, matchMedia() { return { matches: false }; }, innerWidth: 1000 },
+  localStorage: { getItem() { return null; }, setItem() {} },
+  getComputedStyle() { return { getPropertyValue() { return ""; } }; },
+  encodeURIComponent, decodeURIComponent, CSS: { escape: value => value }
+};
+vm.runInNewContext(script, context);
+elements.sort.value = "file";
+listeners["sort:change"]();
+const idsInView = elements.list.children.map(link => link.href);
+if (idsInView.join(",") !== "#fremder-bericht,#luefterfrage-20261017") {
+  throw new Error("Dateiname sort must show both report and fileless decision: " + idsInView.join(","));
+}
+NODE
+  pass "filename sorting keeps a decision without a report"
+}
+
 test_report_without_a_decision_carries_no_decision_section() {
   local home out
   home=$(decision_home)
@@ -737,6 +807,7 @@ test_build_refuses_a_template_without_a_slot
 test_page_fetches_nothing
 test_recorded_decision_reaches_the_report_it_gated
 test_decision_without_a_report_becomes_its_own_entry
+test_filename_sort_keeps_decisions_without_reports
 test_report_without_a_decision_carries_no_decision_section
 test_search_finds_a_phrase_only_the_decision_carries
 test_every_decision_of_one_task_appears_newest_first
