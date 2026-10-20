@@ -7,29 +7,45 @@
 # it carries no network request, loads no external asset, and needs no server,
 # timer, or unit. Rebuilding it is the whole mechanism.
 #
+# A report describes work that some captain decision allowed, and that decision
+# is recorded in the task it gated rather than in the report. So the page also
+# carries this home's recorded decisions, read by bin/fm-reports-decisions.sh:
+# beside the report of the same task, and - where a decision gated no report of
+# this home at all - as its own entry in the same list, with its own anchor.
+# Without that, a decision the captain gave weeks ago stays unfindable, and the
+# work a report describes cannot be traced back to the word that permitted it.
+#
 # Usage:
 #   fm-reports-page.sh build
 #   fm-reports-page.sh path
 #   fm-reports-page.sh link <id>
 #
 # build      Read every data/<id>/report.md of this home, render each to HTML
-#            through bin/fm-reports-render.jq (that file owns the rendered
-#            markdown subset), embed the result in the shipped template
+#            and this home's recorded decisions through bin/fm-reports-render.jq
+#            (that file owns the rendered markdown subset and how a decision
+#            joins a report), embed the result in the shipped template
 #            (.agents/skills/reports-page/assets/page-template.html), and
 #            publish it atomically at the stable page path. Output is either
 #               page: <path>
 #               reports: <n>
+#               decisions: <n>
+#               entries: <n>
 #            or, when the rebuilt page would be byte-identical apart from its
-#            own build stamp,
-#               unchanged: <path>
-#               reports: <n>
-#            A home with no report publishes the page's empty state rather than
-#            refusing, so the path a skill hands out always resolves.
+#            own build stamp, the same with `unchanged: <path>` as its first
+#            line. Every source of decisions that was missing, skipped, or
+#            unreadable is named on its own `source:` line, and the page names
+#            it too, so a gap stays visible instead of passing for a complete
+#            record. A home with no report and no decision publishes the page's
+#            empty state rather than refusing, so the path a skill hands out
+#            always resolves.
 # path       Print the stable page path for this home.
-# link <id>  Print the page link for one report, as file://<path>#<id>, after
-#            proving that report exists. A link is never assembled by hand: a
-#            report whose directory is gone would otherwise be handed out as a
-#            dead anchor that looks live.
+# link <id>  Print the page link for one entry, as file://<path>#<id>, after
+#            proving the PUBLISHED page actually carries that anchor. A link is
+#            never assembled by hand: an anchor to a report that was deleted, or
+#            to one written since the last build, looks live and silently shows
+#            a different entry. Proving it against the published payload is also
+#            what makes a decision's own anchor available at all, since a
+#            decision that gated no report has no report path to check.
 #
 # WHY ONLY ON CHANGE. A rebuild that rewrote the page every run would move its
 # modification time on every run, so neither a reader nor a later check could
@@ -49,12 +65,14 @@
 # exactly one file, the page, and its own staging file beside it; its rows and
 # payload are staged under TMPDIR and removed on every path out.
 #
-# FM_REPORTS_PAGE_TEMPLATE overrides the shipped template path (tests only).
+# FM_REPORTS_PAGE_TEMPLATE overrides the shipped template path, and
+# FM_REPORTS_PAGE_DECISIONS=off builds with no decisions at all (tests only).
 set -u
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 TEMPLATE="${FM_REPORTS_PAGE_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/reports-page/assets/page-template.html}"
 RENDERER="$SCRIPT_DIR/fm-reports-render.jq"
+COLLECTOR="$SCRIPT_DIR/fm-reports-decisions.sh"
 DATA_SLOT='__FM_REPORTS_DATA__'
 BUILT_LINE='const BUILT = "__FM_REPORTS_BUILT__";'
 BUILT_LINE_RE='^const BUILT = ".*";$'
@@ -78,8 +96,6 @@ require_home() {
 }
 
 page_path() { printf '%s/state/reports.html\n' "$FM_HOME"; }
-
-report_path() { printf '%s/data/%s/report.md\n' "$FM_HOME" "$1"; }
 
 # Local modification time in seconds, portable across GNU and BSD stat.
 mtime_of() {  # <path>
@@ -109,37 +125,66 @@ mask_built_line() {  # reads a page on stdin
   '
 }
 
+# The build's own counts, plus one line per source of decisions that did not
+# read cleanly. Defined beside the build because it reads its locals.
+report_counts() {
+  printf 'reports: %s\n' "$count"
+  printf 'decisions: %s\n' "$dcount"
+  printf 'entries: %s\n' "$((count + ocount))"
+  [ -z "$gaps" ] || printf '%s\n' "$gaps"
+}
+
 command_build() {
-  local page tmp dir id ts payload rows count built
+  local page tmp dir id ts payload rows decisions count dcount ocount built gaps
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   require_home
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$RENDERER" ] && [ ! -L "$RENDERER" ] || fail "renderer is missing: $RENDERER"
+  [ -x "$COLLECTOR" ] && [ ! -L "$COLLECTOR" ] || fail "decision reader is missing: $COLLECTOR"
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "page template is missing: $TEMPLATE"
   [ "$(grep -cxF "$DATA_SLOT" "$TEMPLATE")" -eq 1 ] \
     || fail "page template does not carry exactly one data slot: $TEMPLATE"
   [ "$(grep -cxF "$BUILT_LINE" "$TEMPLATE")" -eq 1 ] \
     || fail "page template does not carry exactly one build stamp: $TEMPLATE"
 
+  # The decisions are collected before anything is rendered, because a source
+  # that could not be read has to reach the page as a named gap rather than as
+  # silence. A collector that fails outright is itself such a gap: the page is
+  # still built, and says so.
+  decisions=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-reports-decisions.XXXXXX") \
+    || fail "cannot stage the decisions"
+  if [ "${FM_REPORTS_PAGE_DECISIONS:-}" = off ]; then
+    printf '{"sources":[],"tasks":[]}\n' > "$decisions" \
+      || { rm -f -- "$decisions"; fail "cannot stage the decisions"; }
+  elif ! "$COLLECTOR" collect > "$decisions" 2>/dev/null; then
+    jq -cn '{sources: [{name: "Entscheidungen", state: "unreadable",
+                        note: "die Entscheidungen dieses Zuhauses liessen sich nicht lesen"}],
+             tasks: []}' > "$decisions" \
+      || { rm -f -- "$decisions"; fail "cannot record the unread decisions"; }
+  fi
+
   rows=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-reports-rows.XXXXXX") \
-    || fail "cannot stage the report rows"
+    || { rm -f -- "$decisions"; fail "cannot stage the report rows"; }
   count=0
   for dir in "$FM_HOME"/data/*/; do
     [ -d "$dir" ] || continue
     id=${dir%/}
     id=${id##*/}
     [ -f "$dir/report.md" ] && [ ! -L "$dir/report.md" ] || continue
-    ts=$(mtime_of "$dir/report.md") || { rm -f -- "$rows"; fail "cannot read the time of $dir/report.md"; }
-    [ -n "$ts" ] || { rm -f -- "$rows"; fail "cannot read the time of $dir/report.md"; }
+    ts=$(mtime_of "$dir/report.md") \
+      || { rm -f -- "$rows" "$decisions"; fail "cannot read the time of $dir/report.md"; }
+    [ -n "$ts" ] \
+      || { rm -f -- "$rows" "$decisions"; fail "cannot read the time of $dir/report.md"; }
     if ! report_json "$id" "$dir/report.md" "$ts" >> "$rows"; then
-      rm -f -- "$rows"
+      rm -f -- "$rows" "$decisions"
       fail "cannot read report $id"
     fi
     count=$((count + 1))
   done
 
-  # One render pass over all reports: the renderer is a map over the array and
-  # sorts it newest first.
+  # One render pass over all reports and all decisions: the renderer takes the
+  # report rows as its input and the collected decisions as $dec, joins each
+  # decision to the report it belongs to, and sorts the whole list newest first.
   #
   # The payload stays a FILE and is never held in a shell variable. `<` never
   # appears in JSON syntax outside strings, and U+2028/U+2029 are literal line
@@ -150,27 +195,40 @@ command_build() {
   # stream. The escapes run on raw bytes so neither line separator has to sit
   # in this source as an invisible character.
   payload=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-reports-payload.XXXXXX") \
-    || { rm -f -- "$rows"; fail "cannot stage the report payload"; }
+    || { rm -f -- "$rows" "$decisions"; fail "cannot stage the report payload"; }
   # pipefail is set for this one pipeline only: without it a failing renderer
   # would be hidden behind a perl that happily copied nothing.
   if ! ( set -o pipefail
-         jq -cs -f "$RENDERER" "$rows" \
+         jq -cs --slurpfile dec "$decisions" -f "$RENDERER" "$rows" \
            | perl -pe 's/</\\u003c/g;
                        s/\xe2\x80\xa8/\\u2028/g;
                        s/\xe2\x80\xa9/\\u2029/g;' ) > "$payload"
   then
-    rm -f -- "$rows" "$payload"
+    rm -f -- "$rows" "$payload" "$decisions"
     fail "cannot render the reports"
   fi
   rm -f -- "$rows"
-  [ -s "$payload" ] || { rm -f -- "$payload"; fail "the renderer produced nothing"; }
+  [ -s "$payload" ] || { rm -f -- "$payload" "$decisions"; fail "the renderer produced nothing"; }
+
+  # What the counts mean: a decision is one recorded item, and an entry is one
+  # row of the page's list - every report, plus every decision group that gated
+  # no report of this home.
+  dcount=$(jq '[.tasks[].items | length] | add // 0' "$decisions") \
+    || { rm -f -- "$payload" "$decisions"; fail "cannot count the decisions"; }
+  ocount=$(jq '[.tasks[] | select(.target == null)] | length' "$decisions") \
+    || { rm -f -- "$payload" "$decisions"; fail "cannot count the decisions"; }
+  # Named now, while the collected decisions are still staged, and printed with
+  # the counts below.
+  gaps=$(jq -r '.sources[] | select(.state != "ok")
+                | "source: \(.name) \(.state) - \(.note)"' "$decisions") \
+    || { rm -f -- "$payload" "$decisions"; fail "cannot read the decision sources"; }
 
   page=$(page_path)
   (umask 077; mkdir -p "${page%/*}") \
-    || { rm -f -- "$payload"; fail "cannot create ${page%/*}"; }
+    || { rm -f -- "$payload" "$decisions"; fail "cannot create ${page%/*}"; }
   built=$(date '+%d.%m.%Y %H:%M')
   tmp=$(umask 077; mktemp "${page%/*}/.reports.XXXXXX") \
-    || { rm -f -- "$payload"; fail "cannot stage the page"; }
+    || { rm -f -- "$payload" "$decisions"; fail "cannot stage the page"; }
   # The data slot line is replaced by the payload file read whole, so no report
   # text is ever itself scanned for a slot and no report can become a
   # substitution target of the pass that injects it.
@@ -183,10 +241,10 @@ command_build() {
           close($fh);
         }
       ' "$TEMPLATE" > "$tmp"; then
-    rm -f -- "$tmp" "$payload"
+    rm -f -- "$tmp" "$payload" "$decisions"
     fail "cannot inject the reports data"
   fi
-  rm -f -- "$payload"
+  rm -f -- "$payload" "$decisions"
   if grep -qxF "$DATA_SLOT" "$tmp" || grep -qxF "$BUILT_LINE" "$tmp"; then
     rm -f -- "$tmp"
     fail "a page slot survived injection"
@@ -196,16 +254,16 @@ command_build() {
   # rather than captured: a shell variable would hold every report again.
   if ! sed -n '/<script id="reports-data" type="application\/json">/,/<\/script>/p' "$tmp" \
        | sed '1d;$d' \
-       | jq -e --argjson n "$count" 'length == $n' >/dev/null 2>&1; then
+       | jq -e --argjson n "$((count + ocount))" '.entries | length == $n' >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    fail "the built page does not carry a readable payload of $count reports"
+    fail "the built page does not carry a readable payload of $((count + ocount)) entries"
   fi
 
   if [ -f "$page" ] && [ ! -L "$page" ] \
      && cmp -s <(mask_built_line < "$tmp") <(mask_built_line < "$page"); then
     rm -f -- "$tmp"
     printf 'unchanged: %s\n' "$page"
-    printf 'reports: %s\n' "$count"
+    report_counts
     return 0
   fi
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$page"; }; then
@@ -213,7 +271,7 @@ command_build() {
     fail "cannot publish the page"
   fi
   printf 'page: %s\n' "$page"
-  printf 'reports: %s\n' "$count"
+  report_counts
 }
 
 command_path() {
@@ -226,9 +284,16 @@ command_link() {
   local id=${1-} page
   [ "$#" -eq 1 ] && [ -n "$id" ] || { usage >&2; exit 2; }
   require_home
-  [ -f "$(report_path "$id")" ] || fail "no such report: $id"
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
   page=$(page_path)
-  [ -f "$page" ] || fail "the page is not built yet: $page"
+  [ -f "$page" ] && [ ! -L "$page" ] || fail "the page is not built yet: $page"
+  # The published payload is read the way the page's own script reads it, so the
+  # proof is that THIS page resolves THIS anchor.
+  if ! sed -n '/<script id="reports-data" type="application\/json">/,/<\/script>/p' "$page" \
+       | sed '1d;$d' \
+       | jq -e --arg id "$id" 'any(.entries[]; .id == $id)' >/dev/null 2>&1; then
+    fail "the page carries no entry for $id; rebuild it if that is new"
+  fi
   printf 'file://%s#%s\n' "$page" "$id"
 }
 

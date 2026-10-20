@@ -1,8 +1,24 @@
 # Markdown -> HTML for fm-reports-page.sh; that script's header owns the
 # generator contract and this file owns the rendered subset.
 #
-# Input:  [{id, file, updated, ts, md}]   (md is the raw report text)
-# Output: [{id, title, file, updated, ts, html}]  newest first
+# Input:  [{id, file, updated, ts, md}]            the report rows, md raw
+#         $dec [{sources, tasks}]                  fm-reports-decisions.jq's output
+# Output: {sources: [...],
+#          entries: [{id, kind, title, file, updated, ts, html}]}  newest first
+#
+# ONE LIST, TWO KINDS OF ENTRY. A decision group whose `target` names a report
+# of this home is rendered into that report's own entry, under the report. One
+# that gated no report here becomes an entry of its own, kind "decision", so it
+# inherits the list, the search, the sorting, and a stable anchor with no
+# special case anywhere. That entry opens with its task's title as its heading,
+# because it has no report to supply one and an open pane without a title reads
+# as if the page lost it.
+#
+# A decision's own markup is built here too, from the same escaped-first
+# renderer, so a captain's words can no more become markup than a report's can.
+# Headings inside a decision are rendered with an id prefix: a report's own
+# heading ids stay exactly what they were, and no decision can take an id a
+# report's in-page link already points at.
 #
 # NOTHING FROM A REPORT EVER BECOMES MARKUP BY ACCIDENT. Every line is HTML
 # escaped first, and only this file's own constructions add tags afterwards, so
@@ -232,7 +248,7 @@ def heading_key($raw):
   ($raw | clean_inline | slugify) as $base
   | if $base == "" then "abschnitt" else $base end;
 
-def md_to_html:
+def md_to_html($idprefix):
   (gsub("\r"; "") | gsub(""; "") | split("\n")) as $lines
   | reduce $lines[] as $line
       ({out: [], para: [], quote: [], item: null, stack: [], table: null, cand: null,
@@ -266,7 +282,7 @@ def md_to_html:
           | ((.seen[$key]) // 0) as $n
           | (if $n == 0 then $key else $key + "-" + ($n | tostring) end) as $id
           | .seen[$key] = ($n + 1)
-          | .out += ["<h" + ($lvl | tostring) + " id=\"" + ($id | htmlesc) + "\">"
+          | .out += ["<h" + ($lvl | tostring) + " id=\"" + (($idprefix + $id) | htmlesc) + "\">"
               + ($raw | inline) + "</h" + ($lvl | tostring) + ">"]
 
         # thematic break
@@ -330,7 +346,72 @@ def title_of($md; $id):
    | clean_inline) as $t
   | if $t == "" then $id else $t end;
 
-map({id, file, updated, ts,
-     title: title_of(.md; .id),
-     html: (.md | md_to_html)})
-| sort_by(-.ts)
+# --- decisions ---------------------------------------------------------------
+# One entry's decision groups -> the section that follows the report. A group
+# names its own task, so a report that several tasks gated shows which decision
+# came from which task; a decision-only entry leaves that heading out because
+# the entry already IS that task.
+
+def dec_meta($state; $mode; $digest):
+  "<p class=\"dec-meta\"><span class=\"dec-state\">" + ($state | htmlesc) + "</span>"
+  + (if ($mode // "") == "" then "" else " &middot; Abschluss " + ($mode | htmlesc) end)
+  + (if ($digest // "") == "" then ""
+     else " &middot; Pruefsumme <code>" + ($digest[0:12] | htmlesc) + "</code>" end)
+  + "</p>";
+
+def dec_group($gi; $self):
+  . as $g
+  | "<section class=\"dec-group\">"
+    + (if $g.id == $self then ""
+       else "<h3 id=\"entscheidung-" + ($g.id | htmlesc) + "\">" + ($g.title | htmlesc) + "</h3>"
+       end)
+    + "<p class=\"dec-where\">Vorgang <code>" + ($g.id | htmlesc) + "</code>"
+    + (if ($g.when // "") == "" then "" else " &middot; " + ($g.when | htmlesc) end)
+    + "</p>"
+    + (if ($g.question // "") == "" then ""
+       else "<div class=\"dec-q\"><p class=\"dec-label\">Frage an den Captain</p>"
+            + ($g.question | md_to_html("f" + ($gi | tostring) + "-")) + "</div>"
+       end)
+    + ([$g.items | to_entries[]
+        | .key as $ii | .value as $it
+        | "<div class=\"dec-item dec-" + ($it.state | htmlesc) + "\">"
+          + dec_meta($it.state; $it.mode; $it.digest)
+          + (if ($it.words // "") == "" then ""
+             else ($it.words | md_to_html("e" + ($gi | tostring) + "x" + ($ii | tostring) + "-"))
+             end)
+          + "</div>"] | join(""))
+    + "</section>";
+
+def decisions_html($self):
+  if (. // [] | length) == 0 then ""
+  else "<section class=\"dec\"><h2 id=\"entscheidungsprotokoll\">Entscheidungen</h2>"
+       + ([to_entries[] | .key as $gi | .value | dec_group($gi; $self)] | join(""))
+       + "</section>"
+  end;
+
+def entry:
+  . as $e
+  | {id: $e.id,
+     kind: $e.kind,
+     file: $e.file,
+     updated: $e.updated,
+     ts: $e.ts,
+     title: (if $e.kind == "decision"
+             then ((($e.groups // [])[0].title // $e.id))
+             else title_of($e.md; $e.id) end),
+     html: ((if ($e.md // "") == ""
+             then "<h1>" + ((($e.groups // [])[0].title // $e.id) | htmlesc) + "</h1>"
+             else ($e.md | md_to_html("")) end)
+            + (($e.groups // []) | decisions_html($e.id)))};
+
+(($dec[0]) // {sources: [], tasks: []}) as $d
+| . as $reports
+| {sources: ($d.sources // []),
+   entries:
+     (([$reports[] | . as $r
+        | $r + {kind: "report", groups: [$d.tasks[] | select(.target == $r.id)]}]
+       + [$d.tasks[] | select(.target == null) | . as $g
+          | {id: $g.id, kind: "decision", file: null, updated: ($g.when // ""),
+             ts: ($g.ts // 0), md: "", groups: [$g]}])
+      | map(entry)
+      | sort_by(-.ts))}

@@ -13,6 +13,14 @@
 #     a regression does not fail fast, it consumes the host.
 #   - A report's text must never be substituted into the page as markup or as a
 #     page slot, and the payload must stay parsable JSON.
+#
+# It also covers the page's second kind of content: this home's recorded captain
+# decisions. The cases below fix what the feature actually promises - a decision
+# shown with the report of the task it gated, a decision that gated no report
+# shown as its own searchable, anchored entry, every decision of one task shown
+# newest first, one decision reached through two sources shown once, and a home
+# with no archive files or another backlog store still getting its page with the
+# gap named rather than hidden.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,6 +40,23 @@ new_home() {
   home=$(fm_test_tmproot fm-reports-page) || fail "cannot create a fixture home"
   mkdir -p "$home/data" "$home/state" || fail "cannot create the fixture home layout"
   printf '%s\n' "$home"
+}
+
+# A fixture home that also carries the tracked backlog configuration, so the
+# decision sources resolve the way they do in a real home.
+decision_home() {
+  local home
+  home=$(new_home)
+  fm_test_tasks_toml "$home/.tasks.toml" || fail "cannot write the fixture .tasks.toml"
+  printf '%s\n' "$home"
+}
+
+write_backlog() {  # <home> <markdown>
+  printf '%s\n' "$2" > "$1/data/backlog.md" || fail "cannot write data/backlog.md"
+}
+
+write_note_archive() {  # <home> <markdown>
+  printf '%s\n' "$2" > "$1/data/note-archive.md" || fail "cannot write data/note-archive.md"
 }
 
 write_report() {  # <home> <id> <markdown>
@@ -57,9 +82,26 @@ payload_of() {  # <page>
   sed -n '/<script id="reports-data" type="application\/json">/,/<\/script>/p' "$1" | sed '1d;$d'
 }
 
-# One rendered report's html, by id.
+# The payload's entries, which is what the page lists.
+entries_of() {  # <page>
+  payload_of "$1" | jq '.entries'
+}
+
+# One rendered entry's html, by id.
 html_of() {  # <page> <id>
-  payload_of "$1" | jq -r --arg id "$2" '.[] | select(.id == $id) | .html'
+  payload_of "$1" | jq -r --arg id "$2" '.entries[] | select(.id == $id) | .html'
+}
+
+# One entry's searchable text, derived exactly as the page's own script derives
+# it, so a search case is proved against the built page and not against a
+# report's source text.
+searchable_of() {  # <page> <id>
+  html_of "$1" "$2" | jq -Rrs '
+    gsub("<[^>]*>"; " ")
+    | gsub("&lt;"; "<") | gsub("&gt;"; ">")
+    | gsub("&quot;"; "\"") | gsub("&#39;"; "'"'"'")
+    | gsub("&amp;"; "&")
+    | ascii_downcase'
 }
 
 test_build_publishes_every_report() {
@@ -76,8 +118,8 @@ Zweite Zeile.'
   assert_contains "$out" 'reports: 2' "build must print the number of reports"
   page="$home/state/reports.html"
   assert_present "$page" "build must publish the page"
-  assert_equals 2 "$(payload_of "$page" | jq 'length')" "the page must carry both reports"
-  ids=$(payload_of "$page" | jq -r '[.[].id] | sort | join(",")')
+  assert_equals 2 "$(entries_of "$page" | jq 'length')" "the page must carry both reports"
+  ids=$(entries_of "$page" | jq -r '[.[].id] | sort | join(",")')
   assert_equals 'alpha,beta' "$ids" "every report id must reach the page as its anchor"
   pass "build publishes every report of the home"
 }
@@ -95,7 +137,7 @@ test_build_sorts_newest_first() {
     || fail "cannot age a fixture report"
   build "$home" >/dev/null || fail "build failed"
   page="$home/state/reports.html"
-  assert_equals 'newer' "$(payload_of "$page" | jq -r '.[0].id')" \
+  assert_equals 'newer' "$(entries_of "$page" | jq -r '.[0].id')" \
     "the newest report must come first"
   pass "the page lists the newest report first"
 }
@@ -137,7 +179,7 @@ test_home_without_a_report_still_publishes_the_page() {
   assert_contains "$out" 'reports: 0' "an empty home reports no reports"
   assert_present "$home/state/reports.html" \
     "the page path a skill hands out must resolve even with no report"
-  assert_equals 0 "$(payload_of "$home/state/reports.html" | jq 'length')" \
+  assert_equals 0 "$(entries_of "$home/state/reports.html" | jq 'length')" \
     "an empty home carries an empty payload"
   pass "a home with no report still publishes the page"
 }
@@ -198,7 +240,7 @@ test_report_text_never_becomes_markup() {
 Ein </script> mitten im Satz.'
   build "$home" >/dev/null || fail "build failed on a report quoting markup"
   page="$home/state/reports.html"
-  assert_equals 1 "$(payload_of "$page" | jq 'length')" \
+  assert_equals 1 "$(entries_of "$page" | jq 'length')" \
     "a report quoting markup must leave the payload parsable"
   html=$(html_of "$page" hostile)
   assert_contains "$html" '&lt;script&gt;' "quoted markup must be shown as text"
@@ -216,7 +258,7 @@ __FM_REPORTS_DATA__
 const BUILT = "__FM_REPORTS_BUILT__";'
   build "$home" >/dev/null || fail "build failed on a report quoting the page slots"
   page="$home/state/reports.html"
-  assert_equals 1 "$(payload_of "$page" | jq 'length')" \
+  assert_equals 1 "$(entries_of "$page" | jq 'length')" \
     "a report quoting the page slots must leave the payload parsable"
   html=$(html_of "$page" slots)
   assert_contains "$html" '__FM_REPORTS_DATA__' "the quoted data slot must survive as text"
@@ -234,17 +276,17 @@ Text.'
   build "$home" >/dev/null || fail "build failed"
   page="$home/state/reports.html"
   assert_equals 'Ein klarer Titel' \
-    "$(payload_of "$page" | jq -r '.[] | select(.id == "titled") | .title')" \
+    "$(entries_of "$page" | jq -r '.[] | select(.id == "titled") | .title')" \
     "the first heading must become the list title"
   assert_equals 'untitled' \
-    "$(payload_of "$page" | jq -r '.[] | select(.id == "untitled") | .title')" \
+    "$(entries_of "$page" | jq -r '.[] | select(.id == "untitled") | .title')" \
     "a report without a heading must fall back to its id"
   write_report "$home" later 'Text before heading.
 
 # A later heading is content, not the list title.'
   build "$home" >/dev/null || fail "rebuild failed"
   assert_equals 'later' \
-    "$(payload_of "$page" | jq -r '.[] | select(.id == "later") | .title')" \
+    "$(entries_of "$page" | jq -r '.[] | select(.id == "later") | .title')" \
     "a report without a first-line heading must fall back to its id"
   pass "the list title comes from the first heading, else the id"
 }
@@ -345,9 +387,20 @@ test_link_proves_the_report_exists() {
   assert_equals "file://$home/state/reports.html#alpha" "$out" \
     "link must print the page link with the report's anchor"
   out=$(FM_HOME="$home" bash "$PAGE_SH" link gone 2>&1) && status=0 || status=$?
-  expect_code 1 "$status" "link must refuse an id that has no report"
-  assert_contains "$out" 'no such report: gone' "link must name the missing report"
-  pass "link proves its report exists before handing out an anchor"
+  expect_code 1 "$status" "link must refuse an id the published page has no entry for"
+  assert_contains "$out" 'the page carries no entry for gone' \
+    "link must name the entry the page does not carry"
+  # A report written since the last build is exactly the case a hand-built
+  # anchor gets wrong, so it is refused too, naming the rebuild.
+  write_report "$home" neu '# Neu'
+  out=$(FM_HOME="$home" bash "$PAGE_SH" link neu 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "link must refuse a report the published page does not carry yet"
+  assert_contains "$out" 'rebuild it if that is new' "link must name the rebuild"
+  build "$home" >/dev/null || fail "rebuild failed"
+  out=$(FM_HOME="$home" bash "$PAGE_SH" link neu) || fail "link failed after the rebuild: $out"
+  assert_equals "file://$home/state/reports.html#neu" "$out" \
+    "link must hand out the anchor once the page carries it"
+  pass "link proves the published page carries the anchor before handing it out"
 }
 
 test_build_refuses_without_a_home() {
@@ -367,7 +420,7 @@ test_shipped_template_build_replaces_both_slots() {
   FM_HOME="$home" FM_REPORTS_PAGE_TEMPLATE="$ROOT/.agents/skills/reports-page/assets/page-template.html" \
     bash "$PAGE_SH" build >/dev/null || fail "build with shipped template failed"
   page="$home/state/reports.html"
-  assert_equals 1 "$(payload_of "$page" | jq 'length')" "the shipped template must carry the built payload"
+  assert_equals 1 "$(entries_of "$page" | jq 'length')" "the shipped template must carry the built payload"
   assert_contains "$(payload_of "$page")" 'Shipped payload' "the payload slot must be replaced"
   assert_not_contains "$(cat "$page")" '__FM_REPORTS_' "no template slot may survive the build"
   assert_not_contains "$(cat "$page")" 'const BUILT = "__FM_REPORTS_BUILT__"' "the stamp slot must be replaced"
@@ -405,6 +458,262 @@ test_page_fetches_nothing() {
   pass "the published page fetches nothing"
 }
 
+# --- recorded decisions ------------------------------------------------------
+
+test_recorded_decision_reaches_the_report_it_gated() {
+  local home html
+  home=$(decision_home)
+  write_report "$home" plattenpruefung-20261020 '# Plattenpruefung
+
+Gemessen und belegt.'
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] plattenpruefung-20261020 - Platte tauschen oder behalten? (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: answered
+
+  Captain decision:
+  Behalten. Der Sektor liest wieder und SMART meldet null Ausfaelle.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" plattenpruefung-20261020)
+  assert_contains "$html" 'Gemessen und belegt.' "the report itself must still render"
+  assert_contains "$html" 'id="entscheidungsprotokoll"' \
+    "a report whose task recorded a decision must carry the decision section"
+  assert_contains "$html" 'Behalten. Der Sektor liest wieder' \
+    "the captain's own words must reach the report's entry"
+  assert_contains "$html" 'aaaa1111bbbb' \
+    "the decision's checksum must be shown, so the record can be found again"
+  pass "a recorded decision reaches the report of the task it gated"
+}
+
+test_decision_without_a_report_becomes_its_own_entry() {
+  local home out entries link
+  home=$(decision_home)
+  write_report "$home" fremder-bericht '# Fremder Bericht'
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] luefterfrage-20261017 - Luefter ueber das OS regeln? (kind: captain) (done 2026-10-17) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 1234123412341234123412341234123412341234123412341234123412341234
+  Resolution mode: answered
+
+  Captain decision:
+  Den Fremdtreiber versuchen.'
+  out=$(build "$home") || fail "build failed: $out"
+  assert_contains "$out" 'entries: 2' "a decision that gated no report must add its own entry"
+  entries=$(entries_of "$home/state/reports.html")
+  assert_equals 'decision' \
+    "$(printf '%s' "$entries" | jq -r '.[] | select(.id == "luefterfrage-20261017") | .kind')" \
+    "that entry must declare itself a decision rather than pass for a report"
+  assert_equals 'null' \
+    "$(printf '%s' "$entries" | jq -r '.[] | select(.id == "luefterfrage-20261017") | .file | tostring')" \
+    "a decision entry must claim no report file"
+  assert_contains \
+    "$(printf '%s' "$entries" | jq -r '.[] | select(.id == "luefterfrage-20261017") | .html')" \
+    'Den Fremdtreiber versuchen.' "the decision's words must be its entry's content"
+  link=$(FM_HOME="$home" bash "$PAGE_SH" link luefterfrage-20261017) \
+    || fail "link must hand out the anchor of a decision entry"
+  assert_equals "file://$home/state/reports.html#luefterfrage-20261017" "$link" \
+    "a decision must be reachable by the same stable anchor a report gets"
+  pass "a decision that gated no report becomes its own anchored entry"
+}
+
+test_report_without_a_decision_carries_no_decision_section() {
+  local home out
+  home=$(decision_home)
+  write_report "$home" einsam '# Einsam
+
+Nur ein Bericht.'
+  out=$(build "$home") || fail "build failed: $out"
+  assert_contains "$out" 'decisions: 0' "a home with no recorded decision must say so"
+  assert_contains "$out" 'entries: 1' "no decision means no extra entry"
+  assert_not_contains "$(html_of "$home/state/reports.html" einsam)" 'entscheidungsprotokoll' \
+    "a report with no decision must not grow an empty decision section"
+  pass "a report without a decision is left exactly as it was"
+}
+
+test_search_finds_a_phrase_only_the_decision_carries() {
+  local home searchable
+  home=$(decision_home)
+  write_report "$home" kuehlung-20261017 '# Kuehlung
+
+Der Bericht nennt dieses Wort nicht.'
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] kuehlung-20261017 - Wie weiter mit der Kuehlung? (kind: captain) (done 2026-10-17) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 5555555555555555555555555555555555555555555555555555555555555555
+  Resolution mode: answered
+
+  Captain decision:
+  Zugestimmt, Kennwort Schneeflocke.'
+  build "$home" >/dev/null || fail "build failed"
+  searchable=$(searchable_of "$home/state/reports.html" kuehlung-20261017)
+  assert_contains "$searchable" 'schneeflocke' \
+    "the page's own search text must include what only the decision says"
+  pass "search reaches a phrase that only the decision carries"
+}
+
+test_every_decision_of_one_task_appears_newest_first() {
+  local home html first second third
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] mehrfach-20261018 - Mehrfach beantwortet (kind: captain) (done 2026-10-18) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 3333333333333333333333333333333333333333333333333333333333333333
+  Resolution mode: answered
+
+  Captain decision:
+  Die dritte und neueste Antwort.
+
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 2222222222222222222222222222222222222222222222222222222222222222
+  Resolution mode: released
+
+  Captain decision:
+  Die zweite Antwort.
+
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 1111111111111111111111111111111111111111111111111111111111111111
+  Resolution mode: released
+
+  Captain decision:
+  Die erste Antwort.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" mehrfach-20261018)
+  assert_contains "$html" 'Die erste Antwort.' "an older decision must not be dropped"
+  assert_contains "$html" 'Die zweite Antwort.' "an older decision must not be dropped"
+  assert_contains "$html" 'Die dritte und neueste Antwort.' "the newest decision must be there"
+  first=${html%%Die dritte und neueste Antwort.*}
+  second=${html%%Die zweite Antwort.*}
+  third=${html%%Die erste Antwort.*}
+  [ "${#first}" -lt "${#second}" ] && [ "${#second}" -lt "${#third}" ] \
+    || fail "the decisions of one task must stay newest first, as they are recorded"
+  pass "every decision of one task appears, newest first"
+}
+
+test_a_decision_reached_through_two_sources_appears_once() {
+  local home html
+  home=$(decision_home)
+  # The same recorded block, in the live backlog AND as an archived snapshot of
+  # the same task. Its checksum is its identity, so it is one decision.
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] doppelt-20261019 - Zweimal aufgezeichnet (kind: captain) (done 2026-10-19) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 9999999999999999999999999999999999999999999999999999999999999999
+  Resolution mode: answered
+
+  Captain decision:
+  Genau einmal zu sehen.'
+  write_note_archive "$home" '# Notes
+
+## Archived 2026-10-19
+- [ ] doppelt-20261019 - Zweimal aufgezeichnet (kind: captain) (since 2026-10-19) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 9999999999999999999999999999999999999999999999999999999999999999
+  Resolution mode: answered
+
+  Captain decision:
+  Genau einmal zu sehen.'
+  assert_contains "$(build "$home")" 'decisions: 1' \
+    "a decision reached through two sources must be counted once"
+  html=$(html_of "$home/state/reports.html" doppelt-20261019)
+  assert_equals 1 "$(printf '%s' "$html" | grep -c '9999999999' || true)" \
+    "a decision reached through two sources must be shown once"
+  pass "a decision reached through two sources appears once"
+}
+
+test_home_without_archive_files_still_builds() {
+  local home out
+  home=$(decision_home)
+  write_report "$home" ohne-ablage '# Ohne Ablage'
+  out=$(build "$home") || fail "a home with no archive files must still build: $out"
+  assert_contains "$out" 'reports: 1' "the report must still reach the page"
+  assert_contains "$out" 'decisions: 0' "no archive file means no decision, not a refusal"
+  assert_contains "$out" 'source: data/done-archive.md absent' \
+    "a source that is not there must be named, not passed over in silence"
+  assert_contains "$(cat "$home/state/reports.html")" 'Nicht vollstaendig gelesen' \
+    "the page itself must be able to show the gap"
+  pass "a home without archive files still builds, and names the gap"
+}
+
+test_home_on_another_backlog_store_still_builds() {
+  local home out
+  home=$(decision_home)
+  printf 'backend = "beads"\n' > "$home/.tasks.toml" \
+    || fail "cannot write the foreign-store fixture"
+  write_report "$home" fremde-ablage '# Fremde Ablage'
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] ignoriert-20261019 - Darf nicht aus der Datei gelesen werden (kind: captain) (done 2026-10-19)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 7777777777777777777777777777777777777777777777777777777777777777
+  Resolution mode: answered
+
+  Captain decision:
+  Aus einer Datei, die diesem Zuhause nicht gehoert.'
+  out=$(build "$home") || fail "a home on another backlog store must still build: $out"
+  assert_contains "$out" 'reports: 1' "the report must still reach the page"
+  assert_contains "$out" 'decisions: 0' \
+    "a markdown file must not be read for a home whose store is not markdown"
+  assert_contains "$out" 'source: Ablagedateien skipped' \
+    "the skipped markdown files must be named"
+  pass "a home on another backlog store still builds"
+}
+
+test_decision_text_never_becomes_markup() {
+  local home html
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] boshaft-20261019 - Eine Entscheidung, die Markup zitiert (kind: captain) (done 2026-10-19) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 8888888888888888888888888888888888888888888888888888888888888888
+  Resolution mode: answered
+
+  Captain decision:
+  Freigegeben, auch fuer <script>alert(1)</script> und __FM_REPORTS_DATA__.'
+  build "$home" >/dev/null || fail "build failed on a decision quoting markup"
+  assert_equals 1 "$(entries_of "$home/state/reports.html" | jq 'length')" \
+    "a decision quoting markup must leave the payload parsable"
+  html=$(html_of "$home/state/reports.html" boshaft-20261019)
+  assert_contains "$html" '&lt;script&gt;' "quoted markup in a decision must be shown as text"
+  assert_not_contains "$html" '<script>' "a decision must never contribute a live tag"
+  assert_contains "$html" '__FM_REPORTS_DATA__' \
+    "a decision quoting a page slot must survive as text"
+  pass "a decision's text is shown as text and never built into the page"
+}
+
+test_decisions_can_be_switched_off_for_a_build() {
+  local home out
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] abgeschaltet-20261019 - Nicht zu sehen (kind: captain) (done 2026-10-19) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 6666666666666666666666666666666666666666666666666666666666666666
+  Resolution mode: answered
+
+  Captain decision:
+  Darf bei abgeschalteter Sammlung nicht erscheinen.'
+  out=$(FM_HOME="$home" FM_REPORTS_PAGE_DECISIONS=off bash "$PAGE_SH" build) \
+    || fail "build failed with the decisions switched off: $out"
+  assert_contains "$out" 'decisions: 0' "the switch must leave the build with no decision"
+  assert_contains "$out" 'entries: 0' "the switch must leave the build with no entry"
+  pass "a build can be run with no decisions at all"
+}
+
 test_build_publishes_every_report
 test_build_sorts_newest_first
 test_rebuild_without_a_change_leaves_the_page_alone
@@ -426,3 +735,13 @@ test_unsafe_link_and_image_schemes_are_rejected
 test_shipped_template_build_replaces_both_slots
 test_build_refuses_a_template_without_a_slot
 test_page_fetches_nothing
+test_recorded_decision_reaches_the_report_it_gated
+test_decision_without_a_report_becomes_its_own_entry
+test_report_without_a_decision_carries_no_decision_section
+test_search_finds_a_phrase_only_the_decision_carries
+test_every_decision_of_one_task_appears_newest_first
+test_a_decision_reached_through_two_sources_appears_once
+test_home_without_archive_files_still_builds
+test_home_on_another_backlog_store_still_builds
+test_decision_text_never_becomes_markup
+test_decisions_can_be_switched_off_for_a_build

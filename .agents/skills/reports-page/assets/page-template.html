@@ -2,15 +2,21 @@
 <!--
   Reports page template for bin/fm-reports-page.sh. That script owns the build
   mechanics and names the two slots this file carries: the build stamp in the
-  BUILT constant, and the one line that becomes the JSON array of rendered
-  reports. Each slot appears exactly once, which the build verifies.
+  BUILT constant, and the one line that becomes the JSON payload of rendered
+  entries and the sources they were read from. Each slot appears exactly once,
+  which the build verifies.
 
   The page is opened as a plain file. It therefore makes no network request,
   loads no external font, script, or stylesheet, and has no self-refresh: a
-  rebuild is seen by reloading. Everything a report contributes arrives already
-  escaped by bin/fm-reports-render.jq, and this page only ever puts a report's
-  text through textContent or its html through one container, never through
-  string concatenation into the document.
+  rebuild is seen by reloading. Everything a report or a recorded decision
+  contributes arrives already escaped by bin/fm-reports-render.jq, and this page
+  only ever puts that text through textContent or its html through one
+  container, never through string concatenation into the document.
+
+  The list carries two kinds of entry: a report, and a recorded captain decision
+  that gated no report of this home. A decision entry says so in the list, and
+  the count line names both numbers, so the page never reads as if every entry
+  were a report.
 -->
 <html lang="de">
 <head>
@@ -27,6 +33,9 @@
   --accent: #4082ff;
   --active: #e8f0ff;
   --code: #f2f4f7;
+  --chip: #e6e9ee;
+  --ok: #2f8c4f;
+  --warn: #b5751a;
   --width: 300px;
 }
 @media (prefers-color-scheme: dark) {
@@ -39,6 +48,9 @@
     --accent: #6c9dff;
     --active: #1e2634;
     --code: #22272e;
+    --chip: #2b3038;
+    --ok: #5fbd80;
+    --warn: #d9a44a;
   }
 }
 * { box-sizing: border-box; }
@@ -81,6 +93,22 @@ aside {
   outline-offset: 1px;
 }
 .count { margin-top: 8px; font-size: 12px; color: var(--muted); }
+/* A source of decisions that could not be read is named here rather than left
+   to look like "there were none". */
+.gaps { margin-top: 6px; font-size: 12px; color: var(--warn); }
+.gaps:empty { display: none; }
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.6;
+  vertical-align: 1px;
+}
 nav { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 nav a {
   display: block;
@@ -92,7 +120,9 @@ nav a {
 }
 nav a:hover { background: var(--active); }
 nav a[aria-current="page"] { background: var(--active); border-left-color: var(--accent); }
-nav .t { display: block; font-weight: 600; }
+/* A list title may carry a long unbreakable token, a URL for instance, and a
+   title that cannot break makes the whole list scroll sideways. */
+nav .t { display: block; font-weight: 600; overflow-wrap: anywhere; }
 nav .m { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); word-break: break-all; }
 nav .none { padding: 14px; color: var(--muted); font-size: 13px; }
 
@@ -166,6 +196,33 @@ article img { max-width: 100%; height: auto; }
 article hr { border: 0; border-top: 1px solid var(--line); }
 .empty { color: var(--muted); }
 
+/* --- the decisions under a report --- */
+.dec { margin-top: 2.4em; border-top: 2px solid var(--line); padding-top: 0.2em; }
+/* An entry that is only a decision opens with its own title and then the
+   decisions, so the rule that separates a report from them has nothing to
+   separate. */
+article > h1:first-child + .dec { margin-top: 1.2em; border-top: 0; padding-top: 0; }
+.dec > h2 { border-bottom: 0; }
+.dec-group { margin: 0 0 1.6em; }
+.dec-where { margin: 0 0 0.7em; font-size: 12px; color: var(--muted); }
+/* Only the task id may break mid-token; breaking the whole line would split a
+   date across two lines. */
+.dec-where code { overflow-wrap: anywhere; }
+.dec-label { margin: 0 0 0.3em; font-size: 12px; font-weight: 600; color: var(--muted); }
+.dec-q { margin: 0 0 1.1em; }
+.dec-item { margin: 0 0 1.1em; padding: 0.1em 0 0.1em 13px; border-left: 3px solid var(--line); }
+.dec-item.dec-entschieden { border-left-color: var(--ok); }
+.dec-item.dec-offen { border-left-color: var(--warn); }
+.dec-meta { margin: 0 0 0.5em; font-size: 12px; color: var(--muted); }
+.dec-state { font-weight: 600; color: var(--fg); }
+.dec-item > :last-child { margin-bottom: 0; }
+/* A decision's own words are prose inside an entry, so their headings stay
+   below the entry's title instead of competing with it. */
+.dec-item h1, .dec-item h2, .dec-item h3, .dec-item h4 { margin: 1.2em 0 0.5em; }
+.dec-item h1 { font-size: 19px; }
+.dec-item h2 { font-size: 17px; border-bottom: 0; padding-bottom: 0; }
+.dec-item h3, .dec-item h4 { font-size: 15px; }
+
 /* --- narrow: the sidebar becomes a drawer --- */
 .scrim { display: none; }
 @media (max-width: 720px) {
@@ -208,7 +265,7 @@ body.no-index:not(.drawer) aside { display: none; }
 <aside>
   <div class="head">
     <h1>Berichte</h1>
-    <input type="search" id="q" placeholder="Suchen (Titel und Inhalt)" autocomplete="off" aria-label="Berichte suchen">
+    <input type="search" id="q" placeholder="Suchen (Titel, Inhalt, Entscheidungen)" autocomplete="off" aria-label="Berichte und Entscheidungen suchen">
     <select id="sort" aria-label="Sort reports">
       <option value="new">Neueste zuerst</option>
       <option value="old">Aelteste zuerst</option>
@@ -217,6 +274,7 @@ body.no-index:not(.drawer) aside { display: none; }
       <option value="file">Dateiname</option>
     </select>
     <div class="count" id="count"></div>
+    <div class="gaps" id="gaps"></div>
   </div>
   <nav id="list"></nav>
   <div class="grip" id="grip" title="Drag to resize, double-click to reset"></div>
@@ -239,11 +297,15 @@ __FM_REPORTS_DATA__
 </script>
 <script>
 const BUILT = "__FM_REPORTS_BUILT__";
-const REPORTS = JSON.parse(document.getElementById("reports-data").textContent);
+const DATA = JSON.parse(document.getElementById("reports-data").textContent);
+const REPORTS = DATA.entries;
+const SOURCES = DATA.sources || [];
+const KINDS = REPORTS.reduce((a, r) => (a[r.kind] = (a[r.kind] || 0) + 1, a), {});
 
-// Searchable body text per report, derived once: tags out, the five entities
+// Searchable body text per entry, derived once: tags out, the five entities
 // fm-reports-render.jq produces back in, so a search for "&&" or "<script"
-// finds the report that talks about them.
+// finds the entry that talks about them. A decision's words are part of that
+// html, so searching finds a phrase that appears only in a decision.
 const BODY = REPORTS.map(r => (r.html || "")
   .replace(/<[^>]*>/g, " ")
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
@@ -261,7 +323,8 @@ const el = {
   where: document.getElementById("where"),
   scroll: document.getElementById("scroll"),
   grip: document.getElementById("grip"),
-  scrim: document.getElementById("scrim")
+  scrim: document.getElementById("scrim"),
+  gaps: document.getElementById("gaps")
 };
 
 // localStorage is a convenience only: every read and write may throw (private
@@ -297,12 +360,13 @@ function paint() {
   const needle = el.q.value.trim().toLowerCase();
   shown = order(REPORTS.filter((r, i) => matches(i, needle)));
   el.count.textContent = shown.length + " von " + REPORTS.length +
+    " · " + (KINDS.report || 0) + " Berichte, " + (KINDS.decision || 0) + " Entscheidungen" +
     (BUILT ? " · erzeugt " + BUILT : "");
   el.list.textContent = "";
   if (!shown.length) {
     const none = document.createElement("div");
     none.className = "none";
-    none.textContent = REPORTS.length ? "Kein Bericht passt." : "Noch kein Bericht.";
+    none.textContent = REPORTS.length ? "Kein Eintrag passt." : "Noch kein Eintrag.";
     el.list.append(none);
     return;
   }
@@ -314,9 +378,15 @@ function paint() {
     const t = document.createElement("span");
     t.className = "t";
     t.textContent = r.title;
+    if (r.kind === "decision") {
+      const b = document.createElement("span");
+      b.className = "badge";
+      b.textContent = "Entscheidung";
+      t.append(b);
+    }
     const m = document.createElement("span");
     m.className = "m";
-    m.textContent = r.file + " · " + r.updated;
+    m.textContent = (r.file || "ohne Bericht") + " · " + r.updated;
     a.append(t, m);
     a.addEventListener("click", () => document.body.classList.remove("drawer"));
     el.list.append(a);
@@ -338,13 +408,13 @@ function show() {
     el.report.textContent = "";
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent = "In diesem Zuhause gibt es noch keinen Bericht. Baue die Seite erneut, sobald einer vorhanden ist.";
+    p.textContent = "In diesem Zuhause gibt es noch keinen Bericht und keine aufgezeichnete Entscheidung. Baue die Seite erneut, sobald etwas davon vorliegt.";
     el.report.append(p);
     paint();
     return;
   }
   document.title = r.title + " · Berichte";
-  el.where.textContent = r.file + " · Stand " + r.updated;
+  el.where.textContent = (r.file ? r.file + " · Stand " : "Entscheidung · ") + r.updated;
   // The html comes from fm-reports-render.jq, which escaped every byte of the
   // report before building any markup, so no report text reaches the parser as
   // markup.
@@ -439,6 +509,12 @@ document.addEventListener("keydown", e => {
     store.set("reports-width", "");
   });
 })();
+
+// A source that was missing, skipped, or unreadable at build time, named once.
+if (SOURCES.some(s => s.state !== "ok")) {
+  el.gaps.textContent = "Nicht vollstaendig gelesen: " +
+    SOURCES.filter(s => s.state !== "ok").map(s => s.name + " (" + s.state + ")").join(", ");
+}
 
 el.sort.value = store.get("reports-sort") || "new";
 if (!el.sort.value) el.sort.value = "new";
