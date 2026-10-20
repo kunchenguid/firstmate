@@ -1450,7 +1450,9 @@ test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
   local home real_mktemp
   home=$(make_primary_home hook-turns-main-only-write-fails)
-  turn_main_only_at_second_offer "$home"
+  # Change eligibility without a second status wake closing the successor:
+  # this case exercises a failed hand-back beside a healthy successor.
+  turn_main_only_at_second_offer "$home" quiet
   real_mktemp=$(command -v mktemp)
   cat > "$home/fakebin/mktemp" <<SH
 #!/usr/bin/env bash
