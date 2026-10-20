@@ -1673,7 +1673,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
-    fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1
+    if declare -F fm_dod_receipt_accept >/dev/null; then fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1; fi
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
@@ -1733,7 +1733,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
-    fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1
+    if declare -F fm_dod_receipt_accept >/dev/null; then fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1; fi
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then

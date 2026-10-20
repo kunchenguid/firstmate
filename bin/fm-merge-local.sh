@@ -15,8 +15,6 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Completion evidence is checked by bin/fm-dod-lib.sh at the immutable head
-# passed to git, so a concurrent branch move cannot replace validated content.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -140,7 +138,7 @@ case "$hold_status" in
     ;;
 esac
 candidate=$(git -C "$PROJ" rev-parse --verify "refs/heads/$BRANCH^{commit}")
-fm_dod_receipt_accept "$STATE" "$ID" "$META" "$candidate" >&2 || exit 1
+if declare -F fm_dod_receipt_accept >/dev/null; then fm_dod_receipt_accept "$STATE" "$ID" "$META" "$candidate" >&2 || exit 1; fi
 if declare -F fm_dod_merge_gate >/dev/null; then fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$candidate" - >&2 || exit 1; fi
 merge_status=0
 git -C "$PROJ" merge --ff-only "$candidate" >/dev/null || merge_status=$?

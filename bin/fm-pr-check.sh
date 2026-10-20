@@ -5,12 +5,11 @@
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge. A pull request
 # that lives in a repository other than the worktree's origin (a cross-repo
-# lane's second PR) checks the completion receipt against its verified forge
-# head instead of the worktree's HEAD, because the merge binds to that forge
-# head and the worker's one receipt names it. The gate also
-# reads a pull request's live forge head itself when the worker copy holds no
-# remote-tracking ref for it, so a push that opened the PR from outside this
-# copy's ref sync still registers.
+# lane's second PR) forwards its verified forge head to the gate as a hook
+# argument instead of the worktree's HEAD, because the merge binds to that
+# forge head. The gate also reads a pull request's live forge head itself when
+# the worker copy holds no remote-tracking ref for it, so a push that opened the
+# PR from outside this copy's ref sync still registers.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
@@ -164,12 +163,14 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# A cross-repository lane's completion receipt names the pull request's forge
-# head, which is also what bin/fm-pr-merge.sh binds the merge to, so the
-# gate's receipt candidate is that verified forge head when the pull request's
-# owner and repository are not this worktree's origin. A same-repository pull
-# request, an unverified forge head, or an origin whose repository cannot be
-# isolated keep the worktree HEAD candidate.
+# The fork decides whether a verified forge head is forwarded to the gate: a
+# cross-repository pull request's head, which is also what bin/fm-pr-merge.sh
+# binds the merge to, is forwarded when the pull request's owner and repository
+# are not this worktree's origin. A same-repository pull request, an unverified
+# forge head, or an origin whose repository cannot be isolated forwards none.
+# fm_dod_accept_ship_done binds a named-head or outside-origin pull request to its
+# recorded pr_head when no head is forwarded, and the receipts add-on
+# (fm_receipts_accept_done) picks the candidate from what it is given.
 RECEIPT_CANDIDATE=
 if [ -n "$PR_HEAD" ] && fm_dod_pr_outside_origin "$WT" "$URL"; then
   RECEIPT_CANDIDATE=$PR_HEAD

@@ -130,50 +130,12 @@
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-timeout-lib.sh"
 
-# Completion receipts are task-owned state/<id>.run-receipt.json records.
-# schema=1 binds task, mode, spawn_gen and exact candidate head to PASS or FAIL,
-# with a nonempty evidence body (commands, outcomes and relevant limitations).
-# bin/fm-run-receipt.sh publishes them atomically; evidence is embedded so the
-# proof survives deletion of temporary logs and the disposable worktree.
-# receipt_required=1 is set only for briefs carrying Completion receipt: required.
-# Older records need no absent receipt, but ANY present receipt must validate:
-# explicit FAIL, malformed, stale incarnation/head and empty proof all refuse.
-# This is evidence supplied by the worker, not a replacement for forge checks,
-# no-mistakes validation or merge authority. Both landing entrypoints consume
-# the same gate against the exact head they will submit to the merge command.
-fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
-  local state=$1 id=$2 meta=$3 head=$4 receipt required mode gen count
-  [ -n "$state" ] && [ -n "$id" ] && [ -f "$meta" ] || return 0
-  receipt="$state/$id.run-receipt.json"
-  required=$(fm_dod_meta_value "$meta" receipt_required)
-  count=$(awk -F= '$1 == "receipt_required" { n++ } END { print n+0 }' "$meta") || return 1
-  if [ "$count" -gt 1 ] || { [ "$count" -eq 1 ] && [ "$required" != 1 ]; }; then
-    echo "completion receipt requirement malformed for $id"
-    return 1
-  fi
-  if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
-    [ "$required" != 1 ] && return 0
-    echo "completion receipt missing for $id"
-    return 1
-  fi
-  mode=$(fm_dod_meta_value "$meta" mode)
-  gen=$(fm_dod_meta_value "$meta" spawn_gen)
-  if fm_pr_head_valid "$head" && [ -f "$receipt" ] && [ ! -L "$receipt" ] && command -v jq >/dev/null 2>&1 \
-    && jq -se --arg task "$id" --arg mode "$mode" --arg gen "$gen" --arg head "$head" '
-      length == 1 and (.[0] | .schema == 1 and .task == $task and .mode == $mode and
-      .spawn_gen == $gen and .head == $head and .verdict == "PASS" and
-      (.evidence | type == "string" and test("[^[:space:]]")) and
-      (.at | type == "number" and . > 0))
-    ' "$receipt" >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "completion receipt refused for $id: FAIL, mismatched candidate/incarnation, malformed or absent evidence"
-  return 1
-}
-
 # Optional merge-card add-on: defines fm_dod_merge_gate and fm_merge_post_hook.
 # shellcheck source=/dev/null
 [ ! -r "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh" ] || . "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh"
+# Optional receipts add-on: defines fm_dod_receipt_accept and the fm_receipts_* helpers.
+# shellcheck source=/dev/null
+[ ! -r "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/receipts/bin/fm-receipts-lib.sh" ] || . "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/receipts/bin/fm-receipts-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
@@ -461,10 +423,8 @@ EOF
 }
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} receipt_home_q receipt_tool_q
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
-  receipt_home_q=$(printf '%q' "${FM_HOME:-${FM_ROOT:-}}")
-  receipt_tool_q=$(printf '%q' "${FM_ROOT:-.}/bin/fm-run-receipt.sh")
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -588,13 +548,7 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
-  cat <<EOF
-Completion receipt: required
-Before the final ready report (after validation in no-mistakes mode), write a nonempty evidence file containing commands run, results and limitations, then run \`FM_HOME=$receipt_home_q $receipt_tool_q $id PASS <evidence-file>\` from the clean candidate checkout.
-Use FAIL when verification failed; never label failed or unperformed checks PASS.
-The evidence file may be a task-owned temporary file outside your worktree; that write and the helper's completion-receipt write into its supervising state directory are authorized.
-Regenerate the receipt after any candidate change, including validation fixes or a rebase.
-EOF
+  if declare -F fm_receipts_brief >/dev/null; then fm_receipts_brief "$id"; fi
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
@@ -664,13 +618,7 @@ fm_dod_meta_value() {  # <meta> <key>
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
 # mode the pipeline pushes it, possibly with commits the worker clone never
 # fetched. A direct-PR worker pushes from its own copy, so its named head stays
-# that copy's HEAD and a later unpushed commit is refused. The one exception,
-# applied by fm_dod_accept_ship_done: a registered direct-PR pull request
-# outside the worktree's origin repository takes its recorded pr_head=
-# (bin/fm-pr-check.sh's verified forge head) as the receipt candidate, so the
-# one receipt the worker published for that head also passes
-# bin/fm-crew-state.sh and bin/fm-inactive-reconcile.sh; a same-repository
-# direct-PR keeps the copy's HEAD.
+# that copy's HEAD and a later unpushed commit is refused.
 fm_dod_forge_head_is_named_head() {  # <mode>
   case "$1" in
     no-mistakes|'') return 0 ;;
@@ -856,40 +804,22 @@ fm_dod_forge_pr_head_live() {  # <provider> <host> <path> <number> <url>
 # Optional captured run output preserves an explicit unreturned-custody refusal
 # even when the declared head is already on the forge.
 # The optional trailing <forge-head> is a verified forge head the caller read
-# for a pull request that lives outside the worktree's origin repository. A
-# cross-repository lane's one completion receipt names that pull request's
-# head, because bin/fm-pr-merge.sh binds the merge to the live forge head, so
-# the receipt is checked against it instead of the worktree's HEAD; an absent
-# or invalid value keeps the worktree HEAD candidate, and a forge-head mode's
-# recorded pr_head still wins over it.
-# In direct-PR mode the recorded pr_head= becomes the candidate once the done
-# note names the task's registered pr= and that pull request lives outside
-# the worktree's origin repository (fm_dod_pr_outside_origin): registration
-# recorded bin/fm-pr-check.sh's verified forge head there, so every gate
-# caller accepts the worker's one receipt from local state alone, while a
-# same-repository direct-PR keeps the worktree HEAD candidate and still
-# refuses a later unpushed commit.
+# for a pull request outside the worktree's origin repository. When none is
+# given and the done note names the registered pr= in a named-head mode, or a
+# direct-PR outside that origin, the recorded pr_head stands in, so every caller
+# binds the receipt to the same candidate. The receipts add-on
+# (fm_receipts_accept_done) uses the head it is given.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> <run-output> [<forge-head>]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} forge_head=${10:-} url sha gerrit
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} forge_head=${10:-} url sha gerrit recorded_head
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
-  sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || sha=
-  if [ -n "$forge_head" ] && fm_pr_head_valid "$forge_head"; then
-    sha=$forge_head
+  url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || url=
+  if [ -z "$forge_head" ] && [ -n "$url" ] && [ -n "$meta" ] && [ -f "$meta" ] \
+    && [ "$(fm_dod_meta_value "$meta" pr)" = "$url" ] \
+    && { fm_dod_forge_head_is_named_head "$mode" || { [ "$mode" = direct-PR ] && fm_dod_pr_outside_origin "$wt" "$url"; }; }; then
+    recorded_head=$(fm_dod_meta_value "$meta" pr_head)
+    fm_pr_head_valid "$recorded_head" && forge_head=$recorded_head
   fi
-  if [ -f "$meta" ]; then
-    url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || url=
-    if [ -n "$url" ] && [ "$(fm_dod_meta_value "$meta" pr)" = "$url" ]; then
-      if fm_dod_forge_head_is_named_head "$mode"; then
-        if fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
-          sha=$(fm_dod_meta_value "$meta" pr_head)
-        fi
-      elif [ "$mode" = direct-PR ] && fm_dod_pr_outside_origin "$wt" "$url" \
-        && fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
-        sha=$(fm_dod_meta_value "$meta" pr_head)
-      fi
-    fi
-  fi
-  fm_dod_receipt_accept "$state" "$id" "$meta" "$sha" || return 1
+  if declare -F fm_receipts_accept_done >/dev/null; then fm_receipts_accept_done "$wt" "$mode" "$line" "$state" "$id" "$meta" "$forge_head" || return 1; fi
   [ -z "$run_out" ] || fm_dod_nm_custody_released "$run_out" || return 1
   if [ "$mode" = local-only ] && [ -n "$run_out" ]; then
     fm_dod_nm_custody_returned "$wt" "$run_out" || return 1

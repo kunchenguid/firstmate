@@ -365,15 +365,20 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^receipt_required=' -e '^upstream_consent=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^upstream_consent=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
-  echo "receipt_required=1"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
 } >> "$TMP"
+if declare -F fm_receipts_promote >/dev/null && ! fm_receipts_promote "$META" "$TMP"; then
+  rm -f -- "$TMP"
+  TMP=
+  echo "error: completion receipt requirement for $ID could not be carried into the task record" >&2
+  exit 1
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=

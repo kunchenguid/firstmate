@@ -353,6 +353,57 @@ $launch") \
   pass "relaunch rebuilds the compact-adviser switch for the replacement agent in both allowlist postures"
 }
 
+# A relaunch carries a prior receipt requirement forward. The receipts add-on
+# re-emits that requirement itself, so the record must hold exactly one line.
+test_relaunch_keeps_one_receipt_requirement() {
+  local dir=$TMP_ROOT/relaunch-receipt home proj wt id out status count
+  id=relaunch-receipt-a1
+  home="$dir/home"
+  proj="$dir/proj"
+  wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake" "$dir/addons/receipts/bin" "$dir/user-home"
+  touch "$home/state/.last-watcher-beat"
+  : > "$home/config/launch-env-allowlist"
+  make_relaunch_stub "$dir"
+  fm_git_worktree "$proj" "$wt" wt-relaunch-receipt
+  fm_test_spawn_brief "$home" "$id"
+  cat > "$dir/addons/receipts/bin/fm-receipts-lib.sh" <<'SH'
+fm_receipts_inherit() {
+  if grep -qx 'Completion receipt: required' "$1" || { [ -n "$2" ] && grep -qx 'receipt_required=1' "$2"; }; then
+    echo 'receipt_required=1'
+  fi
+}
+SH
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  printf 'codex' > "$dir/fake/command"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=codex"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "receipt_required=1"
+    echo "tasktmp=$dir/tasktmp"
+    echo "model=default"
+    echo "effort=default"
+  } > "$home/state/$id.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 FM_ADDONS_DIR="$dir/addons" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$id" relaunch --note 'replacement continues the same task' 2>&1)
+  status=$?
+  expect_code 0 "$status" "receipt relaunch should succeed: $out"
+  count=$(grep -c '^receipt_required=' "$home/state/$id.meta" || true)
+  assert_equals 1 "$count" "a relaunch must leave exactly one receipt_required line, got $count"
+  pass "relaunch keeps exactly one receipt requirement line when the receipts add-on is present"
+}
+
 # A command-prefix assignment only covers the first simple command. A raw
 # compound launch such as `cd <dir> && <probe>` must still start the probe with
 # the switch on, so this drives that escape hatch and executes the pane's
@@ -441,4 +492,5 @@ test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
 test_launch_exports_task_inbox
 test_relaunch_rebuilds_the_switch
+test_relaunch_keeps_one_receipt_requirement
 test_raw_compound_launch_command_carries_the_switch

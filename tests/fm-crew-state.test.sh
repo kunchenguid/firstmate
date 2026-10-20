@@ -1504,38 +1504,6 @@ branch_sync:
   arm_idle_record "$d/state" output-acceptance
   out=$(run_crew_state "$d" output-acceptance)
   assert_contains "$out" 'state: done' 'foreign run custody cannot refuse this local-only declaration'
-  # Integration with the independently landed receipt owner, still entirely fake.
-  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
-  FM_FAKE_AXI_STATUS=$(run_passed_no_pr fm/output-acceptance)
-  printf 'mode=no-mistakes\nreceipt_required=1\nspawn_gen=fixture-output-acceptance\n' >> "$d/state/output-acceptance.meta"
-  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$d/state/output-acceptance.status"
-  out=$(run_crew_state "$d" output-acceptance)
-  assert_contains "$out" 'completion receipt missing' 'completed run cannot bypass required receipt'
-  mkdir -p "$d/config"
-  printf 'manual\n' > "$d/config/backlog-backend"
-  printf 'fake validation checkpoint only; product output still pending\n' > "$d/evidence.txt"
-  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance FAIL "$d/evidence.txt" "$d/wt" >/dev/null \
-    || fail 'fake FAIL receipt publication failed'
-  out=$(run_crew_state "$d" output-acceptance)
-  assert_contains "$out" 'completion receipt refused' 'completed run cannot bypass explicit FAIL'
-  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance PASS "$d/evidence.txt" "$d/wt" >/dev/null \
-    || fail 'fake checkpoint receipt publication failed'
-  printf 'paused: product output acceptance pending\n' > "$d/state/output-acceptance.status"
-  out=$(run_crew_state "$d" output-acceptance)
-  assert_contains "$out" 'state: paused' 'checkpoint-only attestation is not independent output acceptance'
-  printf 'fake final output comparison accepted; fixture checks PASS\n' > "$d/evidence.txt"
-  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance PASS "$d/evidence.txt" "$d/wt" >/dev/null \
-    || fail 'fake final receipt publication failed'
-  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$d/state/output-acceptance.status"
-  out=$(run_crew_state "$d" output-acceptance)
-  assert_contains "$out" 'state: done' 'final declaration, head proof and matching receipt accept'
-  FM_FAKE_AXI_STATUS="$FM_FAKE_AXI_STATUS
-branch_sync:
-  next_action:
-    code: recover_custody"
-  out=$(run_crew_state "$d" output-acceptance)
-  assert_contains "$out" 'state: blocked' 'matching PASS cannot bypass unrecovered custody'
-  assert_contains "$out" 'recover_custody' 'receipt integration retains custody refusal'
   pass 'validation readiness and final output/custody acceptance remain separate'
 }
 
