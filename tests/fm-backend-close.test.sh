@@ -7,7 +7,7 @@ set -u
 check_close() {
   local backend=$1 target=$2 expected=$3 rc=0
   shift 3
-  "fm_backend_${backend}_kill" "$target" "$@" || rc=$?
+  "fm_backend_${backend}_kill_confirmed" "$target" "$@" || rc=$?
   expect_code "$expected" "$rc" "$backend close reported an incorrect stop status"
 }
 

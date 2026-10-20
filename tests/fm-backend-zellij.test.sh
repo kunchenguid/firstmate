@@ -806,13 +806,11 @@ test_kill_skips_recorded_tab_when_label_mismatches() {
   dir="$TMP_ROOT/kill-recorded-tab-mismatch"; mkdir -p "$dir/responses"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"not-the-task"}]\n' > "$dir/responses/2.out"
-  printf '[]\n' > "$dir/responses/3.out"
-  printf '[{"tab_id":3,"name":"not-the-task"}]\n' > "$dir/responses/4.out"
   fb=$(make_zellij_fakebin "$dir")
   PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7 3 fm-zghost' "$ROOT"
-  expect_code 0 $? "kill must accept inventories proving the task absent"
+  expect_code 0 $? "kill must stay best-effort when the recorded tab id no longer belongs to the task"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''list-tabs'$'\x1f''--json' \
     "kill did not verify the recorded tab id by label"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \

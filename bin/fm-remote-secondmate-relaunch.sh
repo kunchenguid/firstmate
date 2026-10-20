@@ -110,7 +110,18 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
 done < "$META"
 chmod 0600 "$META_TMP"
-if [[ ! "$NEW_MODEL" =~ ^gpt-[0-9.]+-sol$ ]] &&
+# The ceiling's scope comes from the captain's own declaration: a
+# replacement model the declaration does not cover, on a task that already
+# owns capped occupancy, publishes its model and releases the old claim
+# under one admission boundary.
+CAP_CAPPED=1
+CAP_SCOPE_RC=0
+fm_sol_cap_state_model_capped "$STATE" "$NEW_MODEL" || CAP_SCOPE_RC=$?
+case "$CAP_SCOPE_RC" in
+  0) CAP_CAPPED=0 ;;
+  2) die "the Sol ceiling declaration could not be read, so $ID's replacement model could not be published" ;;
+esac
+if [ "$CAP_CAPPED" = 1 ] &&
   fm_sol_cap_has_owned_occupancy "$ID" "$STATE"; then
   CAP_ROOT=$(fm_firstmate_root_home "$(fm_sol_cap_home "$STATE")") || die "cannot resolve the Sol admission home"
   CAP_PATH=$CAP_ROOT/state/$FM_SOL_LOCK_NAME
@@ -118,7 +129,7 @@ if [[ ! "$NEW_MODEL" =~ ^gpt-[0-9.]+-sol$ ]] &&
   CAP_LOCK=$CAP_PATH
 fi
 mv -f -- "$META_TMP" "$META"
-if [[ ! "$NEW_MODEL" =~ ^gpt-[0-9.]+-sol$ ]]; then
+if [ "$CAP_CAPPED" = 1 ]; then
   if [ -n "$CAP_LOCK" ]; then
     fm_sol_cap_registry_promote "$ID" remove "$STATE" || die "cannot release $ID's stopped Sol incarnation"
   else

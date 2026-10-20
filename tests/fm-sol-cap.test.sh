@@ -35,6 +35,9 @@ add_item() {  # <home> <id>
 
 # A Firstmate home with a dispatch table naming the two Sol rows the fleet
 # files under gpt-6, plus one GLM row, and a brief for every named task.
+# The capped-session guard is OFF unless the captain declares it, so the
+# fixture home carries the declaration that opts it in: the ceiling it
+# enforces and the model ids that ceiling covers.
 make_home() {  # <home> [task-id...]
   local home=$1 id
   shift
@@ -49,6 +52,10 @@ make_home() {  # <home> [task-id...]
  {"when":"GLM lanes route themselves.","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"low"}}
 ]}
 J
+  cat > "$home/config/sol-cap" <<'SOL'
+max=4
+models=gpt-6.1-sol|gpt-6-sol
+SOL
   if [ "$HAVE_TASKS_AXI" = 1 ]; then
     printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
       > "$home/data/backlog.md"
@@ -276,23 +283,61 @@ test_non_sol_model_never_claims_a_slot() {
   pass "a non-Sol model dispatch passes a full ceiling and touches no registry row"
 }
 
-test_config_sol_cap_overrides_the_filed_default() {
+# The ceiling is the captain's own declaration: config/sol-cap names the
+# value the guard enforces and the models it covers, and the guard is inert
+# without that file.
+test_config_sol_cap_declares_the_ceiling() {
   local case_dir out before rc=0
   case_dir=$(make_case override task-c)
   write_sol_row "$case_dir/home" s1 "$(fresh_start)"
   write_sol_row "$case_dir/home" s2 "$(fresh_start)"
-  printf '2\n' > "$case_dir/home/config/sol-cap"
+  printf 'max=4\nceiling=2\nmodels=gpt-6.1-sol|gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
   before=$(call_count "$case_dir")
   worktrees=$(worktree_list "$case_dir")
   out=$(spawn_sol_ship "$case_dir" task-c gpt-6.1-sol "$case_dir/unused") || rc=$?
-  expect_code 1 "$rc" "a spawn over its configured ceiling was not refused: $out"
-  assert_contains "$out" "this ceiling is 2" "the refusal did not use the overridden ceiling"
+  expect_code 1 "$rc" "a spawn over its declared ceiling was not refused: $out"
+  assert_contains "$out" "this ceiling is 2" "the refusal did not use the declared ceiling"
   assert_nothing_created "$case_dir" task-c "$before" "$worktrees"
+  pass "config/sol-cap declares the ceiling the guard enforces"
+}
+
+# A home that never declared a ceiling has none: the guard reserves nothing,
+# counts nothing, and leaves the registry untouched even when the declared
+# models are already at their ceiling.
+test_no_declaration_leaves_the_guard_inert() {
+  local case_dir out rc=0
+  case_dir=$(make_case inert task-c)
   rm -f -- "$case_dir/home/config/sol-cap"
-  out=$(spawn_sol_ship "$case_dir" task-c) || fail "removing the override did not restore the default ceiling: $out"
-  assert_contains "$out" "spawned task-c" \
-    "the four-session default did not admit the dispatch after the override left"
-  pass "config/sol-cap overrides the filed default, and its absence restores it"
+  write_sol_row "$case_dir/home" s1 "$(fresh_start)"
+  write_sol_row "$case_dir/home" s2 "$(fresh_start)"
+  write_sol_row "$case_dir/home" s3 "$(fresh_start)"
+  write_sol_row "$case_dir/home" s4 "$(fresh_start)"
+  cp "$case_dir/home/state/sol-sessions.tsv" "$TMP_ROOT/inert-registry-before.tsv"
+  out=$(spawn_sol_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a home that declared no ceiling was refused: $out"
+  assert_contains "$out" "spawned task-c" "a home that declared no ceiling did not dispatch"
+  assert_equals "$(cat "$TMP_ROOT/inert-registry-before.tsv")" \
+    "$(cat "$case_dir/home/state/sol-sessions.tsv")" \
+    "a home that declared no ceiling changed the registry"
+  pass "a home that declared no ceiling has no ceiling, no reservation, and no registry row"
+}
+
+# The declared model set is exactly what the captain wrote: a model the
+# declaration does not name is never capped, and a declared pattern covers
+# the model ids the captain matched on.
+test_declared_model_set_is_the_only_capped_set() {
+  local case_dir out
+  case_dir=$(make_case model-set task-c)
+  printf 'max=2\nmodel-pattern=^gpt-[0-9.]+-sol$\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "a declared pattern did not cover its model: $out"
+  assert_equals "$out" "claimed" "a declared pattern did not claim its model"
+  out=$(lib_refuse_claim "$case_dir" task-d gpt-5.6-luna) || fail "an undeclared model was refused: $out"
+  assert_equals "$out" "not-capped" "an undeclared model was capped"
+  printf 'max=1\nmodel-pattern=^gpt-[0-9.]+-sol$\n' > "$case_dir/home/config/sol-cap"
+  write_sol_row "$case_dir/home" live "$(fresh_start)" 0
+  out=$(lib_refuse_claim "$case_dir" task-e gpt-6-sol) || true
+  assert_contains "$out" "ceiling reached" "the declared ceiling was not enforced"
+  pass "only the models the captain declared are capped, by exact id or by declared pattern"
 }
 
 
@@ -305,13 +350,12 @@ test_config_sol_cap_overrides_the_filed_default() {
 # spawn cases read.
 lib_refuse_claim() {  # <case-dir> <id> <model>
   local case_dir=$1 id=$2 model=$3 out
-  if out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" \
-    refuse-claim "$id" ship codex "$model" "$case_dir/home/config" "$case_dir/home/state"); then
-    printf '%s\n' claimed
-  else
+  out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" \
+    refuse-claim "$id" ship codex "$model" "$case_dir/home/config" "$case_dir/home/state") || {
     printf '%s\n' "$out"
     return 1
-  fi
+  }
+  printf '%s\n' "$out"
 }
 
 lib_record_actual() {  # <case-dir> <id> <model>
@@ -461,7 +505,7 @@ test_sol_report_under_an_existing_claim_keeps_the_row() {
   case_dir=$(make_case record-keep task-c)
   old_start=$(( "$(fresh_start)" - 43201 ))
   write_sol_row "$case_dir/home" task-c "$old_start" 0 claude-sonnet
-  out=$(lib_record_actual "$case_dir" task-c gpt-5.1-sol) ||
+  out=$(lib_record_actual "$case_dir" task-c gpt-6-sol) ||
     fail "a Sol report under an existing claim failed: $out"
   assert_equals "$out" "recorded" "the keep case did not confirm"
   assert_equals "$(registry_row_field "$case_dir" task-c 3)" "$old_start" \
@@ -484,21 +528,37 @@ test_malformed_registry_row_refuses_loudly() {
   pass "a malformed registry row refuses every Sol dispatch and names the row"
 }
 
-# A ceiling file that is anything but one positive integer refuses instead of
-# guessing, and a dispatch table that cannot be read refuses rather than
-# counting nothing.
-test_unread_ceiling_or_table_refuses_instead_of_counting_nothing() {
+# A declaration that is malformed refuses instead of guessing, and every
+# refusal names the file and the problem.
+test_malformed_declaration_refuses_loudly() {
   local case_dir out
   case_dir=$(make_case unreadable task-c)
   write_sol_row "$case_dir/home" fresh "$(fresh_start)"
-  printf 'four\n' > "$case_dir/home/config/sol-cap"
+  printf 'max=4\nceiling=four\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
-  assert_contains "$out" "ceiling unavailable" "a malformed ceiling did not refuse"
-  printf 'false\n' > "$case_dir/home/config/crew-dispatch.json"
-  rm -f -- "$case_dir/home/config/sol-cap"
+  assert_contains "$out" "ceiling unavailable" "a malformed declaration did not refuse"
+  assert_contains "$out" "config/sol-cap" "the refusal did not name the declaration file"
+  assert_contains "$out" "ceiling" "the refusal did not name the malformed key"
+  printf 'max=4\n' > "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
-  assert_contains "$out" "cannot be read" "an unread dispatch table did not refuse"
-  pass "an unread ceiling or dispatch table refuses instead of counting nothing"
+  assert_contains "$out" "models or model-pattern" "a declaration that names no model was accepted"
+  printf 'max=4\nmodels=gpt-6.1-sol\nceiling=5\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
+  assert_contains "$out" "1 through 4" "a ceiling above the declared maximum was accepted"
+  printf 'max=4\nmodels=gpt-6.1-sol\nunknown=1\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
+  assert_contains "$out" "unknown key" "an unknown declaration key was accepted"
+  printf 'max=4\nmodels=gpt-6.1-sol\nmodel-pattern=*bad(\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || true
+  assert_contains "$out" "unusable model-pattern" "an unusable declared pattern was accepted"
+  # A declaration the guard cannot read leaves the guard unable to know its
+  # own scope, so it refuses rather than admitting a model it might have
+  # been asked to cap. The refusal names the file and the problem.
+  printf 'max=4\nceiling=four\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-uncapped gpt-5.6-luna) || true
+  assert_contains "$out" "ceiling unavailable" "a malformed declaration let an uncapped model through"
+  assert_contains "$out" "config/sol-cap" "the refusal did not name the declaration file"
+  pass "a malformed declaration refuses loudly instead of falling back to a default"
 }
 
 test_review_regressions() {
@@ -522,14 +582,15 @@ test_review_regressions() {
   rc=0
   out=$(lib_refuse_claim "$case_dir" fifth gpt-6.1-sol) || rc=$?
   expect_code 1 "$rc" "live old workers did not hold ceiling"
-  printf '5\n' > "$case_dir/home/config/sol-cap"
+  printf 'max=4\nmodels=gpt-6.1-sol|gpt-6-sol\nceiling=5\n' > "$case_dir/home/config/sol-cap"
   rc=0
   FM_HOME="$case_dir/home" bash "$ROOT/bin/fm-sol-cap-lib.sh" ceiling "$case_dir/home/config" >/dev/null || rc=$?
   expect_code 1 "$rc" "ceiling above four was accepted"
+  printf 'max=4\nmodels=gpt-6.1-sol|gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
   printf '{broken\n' > "$case_dir/home/config/crew-dispatch.json"
-  out=$(lib_refuse_claim "$case_dir" glm glm-5) || fail "GLM blocked by broken table: $out"
-  out=$(lib_refuse_claim "$case_dir" qwen qwen3) || fail "qwen blocked by broken table: $out"
-  pass "exact identities, worker lifetime, live age, bounded overrides and non-Sol isolation"
+  out=$(lib_refuse_claim "$case_dir" glm glm-5) || fail "GLM blocked by a dispatch table the guard does not read: $out"
+  out=$(lib_refuse_claim "$case_dir" qwen qwen3) || fail "qwen blocked by a dispatch table the guard does not read: $out"
+  pass "exact identities, worker lifetime, live age, bounded declarations and non-Sol isolation"
 }
 
 test_shared_home_admission() {
@@ -793,7 +854,7 @@ test_adopted_worker_exit() (
     fm_write_meta "$state/$i.meta" "model=gpt-6.1-sol"
   done
   adopted_state=alive
-  fm_sol_cap_model_set "$case_dir/home/config" || fail "model set failed"
+  fm_sol_cap_config "$case_dir/home/config" || fail "declaration failed"
   fm_sol_cap_active_count "$state" || fail "adoption failed"
   [ "$FM_SOL_COUNT" = 4 ] || fail "live workers not adopted"
   adopted_state=dead
@@ -854,13 +915,15 @@ test_under_cap_sol_spawn_launches_and_claims_its_slot
 test_cap_refuses_the_fifth_and_names_its_sessions
 test_stale_entries_do_not_count
 test_non_sol_model_never_claims_a_slot
-test_config_sol_cap_overrides_the_filed_default
+test_config_sol_cap_declares_the_ceiling
+test_no_declaration_leaves_the_guard_inert
+test_declared_model_set_is_the_only_capped_set
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim
 test_adopted_uncertain_claim_survives_reported_sol
 test_sol_report_under_an_existing_claim_keeps_the_row
 test_malformed_registry_row_refuses_loudly
-test_unread_ceiling_or_table_refuses_instead_of_counting_nothing
+test_malformed_declaration_refuses_loudly
 
 test_non_sol_report_bypasses_admission_without_occupancy

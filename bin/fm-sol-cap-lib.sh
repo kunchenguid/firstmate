@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
-# fm-sol-cap-lib.sh - the mechanical ceiling on concurrent Sol sessions.
+# fm-sol-cap-lib.sh - the mechanical ceiling on concurrent capped sessions.
 #
 # This library owns admission, counting, and claim reconciliation; fm-spawn.sh
 # owns the launch hook. docs/configuration.md "Sol session ceiling" owns the
-# operator contract, model classification, supported limit, and exclusions.
+# operator contract, the declaration keys, and exclusions.
 #
-# The count: <state-dir>/sol-sessions.tsv, one TSV row per Sol session
+# The guard is OFF unless the captain declares it. The declaration lives in
+# <config-dir>/sol-cap and names both the ceiling and the models it covers:
+#
+#   max=4                 # the largest concurrent count the captain allows
+#   ceiling=2             # optional; may lower max, never raise it
+#   models=gpt-6.1-sol    # optional; pipe-delimited exact model ids
+#   model-pattern=^gpt-   # optional; one extended regular expression
+#
+# An absent declaration leaves the guard inert: no ceiling, no reservation,
+# no behaviour change for a home that never opted in. A malformed declaration
+# refuses loudly, naming the file and the problem, rather than guessing.
+#
+# The count: <state-dir>/sol-sessions.tsv, one TSV row per capped session
 #
 #   <session-id>	<model>	<start-epoch>	<pid>
 #
 
-# config/sol-cap may lower this default, never raise it.
-# shellcheck disable=SC2034 # read by bin/fm-spawn.sh after sourcing.
-FM_SOL_CAP_DEFAULT=4
-
 # Registries live in each owning state directory; the claim lock lives in
 # the shared local root home's state directory.
-# shellcheck disable=SC2034 # read by the claim, count, and promotion paths.
+# shellcheck disable=SC2034 # read by bin/fm-spawn.sh after sourcing.
 FM_SOL_REGISTRY_NAME=sol-sessions.tsv
 FM_SOL_LOCK_NAME=.sol-cap.lock
 
@@ -27,16 +35,19 @@ FM_SOL_LOCK_NAME=.sol-cap.lock
 FM_SOL_CAP_REFUSAL=
 FM_SOL_CLAIM_CREATED=
 
-# Set by fm_sol_cap_ceiling (FM_SOL_CAP) and fm_sol_cap_model_set
-# (FM_SOL_CAP_MODELS_ERROR, FM_SOL_CEILING_ERROR, FM_SOL_COUNT_ERROR,
-# FM_SOL_ACTIVE_LIST, FM_SOL_CAP_NOW, FM_LOCK_HELD_PID) for their caller.
+# Set by fm_sol_cap_config (FM_SOL_CAP_ACTIVE, FM_SOL_CAP, FM_SOL_CAP_MAX,
+# FM_SOL_CAP_MODELS, FM_SOL_CAP_PATTERN, FM_SOL_CAP_CONFIG_ERROR) and by
+# fm_sol_cap_active_count (FM_SOL_COUNT_ERROR, FM_SOL_ACTIVE_LIST,
+# FM_SOL_COUNT) and fm_sol_cap_lock_acquire (FM_LOCK_HELD_PID) for their
+# caller.
 # shellcheck disable=SC2034
+FM_SOL_CAP_ACTIVE=0
 FM_SOL_CAP=
-FM_SOL_CAP_MODELS_ERROR=
-FM_SOL_CEILING_ERROR=
-FM_SOL_COUNT_ERROR=
-
+FM_SOL_CAP_MAX=
 FM_SOL_CAP_MODELS=
+FM_SOL_CAP_PATTERN=
+FM_SOL_CAP_CONFIG_ERROR=
+FM_SOL_COUNT_ERROR=
 
 fm_sol_cap_age_text() {  # <seconds>
   local s=$1
@@ -51,59 +62,201 @@ fm_sol_cap_age_text() {  # <seconds>
   fi
 }
 
-# fm_sol_cap_model_set <config-dir>
-# Derive the Sol model ids from <config-dir>/crew-dispatch.json's rule
-# profiles and default profile. Sets FM_SOL_CAP_MODELS to a pipe-delimited
-# set, empty when the file is absent, so a home whose dispatch table names no
-# Sol model keeps this guard inert. Returns 1 with FM_SOL_CAP_MODELS_ERROR
-# when jq is missing or the table exists but cannot be read, so the guard
-# refuses rather than counts nothing on a machine whose dispatch table it
-# cannot read.
-fm_sol_cap_model_set() {  # <config-dir>
-  local config=$1 file
-  FM_SOL_CAP_MODELS=
-  FM_SOL_CAP_MODELS_ERROR=
-  file=$config/crew-dispatch.json
-  [ -e "$file" ] || [ -L "$file" ] || return 0
-  if ! command -v jq >/dev/null 2>&1; then
-    FM_SOL_CAP_MODELS_ERROR="jq is missing, so the Sol ceiling cannot read $file"
-    return 1
+# fm_sol_cap_config_dir <state-dir>
+# The config directory of the home that owns <state-dir>. A parent-route
+# state belongs to the parent home; any other state belongs to the home that
+# holds it. The dispatching home's own config override wins for its own
+# state, so a home that redirects its config is read from where it reads.
+fm_sol_cap_config_dir() {  # <state-dir>
+  local state=$1 home
+  case "$state" in
+    */state/parent-route) home=${state%/state/parent-route} ;;
+    */state) home=${state%/state} ;;
+    *) home=${FM_HOME:-} ;;
+  esac
+  if [ -n "${FM_CONFIG_OVERRIDE:-}" ] && [ -n "$home" ] && [ "$home" = "${FM_HOME:-}" ]; then
+    printf '%s\n' "$FM_CONFIG_OVERRIDE"
+    return 0
   fi
-  if ! FM_SOL_CAP_MODELS=$(jq -r --arg re '^gpt-[0-9.]+-sol$' '
-    def prof($v): if ($v | type) == "array" then $v else [$v] end;
-    ([(.rules // [])[]? | prof(.use?)[]? | (.model? // empty)]
-      + (if has("default") then [prof(.default)[]? | (.model? // empty)] else [] end))
-    | map(select(type == "string" and test($re)))
-    | unique | join("|")' "$file" 2>/dev/null); then
-    FM_SOL_CAP_MODELS_ERROR="$file exists but cannot be read"
-    return 1
-  fi
-  return 0
+  [ -n "$home" ] || return 1
+  printf '%s/config\n' "$home"
 }
 
-# fm_sol_cap_ceiling <config-dir>
-# Resolve the concurrent-Sol ceiling. config/sol-cap in the dispatching home,
-# one integer from 1 through 4, overrides FM_SOL_CAP_DEFAULT; its absence
-# uses the default. Returns 1 with FM_SOL_CEILING_ERROR when the file is
-# present but unreadable or malformed, so the guard refuses instead of
-# guessing the ceiling.
-fm_sol_cap_ceiling() {  # <config-dir>
-  local config=$1 file cap
-  FM_SOL_CAP=$FM_SOL_CAP_DEFAULT
-  FM_SOL_CEILING_ERROR=
+# fm_sol_cap_config <config-dir>
+# Load the captain's declaration from <config-dir>/sol-cap. Sets
+# FM_SOL_CAP_ACTIVE=1 when a declaration exists, FM_SOL_CAP_MAX (the
+# declared maximum), FM_SOL_CAP (the effective ceiling), FM_SOL_CAP_MODELS
+# (the declared exact model ids), and FM_SOL_CAP_PATTERN (the declared model
+# pattern). Returns 0 when the guard is declared and well formed. An absent
+# declaration leaves the guard inert: FM_SOL_CAP_ACTIVE=0, no ceiling, and no
+# error. A malformed declaration returns 1 with FM_SOL_CAP_CONFIG_ERROR
+# naming the file and the problem, so the guard refuses instead of guessing
+# a ceiling the captain never wrote.
+fm_sol_cap_config() {  # <config-dir>
+  local config=$1 file line key value rc
+  local max='' ceiling='' models='' pattern=''
+  local seen_max=0 seen_ceiling=0 seen_models=0 seen_pattern=0
+  FM_SOL_CAP_ACTIVE=0
+  FM_SOL_CAP=
+  FM_SOL_CAP_MAX=
+  FM_SOL_CAP_MODELS=
+  FM_SOL_CAP_PATTERN=
+  FM_SOL_CAP_CONFIG_ERROR=
   file=$config/sol-cap
   [ -e "$file" ] || [ -L "$file" ] || return 0
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    FM_SOL_CEILING_ERROR="$file is not a readable regular file"
+    FM_SOL_CAP_CONFIG_ERROR="$file is not a readable regular file"
     return 1
   fi
-  cap=$(cat "$file")
-  case "$cap" in
-    1 | 2 | 3 | 4) ;;
-    *) FM_SOL_CEILING_ERROR="$file must be one integer from 1 through 4"; return 1 ;;
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    case "$line" in
+      '' | '#'*) continue ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *)
+        FM_SOL_CAP_CONFIG_ERROR="$file declares a line that is not a key=value pair: $line"
+        return 1
+        ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      max)
+        [ "$seen_max" = 0 ] || {
+          FM_SOL_CAP_CONFIG_ERROR="$file declares max more than once"
+          return 1
+        }
+        seen_max=1
+        max=$value
+        ;;
+      ceiling)
+        [ "$seen_ceiling" = 0 ] || {
+          FM_SOL_CAP_CONFIG_ERROR="$file declares ceiling more than once"
+          return 1
+        }
+        seen_ceiling=1
+        ceiling=$value
+        ;;
+      models)
+        [ "$seen_models" = 0 ] || {
+          FM_SOL_CAP_CONFIG_ERROR="$file declares models more than once"
+          return 1
+        }
+        seen_models=1
+        models=$value
+        ;;
+      model-pattern)
+        [ "$seen_pattern" = 0 ] || {
+          FM_SOL_CAP_CONFIG_ERROR="$file declares model-pattern more than once"
+          return 1
+        }
+        seen_pattern=1
+        pattern=$value
+        ;;
+      *)
+        FM_SOL_CAP_CONFIG_ERROR="$file declares an unknown key: $key"
+        return 1
+        ;;
+    esac
+  done < "$file"
+  if [ "$seen_max" != 1 ]; then
+    FM_SOL_CAP_CONFIG_ERROR="$file must declare max, the largest concurrent session count the captain allows"
+    return 1
+  fi
+  case "$max" in
+    '' | *[!0-9]*)
+      FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer"
+      return 1
+      ;;
   esac
-  FM_SOL_CAP=$cap
+  if [ "$max" -lt 1 ]; then
+    FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer"
+    return 1
+  fi
+  if [ "$seen_ceiling" = 1 ]; then
+    case "$ceiling" in
+      '' | *[!0-9]*)
+        FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max"
+        return 1
+        ;;
+    esac
+    if [ "$ceiling" -lt 1 ] || [ "$ceiling" -gt "$max" ]; then
+      FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max"
+      return 1
+    fi
+  else
+    ceiling=$max
+  fi
+  if [ "$seen_models" != 1 ] && [ "$seen_pattern" != 1 ]; then
+    FM_SOL_CAP_CONFIG_ERROR="$file must declare models or model-pattern, the model ids the ceiling covers"
+    return 1
+  fi
+  if [ "$seen_models" = 1 ]; then
+    case "$models" in
+      '')
+        FM_SOL_CAP_CONFIG_ERROR="$file must declare models as a pipe-delimited list of model ids"
+        return 1
+        ;;
+      *'||'*)
+        FM_SOL_CAP_CONFIG_ERROR="$file declares an empty model id in models"
+        return 1
+        ;;
+    esac
+  fi
+  if [ "$seen_pattern" = 1 ]; then
+    case "$pattern" in
+      '')
+        FM_SOL_CAP_CONFIG_ERROR="$file must declare model-pattern as one extended regular expression"
+        return 1
+        ;;
+    esac
+    rc=0
+    printf '' | grep -E -e "$pattern" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      FM_SOL_CAP_CONFIG_ERROR="$file declares an unusable model-pattern: $pattern"
+      return 1
+    fi
+  fi
+  FM_SOL_CAP_ACTIVE=1
+  FM_SOL_CAP_MAX=$max
+  FM_SOL_CAP=$ceiling
+  FM_SOL_CAP_MODELS=$models
+  FM_SOL_CAP_PATTERN=$pattern
   return 0
+}
+
+# fm_sol_cap_model_capped <model>
+# Is <model> one of the models the loaded declaration covers? The declared
+# exact ids match literally; the declared pattern matches the model id. A
+# model the declaration does not name is not capped.
+fm_sol_cap_model_capped() {  # <model>
+  local model=$1
+  [ -n "$model" ] || return 1
+  case "|$FM_SOL_CAP_MODELS|" in
+    *"|$model|"*) return 0 ;;
+  esac
+  [ -n "$FM_SOL_CAP_PATTERN" ] || return 1
+  printf '%s\n' "$model" | grep -Eq "$FM_SOL_CAP_PATTERN"
+}
+
+# fm_sol_cap_state_model_capped <state-dir> <model>
+# Is <model> covered by the declaration that governs <state-dir>? Returns 0
+# when it is, 1 when it is not or when no declaration exists, and 2 when that
+# declaration is malformed and the question cannot be answered.
+fm_sol_cap_state_model_capped() {  # <state-dir> <model>
+  local state=$1 model=$2 config
+  config=$(fm_sol_cap_config_dir "$state") || {
+    printf '%s\n' "error: Sol ceiling unavailable: the config directory of $state could not be resolved" >&2
+    return 2
+  }
+  fm_sol_cap_config "$config" || {
+    printf '%s\n' "error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR" >&2
+    return 2
+  }
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 1
+  fm_sol_cap_model_capped "$model"
 }
 
 # fm_sol_cap_entry_shape <start> <pid>
@@ -122,7 +275,7 @@ fm_sol_cap_entry_live() {  # <start> <pid>
 }
 
 # fm_sol_cap_active_count <first-state>
-# Count the live Sol-session registry rows in every local home's state
+# Count the live capped-session registry rows in every local home's state
 # directory on this machine. Sets FM_SOL_COUNT to the
 # count and FM_SOL_ACTIVE_LIST to a "; "-joined listing "<id> (<model>, age
 # N)"; an entry in a state directory other than <first-state> is qualified
@@ -138,7 +291,7 @@ fm_sol_cap_home() {
 }
 
 fm_sol_cap_adopt_workers() (
-  local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current
+  local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current config
   trap '[ -z "$lifecycle_lock" ] || fm_lock_release "$lifecycle_lock"' EXIT
   file=$state/$FM_SOL_REGISTRY_NAME
   case "$state" in
@@ -146,6 +299,11 @@ fm_sol_cap_adopt_workers() (
     */state) home=${state%/state} ;;
     *) home=$FM_HOME ;;
   esac
+  # The model set is the declaring home's own: a home that declared no
+  # ceiling adopts nothing and owns no occupancy.
+  config=$(fm_sol_cap_config_dir "$state") || return 1
+  fm_sol_cap_config "$config" || return 1
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 0
   for meta in "$state"/*.meta; do
     if [ -n "$lifecycle_lock" ]; then
       fm_lock_release "$lifecycle_lock" || return 1
@@ -156,7 +314,7 @@ fm_sol_cap_adopt_workers() (
     id=${meta##*/}
     id=${id%.meta}
     model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$meta") || return 1
-    case "|$FM_SOL_CAP_MODELS|" in *"|$model|"*) [ -n "$model" ] || continue ;; *) continue ;; esac
+    fm_sol_cap_model_capped "$model" || continue
     if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$file"; then
       pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$file") || return 1
       [ "$pid" = -2 ] || continue
@@ -213,7 +371,7 @@ fm_sol_cap_active_count() {  # <first-state>
   for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
     file=$state/$FM_SOL_REGISTRY_NAME
     if ! fm_sol_cap_adopt_workers "$state" "$now"; then
-      FM_SOL_COUNT_ERROR="cannot reconcile pre-existing Sol workers in $state"
+      FM_SOL_COUNT_ERROR="cannot reconcile pre-existing capped workers in $state"
       return 1
     fi
     [ -e "$file" ] || [ -L "$file" ] || continue
@@ -299,32 +457,29 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
 
 # fm_sol_cap_refuse_and_claim <id> <kind> <harness> <model> <config-dir> <state-dir>
 # The guard bin/fm-spawn.sh calls once a spawn's harness/model axis is fully
-# resolved and before any endpoint, worktree, or record exists. A non-Sol or
-# unset model never touches the registry and returns 0. A Sol-model dispatch
-# at the ceiling is refused with one actionable message in FM_SOL_CAP_REFUSAL
-# and return 1, and otherwise claims this task's row atomically in one locked
-# critical section (count under the lock, then commit), with the calling
-# process's pid as the reservation. An unavailable model set, ceiling, count,
-# or claim lock refuses loudly rather than launching possibly uncounted.
+# resolved and before any endpoint, worktree, or record exists. A home that
+# declared no ceiling never touches the registry and returns 0. A model the
+# declaration does not cover returns 0. A dispatch at the ceiling is refused
+# with one actionable message in FM_SOL_CAP_REFUSAL and return 1, and
+# otherwise claims this task's row atomically in one locked critical section
+# (count under the lock, then commit), with the calling process's pid as the
+# reservation. A malformed declaration, an unavailable count, or a claim lock
+# refuses loudly rather than launching possibly uncounted.
 fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <state-dir>
   local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start
   FM_SOL_CAP_REFUSAL=
   FM_SOL_CLAIM_CREATED=
-  [ -n "$model" ] && [ "$model" != default ] || return 0
   [ -n "$id" ] || return 0
-  fm_sol_cap_model_set "$config" || {
-    if [[ ! "$model" =~ ^gpt-[0-9.]+-sol$ ]]; then return 0; fi
-    FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_MODELS_ERROR; task $id with model $model was not dispatched rather than launched possibly uncounted"
+  # The declaration is read before the model is judged: a malformed
+  # declaration means the guard cannot know which models it covers, so it
+  # refuses the dispatch instead of guessing a scope the captain never wrote.
+  fm_sol_cap_config "$config" || {
+    FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; task $id with model $model was not dispatched rather than launched against an undeclared ceiling"
     return 1
   }
-  case "|$FM_SOL_CAP_MODELS|" in
-  *"|$model|"*) ;;
-  *) return 0 ;;
-  esac
-  fm_sol_cap_ceiling "$config" || {
-    FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CEILING_ERROR; task $id with model $model was not dispatched rather than launched against an unread ceiling"
-    return 1
-  }
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 0
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  fm_sol_cap_model_capped "$model" || return 0
   root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$state")") || return 1
   lock=$root/state/$FM_SOL_LOCK_NAME
   if ! fm_sol_cap_lock_acquire "$lock" "task $id"; then
@@ -351,7 +506,7 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     return 1
   fi
   if [ "$FM_SOL_COUNT" -ge "$FM_SOL_CAP" ]; then
-    FM_SOL_CAP_REFUSAL="error: Sol ceiling reached: $FM_SOL_COUNT concurrent Sol session(s) already active and this ceiling is $FM_SOL_CAP (config/sol-cap may lower it); the dispatch of task $id ($harness, $model) was refused. Active sessions: $FM_SOL_ACTIVE_LIST. A session frees its slot when its worker's process ends; the dispatch contract refuses at the ceiling instead of queueing"
+    FM_SOL_CAP_REFUSAL="error: Sol ceiling reached: $FM_SOL_COUNT concurrent capped session(s) already active and this ceiling is $FM_SOL_CAP (declared in config/sol-cap); the dispatch of task $id ($harness, $model) was refused. Active sessions: $FM_SOL_ACTIVE_LIST. A session frees its slot when its worker's process ends; the dispatch contract refuses at the ceiling instead of queueing"
     fm_lock_release "$lock" || true
     return 1
   fi
@@ -372,8 +527,15 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
   return 0
 }
 
-fm_sol_cap_has_owned_occupancy() {
-  local id=$1 state=$2 model registry occupancy
+# fm_sol_cap_has_owned_occupancy <id> <state-dir>
+# Does this task hold a capped session occupancy that must be released or
+# reconciled? A registry row answers it by its pid alone. Without a row the
+# task's recorded model is classified against the declaring home's own
+# declaration, so a home that declared no ceiling owns no occupancy.
+# Returns 0 when the task owns occupancy, 1 when it does not, and 2 when the
+# declaration is malformed and the question cannot be answered.
+fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
+  local id=$1 state=$2 model registry occupancy config
   registry=$state/$FM_SOL_REGISTRY_NAME
   occupancy=$(awk -F'\t' -v id="$id" '$1 == id {print "pid:" $4; exit}' "$registry" 2>/dev/null || true)
   if [ -n "$occupancy" ]; then
@@ -387,14 +549,23 @@ fm_sol_cap_has_owned_occupancy() {
   fi
   [ -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ] || return 1
   model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$state/$id.meta") || return 1
-  [[ "$model" =~ ^gpt-[0-9.]+-sol$ ]]
+  config=$(fm_sol_cap_config_dir "$state") || return 1
+  fm_sol_cap_config "$config" || {
+    printf '%s\n' "error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR" >&2
+    return 2
+  }
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 1
+  fm_sol_cap_model_capped "$model"
 }
 
 fm_sol_cap_reconcile_local() {
-  local id=$1 state=$2 meta backend target verdict absence
+  local id=$1 state=$2 meta backend target verdict absence owned
   meta=$state/$id.meta
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  fm_sol_cap_has_owned_occupancy "$id" "$state" || return 0
+  owned=0
+  fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+  [ "$owned" -ne 2 ] || return 1
+  [ "$owned" -eq 0 ] || return 0
   backend=$(fm_backend_of_meta "$meta") || return 1
   target=$(fm_backend_target_of_meta "$meta") || return 1
   [ -n "$target" ] || return 0
@@ -413,8 +584,11 @@ fm_sol_cap_reconcile_local() {
 }
 
 fm_sol_cap_reconcile_remote() {
-  local id=$1 state=$2 scripts=$3 remote_state
-  fm_sol_cap_has_owned_occupancy "$id" "$state" || return 0
+  local id=$1 state=$2 scripts=$3 remote_state owned
+  owned=0
+  fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+  [ "$owned" -ne 2 ] || return 1
+  [ "$owned" -eq 0 ] || return 0
   remote_state=$("$scripts/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" </dev/null 2>/dev/null) || return 0
   remote_state=$(printf '%s\n' "$remote_state" | tail -1)
   case "$remote_state" in
@@ -438,10 +612,22 @@ fm_sol_cap_admission_lock_path() {  # <state-dir>
 # The admission-locked reconcile of the model the endpoint's own record
 # reports after an accepted remote launch. Sets FM_SOL_CAP_REFUSAL on failure.
 fm_sol_cap_record_actual() {  # <id> <actual-model> <state-dir>
-  local id=$1 model=$2 state=$3 lock rc=0
+  local id=$1 model=$2 state=$3 lock rc=0 config owned
   FM_SOL_CAP_REFUSAL=
-  if [[ ! "$model" =~ ^gpt-[0-9.]+-sol$ ]] && ! fm_sol_cap_has_owned_occupancy "$id" "$state"; then
-    return 0
+  config=$(fm_sol_cap_config_dir "$state") || return 1
+  fm_sol_cap_config "$config" || {
+    FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; the reported model of task $id could not be reconciled"
+    return 1
+  }
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 0
+  if ! fm_sol_cap_model_capped "$model"; then
+    owned=0
+    fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+    [ "$owned" -ne 2 ] || {
+      FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; the reported model of task $id could not be reconciled"
+      return 1
+    }
+    [ "$owned" -eq 0 ] || return 0
   fi
   lock=$(fm_sol_cap_admission_lock_path "$state") || return 1
   fm_sol_cap_lock_acquire "$lock" "the reported model of task $id" || return 1
@@ -453,16 +639,16 @@ fm_sol_cap_record_actual() {  # <id> <actual-model> <state-dir>
 # fm_sol_cap_record_actual_locked <id> <actual-model> <state-dir>
 # The locked core of fm_sol_cap_record_actual; requires the shared admission
 # lock already held, so a publication-and-reconcile transition stays one step
-# of the boundary. A Sol report claims the task's live occupancy when no live
-# or uncertain claim exists, and a non-Sol report releases the task's Sol
-# claim. A live or uncertain claim keeps its own reconciliation semantics - it
-# is never rewritten, so adopted claims stay recheckable and occupied claims
-# keep their released shape only through proven stops. Sets
+# of the boundary. A capped report claims the task's live occupancy when no
+# live or uncertain claim exists, and an uncapped report releases the task's
+# capped claim. A live or uncertain claim keeps its own reconciliation
+# semantics - it is never rewritten, so adopted claims stay recheckable and
+# occupied claims keep their released shape only through proven stops. Sets
 # FM_SOL_CAP_REFUSAL on failure.
 fm_sol_cap_record_actual_locked() {  # <id> <actual-model> <state-dir>
   local id=$1 model=$2 state=$3 registry existing_pid existing_start
   FM_SOL_CAP_REFUSAL=
-  if [[ ! "$model" =~ ^gpt-[0-9.]+-sol$ ]]; then
+  if ! fm_sol_cap_model_capped "$model"; then
     fm_sol_cap_has_owned_occupancy "$id" "$state" || return 0
     fm_sol_cap_registry_promote "$id" remove "$state" || return 1
     return 0
@@ -475,18 +661,23 @@ fm_sol_cap_record_actual_locked() {  # <id> <actual-model> <state-dir>
   fi
   fm_epoch_seconds_to FM_SOL_CAP_NOW
   if ! fm_sol_cap_registry_claim "$registry" "$id" "$model" "$FM_SOL_CAP_NOW" 0; then
-    FM_SOL_CAP_REFUSAL="error: Sol ceiling: the reported Sol model of task $id could not be recorded in $registry; the confirmed route's record stands for the next admission to reconcile"
+    FM_SOL_CAP_REFUSAL="error: Sol ceiling: the reported model of task $id could not be recorded in $registry; the confirmed route's record stands for the next admission to reconcile"
     return 1
   fi
   return 0
 }
 
 fm_sol_cap_registry_promote() {
-  local id=$1 pid=$2 state=$3 registry tmp stopped=0 recorded_model now
+  local id=$1 pid=$2 state=$3 registry tmp stopped=0 recorded_model now config
   registry=$state/$FM_SOL_REGISTRY_NAME
+  config=$(fm_sol_cap_config_dir "$state") || return 1
+  fm_sol_cap_config "$config" || {
+    echo "error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; the occupancy of task $id was retained rather than released against an undeclared ceiling" >&2
+    return 1
+  }
   if [ "$pid" = remove ] && [ -f "$state/$id.meta" ]; then
     recorded_model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$state/$id.meta") || return 1
-    [[ ! "$recorded_model" =~ ^gpt-[0-9.]+-sol$ ]] || stopped=1
+    fm_sol_cap_model_capped "$recorded_model" && stopped=1
   fi
   if [ "$stopped" = 1 ] &&
     { [ ! -f "$registry" ] || ! awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$registry"; }; then
@@ -506,10 +697,13 @@ fm_sol_cap_registry_promote() {
 }
 
 fm_sol_cap_promote() {
-  local id=$1 pid=$2 state=$3 registry root lock rc=0
+  local id=$1 pid=$2 state=$3 registry root lock rc=0 owned
   registry=$state/$FM_SOL_REGISTRY_NAME
   if [ "$pid" = remove ]; then
-    fm_sol_cap_has_owned_occupancy "$id" "$state" || return 0
+    owned=0
+    fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+    [ "$owned" -ne 2 ] || return 1
+    [ "$owned" -eq 0 ] || return 0
   else
     [ -f "$registry" ] || return 0
     awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$registry" || return 0
@@ -555,11 +749,15 @@ fm_sol_cap_registry_prune() {  # <registry-file>
 
 # --- CLI ---------------------------------------------------------------------
 # Operator and test seam: drive the same contract from a fresh process, so a
-# registry or ceiling can be inspected and a refusal reproduced without
-# sourcing. Requires FM_HOME to select the dispatching Firstmate home; the
-# local-home walk resolves the rest. modes:
+# declaration or a refusal can be inspected and reproduced without sourcing.
+# Requires FM_HOME to select the dispatching Firstmate home; the local-home
+# walk resolves the rest. modes:
+#   status <config-dir>
+#                prints the declaration, or "inert" when none exists.
 #   models <config-dir>
+#                prints the declared exact model ids.
 #   ceiling <config-dir>
+#                prints the effective ceiling, or "inert" when none exists.
 #   refuse-claim <id> <kind> <harness> <model> <config-dir> <state-dir>
 #                prints "claimed" or the refusal, exits 0/1.
 #   record-actual <id> <actual-model> <state-dir>
@@ -570,11 +768,35 @@ fm_sol_cap_registry_prune() {  # <registry-file>
 fm_sol_cap_cli() {
   local mode=$1
   case "$mode" in
+  status)
+    fm_sol_cap_config "${2:?params: status <config-dir>}" || {
+      printf '%s\n' "$FM_SOL_CAP_CONFIG_ERROR" >&2
+      return 1
+    }
+    if [ "$FM_SOL_CAP_ACTIVE" = 1 ]; then
+      printf 'active max=%s ceiling=%s models=%s pattern=%s\n' \
+        "$FM_SOL_CAP_MAX" "$FM_SOL_CAP" "$FM_SOL_CAP_MODELS" "$FM_SOL_CAP_PATTERN"
+    else
+      printf '%s\n' inert
+    fi
+    ;;
   models)
-    fm_sol_cap_model_set "${2:?params: models <config-dir>}" && printf '%s\n' "$FM_SOL_CAP_MODELS"
+    fm_sol_cap_config "${2:?params: models <config-dir>}" || {
+      printf '%s\n' "$FM_SOL_CAP_CONFIG_ERROR" >&2
+      return 1
+    }
+    printf '%s\n' "$FM_SOL_CAP_MODELS"
     ;;
   ceiling)
-    fm_sol_cap_ceiling "${2:?params: ceiling <config-dir>}" && printf '%s\n' "$FM_SOL_CAP"
+    fm_sol_cap_config "${2:?params: ceiling <config-dir>}" || {
+      printf '%s\n' "$FM_SOL_CAP_CONFIG_ERROR" >&2
+      return 1
+    }
+    if [ "$FM_SOL_CAP_ACTIVE" = 1 ]; then
+      printf '%s\n' "$FM_SOL_CAP"
+    else
+      printf '%s\n' inert
+    fi
     ;;
   run)
     local id=$2 state=$3
@@ -588,7 +810,13 @@ fm_sol_cap_cli() {
       return 2
     }
     fm_sol_cap_refuse_and_claim "$2" "$3" "$4" "$5" "$6" "$7" && {
-      printf '%s\n' claimed
+      # "claimed" means a reservation row was written; "not-capped" means the
+      # declaration does not cover that model, so the guard never applied.
+      if [ "$FM_SOL_CLAIM_CREATED" = "$2" ]; then
+        printf '%s\n' claimed
+      else
+        printf '%s\n' not-capped
+      fi
       return 0
     }
     [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL"
@@ -607,7 +835,7 @@ fm_sol_cap_cli() {
     return 1
     ;;
   *)
-    echo "unknown fm-sol-cap-lib.sh mode: $mode (try: models | ceiling | refuse-claim | record-actual)" >&2
+    echo "unknown fm-sol-cap-lib.sh mode: $mode (try: status | models | ceiling | refuse-claim | record-actual)" >&2
     return 2
     ;;
   esac

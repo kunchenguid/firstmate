@@ -1340,6 +1340,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local remote_sol_model='' cap_lock='' cap_scope=1 cap_scope_rc=0
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
@@ -1675,7 +1676,24 @@ spawn_remote_secondmate() {
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
   cap_lock=
-  if [[ "$remote_model" =~ ^gpt-[0-9.]+-sol$ ]] || fm_sol_cap_has_owned_occupancy "$id" "$STATE"; then
+  # The ceiling's scope comes from the captain's own declaration, not from a
+  # model name the tracked code knows: a reported model the declaration
+  # covers, or a task that already owns capped occupancy, needs the shared
+  # admission boundary across publication and reconcile.
+  cap_scope=1
+  cap_scope_rc=0
+  fm_sol_cap_state_model_capped "$STATE" "$remote_model" || cap_scope_rc=$?
+  case "$cap_scope_rc" in
+    0) cap_scope=0 ;;
+    2)
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id launched, but the Sol ceiling declaration could not be read; its task record and occupancy remain for the next admission to reconcile" >&2
+      return 1
+      ;;
+  esac
+  if [ "$cap_scope" = 0 ] || fm_sol_cap_has_owned_occupancy "$id" "$STATE"; then
     cap_lock=$(fm_sol_cap_admission_lock_path "$STATE")
     if [ -z "$cap_lock" ]; then
       fm_lock_release "$remote_lock" || true

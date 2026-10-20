@@ -587,13 +587,10 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
-# Closing a zellij tab's only PANE does NOT close the tab itself (an
-# empty tab survives in list-tabs); `close-tab-by-id` on a live tab DOES
-# cleanly remove both the pane and the tab in one call, verified to need no
-# separate pane-close first. The owning tab id is looked up fresh from the
-# pane id when possible via fm_backend_zellij_tab_for_pane; teardown also
-# passes the recorded tab id and expected tab label for already-empty ghost
-# tabs. Any tab id is verified against the expected label when one is provided.
+# fm_backend_zellij_target_absent: prove that the recorded pane and tab are
+# gone. Every pane and tab of the session is read, and neither the recorded
+# pane nor the recorded tab may still be listed. A read that cannot run, or
+# an inventory that still names the target, is not proof of absence.
 fm_backend_zellij_target_absent() {
   local session=$1 pane=$2 tab=${3:-} label=${4:-} panes tabs scoped=
   [ -z "$label" ] || scoped=$(fm_backend_zellij_scoped_title "$label")
@@ -610,7 +607,46 @@ fm_backend_zellij_target_absent() {
   ' >/dev/null 2>&1
 }
 
+# fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors
+# tmux-kill-window's/herdr-pane-close's `|| true` contract). Verified: unlike
+# herdr, closing a zellij tab's only PANE does NOT close the tab itself (an
+# empty tab survives in list-tabs); `close-tab-by-id` on a live tab DOES
+# cleanly remove both the pane and the tab in one call, verified to need no
+# separate pane-close first. The owning tab id is looked up fresh from the
+# pane id when possible via fm_backend_zellij_tab_for_pane; teardown also
+# passes the recorded tab id and expected tab label for already-empty ghost
+# tabs. Any tab id is verified against the expected label when one is provided.
 fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
+  fm_backend_zellij_parse_target "$1" || return 0
+  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || return 0
+  local tab_id fallback_tab_id=${2:-} expected_label=${3:-}
+  tab_id=$(fm_backend_zellij_tab_for_pane "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null)
+  if [ -n "$tab_id" ] && [ -n "$expected_label" ] && ! fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"; then
+    tab_id=
+  fi
+  case "$fallback_tab_id" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -z "$tab_id" ]; then
+        if [ -z "$expected_label" ] || fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$fallback_tab_id" "$expected_label"; then
+          tab_id=$fallback_tab_id
+        fi
+      fi
+      ;;
+  esac
+  if [ -n "$tab_id" ]; then
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
+  elif [ -z "$expected_label" ]; then
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || true
+  fi
+}
+
+# fm_backend_zellij_kill_confirmed: close the task's tab and report whether
+# it is gone. Only the capped-session release decision uses this, so ordinary
+# teardown keeps fm_backend_zellij_kill's best-effort contract unchanged for
+# every other task. A failed close is proved absent by the session's pane
+# and tab inventories; a successful close is its own proof.
+fm_backend_zellij_kill_confirmed() {  # <target> [tab_id] [expected_label]
   fm_backend_zellij_parse_target "$1" || return 1
   local tab_id fallback_tab_id=${2:-} expected_label=${3:-} sessions
   sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 1

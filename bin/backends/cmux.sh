@@ -612,6 +612,10 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # target is the last one in its window a throwaway sibling is created first,
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
+# fm_backend_cmux_workspace_absent: prove that the named workspace is gone.
+# Every window's inventory is read, and every workspace in it must be a
+# different workspace with a different title. A read that cannot run, or an
+# inventory that still names the workspace, is not proof of absence.
 fm_backend_cmux_workspace_absent() {
   local wsid=$1 label=${2:-} inventory title='' windows window_ids wid
   [ -z "$label" ] || title=$(fm_backend_cmux_scoped_title "$label")
@@ -632,7 +636,33 @@ fm_backend_cmux_workspace_absent() {
   return 0
 }
 
+# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
+# every other backend's `kill` `|| true` contract). A cmux task owns one
+# workspace, so teardown reclaims that workspace and all of its surfaces.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
+  local expected_label=${3:-} wsid wininfo win count
+  if [ -n "$expected_label" ]; then
+    fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
+  else
+    fm_backend_cmux_parse_target "$1" || return 0
+  fi
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  if [ -n "$win" ] && [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+}
+
+# fm_backend_cmux_kill_confirmed: close the task's workspace and report
+# whether the workspace is gone. Only the capped-session release decision
+# uses this, so ordinary teardown keeps fm_backend_cmux_kill's best-effort
+# contract unchanged for every other task. The close and the absence proof
+# are the reviewed cmux sequence: a workspace whose window cannot be resolved
+# is not closed, and every window's inventory must prove the workspace gone.
+fm_backend_cmux_kill_confirmed() {  # <target> [unused] [expected-label]
   local expected_label=${3:-} wsid wininfo win count
   fm_backend_cmux_parse_target "$1" || return 1
   wsid=$FM_BACKEND_CMUX_WORKSPACE

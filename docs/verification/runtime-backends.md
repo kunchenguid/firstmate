@@ -353,7 +353,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 A falsely successful close can let teardown remove every durable record naming a still-live endpoint, so each backend's close return must reflect what it can prove.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
 The table below states the current return contract; the 2026-09-14 measurements cover only the tmux and missing-Orca-CLI paths.
-`tests/fm-backend-close.test.sh` exercises failed and successful close returns for cmux, Zellij, and Orca with controlled command responses.
+`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, and Orca with controlled command responses.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -386,6 +386,23 @@ tmux's re-read is deliberately exact - `=session` plus a whole-line window-name 
 It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
 Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
 
+**The confirmed close is a separate contract**
+
+`fm_backend_kill_confirmed` closes the endpoint and then proves it is gone.
+It exists for exactly one caller: the capped-session release decision, which may only release a session's occupancy after its endpoint is confirmed absent.
+It is deliberately NOT the ordinary teardown path: a task that holds no capped occupancy keeps `fm_backend_kill`'s documented per-backend behavior, so no other task's teardown changes.
+
+| Backend | `fm_backend_kill_confirmed` proves absence by |
+| --- | --- |
+| tmux | the window's exact recorded identity, as the ordinary close already does |
+| herdr | `fm_backend_herdr_endpoint_confirmed_gone`, the same structured not-found the Herdr record gate uses |
+| zellij | the session's pane and tab inventories; a read that cannot run, or an inventory that still names the pane or tab, is not proof |
+| cmux | the workspace inventory of every window; a failed read, or a surviving workspace or title, is not proof |
+| orca | the close command's own answer: a failed command or an error JSON response is a refused close |
+| any other backend | no separate proof exists, so the backend's ordinary close contract applies |
+
+A refused confirmed close means the endpoint could not be proven absent, so the caller keeps the session's occupancy instead of releasing it.
+
 Two bounds of the refusal are known and deliberately not closed here.
 
 `--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, and T3 Code.
@@ -395,7 +412,7 @@ It states what `--force` authorizes rather than what will have happened, because
 T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
-The step immediately after it removes the Orca worktree through the same CLI, so continuing after an unconfirmed close could release the worktree while its terminal remains live; a missing CLI would also prevent that release.
+The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header and `endpoint_close_refusal` comment own cleanup ordering and the limits of record retention after a close refusal.

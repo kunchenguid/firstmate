@@ -697,6 +697,7 @@ TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 SOL_ENDPOINT_STOPPED=0
+TEARDOWN_SOL_CLAIM=0
 TEARDOWN_WINDOWLESS=0
 TEARDOWN_WINDOWLESS_SHAPE=0
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
@@ -4048,7 +4049,34 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
+# Whether this task holds a capped session occupancy that only a CONFIRMED
+# endpoint close may release. The capped-session guard reads the captain's
+# own declaration here, so a task that holds no capped occupancy keeps this
+# teardown's close behavior exactly as it was, and a malformed declaration
+# stops the cleanup loudly instead of releasing occupancy it cannot
+# classify.
+teardown_sol_claim_held() {  # <task-id> <state-dir>
+  local id=$1 state=$2 owned
+  owned=0
+  fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+  case "$owned" in
+    0)
+      TEARDOWN_SOL_CLAIM=1
+      return 0
+      ;;
+    1)
+      TEARDOWN_SOL_CLAIM=0
+      return 0
+      ;;
+    *)
+      echo "error: the Sol ceiling declaration could not be read, so $id's capped occupancy can neither be confirmed nor released" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+teardown_sol_claim_held "$ID" "$STATE" || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -4067,8 +4095,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    if [ "$TEARDOWN_SOL_CLAIM" = 1 ]; then
+      fm_backend_kill_confirmed "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    else
+      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    fi
     SOL_ENDPOINT_STOPPED=1
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -4127,7 +4160,15 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr
   if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
   fi
-  if fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+  if [ "$TEARDOWN_SOL_CLAIM" = 1 ]; then
+    # A capped session's occupancy is released only after the endpoint is
+    # confirmed gone; an unconfirmed close retains it.
+    if fm_backend_kill_confirmed "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+      SOL_ENDPOINT_STOPPED=1
+    else
+      endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+    fi
+  elif fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
     SOL_ENDPOINT_STOPPED=1
   else
     endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1

@@ -979,6 +979,7 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
   mkdir -p "$dir/home/config"
   printf '{"rules":[{"use":{"model":"gpt-6.1-sol"}}]}\n' > "$dir/home/config/crew-dispatch.json"
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$dir/home/config/sol-cap"
   sed 's/^model=opus$/model=gpt-6.1-sol/' "$dir/home/state/rl6.meta" > "$dir/home/state/rl6.meta.tmp"
   mv "$dir/home/state/rl6.meta.tmp" "$dir/home/state/rl6.meta"
   printf 'rl6\tgpt-6.1-sol\t1\t0\n' > "$dir/home/state/sol-sessions.tsv"

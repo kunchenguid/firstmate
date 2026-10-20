@@ -196,7 +196,7 @@ pass "a remote relaunch keeps an already-armed PR poll authenticating"
 echo "ALL TESTS PASSED"
 
 reset_meta
-printf '{"rules":[{"use":{"model":"gpt-6.1-sol"}}]}\n' > "$HOME_DIR/config/crew-dispatch.json"
+printf 'max=4\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
 for i in 1 2 3 4; do printf 'live-%s\tgpt-6.1-sol\t1\t%s\n' "$i" "$$"; done > "$HOME_DIR/state/sol-sessions.tsv"
 printf 'ios\tgpt-6.1-sol\t1\t99999999\n' >> "$HOME_DIR/state/sol-sessions.tsv"
 OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?

@@ -2045,54 +2045,85 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Sol session ceiling (config/sol-cap)
 
-Firstmate mechanically limits concurrent Sol sessions to four; `config/sol-cap` may lower this ceiling.
-A Sol session is a worker whose actual dispatched model is in the Sol set.
+The ceiling is **off unless the captain declares it**.
+`config/sol-cap` is a local, gitignored file in the dispatching home that names both the ceiling and the models it covers.
+Without that file there is no ceiling, no reservation, and no change to any dispatch: a home that never opted in behaves exactly as it did before this guard existed.
+A malformed file refuses loudly, naming the file and the problem, rather than guessing a ceiling the captain never wrote.
+
+```sh
+# config/sol-cap
+max=4                             # required: the largest concurrent count the captain allows
+ceiling=2                         # optional: may lower max, never raise it
+models=gpt-6.1-sol|gpt-6-sol      # optional: pipe-delimited exact model ids
+model-pattern=^gpt-[0-9.]+-sol$   # optional: one extended regular expression
+```
+
+| Key | Requirement |
+| --- | --- |
+| `max` | Required. A positive integer: the largest number of concurrent capped sessions the captain allows. |
+| `ceiling` | Optional. An integer from 1 through `max`; the effective cap. Absent, it is `max`. A value above `max` is refused. |
+| `models` | Optional. A pipe-delimited list of the exact model ids the ceiling covers. |
+| `model-pattern` | Optional. One extended regular expression matching the model ids the ceiling covers. |
+
+At least one of `models` or `model-pattern` is required, because a declaration that names no model covers nothing.
+A model covered by neither is never capped, never reserved, and never counted.
+Blank lines and `#` comments are ignored; every other line is a `key=value` pair, and an unknown key, a repeated key, a non-integer count, a `ceiling` above `max`, or an unusable pattern is refused by name.
+A capped session is a worker whose dispatched model is one the declaration covers.
 A fresh launch with `--model default` has no explicit model pin; remote endpoint reuse follows the reported-model reconciliation below.
-The set is derived at call time from `config/crew-dispatch.json`'s rule and default profiles (model ids matching `^gpt-[0-9.]+-sol$`), so a future Sol row joins the ceiling by editing the dispatch table, not code.
 `bin/fm-sol-cap-lib.sh` is the single owner of the guard's mechanics and CLI, `bin/fm-spawn.sh` owns the hook point (after the spawn's harness/model axis resolves, before any endpoint, worktree, or record exists), and this section is the single owner of the operator contract.
 
 **What counts and where it lives**
 
-- The count registry is one TSV file per Firstmate home on this machine: `<state>/sol-sessions.tsv`, one row per Sol session keyed by task id; the [`fm-sol-cap-lib.sh` header](../bin/fm-sol-cap-lib.sh) owns the row format.
+- The count registry is one TSV file per Firstmate home on this machine: `<state>/sol-sessions.tsv`, one row per capped session keyed by task id; the [`fm-sol-cap-lib.sh` header](../bin/fm-sol-cap-lib.sh) owns the row format.
 - The guard counts live rows across every local Firstmate home's state directory on this machine (the same enumeration `bin/fm-project-capacity-lib.sh` counts through), so local homes share one ceiling and remote homes are never walked because their workers run on another machine; a remote secondmate is counted in the dispatching home.
+- Each home's own declaration decides which of its sessions are capped, so a home that declared no ceiling owns no capped occupancy and is never adopted into another home's count.
 - A registered stale row does not count: its recorded positive pid is no longer alive; age never releases a live worker.
 - A fresh spawn claims its row atomically under the local root home's `state/.sol-cap.lock`, with the spawning process's pid until launch delivery begins.
 - Before delivery, the reservation becomes conservative (pid 0), so an uncertain delivery or later spawn error cannot free a running worker's slot.
 - Local launch commands transfer that reservation to their own process before starting the worker; exiting the worker releases occupancy even while its interactive pane remains open.
 - Remote or uncertain deliveries keep pid 0 and require reconciliation before their slot can be released; they never expire by age.
-- A retry requesting an explicit Sol model refuses while its existing worker is live or delivery is uncertain; requesting a non-Sol or default model alone does not release that occupancy.
-- A successful remote launch involving Sol occupancy publishes the endpoint's reported actual model and reconciles occupancy from it under the admission lock, while retaining its per-task spawn lock: an existing live or uncertain Sol claim keeps its reconciliation semantics, and a confirmed non-Sol route releases stale Sol occupancy.
+- A retry requesting an explicitly capped model refuses while its existing worker is live or delivery is uncertain; requesting an uncapped or default model alone does not release that occupancy.
+- A successful remote launch involving capped occupancy publishes the endpoint's reported actual model and reconciles occupancy from it under the admission lock, while retaining its per-task spawn lock: an existing live or uncertain capped claim keeps its reconciliation semantics, and a confirmed uncapped route releases stale capped occupancy.
 - Failure to acquire the admission lock or publish the route leaves existing occupancy intact; if reconciliation fails after publication, the confirmed route record remains for the next admission to reconcile.
-- Confirmed endpoint cleanup and remote retirement release the owned Sol occupancy; failed or uncertain closes retain it.
+- Confirmed endpoint cleanup and remote retirement release the owned capped occupancy; failed or uncertain closes retain it.
 - Local relaunch and secondmate recovery reconcile an owned claim under the lifecycle locks only after proving the endpoint dead or absent; uncertain state retains the claim.
 - Remote recovery probes the configured route under the spawn locks and retires its conservative claim only for a successful dead or missing verdict, including retries after delivery failed before parent metadata publication.
-- Remote runtime switches reuse only a live reservation or reserve a new Sol slot in the parent before delivery, retaining existing occupancy until a confirmed non-Sol replacement; publishing that replacement's model and releasing the claim share the admission lock so adoption cannot restore the old Sol claim between them.
+- Remote runtime switches reuse only a live reservation or reserve a new capped slot in the parent before delivery, retaining existing occupancy until a confirmed uncapped replacement; publishing that replacement's model and releasing the claim share the admission lock so adoption cannot restore the old capped claim between them.
 - On the remote host, the nested `state/parent-route` registry shares its operational home's count and root lock with that secondmate's crew.
-- Before admission, owned Sol workers preserved across an update are adopted from task metadata under the shared lock when they have no registry row; live or unverified workers count, while proven-stopped workers do not.
+- Before admission, owned capped workers preserved across an update are adopted from task metadata under the shared lock when they have no registry row; live or unverified workers count, while proven-stopped workers do not.
 - Adopted claims use pid -2 and are rechecked before counting when their spawn lifecycle lock is available; a proven stop becomes a non-counting stop marker, while uncertain workers retain occupancy.
 - Delivery reservations with pid 0 are not rechecked by unrelated admissions, because a queued launch may still execute after its spawning process exits.
 - Dead-PID rows remain while their task metadata exists, preserving stop evidence against repeated adoption.
-- Explicit confirmed-stop release records pid -1 while Sol metadata remains, even when no registry row or file existed; that row holds no occupancy, prevents re-adoption of the stopped worker, and is replaced by a new admitted incarnation.
-- Non-Sol launches with no owned Sol occupancy bypass the admission lock, including retries whose only registry row is a non-counting stop marker or a dead positive PID; these records remain stop evidence until a new admitted incarnation or pruning replaces them.
+- Explicit confirmed-stop release records pid -1 while the capped task's metadata remains, even when no registry row or file existed; that row holds no occupancy, prevents re-adoption of the stopped worker, and is replaced by a new admitted incarnation.
+- Launches that own no capped occupancy bypass the admission lock, including retries whose only registry row is a non-counting stop marker or a dead positive PID; these records remain stop evidence until a new admitted incarnation or pruning replaces them.
 - Passing spawns prune stopped rows once their metadata is absent.
-- A malformed registry row (bad shape) refuses every Sol dispatch with the row named rather than silently undercounting; staleness is release, but a broken row is a disruption, not a free slot.
+- A malformed registry row (bad shape) refuses every capped dispatch with the row named rather than silently undercounting; staleness is release, but a broken row is a disruption, not a free slot.
 
 **Refusal, not queueing**
 
 A dispatch at the ceiling is refused before anything is created, with one actionable error naming the active sessions and their ages, in line with the dispatch contract that refuses rather than queues a wait with no bounded end.
-The refusal message names `config/sol-cap`, and the CLI prints the derived Sol set and the resolved ceiling directly for inspection:
+The refusal message names `config/sol-cap`, and the CLI prints the declaration and the resolved ceiling directly for inspection:
 
 ```sh
-FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh models    $FM_HOME/config   # derived Sol ids
-FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh ceiling   $FM_HOME/config
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh status   $FM_HOME/config   # the declaration, or "inert"
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh models   $FM_HOME/config   # the declared exact model ids
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh ceiling  $FM_HOME/config   # the effective ceiling, or "inert"
 ```
 
-**Ceiling and the override**
+**The declaration is the contract**
 
-- The default is 4, `FM_SOL_CAP_DEFAULT` in `bin/fm-sol-cap-lib.sh`, in one place.
-- `config/sol-cap` in the dispatching home may lower it with one integer from 1 through 4; larger values are refused.
-- A ceiling file that is present but unreadable or malformed, or a dispatch table that cannot be read, refuses Sol dispatch loudly rather than guessing or counting nothing.
-- An absent dispatch table or one with no matching models leaves the guard inert; GLM and qwen dispatches do not claim Sol slots.
+- There is no built-in ceiling and no built-in model set: the ceiling value, the declared maximum, and the covered models all come from the captain's own file.
+- An absent `config/sol-cap` leaves the guard inert: no ceiling, no reservation, no registry row, and no change to any dispatch.
+- A `config/sol-cap` that is present but unreadable or malformed refuses dispatch loudly, naming the file and the problem, instead of falling back to a default.
+- A `ceiling` above the declared `max` is refused, so the effective cap can only ever lower the captain's own maximum.
+- The guard's model set is exactly what the captain declared; a model the declaration does not name is never capped and never counted, whatever a dispatch table happens to contain.
+
+**One model, one capacity path**
+
+This guard is the narrow, per-home form of a fleet-wide capacity rule.
+When a fleet-wide seat-pool declaration is also in use, a model that both declarations cover is counted once: the fleet-wide ledger is authoritative for it, and this guard defers to it instead of counting the same session a second time.
+A model declared in both is a configuration error and is refused, not counted twice.
+The cross-check itself belongs to the fleet-wide seat accounting, because only that mechanism knows which pool owns a model.
 
 **Boundary**: the no-mistakes daemon's internal gate/review agent spawns decode their own agent surface in the daemon's global config (`agent:`, `agent_config:`, `agent_path_override` in the operating no-mistakes config.yaml), its binary lives outside this repository, and a task may not administer it, so those spawns stay outside this count until whoever owns that daemon instance wires a hook to conform to this contract.
 
