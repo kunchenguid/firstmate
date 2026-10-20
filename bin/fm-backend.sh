@@ -446,7 +446,8 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   if [ -n "$project" ]; then
     # Quoted, so the printed command survives a project path with spaces and
     # can be copied and run exactly as it reads.
-    echo "git -C $(printf '%q' "$project") worktree list names the copy checked out on this task's recorded branch${branch:+ $branch}."
+    echo "Find the copy checked out on this task's recorded branch${branch:+ $branch} with:"
+    echo "git -C $(printf '%q' "$project") worktree list"
   fi
   if [ -f "$prior" ] && [ ! -L "$prior" ]; then
     echo "The record as it stood before the last relaunch still carries that line at $prior."

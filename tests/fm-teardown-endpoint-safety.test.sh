@@ -155,7 +155,7 @@ test_worktree_identity_refusal_names_the_repair_path() {
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   set -e
-  printed=$(sed -n 's/^\(git -C .* worktree list\) names the copy.*/\1/p' "$dir/stderr")
+  printed=$(sed -n '/^git -C .* worktree list$/p' "$dir/stderr")
   [ -n "$printed" ] || fail "the refusal printed no runnable worktree listing: $(cat "$dir/stderr")"
   eval "$printed" > "$dir/listing" 2> "$dir/listing-err" \
     || fail "the printed listing did not run as printed: $printed"$'\n'"$(cat "$dir/listing-err")"
