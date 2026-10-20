@@ -323,11 +323,11 @@ if [ "$KIND" = ship ]; then
   # forge-CLI rule names it instead of gh-axi; an external review tool has no
   # forge CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser."
   elif [ "$FORGE" = external ]; then
-    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations, but never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser."
   else
-    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
+    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser."
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -666,6 +666,15 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+IFS= read -r -d '' SAFETY_RULES <<'EOF' || true
+8. Before any temporary edit (debug logging, a formatter run), commit the file or copy it aside, and undo the edit by restoring from that commit or copy.
+   Never `git checkout` or `git restore` a file that holds uncommitted work: it silently wipes every real change in it, so diff first.
+9. Run builds and test suites in the foreground, or poll with a bounded command that returns on its own; never background one just to idle-wait on a completion notification.
+   Where a tracked background job is genuinely needed, the paused declaration in rule 4 applies.
+10. Never `pkill` or `killall` by name or pattern - it matches every worker on the machine whose command line mentions the name. Stop only the exact process ids you started.
+EOF
+SAFETY_RULES=${SAFETY_RULES%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -695,7 +704,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations, but never drive the captain's own screen: test with headless browsers only, and never use osascript or System Events keystrokes, open app windows, attach chrome-devtools-axi to the captain's own Chrome, or launch a headed browser.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -713,6 +722,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SAFETY_RULES
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -793,6 +803,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SAFETY_RULES
 
 $WAIT_BLOCK$INBOX_SECTION
 
