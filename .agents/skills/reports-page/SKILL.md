@@ -4,7 +4,7 @@ description: >-
   Build and hand out this home's offline reports page, one searchable file carrying every data/<id>/report.md and this home's recorded captain decisions, with a stable link per entry.
   Use when the captain invokes /reports-page, asks to read, browse, search, or be linked to a scout report or an earlier investigation, or asks what a past report said.
   Also use when the captain asks what was decided about something, what they already answered, or for the link to a recorded decision.
-  Also use right after a scout's report lands, when handing the captain the link to it.
+  Nothing else fires this: it is asked for, never triggered by a report landing or by any other event.
 user-invocable: true
 metadata:
   internal: true
@@ -19,6 +19,10 @@ This skill turns both piles into one page the captain can search, and gives ever
 The page is a plain file.
 There is no service, no port, no unit, and no timer behind it: `bin/fm-reports-page.sh build` is the entire mechanism, and the page shows what the reports said at the moment of that build.
 Rebuild before handing out a link, so a report written since the last build is actually on the page.
+
+Nothing builds or offers the page on its own.
+It is opt-in by construction: a report landing does not trigger it, and neither does anything else, so a home that never asks for the page never pays for it.
+A home that wants the page offered as a matter of course says so in its own captain preferences; this skill does not decide that for anyone.
 
 ## Invocation
 

@@ -157,8 +157,8 @@ command_build() {
     printf '{"sources":[],"tasks":[]}\n' > "$decisions" \
       || { rm -f -- "$decisions"; fail "cannot stage the decisions"; }
   elif ! "$COLLECTOR" collect > "$decisions" 2>/dev/null; then
-    jq -cn '{sources: [{name: "Entscheidungen", state: "unreadable",
-                        note: "die Entscheidungen dieses Zuhauses liessen sich nicht lesen"}],
+    jq -cn '{sources: [{name: "decisions", state: "unreadable",
+                        note: "the decisions of this home could not be read"}],
              tasks: []}' > "$decisions" \
       || { rm -f -- "$decisions"; fail "cannot record the unread decisions"; }
   fi

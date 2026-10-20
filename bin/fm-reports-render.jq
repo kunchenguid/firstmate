@@ -365,9 +365,9 @@ def title_of($md; $id):
 
 def dec_meta($state; $mode; $digest):
   "<p class=\"dec-meta\"><span class=\"dec-state\">" + ($state | htmlesc) + "</span>"
-  + (if ($mode // "") == "" then "" else " &middot; Abschluss " + ($mode | htmlesc) end)
+  + (if ($mode // "") == "" then "" else " &middot; resolution " + ($mode | htmlesc) end)
   + (if ($digest // "") == "" then ""
-     else " &middot; Pruefsumme <code>" + ($digest[0:12] | htmlesc) + "</code>" end)
+     else " &middot; checksum <code>" + ($digest[0:12] | htmlesc) + "</code>" end)
   + "</p>";
 
 def dec_group($gi; $self):
@@ -376,11 +376,11 @@ def dec_group($gi; $self):
     + (if $g.id == $self then ""
        else "<h3 id=\"entscheidung-" + ($g.id | htmlesc) + "\">" + ($g.title | htmlesc) + "</h3>"
        end)
-    + "<p class=\"dec-where\">Vorgang <code>" + ($g.id | htmlesc) + "</code>"
+    + "<p class=\"dec-where\">task <code>" + ($g.id | htmlesc) + "</code>"
     + (if ($g.when // "") == "" then "" else " &middot; " + ($g.when | htmlesc) end)
     + "</p>"
     + (if ($g.question // "") == "" then ""
-       else "<div class=\"dec-q\"><p class=\"dec-label\">Frage an den Captain</p>"
+       else "<div class=\"dec-q\"><p class=\"dec-label\">Question put to the captain</p>"
             + ($g.question | md_to_html("f" + ($gi | tostring) + "-")) + "</div>"
        end)
     + ([$g.items | to_entries[]
@@ -395,7 +395,7 @@ def dec_group($gi; $self):
 
 def decisions_html($self):
   if (. // [] | length) == 0 then ""
-  else "<section class=\"dec\"><h2 id=\"entscheidungsprotokoll\">Entscheidungen</h2>"
+  else "<section class=\"dec\"><h2 id=\"decisions\">Decisions</h2>"
        + ([to_entries[] | .key as $gi | .value | dec_group($gi; $self)] | join(""))
        + "</section>"
   end;

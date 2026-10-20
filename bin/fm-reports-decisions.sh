@@ -109,9 +109,9 @@ command_collect() {
 
   # --- the configured store, first -------------------------------------------
   if [ ! -x "$TASKS_AXI" ]; then
-    note 'Vorgangsablage' 'missing' 'das Lesewerkzeug der Ablage fehlt' >> "$notes"
+    note 'task store' 'missing' 'the command that reads the store is not here' >> "$notes"
   elif ! list=$("$TASKS_AXI" list --fields body,links,hold_kind,hold_reason,closed 2>/dev/null); then
-    note 'Vorgangsablage' 'unreadable' 'die Ablage liess sich nicht lesen' >> "$notes"
+    note 'task store' 'unreadable' 'the store could not be read' >> "$notes"
   else
     # The row count comes from the TOON header, and exactly that many following
     # lines are rows, so no prose line of a wrapped value can be mistaken for an
@@ -134,10 +134,10 @@ command_collect() {
       fi
     done <<< "$ids"
     if [ "$missing" -gt 0 ]; then
-      note 'Vorgangsablage' 'partial' \
-        "$count Vorgaenge gelesen, $missing nicht lesbar" >> "$notes"
+      note 'task store' 'partial' \
+        "$count tasks read, $missing unreadable" >> "$notes"
     else
-      note 'Vorgangsablage' 'ok' "$count Vorgaenge" >> "$notes"
+      note 'task store' 'ok' "$count tasks" >> "$notes"
     fi
   fi
 
@@ -152,13 +152,13 @@ command_collect() {
     path=$(toml_value "$toml" path); [ -z "$path" ] || backlog=$path
     path=$(toml_value "$toml" archive); [ -z "$path" ] || archive=$path
   elif [ -e "$toml" ]; then
-    note 'Ablagekonfiguration' 'unreadable' \
-      '.tasks.toml liess sich nicht lesen, die voreingestellten Pfade gelten' >> "$notes"
+    note 'store configuration' 'unreadable' \
+      '.tasks.toml could not be read, the default paths apply' >> "$notes"
   fi
 
   if [ "$backend" != markdown ]; then
-    note 'Ablagedateien' 'skipped' \
-      "die Ablage laeuft auf $backend, es gibt keine Markdown-Dateien zu lesen" >> "$notes"
+    note 'store files' 'skipped' \
+      "the store runs on $backend, so there are no markdown files to read" >> "$notes"
   else
     notearch='data/note-archive.md'
     for name in "$backlog" "$archive" "$notearch"; do
@@ -168,9 +168,9 @@ command_collect() {
       esac
       if ! readable_file "$path"; then
         if [ -e "$path" ]; then
-          note "$name" 'unreadable' 'vorhanden, aber nicht lesbar' >> "$notes"
+          note "$name" 'unreadable' 'present, but could not be read' >> "$notes"
         else
-          note "$name" 'absent' 'in diesem Zuhause nicht vorhanden' >> "$notes"
+          note "$name" 'absent' 'not present in this home' >> "$notes"
         fi
         continue
       fi
@@ -178,7 +178,7 @@ command_collect() {
            '{source: $source, text: $text}' >> "$files"; then
         fail "cannot stage $name"
       fi
-      note "$name" 'ok' 'gelesen' >> "$notes"
+      note "$name" 'ok' 'read' >> "$notes"
     done
   fi
 

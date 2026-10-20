@@ -11,7 +11,7 @@
 #
 # Output: {sources: [{name, state, note}], tasks: [group]}, newest group first,
 #   group = {id, title, target, ts, when, question, items}
-#   item  = {state: "entschieden" | "offen", key, digest, mode, words}
+#   item  = {state: "decided" | "open", key, digest, mode, words}
 #
 # WHAT COUNTS AS A DECISION. The recorded form is the block bin/fm-captain-hold.sh
 # (and the older fm-decision-hold.sh) writes into a task body: a marker line, a
@@ -197,13 +197,13 @@ def target_of($reports):
          when: (if $g.ts == 0 then null else ($g.ts | strftime("%d.%m.%Y")) end),
          question: $g.question,
          items: ([$g.blocks[]
-                  | {state: "entschieden", key: (.digest // .words),
+                  | {state: "decided", key: (.digest // .words),
                      digest: .digest, mode: .mode, words: .words}]
                  + (if ($g.blocks | length) == 0 and $g.body != ""
-                    then [{state: (if $g.closed == null then "offen" else "entschieden" end),
+                    then [{state: (if $g.closed == null then "open" else "decided" end),
                            key: $g.id, digest: null, mode: null, words: $g.body}]
                     elif ($g.blocks | length) == 0
-                    then [{state: "offen", key: $g.id, digest: null, mode: null, words: ""}]
+                    then [{state: "open", key: $g.id, digest: null, mode: null, words: ""}]
                     else [] end))})
 | sort_by(-.ts)
 | {sources: $notes, tasks: .}

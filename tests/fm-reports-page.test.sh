@@ -523,7 +523,7 @@ Gemessen und belegt.'
   build "$home" >/dev/null || fail "build failed"
   html=$(html_of "$home/state/reports.html" plattenpruefung-20261020)
   assert_contains "$html" 'Gemessen und belegt.' "the report itself must still render"
-  assert_contains "$html" 'id="entscheidungsprotokoll"' \
+  assert_contains "$html" 'id="decisions"' \
     "a report whose task recorded a decision must carry the decision section"
   assert_contains "$html" 'Behalten. Der Sektor liest wieder' \
     "the captain's own words must reach the report's entry"
@@ -709,7 +709,7 @@ Nur ein Bericht.'
   out=$(build "$home") || fail "build failed: $out"
   assert_contains "$out" 'decisions: 0' "a home with no recorded decision must say so"
   assert_contains "$out" 'entries: 1' "no decision means no extra entry"
-  assert_not_contains "$(html_of "$home/state/reports.html" einsam)" 'entscheidungsprotokoll' \
+  assert_not_contains "$(html_of "$home/state/reports.html" einsam)" 'class="dec"' \
     "a report with no decision must not grow an empty decision section"
   pass "a report without a decision is left exactly as it was"
 }
@@ -819,7 +819,7 @@ test_home_without_archive_files_still_builds() {
   assert_contains "$out" 'decisions: 0' "no archive file means no decision, not a refusal"
   assert_contains "$out" 'source: data/done-archive.md absent' \
     "a source that is not there must be named, not passed over in silence"
-  assert_contains "$(cat "$home/state/reports.html")" 'Nicht vollstaendig gelesen' \
+  assert_contains "$(cat "$home/state/reports.html")" 'Not read in full' \
     "the page itself must be able to show the gap"
   pass "a home without archive files still builds, and names the gap"
 }
@@ -844,7 +844,7 @@ test_home_on_another_backlog_store_still_builds() {
   assert_contains "$out" 'reports: 1' "the report must still reach the page"
   assert_contains "$out" 'decisions: 0' \
     "a markdown file must not be read for a home whose store is not markdown"
-  assert_contains "$out" 'source: Ablagedateien skipped' \
+  assert_contains "$out" 'source: store files skipped' \
     "the skipped markdown files must be named"
   pass "a home on another backlog store still builds"
 }
