@@ -1595,7 +1595,7 @@ test_fast_cadence_visits_only_unreported_ships() {
 }
 
 test_fast_cadence_resumes_after_an_exhausted_budget() {
-  local log pass
+  local log
   make_world fast-cadence-budget
   write_unreported_ship "$MAIN" off alpha
   write_unreported_ship "$MAIN" off bravo
@@ -1605,7 +1605,7 @@ test_fast_cadence_resumes_after_an_exhausted_budget() {
   export FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_FAKE_CREW_STATE_DELAY=2 \
     FM_TEST_RECONCILE_SECS=900 FM_INACTIVE_RECONCILE_BUDGET_SECS=1
   run_reconcile "$MAIN" --startup
-  for pass in 1 2 3; do
+  for _ in 1 2 3; do
     set_mtime "$(( $(date +%s) - 61 ))" "$MAIN/state/.inactive-outcome-early-reconcile"
     run_reconcile "$MAIN"
   done
