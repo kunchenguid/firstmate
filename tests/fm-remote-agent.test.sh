@@ -233,6 +233,22 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
           case "$mode" in
             create-missing) exit 0 ;;
             create-malformed) result='not-json' ;;
+            create-http-429|create-http-503)
+              result=$(jq -cn --argjson status "${mode##*-}" '{status:"error",data:null,error:{code:"IDA_API_ERROR",status_code:$status,message:"PRIVATE_HTTP_BODY token=synthetic-secret",details:{response_preview:"PRIVATE_HTTP_PREVIEW"}}}')
+              mcp_error=true
+              ;;
+            create-numeric-http)
+              result='{"status":"error","data":null,"error":{"code":503,"status_code":503,"message":"PRIVATE_HTTP_BODY"}}'
+              mcp_error=true
+              ;;
+            create-detail-http)
+              result='{"status":"error","data":null,"error":{"code":"IDA_HTTP_ERROR","details":{"status":403,"payload":"PRIVATE_HTTP_BODY"},"message":"PRIVATE_HTTP_BODY"}}'
+              mcp_error=true
+              ;;
+            create-invalid-http)
+              result='{"status":"error","data":null,"error":{"code":"IDA_API_ERROR","status_code":999,"details":{"status":"PRIVATE_HTTP_BODY"},"message":"PRIVATE_HTTP_BODY"}}'
+              mcp_error=true
+              ;;
             mcp-eof-sensitive)
               printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"
               # Official create --no-wait omits answer, events and result.
@@ -1918,7 +1934,7 @@ SH
 }
 
 test_followup_identity_and_unknown_submission() {
-  local home fakebin id=ida-followup old_sha creates outcome mode expected rc=0
+  local home fakebin id=ida-followup old_sha creates outcome mode expected expected_http rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
@@ -1938,7 +1954,7 @@ test_followup_identity_and_unknown_submission() {
   wait_phase "$home" "$id" terminal-success || fail 'receipt-bound followup with no returned marker did not complete'
   jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001" and .provider_checkpoint=="result-verified"' "$(state_file "$home" "$id")" >/dev/null || fail 'followup did not bind and read the exact receipt turn'
   assert_grep 'Verified iDA answer.' "$home/data/$id/report.md" 'receipt-bound followup result was not read without its marker'
-  jq -e '.provider_state.submission_response=={exit_code:0,response_kind:"success",error_code:null}' "$(state_file "$home" "$id")" >/dev/null \
+  jq -e '.provider_state.submission_response=={exit_code:0,response_kind:"success",error_code:null,http_status:null}' "$(state_file "$home" "$id")" >/dev/null \
     || fail 'delayed official no-wait receipt lost its safe response evidence'
   jq -e '.phase=="terminal-success" and .provider_state.task_id=="80001"' "$home/state/remote-tasks/$id/generations/1.json" >/dev/null || fail 'prior terminal overwritten'
   [ "$old_sha" = "$(shasum -a 256 "$home/data/$id/turn-1-report.md" | cut -d' ' -f1)" ] || fail 'prior report changed'
@@ -1986,7 +2002,7 @@ test_followup_identity_and_unknown_submission() {
   [ "$creates" = 2 ] || fail "conflicting error receipt repeated create: $creates total"
   pass 'conflicting structured error receipt aliases stay unknown without duplicate create'
 
-  for mode in renamed-invalid-success renamed-invalid-data create-missing create-malformed; do
+  for mode in renamed-invalid-success renamed-invalid-data create-missing create-malformed create-http-429 create-http-503 create-numeric-http create-detail-http create-invalid-http; do
     id="ida-followup-$mode"
     home=$(new_home "followup-$mode"); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
     : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
@@ -2001,19 +2017,27 @@ test_followup_identity_and_unknown_submission() {
     fi
     [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail "$mode invalid receipt lost submission-unknown"
     jq -e '.provider_state.task_id==null' "$(state_file "$home" "$id")" >/dev/null || fail "$mode invalid receipt bound an unverified task"
+    expected_http=null
     case "$mode" in
       create-missing) expected=MCP_RESPONSE_MISSING ;;
       create-malformed) expected=MCP_RESULT_INVALID ;;
+      create-http-*) expected=IDA_API_ERROR; expected_http=${mode##*-} ;;
+      create-numeric-http) expected=null; expected_http=503 ;;
+      create-detail-http) expected=IDA_HTTP_ERROR; expected_http=403 ;;
+      create-invalid-http) expected=IDA_API_ERROR ;;
       *) expected='' ;;
     esac
-    jq -e --arg code "$expected" '
+    jq -e --arg code "$expected" --argjson http "$expected_http" '
       .provider_state.submission_response as $s
-      | if $code=="" then $s.response_kind=="invalid" and $s.error_code==null
-        else $s.response_kind=="error" and $s.error_code==$code and $s.exit_code==1 end
+      | $s.http_status==$http and
+        (if $code=="" then $s.response_kind=="invalid" and $s.error_code==null
+        else $s.response_kind=="error" and $s.error_code==(if $code=="null" then null else $code end) and $s.exit_code==1 end)
     ' "$(state_file "$home" "$id")" >/dev/null || fail "$mode lost submission framing evidence"
     run_ida "$home" "$fakebin" diagnose "$id" >"$home/diagnosis" || fail "$mode diagnosis failed"
     jq -e '.submission_response!=null and .provider_write_performed==false and .outcome=="identity-unproven"' "$home/diagnosis" >/dev/null \
       || fail "$mode diagnosis hid the original submission boundary"
+    assert_no_grep 'PRIVATE_HTTP_' "$home/diagnosis" 'submission diagnosis leaked provider error text'
+    assert_no_grep 'PRIVATE_HTTP_' "$(state_file "$home" "$id")" 'submission evidence retained provider error text'
     if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt-replay" 2>&1; then
       fail "$mode invalid receipt replay inferred a task without exact evidence"
     fi

@@ -306,7 +306,7 @@ fm_ida_followup_recover() { # <private-scratch-dir>; sets IDA_RECOVERY_*
 # Project only submission framing, exit status and an official code into the
 # current generation. This evidence never proves non-execution or turn identity.
 fm_ida_submission_evidence() { # <normalized-response-file> <exit-code>
-  local out=$1 rc=$2 kind=invalid code=''
+  local out=$1 rc=$2 kind=invalid code='' http_status=null
   if [ ! -s "$out" ]; then
     kind=empty
   elif jq -se 'length==1 and (.[0]|type=="object")' "$out" >/dev/null 2>&1; then
@@ -314,10 +314,14 @@ fm_ida_submission_evidence() { # <normalized-response-file> <exit-code>
     elif jq -e '.status=="error" and .data==null and (.error|type=="object")' "$out" >/dev/null 2>&1; then
       kind=error
       code=$(jq -r '.error.code | select(type=="string" and test("^(MCP_|IDA_|AUTH_|CLI_|HTTP_)[A-Z0-9_]{1,70}$"))' "$out")
+      http_status=$(jq -c '
+        [.error.status_code?, .error.code?, .error.details.status?]
+        | map(select(type=="number") | select(.>=100 and .<=599 and floor==.)) | unique
+        | if length==1 then .[0] else null end' "$out")
     fi
   fi
-  jq -cn --arg kind "$kind" --arg code "$code" --argjson rc "$rc" '
-    {submission_response:{exit_code:$rc,response_kind:$kind,
+  jq -cn --arg kind "$kind" --arg code "$code" --argjson rc "$rc" --argjson http_status "$http_status" '
+    {submission_response:{exit_code:$rc,response_kind:$kind,http_status:$http_status,
       error_code:(if $code=="" then null else $code end)}}'
 }
 

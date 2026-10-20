@@ -12,7 +12,8 @@
 # plus one 30-second raw session-info control read, never another create.
 # `state` performs that diagnosis too unless --durable-only is requested.
 # Diagnosis includes submission_response (null for legacy/unrecorded calls):
-# exit_code, response_kind=success|error|invalid|empty, and a bounded error_code.
+# exit_code, response_kind=success|error|invalid|empty, bounded error_code,
+# and http_status (a unique integer 100..599 from official status/code fields).
 # It describes only the local response, never whether the provider wrote.
 # `adopt` replays the exact recorded action through followup to reconcile/re-arm;
 # only a retained receipt or exact marker/task binding permits progress.
