@@ -7,7 +7,9 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". Linked-worktree homes gain owned Git-native lock
+#       protection before identity publication; ordinary Git removal refuses.
+#       Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -21,7 +23,9 @@
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
-#       target is safe; a failed return warns because the lease may still be held.
+#       target is safe and belongs to this attempt; existing homes and foreign
+#       locks are preserved. A failed return restores owned protection and warns
+#       because the lease may still be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -47,12 +51,15 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-home-worktree-lock-lib.sh
+. "$SCRIPT_DIR/fm-home-worktree-lock-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
+  echo "Linked worktree homes gain owned Git-native durable-home protection." >&2
 }
 
 validate_registry_home_text() {
@@ -535,6 +542,8 @@ SEED_HOME=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
+SEED_HOME_LOCK_ACQUIRED=0
+SEED_ID=
 SEED_BACKUP_DIR=
 SEED_CREATED_PROJECTS_FILE=
 SEED_PARENT_REG_EXISTED=0
@@ -593,14 +602,29 @@ seed_rollback_target() {
 seed_return_treehouse_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
+  validate_home_assignment "$SEED_ID" "$abs_home" || return 0
+  validate_existing_parent_binding "$abs_home" || return 0
+  if [ -e "$abs_home/$SUB_HOME_MARKER" ] \
+    && { [ "$SEED_HOME_BACKED_UP" = 0 ] || [ "$SEED_MARKER_EXISTED" = 1 ]; }; then
+    echo "REFUSED: seed rollback does not own preexisting secondmate home $abs_home" >&2
+    return 0
+  fi
+  fm_home_worktree_lock_check "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
+  if [ "$SEED_HOME_LOCK_ACQUIRED" = 0 ] && [ -n "$FM_HOME_LOCK_REASON" ]; then
+    echo "REFUSED: seed rollback does not own preexisting durable-home protection: $abs_home" >&2
+    return 0
+  fi
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
+  fm_home_worktree_lock_release "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
   ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+    fm_home_worktree_lock_acquire "$abs_home" "$SEED_ID" "$FM_HOME" || echo "error: cannot restore durable-home protection after failed rollback return: $abs_home" >&2
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
+  fm_home_worktree_lock_forget "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
 }
 
 seed_remove_created_home() {
@@ -656,6 +680,11 @@ seed_rollback() {
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
+      if [ "$SEED_HOME_LOCK_ACQUIRED" = 1 ]; then
+        fm_home_worktree_lock_release "$SEED_HOME" "$SEED_ID" "$FM_HOME" \
+          && fm_home_worktree_lock_forget "$SEED_HOME" "$SEED_ID" "$FM_HOME" \
+          || echo "warning: failed to release attempt-owned durable-home protection: $SEED_HOME" >&2
+      fi
       if [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] && [ -f "$SEED_CREATED_PROJECTS_FILE" ]; then
         while IFS= read -r project_path; do
           [ -n "$project_path" ] || continue
@@ -873,6 +902,8 @@ seed_home() {
     validate_seed_project "$project"
   done
 
+  SEED_ID=$id
+  SEED_HOME_LOCK_ACQUIRED=0
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
   SEED_HOME=
@@ -920,6 +951,8 @@ seed_home() {
       refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
     fi
   fi
+  fm_home_worktree_lock_acquire "$home" "$id" "$FM_HOME" || return 1
+  SEED_HOME_LOCK_ACQUIRED=$FM_HOME_LOCK_ACQUIRED
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
