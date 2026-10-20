@@ -4140,6 +4140,7 @@ teardown_finish_treehouse_return() {  # early|final
       TEARDOWN_RETURN_DEFERRED=1
     else
       echo "teardown: kept worktree $WT; spared unowned process(es) still run in it: $(printf '%s' "$survivors" | tr '\n' ' ')" >&2
+      teardown_process_log - kept "spared pid(s) still in worktree: $(printf '%s' "$survivors" | tr '\n' ' ')" "$WT"
     fi
     return 0
   fi
