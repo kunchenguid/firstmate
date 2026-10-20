@@ -957,6 +957,9 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  if [ "$(fm_meta_get "$META" codex_brief_record)" = 1 ] && [ "$TARGET_HARNESS" != codex ]; then
+    die "task $ID uses a Codex brief record; relaunch requires the native Codex task-worker harness"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.

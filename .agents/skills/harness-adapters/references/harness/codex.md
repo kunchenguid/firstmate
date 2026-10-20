@@ -20,6 +20,11 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
+## Task-worker launch input
+
+[`bin/fm-spawn.sh`](../../../../../bin/fm-spawn.sh) owns the default and opt-in native Codex launch mechanics; see its usage header for the task-worker selector and [runtime verification](../../../../../docs/verification/runtime-backends.md#native-codex-task-worker-launch-boundary) for the tested boundary.
+When the launch prompt names an operational record, read it completely before project work and retain the authorized intent for later validation; the doorbell is transport, not a replacement for the captain's instructions.
+
 ## Hook trust
 
 A second dialog, "Hooks need review - N hooks are new or changed", appears whenever the machine's `~/.codex/hooks.json` or a project's own `.codex/hooks.json` carries a hook Codex has not persisted trust for.
