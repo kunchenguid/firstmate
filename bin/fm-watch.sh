@@ -255,8 +255,9 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-watch-progress-lib.sh
 . "$SCRIPT_DIR/fm-watch-progress-lib.sh"
-# shellcheck source=bin/fm-model-outage-lib.sh
-. "$SCRIPT_DIR/fm-model-outage-lib.sh"
+# Optional alerts add-on: defines fm_model_outage_tick.
+# shellcheck source=/dev/null
+[ ! -r "${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/alerts/bin/fm-model-outage-lib.sh" ] || . "${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/alerts/bin/fm-model-outage-lib.sh"
 # Parked-home reader (firstmate-addons/parked-homes): the shared predicate
 # every parked-home guard in the watcher calls. The shim answers not parked
 # when the add-on is absent (stock behavior).
@@ -3328,7 +3329,7 @@ while :; do
 
   if declare -F fm_memory_sampler_ensure >/dev/null; then fm_memory_sampler_ensure || triage_log "host memory sampler failed to restart"; fi
   host_memory_surface_queued
-  fm_model_outage_tick || triage_log "model-error observation failed"
+  if declare -F fm_model_outage_tick >/dev/null; then fm_model_outage_tick || triage_log "model-error observation failed"; fi
   own_queue_resurface || { echo "watcher: own wake-queue observation failed" >&2; exit 1; }
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is

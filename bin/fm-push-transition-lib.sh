@@ -33,7 +33,6 @@ task_captain_call_open() {  # <task>
     open "$task" --identity 2>/dev/null) || return 1
   return 0
 }
-
 # Set only after this watcher has printed a durable actionable reason. The
 # watcher's EXIT cleanup uses it to distinguish an ordinary delivered close from
 # an interruption that leaves a recovery gap before the next arm.
@@ -165,7 +164,8 @@ handle_push_transition() {  # <backend> <session> <record>
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
-  if [ "$(fm_meta_get "$STATE/$task.meta" harness)" = cursor ] || task_captain_call_open "$task"; then
+  # Optional alerts add-on: suppresses the immediate wake for lanes it names (Cursor, held for the captain).
+  if declare -F fm_alerts_push_suppress >/dev/null && fm_alerts_push_suppress "$task"; then
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi

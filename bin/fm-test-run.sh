@@ -331,8 +331,7 @@ family_for_basename() {
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh|fm-sentinel-restart-resume.test.sh|\
     fm-sentinel-herdr-restart-live-e2e.test.sh|fm-herdr-lab-xdg.test.sh|\
-    fm-herdr-codex-state-live-e2e.test.sh|fm-herdr-doorbell-wrap-live-e2e.test.sh|\
-    fm-model-outage-live-e2e.test.sh)
+    fm-herdr-codex-state-live-e2e.test.sh|fm-herdr-doorbell-wrap-live-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
     fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\

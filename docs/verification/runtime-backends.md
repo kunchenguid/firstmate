@@ -2833,30 +2833,3 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
-
-## OpenCode model-error wakes and second-mate continuity
-
-Verified on 2026-10-08 with OpenCode 1.18.25 in a credential-free named Herdr lab, against the observation code at commit b45da13f.
-This live record does not qualify later observer changes, which the portable tests below cover.
-Two real OpenCode lanes selected an unavailable hosted model and emitted `session.error` followed by idle.
-The ordinary watcher delivered one grouped model-error notification automatically, and the real second-mate agent drained and acknowledged it within 97 seconds of the recorded failure.
-A later worker status event reached that same second mate automatically, and fresh beacons continued after both turns without any manual arm.
-Cleanup passed the default-session fleet-state tripwire.
-
-Refresh with:
-
-```sh
-FM_MODEL_OUTAGE_LIVE=1 bash bin/fm-test-run.sh tests/fm-model-outage-live-e2e.test.sh
-```
-
-Exact guard output:
-
-```text
-PASS OpenCode 1.18.25: grouped hosted outage delivered automatically; second mate keeps monitoring across turns
-lab cleanup: 0
-```
-
-The portable scan tests in `tests/fm-busy-adapter-wiring.test.sh` cover staggered, recovered, unreadable, wrapped-banner, hung-verdict, and mid-turn usage-limit-banner lanes; `tests/fm-busy-state.test.sh` retains generation and retirement coverage.
-This qualification covers OpenCode error observation on Herdr, not new error signatures for other harnesses or fresh live qualification of other backends.
-Other harnesses retain their existing stale and blocked-worker supervision.
-The bounded scan behavior belongs to `bin/fm-model-outage-lib.sh`; this record does not own another recovery mechanism.

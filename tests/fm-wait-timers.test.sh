@@ -6,6 +6,7 @@ set -eu
 TMP_ROOT=$(fm_test_tmproot fm-wait-timers)
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+ADDONS_DIR="${FM_ADDONS_DIR:-$ROOT/projects/firstmate-addons}"
 
 cycle() {
   local rc=0 seq gen
@@ -15,6 +16,7 @@ cycle() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HOME_SUMMARY_INTERVAL=999999 \
     FM_SECONDMATE_LIVENESS_SECS=99999999 FM_BUSY_TURN_MAX_SECS=999999 \
     FM_STALE_ESCALATE_SECS=999999 FM_WAIT_ALERT_SECS=2 FM_WAIT_ESCALATE_SECS=4 \
+    FM_ADDONS_DIR="$ADDONS_DIR" \
     "$WATCH" > "$dir/out" 2> "$dir/err" &
   pid=$!
   wait_for_exit "$pid" 70 || rc=$?
@@ -166,30 +168,38 @@ cycle
 [ "$(grep -c 'level=owner' "$dir/events")" -eq 2 ] || fail 'child report was mistaken for the lead waiting'
 pass 'lead native blocked overrides log, ignores foreign panes, re-arms, and excludes child reports'
 
-printf 'kind=ship\nharness=cursor\nbackend=herdr\nwindow=fixture:w1:p1\n' > "$dir/state/lane.meta"
+if (
+  export FM_HOME="$ROOT" SCRIPT_DIR="$ROOT/bin"
+  [ -r "$ADDONS_DIR/alerts/bin/fm-model-outage-lib.sh" ] || exit 1
+  # shellcheck source=/dev/null
+  . "$ADDONS_DIR/alerts/bin/fm-model-outage-lib.sh" || exit 1
+  declare -F fm_alerts_push_suppress >/dev/null
+) 2>/dev/null; then
+  printf 'kind=ship\nharness=cursor\nbackend=herdr\nwindow=fixture:w1:p1\n' > "$dir/state/lane.meta"
 cat > "$dir/fakebin/reader" <<'SH'
 #!/usr/bin/env bash
 printf '@subscribed\n'
 sleep "$2"
 SH
-chmod +x "$dir/fakebin/reader"
-export FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$dir/fakebin/reader"
-: > "$dir/events"
-: > "$dir/native-reads"
-printf 'blocked\n' > "$dir/native"
-printf 'working: healthy Cursor\n' > "$dir/state/lane.status"
-prime_status_seen "$dir/state" "$dir/state/lane.status"
-: > "$dir/native-calls"
-cycle
-[ ! -e "$dir/state/.waiting-timers/lane" ] || fail 'Cursor native blocked admitted'
-[ -s "$dir/native-reads" ] || fail "Cursor ship did not reach native push reconciliation: $(cat "$dir/out" "$dir/err" "$dir/native-calls")"
-[ -e "$dir/state/.herdr-escalated-fixture_w1_p1" ] || fail 'Cursor push was not consumed'
-[ ! -s "$dir/events" ] || fail 'healthy Cursor ship emitted an alert'
-printf 'blocked [key=cursor-wait]: real dependency\n' >> "$dir/state/lane.status"
-cycle
-cycle
-grep -q 'waiting-state lane (blocked' "$dir/events" || fail 'Cursor declaration not monitored'
-pass 'Cursor ship ignores native polling and push blockers but retains declaration monitoring'
+  chmod +x "$dir/fakebin/reader"
+  export FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$dir/fakebin/reader"
+  : > "$dir/events"
+  : > "$dir/native-reads"
+  printf 'blocked\n' > "$dir/native"
+  printf 'working: healthy Cursor\n' > "$dir/state/lane.status"
+  prime_status_seen "$dir/state" "$dir/state/lane.status"
+  : > "$dir/native-calls"
+  cycle
+  [ ! -e "$dir/state/.waiting-timers/lane" ] || fail 'Cursor native blocked admitted'
+  [ -s "$dir/native-reads" ] || fail "Cursor ship did not reach native push reconciliation: $(cat "$dir/out" "$dir/err" "$dir/native-calls")"
+  [ -e "$dir/state/.herdr-escalated-fixture_w1_p1" ] || fail 'Cursor push was not consumed'
+  [ ! -s "$dir/events" ] || fail 'healthy Cursor ship emitted an alert'
+  printf 'blocked [key=cursor-wait]: real dependency\n' >> "$dir/state/lane.status"
+  cycle
+  cycle
+  grep -q 'waiting-state lane (blocked' "$dir/events" || fail 'Cursor declaration not monitored'
+  pass 'Cursor ship ignores native polling and push blockers but retains declaration monitoring'
+fi
 unset FM_BACKEND_HERDR_EVENTS_FORCE FM_BACKEND_HERDR_EVENT_READER
 printf 'kind=secondmate\nharness=cursor\nbackend=herdr\nwindow=fixture:w1:p1\n' > "$dir/state/lane.meta"
 

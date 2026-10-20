@@ -558,8 +558,6 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # at the pane width - both `usin... (click to expand)` and `click to expand)`
 # first-row truncations were observed. The square glyphs are an alternation,
 # never a bracket range, for the reason FM_OMP_SPINNER_FRAMES_RE records.
-# bin/fm-model-outage-lib.sh reads this same variable for its outage alert, so
-# the outage banner and the staleness furniture can never drift apart.
 FM_COMPOSER_OPENCODE_LIMIT_BANNER_RE_DEFAULT='^[[:space:]]*(■|⬝)[0-9]+(■|⬝)hour(■|⬝)usage limit reached|^[[:space:]]*(usin\.\.\.[[:space:]]+)?\(?click to expand\)[[:space:]]+\[retrying in [0-9]+[hms]([[:space:]]+[0-9]+[hms])*[[:space:]]+attempt #[0-9]+\]$'
 FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='^[[:space:]]*/.*[0-9]+(\.[0-9]+)?[KMG]?[[:space:]]+\([0-9]+%\)([[:space:]]+·[[:space:]]+\$[0-9]*(\.[0-9]+)?)?([[:space:]]*ctrl\+p([[:space:]]+commands)?)?$|^[^[:space:]]+([[:space:]]+tab[[:space:]]+agents[[:space:]]+ctrl\+p)?[[:space:]]+commands$|^tab[[:space:]]+agents[[:space:]]+ctrl\+p[[:space:]]+commands$|'"$FM_COMPOSER_OPENCODE_LIMIT_BANNER_RE_DEFAULT"
 # OpenCode 1.18.x also right-aligns a `<dir>:<branch>` cell INSIDE the
