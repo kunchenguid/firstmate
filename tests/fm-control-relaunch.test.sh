@@ -43,9 +43,9 @@ TASK_TMPS=()
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap relaunch_cleanup EXIT
 
@@ -611,6 +611,35 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
 }
 
+test_relaunch_note_inbox_listing_is_safe_on_empty_inbox() {
+  local dir out rc brief cmd inbox shell_name status
+  dir=$(new_case notelist rl2b)
+  add_ship_task "$dir" rl2b claude
+  out=$(run_control "$dir" rl2b relaunch --note "resume"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  brief="$dir/home/data/rl2b/brief.md"
+  # shellcheck disable=SC2016
+  cmd=$(sed -n 's/^`\(find [^`]*\)`.*/\1/p' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "the progress note does not give a find-based inbox listing command"
+  inbox="$dir/home/state/rl2b.inbox"
+  for shell_name in bash zsh; do
+    command -v "$shell_name" >/dev/null 2>&1 || continue
+    rm -rf "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: absent inbox listing was not silent success (exit $status): $out"
+    mkdir -p "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: empty inbox listing was not silent success (exit $status): $out"
+    : > "$inbox/1000.msg"
+    : > "$inbox/999.msg"
+    out=$("$shell_name" -c "$cmd" 2>&1 | sed 's#.*/##' | tr '\n' ' ')
+    [ "$out" = "999.msg 1000.msg " ] || fail "$shell_name: messages not listed in numeric order: $out"
+  done
+  pass "fm-control relaunch: the progress note's inbox listing is silent on an empty inbox"
+}
+
 test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
@@ -921,6 +950,80 @@ test_worker_account_pin_follows_the_relaunch() {
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+}
+
+test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
+  local dir out rc id=rl-sm-acct harness file variable pin
+  for harness in claude pi; do
+    dir=$(new_case "sm-account-$harness" "$id")
+    add_ship_task "$dir" "$id" "$harness"
+    make_claude_auth_stub "$dir"
+    cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf 'Options: --tui-mode\n' ;;
+  auth)
+    if grep -qx "$4" "$PI_CODING_AGENT_DIR/signed-in" 2>/dev/null; then
+      printf '{"status":"ready"}\n'
+    else
+      printf '{"status":"not_ready","reason":"credentials_not_configured"}\n'
+      exit 1
+    fi ;;
+esac
+SH
+    chmod +x "$dir/fakebin/pi"
+    file=claude-account; variable=CLAUDE_CONFIG_DIR
+    if [ "$harness" = pi ]; then file=pi-account; variable=PI_CODING_AGENT_DIR; fi
+    printf '%s' "$harness" > "$dir/fake/command"
+    printf '%s' "$harness" > "$dir/fake/becomes"
+    mkdir -p "$dir/wt/state" "$dir/wt/data" "$dir/wt/bin" \
+      "$dir/home/config/secondmate-accounts/$id" "$dir/primary" "$dir/mate" "$dir/new-mate"
+    printf '%s\n' "$id" > "$dir/wt/.fm-secondmate-home"
+    printf '# agents\n' > "$dir/wt/AGENTS.md"
+    printf '# charter\n' > "$dir/wt/data/charter.md"
+    printf '%s openai-codex/gpt-5.5\n' "$harness" > "$dir/home/config/secondmate-harness"
+    {
+      printf 'window=fmses:fm-%s\nendpoint_task_id=%s\n' "$id" "$id"
+      printf 'worktree=%s\nproject=%s\nhome=%s\n' "$dir/wt" "$dir/wt" "$dir/wt"
+      printf 'harness=%s\nkind=secondmate\nmode=secondmate\nyolo=off\nmodel=default\neffort=default\n' "$harness"
+    } > "$dir/home/state/$id.meta"
+    : > "$dir/primary/.credentials.json"
+    : > "$dir/mate/.credentials.json"
+    : > "$dir/new-mate/.credentials.json"
+    printf 'openai-codex\n' > "$dir/primary/signed-in"
+    printf 'openai-codex\n' > "$dir/mate/signed-in"
+    printf 'openai-codex\n' > "$dir/new-mate/signed-in"
+    printf '%s\n' "$dir/primary" > "$dir/home/config/$file"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$dir/home/config/$file"
+    pin="$dir/home/config/secondmate-accounts/$id/$file"
+    printf '%s\n' "$dir/mate" > "$pin"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "the secondmate should relaunch on its $harness pin: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/mate'" "the replacement must use the mate's pin"
+    [ "$(meta_field "$dir" "$id" account)" = "$dir/mate" ] || fail "the record must name the mate's account"
+    printf '%s\n' "$dir/new-mate" > "$pin"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
+    : > "$dir/fake/literal"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "a changed durable pin should govern relaunch: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/new-mate'" "relaunch must not reuse the old recorded account"
+    rm "$dir/new-mate/.credentials.json" "$dir/new-mate/signed-in"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    : > "$dir/fake/literal"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 1 "$rc" "a signed-out mate account must refuse before stop"
+    assert_contains "$out" "$pin" "the refusal must name the mate setting"
+    assert_contains "$out" 'not signed in' "the refusal must name the reason"
+    [ "$(cat "$dir/fake/command")" = "$harness" ] || fail "the running mate must remain alive"
+    [ ! -s "$dir/fake/literal" ] || fail "the refused relaunch must send no lifecycle input"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the refused relaunch must preserve metadata"
+    rm "$pin"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "removing the mate pin should restore the primary's pin: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/primary'" "an absent mate setting must restore the primary's pin"
+  done
+  pass "fm-control relaunch: mate pins are re-read for Claude and Pi, and unusable pins refuse before stopping the agent"
 }
 
 test_pi_exclude_tools_follow_the_relaunch() {
@@ -2680,6 +2783,7 @@ test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
@@ -2692,6 +2796,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
