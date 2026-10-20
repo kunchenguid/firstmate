@@ -158,8 +158,69 @@ test_recorded_decline_is_refused() {
   out=$(run_trust "$WT" "$PROJ")
   expect_code 1 $? "a recorded decline must refuse rather than be reversed: $out"
   assert_contains "$out" "Do not trust" "the refusal must name the recorded decision it will not reverse"
+  assert_contains "$out" "$store" "the refusal must name the store to change"
   [ "$(cat "$store")" = "$before" ] || fail "a refused registration must not rewrite the store"
   pass "a recorded 'Do not trust' decision refuses the spawn instead of being reversed"
+}
+
+# Pi resolves trust through the nearest ancestor entry, so the script must too:
+# an inherited decision is the operator's decision, not a missing entry.
+test_trusted_ancestor_is_already_trusted() {
+  local rec out store before
+  rec=$(make_case ancestor-true)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  mkdir -p "$AGENT"
+  printf '{\n  "%s": true\n}\n' "$CASE" > "$store"
+  before=$(cat "$store")
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a worktree under a trusted ancestor must succeed: $out"
+  assert_contains "$out" "already trusted:" "an inherited trust must be reported as already trusted"
+  [ "$(cat "$store")" = "$before" ] || fail "an inherited trust must not rewrite the store"
+  [ "$(trust_entry "$store" "$(wt_real)")" = absent ] \
+    || fail "an inherited trust must not add a narrower entry"
+  pass "a trusted ancestor counts as already trusted and writes nothing"
+}
+
+# A null entry records "undecided", so it must be skipped and the next recorded
+# decision above it must win, exactly as Pi's own walk does.
+test_undecided_ancestor_is_skipped() {
+  local dir proj wt home agent store out
+  dir="$TMP_ROOT/ancestor-null"
+  proj="$dir/project"
+  wt="$dir/pool/wt"
+  home="$dir/home"
+  agent="$dir/agent"
+  store="$agent/trust.json"
+  mkdir -p "$home" "$dir/pool" "$agent"
+  fm_git_worktree "$proj" "$wt" wt-ancestor-null
+  printf '{\n  "%s": true,\n  "%s/pool": null\n}\n' "$dir" "$dir" > "$store"
+
+  out=$(HOME="$home" "$TRUST" --agent-dir "$agent" "$wt" "$proj" 2>&1)
+  expect_code 0 $? "a null ancestor entry must be skipped: $out"
+  assert_contains "$out" "already trusted:" "a true decision above a null entry must be honoured"
+  pass "an undecided ancestor entry is skipped and the nearest recorded decision wins"
+}
+
+test_declined_ancestor_is_refused() {
+  local rec out store before
+  rec=$(make_case ancestor-false)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  mkdir -p "$AGENT"
+  printf '{\n  "%s": false\n}\n' "$CASE" > "$store"
+  before=$(cat "$store")
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 1 $? "an inherited 'Do not trust' must refuse: $out"
+  assert_contains "$out" "Do not trust" "the refusal must name the recorded decision it will not reverse"
+  assert_contains "$out" "for $CASE," "the refusal must name the ancestor that records the decline"
+  assert_contains "$out" "$store" "the refusal must name the store to change"
+  [ "$(cat "$store")" = "$before" ] || fail "a refused registration must not rewrite the store"
+  [ "$(trust_entry "$store" "$(wt_real)")" = absent ] \
+    || fail "a refused registration must not add a narrower entry"
+  pass "an inherited 'Do not trust' refuses the spawn instead of being overridden"
 }
 
 # --- failure is loud --------------------------------------------------------
@@ -249,22 +310,27 @@ test_agent_root_resolution() {
   rec=$(make_case roots)
   read_case "$rec"
 
-  # 1. PI_CODING_AGENT_DIR when no --agent-dir is given.
+  # 1. The invoking process's PI_CODING_AGENT_DIR is not evidence: panes are
+  #    created by a daemon that does not inherit it, and an unpinned launch line
+  #    names no root, so that worker reads Pi's default ~/.pi/agent.
   out=$(HOME="$USER_HOME" PI_CODING_AGENT_DIR="$CASE/env-agent" "$TRUST" "$WT" "$PROJ" 2>&1)
-  expect_code 0 $? "a PI_CODING_AGENT_DIR root must be registered: $out"
-  assert_trusted "$CASE/env-agent/trust.json" "$(wt_real)" "PI_CODING_AGENT_DIR was not the store root"
+  expect_code 0 $? "a registration under an ambient PI_CODING_AGENT_DIR must succeed: $out"
+  assert_trusted "$USER_HOME/.pi/agent/trust.json" "$(wt_real)" \
+    "an unpinned registration must use the default ~/.pi/agent root"
+  assert_absent "$CASE/env-agent/trust.json" \
+    "the invoking process's PI_CODING_AGENT_DIR must not receive the entry"
 
-  # 2. The user-level ~/.pi/agent default when neither is set.
-  out=$(env -u PI_CODING_AGENT_DIR HOME="$USER_HOME" "$TRUST" "$WT" "$PROJ" 2>&1)
-  expect_code 0 $? "the default user-level root must be registered: $out"
-  assert_trusted "$USER_HOME/.pi/agent/trust.json" "$(wt_real)" "the default ~/.pi/agent root was not the store root"
-
-  # 3. An explicit --agent-dir wins over the environment, because a pinned
-  #    worker account names that root on the launch line itself.
+  # 2. An explicit --agent-dir names the root a pinned worker account puts on
+  #    the launch line, and wins over the environment.
   out=$(HOME="$USER_HOME" PI_CODING_AGENT_DIR="$CASE/env-agent" "$TRUST" --agent-dir "$AGENT" "$WT" "$PROJ" 2>&1)
   expect_code 0 $? "an explicit agent root must be registered: $out"
   assert_trusted "$AGENT/trust.json" "$(wt_real)" "--agent-dir did not decide the store root"
-  pass "the store root follows the pinned agent dir, then PI_CODING_AGENT_DIR, then ~/.pi/agent"
+
+  # 3. Neither names a root, so the user-level ~/.pi/agent default applies.
+  out=$(env -u PI_CODING_AGENT_DIR HOME="$USER_HOME" "$TRUST" "$WT" "$PROJ" 2>&1)
+  expect_code 0 $? "the default user-level root must be registered: $out"
+  assert_trusted "$USER_HOME/.pi/agent/trust.json" "$(wt_real)" "the default ~/.pi/agent root was not the store root"
+  pass "the store root follows the pinned agent dir and else ~/.pi/agent, never the invoking environment"
 }
 
 # --- the spawn that calls it ------------------------------------------------
@@ -316,6 +382,33 @@ EOF
   done
 }
 
+# The spawning process's PI_CODING_AGENT_DIR is not the store an unpinned
+# launch reads: its launch line names no root and the pane comes from a daemon
+# that does not inherit firstmate's environment. Registering the spawning
+# root instead would leave the dialog exactly where it was.
+test_pi_spawn_ignores_the_spawning_process_agent_root() {
+  local rec id out store launch
+  id=pi-trust-divergent-root
+  rec=$(make_pi_spawn_case spawn-divergent pi "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$HOME_DIR/user-home/.pi/agent/trust.json"
+
+  out=$(PI_CODING_AGENT_DIR="$CASE/work-root" FM_FAKE_LAUNCH_LOG="$CASE/launch.log" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "an unpinned pi spawn must succeed with an ambient agent root: $out"
+  assert_trusted "$store" "$(cd -P -- "$WT_DIR" && pwd -P)" \
+    "the unpinned spawn did not register in Pi's default store"
+  assert_absent "$CASE/work-root/trust.json" \
+    "the spawning process's PI_CODING_AGENT_DIR must not receive the entry"
+  launch=$(cat "$CASE/launch.log")
+  assert_not_contains "$launch" "PI_CODING_AGENT_DIR" \
+    "an unpinned launch line must still carry no agent root"
+  pass "an unpinned pi spawn registers Pi's default store even when the spawn environment names another root"
+}
+
 # A registration failure is a spawn refusal: launching anyway would recreate
 # the exact stall this control exists to remove.
 test_pi_spawn_refuses_when_registration_fails() {
@@ -362,11 +455,15 @@ test_symlinked_fixture_registers_the_realpath
 test_existing_registration_is_a_noop
 test_unrelated_entries_survive_a_new_registration
 test_recorded_decline_is_refused
+test_trusted_ancestor_is_already_trusted
+test_undecided_ancestor_is_skipped
+test_declined_ancestor_is_refused
 test_write_failure_refuses_loudly
 test_malformed_store_refuses_loudly
 test_out_of_scope_paths_are_refused
 test_agent_root_resolution
 test_pi_spawn_registers_the_worktree
+test_pi_spawn_ignores_the_spawning_process_agent_root
 test_pi_spawn_refuses_when_registration_fails
 test_other_harnesses_get_no_pi_trust_write
 
