@@ -274,8 +274,11 @@ test_out_of_scope_paths_are_refused() {
   expect_code 1 $? "a primary checkout must be refused: $out"
   assert_contains "$out" "primary checkout" "the primary-checkout refusal must name the reason"
 
-  out=$(HOME="$USER_HOME" "$TRUST" --agent-dir "$AGENT" "$WT/.git" "$PROJ" 2>&1)
+  mkdir -p "$WT/sub"
+
+  out=$(HOME="$USER_HOME" "$TRUST" --agent-dir "$AGENT" "$WT/sub" "$PROJ" 2>&1)
   expect_code 1 $? "a subdirectory of the worktree must be refused: $out"
+  assert_contains "$out" "not a worktree root" "the subdirectory refusal must name the worktree-root check"
 
   mkdir -p "$CASE/plain"
   out=$(HOME="$USER_HOME" "$TRUST" --agent-dir "$AGENT" "$CASE/plain" "$PROJ" 2>&1)
