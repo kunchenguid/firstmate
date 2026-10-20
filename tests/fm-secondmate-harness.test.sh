@@ -62,6 +62,7 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
+mkdir -p "$TMP_ROOT/no-addons"
 export FM_BACKEND=tmux
 
 # Every claude launch pre-registers workspace trust for the directory it starts
@@ -448,7 +449,7 @@ test_propagate_lib() {
   printf '{"default":{"harness":"grok"}}\n' > "$src/crew-dispatch.json"
   stdout="$d/guard-skip.out"
   stderr="$d/guard-skip.err"
-  FM_INHERITABLE_CONFIG=crew-dispatch.json propagate_inheritable_config "$src" "$guard_repo/config" >"$stdout" 2>"$stderr" \
+  FM_ADDONS_DIR="$TMP_ROOT/no-addons" FM_INHERITABLE_CONFIG=crew-dispatch.json propagate_inheritable_config "$src" "$guard_repo/config" >"$stdout" 2>"$stderr" \
     || fail "guard skip should not make propagation fail"
   [ ! -s "$stdout" ] || fail "guard skip wrote to stdout"
   err_text=$(cat "$stderr")

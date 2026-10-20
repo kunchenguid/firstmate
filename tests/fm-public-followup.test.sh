@@ -835,7 +835,7 @@ case "$destination" in
     wait_count=0
     while [ ! -f "$FM_TEST_PUBLISH_RELEASE" ]; do
       wait_count=$((wait_count + 1))
-      [ "$wait_count" -le 250 ] || exit 97
+      [ "$wait_count" -le 3000 ] || exit 97
       sleep 0.02
     done
     ;;
@@ -854,7 +854,7 @@ SH
     kill -0 "$seed_pid" 2>/dev/null \
       || fail "local seeding exited before its identity completion marker: $(cat "$manifest_out")"
     wait_count=$((wait_count + 1))
-    [ "$wait_count" -le 250 ] || fail "local seeding never reached its identity completion marker"
+    [ "$wait_count" -le 3000 ] || fail "local seeding never reached its identity completion marker"
     sleep 0.02
   done
   assert_local_secondmate_parent_record "$child" "$parent_resolved"

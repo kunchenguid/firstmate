@@ -17,6 +17,7 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-network-parallel)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
+mkdir -p "$TMP_ROOT/no-addons"
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
@@ -237,7 +238,7 @@ SH
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \
     FM_FAKE_GIT_FETCH_SLEEP=0.4 \
-    FM_INHERITABLE_CONFIG='' \
+    FM_ADDONS_DIR="$TMP_ROOT/no-addons" FM_INHERITABLE_CONFIG='' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )

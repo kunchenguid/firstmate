@@ -31,6 +31,7 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 TMP_ROOT=$(fm_test_tmproot fm-self-repo-role)
+mkdir -p "$TMP_ROOT/no-addons"
 export FM_BACKEND=tmux
 
 # The code root under test is this checkout, so self-repo detection reaches it
@@ -347,7 +348,7 @@ test_secondmate_inheritance_receipt_lifecycle() {
   receipt="$dst_config/.fm-inherit-firstmate-role.generation"
 
   printf 'maintainer %s\n' "${PUB_TARGET:-github.com/kunchenguid/firstmate}" > "$src/firstmate-role"
-  FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
+  FM_ADDONS_DIR="$TMP_ROOT/no-addons" FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
     || fail "local propagation of firstmate-role failed"
   assert_present "$dst_config/firstmate-role" "propagation did not copy the role file"
   assert_present "$receipt" "propagation did not commit the role receipt"
@@ -386,7 +387,7 @@ test_secondmate_inheritance_receipt_lifecycle() {
   # destination file and records the absence in the receipt.
   printf 'maintainer %s\n' "${PUB_TARGET:-github.com/kunchenguid/firstmate}" > "$dst_config/firstmate-role"
   rm "$src/firstmate-role"
-  FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
+  FM_ADDONS_DIR="$TMP_ROOT/no-addons" FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
     || fail "revocation propagation of firstmate-role failed"
   assert_absent "$dst_config/firstmate-role" "revocation did not remove the inherited role file"
   assert_present "$receipt" "revocation dropped the receipt that proves absence"
@@ -419,7 +420,7 @@ test_secondmate_inherits_only_resolved_primary_role() {
   for bad in symlink two-directives; do
     rm -f "$src/firstmate-role"
     printf '# operator note\nmaintainer %s\n' "$scope" > "$src/firstmate-role"
-    FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
+    FM_ADDONS_DIR="$TMP_ROOT/no-addons" FM_INHERITABLE_CONFIG=firstmate-role propagate_inheritable_config "$src" "$dst_config" \
       || fail "propagation of a valid primary grant failed"
     out=$(run_role "$sm_home" report)
     assert_equals "fm-role: maintainer $scope (inherited)" "$out" "a valid primary grant must be inherited"
