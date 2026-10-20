@@ -1644,8 +1644,13 @@ await assertStockHtmlRendering("/export calm.html", "\r");
 getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
-const unmatchedRenderer = createInstalledToolHtmlRenderer();
-if (unmatchedRenderer.renderCall("unmatched-submit", "grep", { pattern: "alpha", path: "." })) {
+const unmatchedRenderer = createToolHtmlRenderer({
+  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  getToolRenderers: (name) => tools.find((tool) => tool.name === name),
+  theme,
+  cwd: process.cwd(),
+});
+if (unmatchedRenderer.renderCall("unmatched-submit", "fm_watch_arm_pi", watchArgs)) {
   throw new Error("ordinary non-submit input activated HTML export rendering");
 }
 editorText = "";
