@@ -79,9 +79,9 @@ for harness in codex claude; do
       case "$var" in *_OVERRIDE) unset "$var" ;; esac
     done
     env -u FM_GATE_REFUSE_BYPASS FM_HOME="$lab" NO_MISTAKES_GATE=1 FM_SUPERVISION_ACTOR=branch \
-      FM_CONFIG_OVERRIDE="$lab/config" "$BIN/fm-approval-failover.sh" apply task
+      FM_CONFIG_OVERRIDE="$home/config" "$BIN/fm-approval-failover.sh" apply task
   ) > "$home/lab-override.out" 2>&1 || rc=$?
-  [ "$rc" -eq 3 ] || fail 'lab with an override escaped gate refusal'
+  [ "$rc" -eq 3 ] || fail 'lab with a config override outside its home escaped gate refusal'
   [ -z "$(find "$lab/config" -mindepth 1 -print)" ] || fail 'refused lab override changed configuration'
   [ ! -e "$lab/control.log" ] || fail 'refused lab override reached lifecycle control'
   (
@@ -89,7 +89,7 @@ for harness in codex claude; do
       case "$var" in *_OVERRIDE) unset "$var" ;; esac
     done
     env -u FM_GATE_REFUSE_BYPASS FM_HOME="$lab" NO_MISTAKES_GATE=1 FM_SUPERVISION_ACTOR=branch \
-      CHECK_INHERIT_SETTING="$setting" "$BIN/fm-approval-failover.sh" apply task
+      FM_CONFIG_OVERRIDE="$lab/config" CHECK_INHERIT_SETTING="$setting" "$BIN/fm-approval-failover.sh" apply task
   ) > "$home/lab.out" 2>&1 || fail "$harness disposable lab recovery was refused"
   [ "$(cat "$lab/config/$setting")" = "$fallback" ] || fail 'lab fallback was not saved'
   assert_grep 'task interrupt' "$lab/control.log" 'lab did not cancel the pending turn'

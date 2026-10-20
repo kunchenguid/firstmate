@@ -6,8 +6,8 @@
 # protects is exactly a vendor-owned surface. Codex blocks a fresh crewmate
 # launch on an unanswerable "Hooks need review" modal whenever the machine's
 # ~/.codex/hooks.json or a project's .codex/hooks.json carries a hook it has no
-# persisted trust for, so the crewmate launch disables codex's hook layer
-# outright (bin/fm-spawn.sh's launch template owns the flag).
+# persisted trust for, so the crewmate launch requests hook disablement
+# (bin/fm-spawn.sh's launch template owns the flag and policy limitation).
 #
 # The guard replays the REAL launch flags fm-spawn builds - captured from a
 # spawn driven through a fake pane - against the installed codex and verifies
