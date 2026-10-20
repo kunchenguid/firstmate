@@ -5,9 +5,13 @@
 # with nobody at the window to press Enter.
 #
 # Usage: fm-pi-trust.sh [--agent-dir <dir>] <worktree> <project>
-#   --agent-dir <dir>  the Pi agent root the launch will read (its
-#                      PI_CODING_AGENT_DIR); default $PI_CODING_AGENT_DIR, then
-#                      $HOME/.pi/agent
+#   --agent-dir <dir>  the Pi agent root the launch will read (the value its
+#                      launch line sets as PI_CODING_AGENT_DIR); default
+#                      $HOME/.pi/agent. The invoking process's own
+#                      PI_CODING_AGENT_DIR is never an input: panes are created
+#                      by a long-lived daemon that does not inherit firstmate's
+#                      environment, so it is not evidence of what the worker
+#                      reads.
 #   <worktree>         the isolated task worktree this spawn launches into
 #   <project>          the primary checkout that worktree belongs to
 # Prints one line naming what it registered; refuses loudly on anything else.
@@ -36,15 +40,25 @@
 # turn. The exact keys and the live probe are recorded in the PR body and
 # docs/verification/runtime-backends.md.
 #
-# An existing `true` for this exact path is success with NO write at all, which
-# is what makes the registration idempotent across the relaunches and the pooled
-# slot's later reuse. An existing `false` - a human's explicit "Do not trust"
-# recorded for this path - is REFUSED rather than flipped: a spawn may not
-# spend a decision the operator already made, and launching anyway would wedge
-# exactly as before. Nothing else in the store is touched: no other entry is
-# added, removed, or rewritten, and the parent directory, the project checkout,
-# the home directory, and `/` are never registered - only the one absolute path
-# this spawn actually uses.
+# THE STORE IS THE ONE THE LAUNCH LINE NAMES. A worker account pin puts its root
+# on the launch line and bin/fm-spawn.sh passes that root as --agent-dir; an
+# unpinned launch line carries no root at all, so that worker reads Pi's default
+# `<home>/.pi/agent`, which is this script's default. Those are the only two
+# shapes; the invoking process's environment is not one of the inputs.
+#
+# A lookup resolves the nearest recorded decision on the worktree path itself or
+# any ancestor, matching Pi's own `findNearestTrustEntry` walk, which skips
+# `null` entries. A nearest `true` is success with NO write at all, which is what
+# makes the registration idempotent across the relaunches and the pooled slot's
+# later reuse, including a worktree already covered by a trusted ancestor. A
+# nearest `false` - a human's explicit "Do not trust", exact or inherited - is
+# REFUSED rather than flipped: a spawn may not spend a decision the operator
+# already made, and Pi applies that recorded decline to this path without
+# prompting, so the worker would run untrusted rather than park on a dialog. The
+# refusal names the store and the entry to change or remove. Nothing else in the
+# store is touched: no other entry is added, removed, or rewritten, and the
+# parent directory, the project checkout, the home directory, and `/` are never
+# registered - only the one absolute path this spawn actually uses.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY and mirrors bin/fm-agy-trust.sh and
 # bin/fm-claude-trust.sh: <worktree> must be a LINKED git worktree - its own git
@@ -83,10 +97,12 @@ usage() {
 }
 
 AGENT_ARG=
+AGENT_GIVEN=0
 case "${1:-}" in
 --agent-dir)
   [ "$#" -eq 4 ] || usage
   AGENT_ARG=$2
+  AGENT_GIVEN=1
   shift 2
   ;;
 -h | --help)
@@ -120,8 +136,10 @@ HOME_REAL=$(real_dir "$HOME") || true
 # The launch forwards a pinned agent root verbatim, so a relative value would
 # name one directory here and another once the worker resolves it. Refuse rather
 # than guess, the same way bin/fm-claude-trust.sh treats a relative
-# CLAUDE_CONFIG_DIR.
-AGENT_DIR=${AGENT_ARG:-${PI_CODING_AGENT_DIR:-$HOME_REAL/.pi/agent}}
+# CLAUDE_CONFIG_DIR. An explicit empty --agent-dir is refused by the same case
+# below instead of falling back, because that is a launch root nobody named.
+AGENT_DIR=$HOME_REAL/.pi/agent
+[ "$AGENT_GIVEN" -eq 0 ] || AGENT_DIR=$AGENT_ARG
 case $AGENT_DIR in
 '') refuse "the Pi agent root is empty, so the trust store cannot be located" ;;
 /*) ;;
@@ -200,6 +218,19 @@ const readStore = () => {
 };
 const fingerprint = (buf) =>
   buf === null ? "absent" : crypto.createHash("sha256").update(buf).digest("hex");
+// Pi's findNearestTrustEntry: the nearest recorded true/false on the path or an
+// ancestor wins, and null entries are skipped. An inherited decision is the
+// operator's own, so this lookup must not see only the exact key.
+const nearestDecision = (data, dir) => {
+  let current = dir;
+  while (true) {
+    const value = data[current];
+    if (value === true || value === false) return { path: current, decision: value };
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+};
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
@@ -213,16 +244,17 @@ const attempt = () => {
       }
     }
   }
-  if (root[target] === true) return "present";
-  // A recorded decline is a human decision, not a missing entry. Refuse rather
-  // than reverse it; the spawn stops and reports instead of launching a worker
-  // that would wedge on the dialog anyway.
-  if (root[target] === false) return "declined";
   for (const [key, value] of Object.entries(root)) {
     if (value !== true && value !== false && value !== null) {
       throw new Error(`${store} has a non-boolean value for ${JSON.stringify(key)}, so Pi would reject the whole store`);
     }
   }
+  const found = nearestDecision(root, target);
+  if (found !== null && found.decision === true) return "present";
+  // A recorded decline is a human decision, exact or inherited, not a missing
+  // entry. Refuse rather than reverse it: Pi applies it to this path without
+  // prompting, so the spawn would run untrusted instead of parking.
+  if (found !== null) return `declined:${found.path}`;
   root[target] = true;
   const sorted = {};
   for (const key of Object.keys(root).sort()) sorted[key] = root[key];
@@ -241,7 +273,8 @@ const attempt = () => {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
   const back = JSON.parse(fs.readFileSync(store, "utf8"));
-  return back[target] === true ? "recorded" : "dropped";
+  const settled = nearestDecision(back, target);
+  return settled !== null && settled.decision === true ? "recorded" : "dropped";
 };
 try {
   for (let i = 0; i < 3; i += 1) {
@@ -250,8 +283,9 @@ try {
       process.stdout.write(`${result}\n`);
       process.exit(0);
     }
-    if (result === "declined") {
-      console.error(`error: ${store} records "Do not trust" for ${target}; refusing to reverse the operator's recorded decision. Remove that entry or answer the dialog interactively once to recover`);
+    if (result.startsWith("declined:")) {
+      const denied = result.slice("declined:".length);
+      console.error(`error: ${store} records "Do not trust" for ${denied}, which Pi applies to ${target}; refusing to reverse a decision the operator already made. Change or remove the ${denied} entry in ${store} to allow this spawn`);
       process.exit(1);
     }
     if (result === "moved" && i >= 1) {

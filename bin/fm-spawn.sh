@@ -5401,9 +5401,12 @@ claude*)
   ;;
 pi | pi-signed)
   # The store is the one the LAUNCH will read: a worker account pin names the
-  # root on the launch line itself, and an unpinned launch inherits the pane's
-  # own PI_CODING_AGENT_DIR (else the user-level ~/.pi/agent). Only the realpath
-  # is registered, because Pi keys its store by the canonical path.
+  # root on the launch line itself, and an unpinned launch line names no root at
+  # all, so that worker reads Pi's default <home>/.pi/agent. The spawning
+  # process's own PI_CODING_AGENT_DIR is not evidence, because a pane is created
+  # by a long-lived tmux/herdr daemon that does not inherit firstmate's
+  # environment. Only the realpath is registered, because Pi keys its store by
+  # the canonical path.
   if [ "$KIND" != secondmate ]; then
     spawn_pi_trust_args=("$WT" "$PROJ_ABS")
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
