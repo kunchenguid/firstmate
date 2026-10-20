@@ -42,8 +42,10 @@
 #                          resume. Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
 #                          the escalation at that count carries an extra
 #                          "PERMANENTLY-WEDGED" clause and is the last wedge
-#                          escalation for that WINDOW until its episode ends
-#                          (wedge_timer_check owns that opt-in).
+#                          escalation for that WINDOW while its cap marker
+#                          stands: until the next episode-ending reset,
+#                          FM_CAP_HORIZON_SECS elapses, or the operator removes
+#                          the marker (wedge_timer_check owns that opt-in).
 #                          When the pane shows the Claude background-task
 #                          exit picker, that same parenthetical ends with
 #                          "blocked-on-prompt:" and the picker's name, after the
