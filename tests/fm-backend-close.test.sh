@@ -124,6 +124,32 @@ pass "zellij distinguishes confirmed absence from failed reads, closes and ident
 
 # shellcheck disable=SC2329 # Fixture overrides are called through backend dispatch.
 (
+  . "$ROOT/bin/backends/paseo.sh"
+  fm_backend_paseo_cli() {
+    case "$1 $2" in
+      "terminal ls") printf '%s' "$paseo_terminals"; return "$paseo_read_status" ;;
+      "terminal kill") return "$paseo_kill_status" ;;
+      *) return 0 ;;
+    esac
+  }
+  fm_backend_paseo_terminal_id_for_name() { return 1; }
+  fm_backend_paseo_surface_id_for_workspace() { return 1; }
+  fm_backend_paseo_scoped_name() { printf '%s' "$1"; }
+  fm_backend_paseo_retire_workspace() { :; }
+  paseo_read_status=0 paseo_kill_status=0 paseo_terminals='[{"id":"term-1"}]'
+  check_close paseo term-1:ws-1 1
+  paseo_read_status=1
+  check_close paseo term-1:ws-1 1
+  paseo_read_status=0 paseo_terminals='[]'
+  check_close paseo term-1:ws-1 0
+  paseo_terminals='[{"id":"term-1"}]'
+  paseo_kill_status=1
+  check_close paseo term-1:ws-1 1
+) || exit 1
+pass "paseo proves its terminal absent from the live inventory and refuses a failed close"
+
+# shellcheck disable=SC2329 # Fixture overrides are called through backend dispatch.
+(
   . "$ROOT/bin/backends/orca.sh"
   orca() { printf '%s\n' "$close_response"; return "$orca_close_status"; }
   orca_close_status=1 close_response='{}'

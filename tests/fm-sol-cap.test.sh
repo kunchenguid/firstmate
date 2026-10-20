@@ -337,6 +337,11 @@ test_declared_model_set_is_the_only_capped_set() {
   write_sol_row "$case_dir/home" live "$(fresh_start)" 0
   out=$(lib_refuse_claim "$case_dir" task-e gpt-6-sol) || true
   assert_contains "$out" "ceiling reached" "the declared ceiling was not enforced"
+  # A declared pattern that begins with a dash is a pattern, not a grep
+  # option: an option-shaped pattern would silently cover nothing.
+  printf 'max=1\nmodel-pattern=-sol$\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-f gpt-6-sol) || true
+  assert_contains "$out" "ceiling reached" "a dash-leading declared pattern matched nothing"
   pass "only the models the captain declared are capped, by exact id or by declared pattern"
 }
 

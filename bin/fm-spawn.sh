@@ -1799,7 +1799,33 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+# Whether the endpoint this spawn opened was CONFIRMED gone. A capped
+# session's occupancy is released only on a confirmed close, so the two are
+# tracked apart: SPAWN_ENDPOINT_CLOSED says the close ran, and this says the
+# endpoint was proven absent.
+SPAWN_ENDPOINT_CONFIRMED=0
 SPAWN_STAGED_LAUNCH_FILE=
+
+# spawn_close_endpoint <backend> <target> [tab_id] [label]
+# Close the endpoint this spawn opened. A task that holds a capped session
+# claim uses the confirmed close, so a close that could not be proven absent
+# does not release that claim; every other task keeps the ordinary close.
+spawn_close_endpoint() {  # <backend> <target> [tab_id] [label]
+  local backend=$1 target=$2 tab_id=${3:-} label=${4:-}
+  if [ "${FM_SOL_CLAIM_CREATED:-}" = "$ID" ]; then
+    if fm_backend_kill_confirmed "$backend" "$target" "$tab_id" "$label" 2>/dev/null; then
+      SPAWN_ENDPOINT_CLOSED=1
+      SPAWN_ENDPOINT_CONFIRMED=1
+      return 0
+    fi
+    return 1
+  fi
+  if fm_backend_kill "$backend" "$target" "$tab_id" "$label" 2>/dev/null; then
+    SPAWN_ENDPOINT_CLOSED=1
+    return 0
+  fi
+  return 1
+}
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1891,7 +1917,7 @@ spawn_abort_cleanup() {
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+      spawn_close_endpoint orca "$ORCA_TERMINAL" || true
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
@@ -1984,7 +2010,10 @@ spawn_abort_cleanup() {
   # is still held: once the per-id spawn and metadata locks are gone, a fresh
   # dispatch may already reuse this task id and hold its own live claim, which
   # this release must never remove.
-  if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && [ "${FM_SOL_CLAIM_CREATED:-}" = "$ID" ]; then
+  # A capped session's occupancy is released only after the endpoint was
+  # CONFIRMED gone: an unconfirmed close leaves the occupancy standing, so a
+  # worker that survived the close still holds its slot.
+  if [ "$SPAWN_ENDPOINT_CONFIRMED" = 1 ] && [ "${FM_SOL_CLAIM_CREATED:-}" = "$ID" ]; then
     fm_sol_cap_promote "$ID" remove "$STATE" || status=1
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -2016,9 +2045,7 @@ spawn_abort_cleanup() {
       SPAWN_FRESH_ENDPOINT_OPENED=0
       local abort_tab_id=
       [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
-      if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
-        SPAWN_ENDPOINT_CLOSED=1
-      else
+      if ! spawn_close_endpoint "$BACKEND" "$T" "$abort_tab_id" "fm-$ID"; then
         echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
       fi
     fi
@@ -5932,12 +5959,12 @@ rovo_spawn_fail() { # <detail>
 # for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+    spawn_close_endpoint orca "$T" || true
     return 0
   fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  spawn_close_endpoint "$BACKEND" "$T" "$tab_id" "fm-$ID" || true
 }
 
 # OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x

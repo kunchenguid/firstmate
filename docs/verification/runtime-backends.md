@@ -399,7 +399,8 @@ It is deliberately NOT the ordinary teardown path: a task that holds no capped o
 | zellij | the session's pane and tab inventories; a read that cannot run, or an inventory that still names the pane or tab, is not proof |
 | cmux | the workspace inventory of every window; a failed read, or a surviving workspace or title, is not proof |
 | orca | the close command's own answer: a failed command or an error JSON response is a refused close |
-| any other backend | no separate proof exists, so the backend's ordinary close contract applies |
+| paseo | the live terminal inventory; a read that cannot run, or an inventory that still names the terminal, is not proof |
+| any other backend | no confirmed-close implementation exists, so the close is refused rather than assumed |
 
 A refused confirmed close means the endpoint could not be proven absent, so the caller keeps the session's occupancy instead of releasing it.
 

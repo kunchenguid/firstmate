@@ -238,7 +238,7 @@ fm_sol_cap_model_capped() {  # <model>
     *"|$model|"*) return 0 ;;
   esac
   [ -n "$FM_SOL_CAP_PATTERN" ] || return 1
-  printf '%s\n' "$model" | grep -Eq "$FM_SOL_CAP_PATTERN"
+  printf '%s\n' "$model" | grep -Eq -e "$FM_SOL_CAP_PATTERN"
 }
 
 # fm_sol_cap_state_model_capped <state-dir> <model>
