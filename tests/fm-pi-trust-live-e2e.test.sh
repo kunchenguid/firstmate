@@ -36,6 +36,7 @@ printf '# live pi version: %s (package %s)\n' "$PI_VERSION" "$PKG_VERSION"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-trust-live.XXXXXX") || fail "could not create a disposable lab"
 cleanup() { rm -rf -- "$LAB"; }
 trap cleanup EXIT
+LAB_REAL=$(cd -P -- "$LAB" && pwd -P) || fail "could not resolve the disposable lab"
 
 # A disposable project with one linked worktree that holds a trust-requiring
 # resource, which every real task worktree of this repository does through
@@ -52,13 +53,19 @@ WT_REAL=$(cd -P -- "$WT" && pwd -P)
 AGENT="$LAB/agent"
 mkdir -p "$AGENT" "$LAB/home"
 
-# probe_trust: ask Pi's own resolver about the lab worktree. Prints one JSON
-# object; exits non-zero if the installed package no longer exposes the module
-# this guard reads, so a layout change fails loudly naming the version instead
-# of silently proving nothing.
+# probe_trust <agent-dir> [seed-json]: ask Pi's own resolver about the lab
+# worktree under one disposable agent root. An optional seed object is written
+# as that root's trust store first, so each case proves how the INSTALLED
+# package resolves the entries the script's own copy of the rule claims. Prints
+# one JSON object; exits non-zero if the installed package no longer exposes the
+# module this guard reads, so a layout change fails loudly naming the version
+# instead of silently proving nothing.
 probe_trust() {
-  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$AGENT" HOME="$LAB/home" \
+  local agent=$1 seed=${2:-}
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$agent" HOME="$LAB/home" \
+    PI_TRUST_SEED="$seed" \
     node --input-type=module - "$WT_REAL" "$PI_VERSION" <<'NODE'
+import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 const [cwd, version] = process.argv.slice(2);
@@ -73,7 +80,13 @@ try {
   console.error(`installed Pi ${version} no longer exposes its trust manager at the expected path: ${err.message}`);
   process.exit(3);
 }
-const store = new trustManager.ProjectTrustStore(config.getAgentDir());
+const agentDir = config.getAgentDir();
+const seed = process.env.PI_TRUST_SEED;
+if (seed) {
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "trust.json"), `${JSON.stringify(JSON.parse(seed), null, 2)}\n`);
+}
+const store = new trustManager.ProjectTrustStore(agentDir);
 const resolved = await projectTrust.resolveProjectTrusted({
   cwd,
   trustStore: store,
@@ -81,7 +94,7 @@ const resolved = await projectTrust.resolveProjectTrusted({
 });
 process.stdout.write(
   JSON.stringify({
-    agentDir: config.getAgentDir(),
+    agentDir,
     trustGating: trustManager.hasTrustRequiringProjectResources(cwd),
     decision: store.get(cwd),
     resolved,
@@ -92,7 +105,7 @@ NODE
 
 # --- 1. Baseline: an unregistered worktree is untrusted ---------------------
 BASE=
-if ! BASE=$(probe_trust); then
+if ! BASE=$(probe_trust "$AGENT"); then
   fail "the installed Pi package could not be probed: $BASE"
 fi
 printf '# baseline: %s\n' "$BASE"
@@ -111,7 +124,7 @@ assert_contains "$OUT" "trusted:" "the registration did not report what it trust
 
 # --- 3. Pi's own resolver now reports the same worktree trusted -------------
 AFTER=
-if ! AFTER=$(probe_trust); then
+if ! AFTER=$(probe_trust "$AGENT"); then
   fail "the installed Pi package could not be probed after registration: $AFTER"
 fi
 printf '# after registration: %s\n' "$AFTER"
@@ -129,4 +142,36 @@ KEYS=$(node -e 'process.stdout.write(Object.keys(JSON.parse(require("node:fs").r
 [ "$KEYS" = "$WT_REAL" ] || fail "the store carries '$KEYS', not only the canonical worktree path '$WT_REAL'"
 pass "pi $PKG_VERSION: the worktree fm-pi-trust.sh registered resolves trusted with no dialog"
 
-echo "# all fm-pi-trust-live-e2e checks passed (2)"
+# --- 4. The ancestor rule the script copies is Pi's own ---------------------
+# bin/fm-pi-trust.sh skips the write for an inherited true, refuses an inherited
+# false, and skips a nearer null entry. Those are only safe because the INSTALLED
+# package resolves the same entries the same way, so each shape is driven through
+# Pi's resolver on a fresh agent root.
+probe_case() {  # <slug> <seed-json> <want-decision> <want-resolved> <description>
+  local slug=$1 seed=$2 want_decision=$3 want_resolved=$4 description=$5 agent out
+  agent="$LAB/agent-$slug"
+  if ! out=$(probe_trust "$agent" "$seed"); then
+    fail "the installed Pi package could not be probed for the $slug case: $out"
+  fi
+  printf '# %s: %s\n' "$slug" "$out"
+  # shellcheck disable=SC2016 # the JS template literals are literal here
+  node -e '
+    const [raw, wantStore, wantDecision, wantResolved] = process.argv.slice(1);
+    const r = JSON.parse(raw);
+    if (r.agentDir !== wantStore) { console.error(`Pi read agent root ${r.agentDir}, not ${wantStore}`); process.exit(1); }
+    if (r.trustGating !== true) { console.error("the probe cwd must hold a trust-requiring resource or this case proves nothing"); process.exit(1); }
+    if (String(r.decision) !== wantDecision) { console.error(`pi read decision ${r.decision}, not ${wantDecision}`); process.exit(1); }
+    if (String(r.resolved) !== wantResolved) { console.error(`pi resolved ${r.resolved}, not ${wantResolved}`); process.exit(1); }
+  ' "$out" "$agent" "$want_decision" "$want_resolved" \
+    || fail "the $slug verdict is wrong: $out"
+  pass "pi $PKG_VERSION: $description"
+}
+
+probe_case ancestor-true "{\"$LAB_REAL\":true}" true true \
+  "a trusted ancestor with no exact key resolves the worktree trusted"
+probe_case ancestor-false "{\"$LAB_REAL\":false}" false false \
+  "an inherited 'Do not trust' resolves untrusted with no dialog"
+probe_case null-skips "{\"$WT_REAL\":null,\"$LAB_REAL\":true}" true true \
+  "a nearer null entry is skipped and the trusted ancestor resolves"
+
+echo "# all fm-pi-trust-live-e2e checks passed (5)"

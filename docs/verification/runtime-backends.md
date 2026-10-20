@@ -579,7 +579,7 @@ Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.
 A crewmate or scout spawn registers one absolute worktree path before launch, because a fresh pooled slot is a new path to Pi every time and the dialog otherwise parks an unattended worker indefinitely.
 
 Verified 2026-10-20 on pi 0.84.2 (package 0.84.2) through the default-on live guard (disposable `HOME` and `PI_CODING_AGENT_DIR` only; never `~/.pi`).
-The guard drives the installed package's own `ProjectTrustStore` and `resolveProjectTrusted`, which are what the TUI consults before it renders the dialog, and asserts the verdict flips only because `bin/fm-pi-trust.sh` wrote the entry.
+The guard drives the installed package's own `ProjectTrustStore` and `resolveProjectTrusted`, which are what the TUI consults before it renders the dialog. It asserts the verdict flips from untrusted to trusted because `bin/fm-pi-trust.sh` wrote the entry, then seeds the three ancestor shapes the script itself now resolves - an inherited trust, an inherited decline, and a nearer `null` above a trust - and asserts the installed package resolves each one the same way.
 
 ```sh
 bash tests/fm-pi-trust-live-e2e.test.sh
@@ -591,13 +591,20 @@ bash tests/fm-pi-trust-live-e2e.test.sh
 ok - pi 0.84.2: an unregistered task worktree resolves untrusted
 # after registration: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent","trustGating":true,"decision":true,"resolved":true}
 ok - pi 0.84.2: the worktree fm-pi-trust.sh registered resolves trusted with no dialog
-# all fm-pi-trust-live-e2e checks passed (2)
+# ancestor-true: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent-ancestor-true","trustGating":true,"decision":true,"resolved":true}
+ok - pi 0.84.2: a trusted ancestor with no exact key resolves the worktree trusted
+# ancestor-false: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent-ancestor-false","trustGating":true,"decision":false,"resolved":false}
+ok - pi 0.84.2: an inherited 'Do not trust' resolves untrusted with no dialog
+# null-skips: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent-null-skips","trustGating":true,"decision":true,"resolved":true}
+ok - pi 0.84.2: a nearer null entry is skipped and the trusted ancestor resolves
+# all fm-pi-trust-live-e2e checks passed (5)
 ```
 
 What the installed package establishes, read from `dist/config.js`, `dist/core/trust-manager.js`, and `dist/core/project-trust.js`:
 The store is `<agentDir>/trust.json`, where `agentDir` is `PI_CODING_AGENT_DIR` when set and else `<homedir>/.pi/agent`.
 The file is one JSON object keyed by the absolute realpath-resolved directory, valued `true` (trusted), `false` (declined), or `null` (recorded undecided), sorted with two-space indentation and a trailing newline.
-A lookup walks the directory's ancestors and takes the nearest entry, and `resolveProjectTrusted` returns a recorded decision before any prompt, so a pre-written entry suppresses the dialog entirely.
+A lookup walks the directory's ancestors and takes the nearest entry, skipping `null` and taking the nearest recorded `true` or `false`, and `resolveProjectTrusted` returns a recorded decision before any prompt, so a pre-written entry suppresses the dialog entirely.
+The live guard above proves the installed package resolves an inherited `true`, an inherited `false`, and a nearer `null` above a `true` exactly as `bin/fm-pi-trust.sh` does.
 
 The portable half lives in `tests/fm-pi-trust.test.sh`: a fresh worktree is registered, a canonical path is recorded for a symlinked fixture root, an existing registration writes nothing, unrelated entries are preserved, an exact or inherited recorded decline refuses and names the store, an inherited trust counts as already trusted and writes nothing, an undecided ancestor entry is skipped, an unwritable or malformed store fails loudly, out-of-scope paths are refused, the store root follows the pinned agent dir and else `~/.pi/agent` and never the invoking process's `PI_CODING_AGENT_DIR`, an unpinned spawn registers that default store even when the spawn environment names another root, a pi and pi-signed spawn register their worktree without gaining `--approve`, a failed registration refuses the spawn, and a codex spawn never touches the Pi store.
 
