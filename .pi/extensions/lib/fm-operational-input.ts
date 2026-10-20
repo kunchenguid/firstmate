@@ -23,6 +23,12 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
 // digest, so this event firing on reload cannot manufacture ownership.
 export const FIRSTMATE_SESSION_START_SETTLED_EVENT = "firstmate:session-start-settled";
 
+// Process-local ownership fence for async follow-ups admitted from a settled
+// main-session boundary. Existing owners bracket their readback/delivery work;
+// optional idle work waits until every bracket has drained.
+export const FIRSTMATE_OWNED_FOLLOWUP_START_EVENT = "firstmate:owned-followup-start";
+export const FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT = "firstmate:owned-followup-drained";
+
 export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 

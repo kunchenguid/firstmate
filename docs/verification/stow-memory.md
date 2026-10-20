@@ -40,3 +40,23 @@ $ # Historical rich-lifecycle live matrix removed; retain the portable periodic-
 
 The live guard provisions, addresses, stops, and deletes only through `bin/fm-herdr-lab.sh`; that helper verifies the default Herdr fleet before and after the run.
 Installation evidence is not enablement: the repository contains no `config/periodic-stow.json`, and choosing an enabled home and frequency remains a later operator action.
+
+## 2026-10-20 idle-reminder verification
+
+The focused coordinator suite uses controlled clocks and canonical task records to prove the 1800-second due boundary, structural busy deferral, verified main-session lock and role binding, one reminder after prolonged busy time, repeat eligibility for an unchanged decision, completed and archived exclusion, empty-inventory silence, and successful-settlement pacing across extension reload.
+It also proves that snapshot failures release existing maintenance and continuation scheduling, failed or aborted model turns retry only at a later boundary, tool-use preambles are not delivery evidence, and a cold restart retires an orphaned request before an intervening ordinary reply and reload without creating a false receipt.
+The combined periodic-coordinator and turn-end-guard fixture holds the guard's asynchronous settlement claim open and observes delivery order `guard, reminder`, proving that the optional reminder cannot enter Pi's follow-up queue ahead of an existing recovery owner.
+An offline deterministic provider then drives the extension through the installed Pi 1.3.0 `DefaultResourceLoader` and `AgentSession`: a real settled TUI turn reaches one hidden reminder follow-up and persisted delivery receipt, and reopening that session does not duplicate it.
+The same suite reruns the pre-existing manual, pre-compaction, maintenance, fixed-cutoff, recovery, receipt, and escalation cases so the lightweight reminder cannot replace or consume maintenance custody.
+
+```text
+$ tests/fm-periodic-stow.test.sh
+ok - Pi coordinator bounds heartbeat delivery and hands exhaustion to one executable main turn
+ok - idle reminders defer at busy boundaries, collapse missed intervals, repeat unresolved decisions, and persist successful delivery cadence
+ok - idle reminder stays quiet for an empty canonical inventory
+ok - old requested maintenance keeps its custody without suppressing a due idle reminder
+ok - installed Pi delivers one idle reminder and restores its successful cadence without network access
+ok - idle reminder waits for the existing turn-end owner before entering the follow-up queue
+ok - heartbeat retains failed duties and completes only with three unchanged bound readbacks
+ok - heartbeat persists paced recovery across generations without resetting attempts or fabricating progress
+```

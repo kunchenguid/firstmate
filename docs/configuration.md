@@ -386,11 +386,47 @@ Unknown fields or versions, malformed JSON, symlinks, unsafe interval values, cl
 Setting `enabled` to false stops new automatic maintenance requests and withdraws an unconsumed automatic-only request, while manual, partial, blocked, plan, and receipt evidence remains available for recovery.
 Automatic passes now account for task archival, unfinished-task continuation, and knowledge curation in one heartbeat run, replacing periodic stow while leaving manual `/stow` and pre-compaction invocation intact.
 The existing coordinator timer also emits bounded live-task continuation checks while full maintenance is disabled; it creates no second timer or daemon.
+The same timer owns optional idle reminders through the separate [`config/idle-reminder.json`](#idle-reminders-configidle-reminderjson) cadence; an old or active maintenance run does not own or suppress that reminder clock.
 Busy tools, queued input, compaction, and editor input defer the maintenance offer; unchanged duties remain silent and repeated ticks share the same run id.
 After three offers without a verified finish, the coordinator retains the run and starts main-session recovery with persistent pacing and delivery deduplication owned by `bin/fm-stow-run.sh`.
 A handling turn that performs no operation leaves the obligation pending for a later safe tick; original offer counts never reset, and delivery alone cannot complete a duty.
 The heartbeat receipt requires separately bound evidence for all three duties, as specified by `bin/fm-heartbeat-receipt.py`; an incomplete duty retains the run.
 `state/stow/state.json` is the single coordinator-state owner and `data/stow-runs/<run_id>/` holds non-injected plans and receipts; `bin/fm-stow-run.sh --help` owns their mutation interface, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns all knowledge, decay, budget, open-record, and cascade semantics.
+
+## Idle reminders (config/idle-reminder.json)
+
+`config/idle-reminder.json` is an optional per-home opt-in for concise unfinished-work and unanswered-decision reminders in the Pi main session.
+It reuses `.pi/extensions/fm-periodic-stow.ts`'s existing session timer, structural idle boundary, primary-session identity, verified fleet-lock ownership, native follow-up delivery, and bound chat mirroring.
+It creates no daemon, watcher cycle, task ledger, channel, or credential.
+
+The complete version 1 object has exactly `version`, `enabled`, and `interval_seconds`.
+`interval_seconds` is an integer of at least 1800 seconds.
+The requested half-hour configuration is:
+
+```json
+{"version":1,"enabled":true,"interval_seconds":1800}
+```
+
+The first interval starts from the configuration file modification time.
+Later intervals start only from a successfully settled reminder response or a successful canonical check that found no eligible work, never from the timer becoming due or from queuing a reminder request.
+Busy model work, tools, queued input, blocking UI, compaction, editor input, an unowned main-session lock, or an existing queued reminder defers the due reminder without consuming it.
+Turn-end recovery and canonical task-continuation readback bracket their owned asynchronous follow-ups; the coordinator admits an idle reminder only after those brackets drain, so optional reminder work cannot enter the queue ahead of existing recovery or continuation work.
+After a prolonged busy or offline span, the next safe idle boundary offers at most one consolidated reminder rather than replaying missed intervals.
+The handling receipt lives as a non-context custom entry in the persisted Pi session, so extension reload or process restart on that same session does not duplicate a handled reminder.
+A failed snapshot or model run preserves the due obligation but releases maintenance and continuation scheduling, then retries no sooner than a later timer boundary; a cold restart records the unowned queued request as failed before releasing it, so an intervening ordinary reply cannot become false reminder-delivery evidence.
+
+The reminder reads only `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-queued` and sends the model only its unfinished, gated, and captain-decision projections.
+That canonical projection excludes completed and archived records even when worker metadata or historical decision evidence remains.
+An unchanged unanswered captain decision remains eligible after the next interval, while a snapshot with no unfinished work, gates, or decisions stays silent.
+The generated Chinese reminder lists unfinished outcomes and their real blocker or next action before genuine user decisions, gives decision options and a concise recommendation, uses UTC+8 for any displayed time, and never answers or closes a decision itself.
+Standing local-Dorado routing and already-authorized ordinary permission declarations are not re-asked.
+
+This integration is Pi-only because it depends on Pi's persisted session entries, `agent_settled`, structural idle state, pending-message state, and native custom follow-up delivery.
+Codex primary sessions retain their existing foreground checkpoint and supervision behavior and do not load this reminder extension.
+TraeX remains a worker and scout harness rather than a supported primary integration.
+After installing a version that contains this feature, reload or restart the Pi primary once so it loads the changed extension, then create the configuration file in that primary's `FM_HOME`.
+Creating or changing the configuration file after the extension is loaded needs no further reload because every tick reads it again.
+No Firstmate service, watcher, Herdr session, or worker restart is required.
 
 ## FM_HOME
 

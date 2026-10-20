@@ -541,6 +541,7 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let prompts = 0;
 const pi = {
+  events: { emit() {} },
   on(event, handler) {
     handlers.set(event, handler);
   },
@@ -601,6 +602,7 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let attempts = 0;
 const pi = {
+  events: { emit() {} },
   on(event, handler) {
     handlers.set(event, handler);
   },
