@@ -979,6 +979,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-sol-cap-lib.sh
+. "$SCRIPT_DIR/fm-sol-cap-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
@@ -1431,6 +1433,11 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 1
   fi
+  # Sol session ceiling (bin/fm-sol-cap-lib.sh): a remote secondmate counts in
+  # the dispatching home's registry, the only home that records this route; a
+  # remote home's own dispatches count in theirs.
+  remote_sol_model=
+  [ "$model" != - ] && [ "$model" != default ] && [ -n "$model" ] && remote_sol_model=$model
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$STATE" ||
@@ -1466,6 +1473,14 @@ spawn_remote_secondmate() {
     return 1
     ;;
   esac
+  # Sol session ceiling (bin/fm-sol-cap-lib.sh): the ceiling gates this route
+  # the same way it gates a local spawn, before anything is published or
+  # transferred, so a refused launch leaves no half-built endpoint behind.
+  fm_sol_cap_reconcile_remote "$id" "$STATE" "$SCRIPT_DIR" || return 1
+  fm_sol_cap_refuse_and_claim "$id" secondmate "$harness" "$remote_sol_model" "$CONFIG" "$STATE" || {
+    [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+    return 1
+  }
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
@@ -1544,6 +1559,9 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if [ "$FM_SOL_CLAIM_CREATED" = "$id" ]; then
+    fm_sol_cap_promote "$id" 0 "$STATE" || return 1
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1563,6 +1581,7 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
   if [ "$remote_backend" != "$backend" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -1577,6 +1596,13 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
+  # The launch result reports the model the endpoint actually runs, read from
+  # the endpoint's own record: a reused live endpoint answers with the model it
+  # already runs, which can differ from this dispatch's request. Publishing the
+  # route record and reconciling Sol occupancy must retain lifecycle ownership
+  # and, when Sol occupancy is involved, the shared admission lock across both
+  # operations. A reconciliation failure after publication preserves the
+  # confirmed route for the next admission to reconcile.
   remote_herdr_session=
   remote_rex_session_id=
   remote_rex_server=
@@ -1631,7 +1657,7 @@ spawn_remote_secondmate() {
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
+    echo "model=$remote_model"
     echo "effort=${effort#-}"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
@@ -1648,21 +1674,51 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
+  cap_lock=
+  if [[ "$remote_model" =~ ^gpt-[0-9.]+-sol$ ]] || fm_sol_cap_has_owned_occupancy "$id" "$STATE"; then
+    cap_lock=$(fm_sol_cap_admission_lock_path "$STATE")
+    if [ -z "$cap_lock" ]; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id launched, but its Sol admission lock path could not be resolved; its task record and occupancy remain for the next admission to reconcile" >&2
+      return 1
+    fi
+    if ! fm_sol_cap_lock_acquire "$cap_lock" "the publication of task $id's route"; then
+      [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id launched, but another dispatch held the Sol admission boundary; its task record was not published and its occupancy stands for the next admission to reconcile" >&2
+      return 1
+    fi
+  fi
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
       SPAWN_TASK_SET_LOCK_HELD=0
       fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
     fi
+    [ -z "$cap_lock" ] || fm_lock_release "$cap_lock" || true
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id launched, but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    echo "error: remote secondmate $id launched, but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR); its Sol occupancy stands for the next admission to reconcile" >&2
     return 1
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
   fi
+  if [ -n "$cap_lock" ] && ! fm_sol_cap_record_actual_locked "$id" "$remote_model" "$STATE"; then
+    [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+    echo "error: remote secondmate $id launched, but its Sol occupancy could not be reconciled with the reported model; the confirmed route's record stands for the next admission to reconcile" >&2
+    [ -z "$cap_lock" ] || fm_lock_release "$cap_lock" || true
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
+  [ -z "$cap_lock" ] || fm_lock_release "$cap_lock" || true
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1905,6 +1961,13 @@ spawn_abort_cleanup() {
       (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 \
         || echo "warning: could not return the leased worktree $WT for $ID; run 'treehouse return --force $WT' from $PROJ_ABS" >&2
     fi
+  fi
+  # A stopped incarnation releases its Sol claim while its lifecycle ownership
+  # is still held: once the per-id spawn and metadata locks are gone, a fresh
+  # dispatch may already reuse this task id and hold its own live claim, which
+  # this release must never remove.
+  if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && [ "${FM_SOL_CLAIM_CREATED:-}" = "$ID" ]; then
+    fm_sol_cap_promote "$ID" remove "$STATE" || status=1
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -3514,6 +3577,19 @@ if [ "$HARNESS" = kiro ]; then
     kiro_hook_path_validate "$STATE" "$ID" || exit 1
   fi
 fi
+# Sol session ceiling (bin/fm-sol-cap-lib.sh; docs/configuration.md "Sol
+# session ceiling (config/sol-cap)"): the mechanical ceiling on concurrent
+# Sol dispatches runs once the spawn's model axis fully resolves (the
+# secondmate resolution above; a fresh ship or scout carries the explicit
+# --model dispatch resolves at intake) and before any endpoint, worktree, or
+# record exists, so a refusal unwinds to nothing.
+if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+  fm_sol_cap_reconcile_local "$ID" "$STATE" || exit 1
+fi
+fm_sol_cap_refuse_and_claim "$ID" "$KIND" "$HARNESS" "${MODEL:-}" "$CONFIG" "$STATE" || {
+  [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+  exit 1
+}
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
@@ -8004,6 +8080,9 @@ if [ "$BACKEND" = t3code ]; then
     fi
     T3CODE_LAUNCH_UNCONFIRMED=1
   }
+  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
+    fm_sol_cap_promote "$ID" 0 "$STATE" || exit 1
+  fi
   T3CODE_ABORT_CLEANUP=0
   T3CODE_LEASED=0
   T3CODE_HOME_ENV=0
@@ -8026,6 +8105,9 @@ else
   if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
     echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
     exit 1
+  fi
+  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
+    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run $(shell_quote "$ID") $(shell_quote "$STATE") /bin/sh -c $(shell_quote "$LAUNCH")"
   fi
   if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
     chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
@@ -8067,6 +8149,9 @@ else
       sleep 0.2
     done
   }
+  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
+    fm_sol_cap_promote "$ID" 0 "$STATE" || exit 1
+  fi
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.

@@ -350,9 +350,10 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 
 ### Endpoint close
 
-A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
+A falsely successful close can let teardown remove every durable record naming a still-live endpoint, so each backend's close return must reflect what it can prove.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
-Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
+The table below states the current return contract; the 2026-09-14 measurements cover only the tmux and missing-Orca-CLI paths.
+`tests/fm-backend-close.test.sh` exercises failed and successful close returns for cmux, Zellij, and Orca with controlled command responses.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -375,14 +376,12 @@ The refusal is reached only through a close that could not do its job, and each 
 | Backend | already gone | a close that failed |
 | --- | --- | --- |
 | tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
-| orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
-| zellij | 0, silent | 0, not yet distinguishable |
-| cmux | 0, silent | 0, not yet distinguishable |
+| orca | Requires a successful CLI close response | Nonzero on a failed command or an error JSON response |
+| zellij | 0 when successful session or pane/tab inventories prove absence | Nonzero when a failed close or unresolved identity cannot be confirmed absent |
+| cmux | 0 when successful inventories across every window prove absence | Every close requires confirming inventories; failed reads and surviving workspaces return nonzero |
 | tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
-The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
-Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
 It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
 Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
@@ -396,7 +395,7 @@ It states what `--force` authorizes rather than what will have happened, because
 T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
-The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
+The step immediately after it removes the Orca worktree through the same CLI, so continuing after an unconfirmed close could release the worktree while its terminal remains live; a missing CLI would also prevent that release.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header and `endpoint_close_refusal` comment own cleanup ordering and the limits of record retention after a close refusal.
