@@ -1668,6 +1668,36 @@ That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-tr
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
+### Pi model selector
+
+Measured 2026-10-20 against pi 1.3.0 in an isolated tmux session on Linux.
+The Herdr lab was not running, so the Herdr path is covered by the existing fakes.
+Typing `/model` opens a selector whose selected row carries a right arrow and a check, whose other rows are indented under it, and whose last non-blank row is the select, save and cancel footer:
+
+```text
+Only showing models from configured providers. Use /login to add providers.
+
+>
+
+→ ✓ alpha-model-one [localfake]
+    beta-model-two [localfake]
+    gamma-model-three [localfake]
+
+  Model Name: alpha-model-one
+
+  Model catalogs refreshed.
+
+  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
+```
+
+The rows in that capture come from a local `models.json` provider with no reachable endpoint: the selector's own structure is what is measured, and no provider was called.
+A second Enter would confirm the selected model, so the screen is a modal the same way the Claude exit picker is.
+The selector is recognised by its recorded structure only: a selected row marked with the arrow and check, and `Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel` as the last non-blank row.
+A screen that quotes those words - a diff, a note, or a test fixture above a normal composer - has no selected row and is not a selector.
+The matcher is per recorded screen rather than a shared "looks like a picker" heuristic: the footers differ per harness, and a footer-only match would reclassify ordinary screens that happen to end in the same words.
+No recorded screen was available for a Codex, Cursor, Grok, Kimi, OpenCode, Gemini, or omp modal picker, so those dialogs are not covered.
+Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

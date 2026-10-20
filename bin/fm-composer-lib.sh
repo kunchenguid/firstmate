@@ -2221,8 +2221,21 @@ EOF
 # The strings alone are not enough, because a diff, a note, or a test fixture
 # on the pane can quote all of them above a normal composer. A miss returns 1
 # and prints nothing.
+#
+# Each entry below is one recorded screen, matched by its own structure. A
+# shared "looks like a picker" heuristic is deliberately not used: the
+# footers below differ per harness, and a footer-only match would
+# reclassify ordinary screens that happen to end in the same words.
+#
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+#
+# Recorded 2026-10-20 on pi 1.3.0 (Linux): /model opens the model selector.
+# Its selected row is marked with a right arrow and a check, the other rows
+# are indented under it, and the last non-blank row is the select/save/cancel
+# footer. The search prompt and the provider hint above the rows are part of
+# the recorded screen but are not required for the match: the row marker and
+# the footer together are what identify this dialog.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -2233,6 +2246,19 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  # The Pi model selector. The selected row carries the arrow and check
+  # markers, and the footer names the select, save and cancel keys of THIS
+  # picker. A screen that merely quotes those words - a diff, a note, a
+  # test fixture above a normal composer - has no selected row, so it does
+  # not match.
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*→[ \t]*✓[ \t]+\S/ { selected = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(selected && last ~ /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t\r]*$/) }
+  '; then
+    printf '%s' 'Pi model selector'
     return 0
   fi
   return 1

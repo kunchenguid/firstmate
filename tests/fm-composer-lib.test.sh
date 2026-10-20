@@ -1848,6 +1848,57 @@ test_dialog_heading_and_footer_must_be_the_recorded_lines() {
   pass "a buried heading or a different last line is not the exit picker"
 }
 
+# The Pi model selector, as it rendered on pi 1.3.0 on 2026-10-20. The
+# rows, the provider hint, the search prompt and the footer are the recorded
+# screen; a real capture, not a reconstruction from the installed source.
+pi_model_picker_screen() {
+  printf '%s\n' \
+    'Only showing models from configured providers. Use /login to add providers.' \
+    '' \
+    '>' \
+    '' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '    gamma-model-three [localfake]' \
+    '' \
+    '  Model Name: alpha-model-one' \
+    '' \
+    '  Model catalogs refreshed.' \
+    '' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+}
+
+test_pi_model_selector_is_named_and_blocks_enter() {
+  local screen out rc sink
+  screen=$(pi_model_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded Pi model selector should match"
+  [ "$out" = 'Pi model selector' ] || fail "dialog name was '$out'"
+  # A picker must be named even when the composer classifier cannot see a
+  # cursor or a styled row, which is the case on a plain capture.
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$(cat "$sink")" = 'Pi model selector' ] \
+    || fail "classify should note the dialog, got '$(cat "$sink")'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  # The footer alone, without the selected row, is not this dialog: the
+  # strings can be quoted above a normal composer.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    'the fixture quotes: Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a quoted footer without the selected row must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  # The selected row without the recorded footer is not this dialog either.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Model catalogs refreshed.')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the rows without the recorded footer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  pass "the Pi model selector is named by its recorded rows and footer"
+}
+
 test_dialog_note_skips_the_match_when_no_sink_is_set() {
   local screen out rc before after
   screen=$(exit_picker_screen)
@@ -1902,6 +1953,7 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
+test_pi_model_selector_is_named_and_blocks_enter
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
