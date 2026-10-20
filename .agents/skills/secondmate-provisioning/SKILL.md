@@ -2,7 +2,7 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, giving a lookout duty to, or retiring a secondmate home, or when editing data/secondmates.md.
   Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
@@ -59,6 +59,11 @@ Retire or clean that home first, and re-scaffold a stale project-bearing charter
 Keep custom charter text focused on the persistent responsibility, available project clones, and genuinely domain-specific hard rules.
 The scaffolded charter, later copied to `data/charter.md`, owns the standard lifecycle and escalation wording.
 Preserve the generated charter sections unless the domain genuinely needs a hard rule.
+
+Pass `--lookout` on the scaffold to give the mate the lookout duty: it keeps a lookout on this home, the flagship, while the captain is away, and takes the con of the overnight reviews it can build when supervision here cannot be recovered.
+The duty is captain-routed standing work, the one exception to idle-by-default, and the charter section is its whole instruction.
+For a mate already seeded, add that section to its `data/charter.md` through the inherited-material path below rather than by hand-writing a new duty.
+Then write the mate's `config/lookout` and run `bin/fm-lookout.sh stand` in the mate home, through `bin/fm-on.sh` for a remote route; `docs/configuration.md` "Second-mate lookout on the flagship" owns the setup and `bin/fm-lookout.sh` the mechanics.
 
 Provision a local persistent home and registry entry after the charter is filled:
 
