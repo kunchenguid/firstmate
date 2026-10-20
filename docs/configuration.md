@@ -431,7 +431,7 @@ Every home's Treehouse spawns, primary or secondmate, run `treehouse --root <sta
 
 Treehouse keys a pool by the clone's directory name and origin, so before every home allocated from its own `state/treehouse/` root, a secondmate home's clone, the primary home's clone, and any other checkout of the same project could share one pool under Treehouse's default root.
 Slots created that way remain in the default-root pool after upgrade, and one of them may belong to another clone than the one now spawning from it.
-New spawns no longer allocate from the default root, so such a slot reaches a spawn only through a Treehouse configuration (`TREEHOUSE_ROOT` or a config file) that points back at it.
+New spawns always pass `--root`, which overrides `TREEHOUSE_ROOT` and Treehouse config, so no operator configuration sends a new spawn back to a default-root slot; the refusal below remains the last-resort guard should a spawn still meet another clone's copy.
 A task already running on a default-root slot keeps it: teardown and relaunch use the worktree path the task recorded, never a recomputed root, so that task runs to completion and its slot is returned to the default-root pool it came from.
 A Treehouse spawn refuses such a slot before any fetch, reset, slot claim, or launch: the spawn fails with `treehouse get did not enter an isolated worktree within 60s`, naming `it belongs to a different clone` and both common git dirs.
 That refusal leaves the slot and its contents as found: Firstmate does not migrate, quarantine, or delete it or run `treehouse return` on it, and it does not recover any older task that used it.
