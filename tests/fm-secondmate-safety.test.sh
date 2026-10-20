@@ -21,6 +21,20 @@ file_mode() {
   fi
 }
 
+# Clone the exact reviewed commit into a disposable directory.
+#
+# The commit is named explicitly rather than through a branch: a checkout
+# can be detached, and `git branch --show-current` is then empty, so
+# `git clone --branch ""` fails before the fixture exists. The gate
+# worktree is a detached checkout, so a fixture that needs a branch name
+# fails there and never exercises the behaviour it is written for.
+clone_reviewed_head() {  # <source> <destination>
+  local src=$1 dst=$2 head
+  head=$(git -C "$src" rev-parse HEAD) || return 1
+  git clone --quiet --no-checkout "$src" "$dst" || return 1
+  git -C "$dst" checkout --quiet "$head" || return 1
+}
+
 install_fake_process_event_sweep() {
   local home=$1 log=$2
   mkdir -p "$home/bin"
@@ -52,7 +66,7 @@ test_durable_home_git_lock_lifecycle() {
   fmroot="$TMP_ROOT/git-lock-code"
   home="$TMP_ROOT/git-lock-parent"
   sub="$TMP_ROOT/git-lock-subhome"
-  git clone --quiet --branch "$(git -C "$ROOT" branch --show-current)" "$ROOT" "$fmroot" || fail "cannot create disposable code root"
+  clone_reviewed_head "$ROOT" "$fmroot" || fail "cannot create disposable code root"
   git -C "$fmroot" worktree add --quiet --detach "$sub" HEAD || fail "cannot create disposable home worktree"
   mkdir -p "$home/data" "$home/state"
   fakebin=$(make_fake_tmux "$TMP_ROOT/git-lock-fake")
@@ -168,7 +182,7 @@ test_durable_home_git_lock_rollback() {
   fmroot="$TMP_ROOT/git-lock-rollback-code"
   home="$TMP_ROOT/git-lock-rollback-parent"
   sub="$TMP_ROOT/git-lock-rollback-subhome"
-  git clone --quiet --branch "$(git -C "$ROOT" branch --show-current)" "$ROOT" "$fmroot" || fail "cannot create rollback code root"
+  clone_reviewed_head "$ROOT" "$fmroot" || fail "cannot create rollback code root"
   git -C "$fmroot" worktree add --quiet --detach "$sub" HEAD || fail "cannot create rollback worktree"
   mkdir -p "$home/data" "$home/state"
   fakebin=$(make_fake_tmux "$TMP_ROOT/git-lock-rollback-fake")
