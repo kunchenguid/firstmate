@@ -106,8 +106,7 @@ if [ "${1:-}" = display-message ] && [ "${*: -1}" = '#{pane_pid}' ]; then
   printf '%s\n' "${FM_FAKE_PANE_PID:-}"
 fi
 if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_KILL_PID:-}" ]; then
-  kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null || true
-  sleep 0.2
+  ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
 fi
 exit 0
 SH

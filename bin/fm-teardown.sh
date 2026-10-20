@@ -2442,9 +2442,8 @@ $dir_pids"
       fi
       if ! task_pid_list_contains "$TASK_REAP_REPORTED" "$pid"; then
         echo "teardown: spared unowned process $pid: $command" >&2
-        if identity=$(task_process_identity "$pid"); then
-          TEARDOWN_SPARED_PIDS="${TEARDOWN_SPARED_PIDS}${TEARDOWN_SPARED_PIDS:+$'\n'}$pid"$'\t'"$identity"
-        fi
+        identity=$(task_process_identity "$pid") || identity=
+        TEARDOWN_SPARED_PIDS="${TEARDOWN_SPARED_PIDS}${TEARDOWN_SPARED_PIDS:+$'\n'}$pid"$'\t'"$identity"
         TASK_REAP_REPORTED="${TASK_REAP_REPORTED}${TASK_REAP_REPORTED:+$'\n'}$pid"
       fi
     fi
@@ -4030,7 +4029,7 @@ teardown_spared_pids_in_worktree() {
   while IFS=$'\t' read -r pid identity; do
     [ -n "$pid" ] || continue
     task_pid_list_contains "$current" "$pid" || continue
-    task_process_identity_matches "$pid" "$identity" || continue
+    [ -z "$identity" ] || task_process_identity_matches "$pid" "$identity" || continue
     printf '%s\n' "$pid"
   done <<EOF
 $TEARDOWN_SPARED_PIDS
@@ -4038,8 +4037,15 @@ EOF
 }
 
 teardown_finish_treehouse_return() {  # early|final
-  local survivors
+  local survivors waits=0
   survivors=$(teardown_spared_pids_in_worktree)
+  if [ "$1" = final ]; then
+    while [ -n "$survivors" ] && [ "$waits" -lt 20 ]; do
+      sleep 0.25
+      waits=$((waits + 1))
+      survivors=$(teardown_spared_pids_in_worktree)
+    done
+  fi
   if [ -n "$survivors" ]; then
     if [ "$1" = early ]; then
       TEARDOWN_RETURN_DEFERRED=1
