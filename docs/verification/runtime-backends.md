@@ -330,7 +330,7 @@ Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Paseo records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -338,7 +338,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and Paseo before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -808,7 +808,7 @@ Every message the fleet tried to send and every worker restart or shutdown was r
 
 Opencode's left-bar composer draws its mode/model/branch line INSIDE the box as its last row, and that row's identifying cells are DE-EMPHASISED: the mode word is `ESC[38;2;67;133;190m` (luminance 119.8) and the middle-dot separators are `ESC[38;2;111;110;105m` (luminance 109.7), both under `FM_COMPOSER_GHOST_LUMA_MAX`'s 128, while the model, effort, and branch cells beside them are bright.
 `fm_composer_strip_ghost` exists to answer "what did the human type?", so it deleted precisely the cells that identify the footer, and the row reached `_fm_composer_classify_leftbar` opening at the bright model cell (`Space Bunny max fm-composer-footer` on the pane above, `Grok 4.7 ... tt-record-refresh` on the pane the incident was recorded from) instead of at `Build`.
-`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT`'s `^(Build|Plan)` anchor therefore could not match on ANY styled backend - tmux, Herdr, and Zellij all pass `styled=1`, which is every backend except cmux and orca - so the exemption was unreachable and a real idle composer read `pending`.
+`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT`'s `^(Build|Plan)` anchor therefore could not match on ANY styled backend - tmux, Herdr, and Zellij all pass `styled=1`, which is every backend except cmux, orca, and Paseo - so the exemption was unreachable and a real idle composer read `pending`.
 `pending` is the one verdict that blocks a steer: `fm_task_inbox_ring` defers on it and `bin/fm-watch.sh`'s re-ring calls the same function, and `bin/fm-send.sh` and `bin/fm-control.sh` refuse it, so the measured cost was three manual interventions into worker panes in one day.
 The geometry was never at fault: the pane's floor row is still `╹` + `▀` and `_fm_composer_leftbar_floor_row` still recognizes it, and the run's LAST row was correctly the footer row.
 
@@ -2157,6 +2157,42 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Paseo
+
+The current compatibility floor is Paseo 0.8, and the active live evidence uses Paseo 0.8.0 on macOS.
+The bundled CLI was found at `/Applications/Paseo.app/Contents/Resources/bin/paseo`, and the daemon was already healthy on `127.0.0.1:6767` (`paseo status`).
+
+Real live checks used a throwaway project directory, its shared `firstmate` workspace, and `fm-test-` scoped probe terminals, torn down (project included) at the end of the pass.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Workspace create | `workspace create --path <dir> --isolation local --title firstmate --json` | Created the shared workspace under the project registered for `<dir>`; a second call for the same path reused that project and did not add another. |
+| Project registration | `project ls --json`, `project delete <id>` | Paseo registers the project by path on workspace create and keeps it after its workspaces are archived; `project delete` removes it from the sidebar and leaves the folder on disk (verified on 0.9.2). The adapter deletes only a project for one of the home's own clones. |
+| Workspace adoption | `workspace ls --json` | Reports the title in `name` and the cwd normalized (no doubled slash) but not symlink-resolved, so adoption matches the raw, logical, and physical path. Duplicate titles are allowed; the adapter adopts the first match. |
+| Terminal create | `terminal create --workspace <id> --cwd <dir> --name <name> --json` | Created one terminal tab bound to that workspace, unfocused; a second create in the same workspace added a sibling tab. |
+| Literal send | `terminal send-keys <id> -l -- <text>` | Left text unsubmitted. |
+| Submit | `terminal send-keys <id> Enter` | Submitted the pending literal. |
+| Escape | `terminal send-keys <id> Escape` | Accepted; in zsh's emacs keymap the bare Escape stays pending and fuses with the next key whatever the gap, so the smoke test never sends text right after it. |
+| Key tokens (source) | `terminal send-keys <id> <key>` versus `-l` | The 0.8.0 bundle's `@getpaseo/client` `resolveKeyToken` maps only Enter, Tab, Escape, Space, BSpace, C-c, C-d, C-z, C-l, C-a, and C-e and returns any other name unchanged, so it is typed as text; `-l` writes its argument as raw input, which is how the adapter delivers Ctrl-U as `0x15`. |
+| Capture | `terminal capture <id> -S --json` (also `--ansi` for styled reads) | Returned `{terminalId, lines[], totalLines}`; the probe round-trip echoed `hello-paseo-probe` back in `lines`. |
+| Kill | `terminal kill <id>` | Removed only that tab; the sibling tab and the workspace stayed live. |
+| Workspace retire | `workspace archive <id>` after the last `terminal kill` | On Paseo 0.9.2, closing the last task tab of a per-project `firstmate` workspace for a clone under the home's `projects/` archived it and deleted that project, under the home-wide `state/.paseo-workspace.lock` shared with spawn; a tab placed in Firstmate's own workspace (found by home cwd from a Paseo agent) closed without archiving that workspace. |
+| Stderr noise | any call from inside a Paseo agent | The CLI prints an Electron warning on stderr before its JSON, so parsed calls never merge stderr into stdout. |
+| Worktree create | `worktree create` | Available; Treehouse remains the worktree provider, so this adapter never calls it. |
+
+Running inside a Paseo agent exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI`; a terminal tab created with `terminal create` exposes `PASEO_TERMINAL_ID`, `PASEO_WORKSPACE_ID`, `PASEO_CLI`, and no `PASEO_AGENT_ID`; both carry `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices (verified live 2026-09-18).
+None of them selects the backend: `fm_backend_detect` ignores every Paseo marker, because they reach every descendant process including a tmux server started from a Paseo tab.
+`PASEO_WORKSPACE_ID` and `PASEO_AGENT_ID` are consulted only after an explicit selection, to find Firstmate's own workspace for task tabs.
+
+```sh
+tests/fm-backend-paseo.test.sh
+tests/fm-backend-paseo-smoke.test.sh
+```
+
+The real smoke proves daemon reachability, shared-workspace creation and adoption, sibling tabs without a second project, current-path probing, send and keys, bounded capture, tab-only kill, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
@@ -2329,8 +2365,8 @@ Other harnesses on Herdr are unaffected by the edge-detector change.
 All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
 
 **Typed-submit confirmation is verified on tmux and Herdr only.**
-Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
-Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
+Zellij, cmux, Orca, and Paseo share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
+Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those four backends and needs its own live validation on each.
 
 The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.
 Refresh this harness-dependent proof before accepting a cursor upgrade:
