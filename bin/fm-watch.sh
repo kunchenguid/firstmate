@@ -32,7 +32,20 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once. One terminal exception: a
+#                          `blocked:` line whose own status wake already surfaced
+#                          it (the .seen signature is current) and whose backlog
+#                          proves no open captain call bounds further NEW pane
+#                          hashes to that same long cadence
+#                          (surfaced_blocked_stale_bound), because the status
+#                          wake was the alarm and a stale wake would only repeat
+#                          it; a new status line is a new declaration and wakes
+#                          again, an open call keeps the call's own first-sight
+#                          alarm, and an `open` exit that cannot prove the call
+#                          state (2, 124, anything but 0 or 1) still alarms, since
+#                          a wait this watcher cannot prove is not a wait. Away
+#                          mode does not use this bound.
+#                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -1985,13 +1998,19 @@ pause_state_class() {  # <window> <task>
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
+# The last `open` exit, kept so a later bound can tell a proven "no call" (1)
+# from any exit that could not prove the open-call state (2, a 124 read bound,
+# an unrunnable helper).
+CAPTAIN_CALL_OPEN_RC=1
 
 task_captain_call_open() {  # <task>
   local task=$1
   CAPTAIN_CALL_IDENTITY=
+  CAPTAIN_CALL_OPEN_RC=1
   [ -n "$task" ] || return 1
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+    open "$task" --identity 2>/dev/null) || { CAPTAIN_CALL_OPEN_RC=$?; return 1; }
+  CAPTAIN_CALL_OPEN_RC=0
   return 0
 }
 
@@ -2040,6 +2059,29 @@ stale_wait_throttled() {  # <window-key> <declaration>
 stale_wait_record() {  # <window-key>
   [ -n "$STALE_WAIT_DECLARATION" ] || return 0
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
+}
+
+# Bound a stale alarm for a worker whose latest line is `blocked` and whose status
+# change already has its own wake (the .seen signature is current). Absorbs the first
+# sighting and every one inside PAUSE_RESURFACE_SECS, then lets one alarm through.
+# A new status line changes the signature and the declaration, so it wakes again.
+# Runs right after captain_call_stale_bound declined: only a proven "no call"
+# admits it. Any `open` exit that cannot prove the open-call state (2, 124, or
+# anything else) may hide a call whose first sight is what is alarming; such a
+# wait this watcher cannot prove is not a wait, so the bound steps aside and
+# the alarm goes through.
+# Returns 0 to absorb, 1 to alarm.
+surfaced_blocked_stale_bound() {  # <window-key> <task> <status-line>
+  local key=$1 task=$2 line=$3
+  case "$CAPTAIN_CALL_OPEN_RC" in 0|1) ;; *) return 1 ;; esac
+  status_is_blocked "$line" || return 1
+  fm_wake_signal_seen_current "$STATE" "$STATE/$task.status" || return 1
+  STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+  if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" != "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_record "$key"
+    return 0
+  fi
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
 # Bound a due stale alarm for an ordinary crew task held for the captain.
@@ -3323,6 +3365,13 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && surfaced_blocked_stale_bound "$key" "$task" "$(last_status_line "$STATE/$task.status")"; then
+              # A blocker its status wake already surfaced: the stale alarm would
+              # only repeat that question. Same bounded cadence as a pause.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (blocked status already surfaced): $w"
             else
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1

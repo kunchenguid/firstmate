@@ -4380,7 +4380,6 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
   for spec in \
     'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'unheld-blocker|blocked: cannot reach the release host' \
     'unheld-worker-line|working: still tidying the branch'
   do
     name=${spec%%|*}; line=${spec#*|}
@@ -4399,6 +4398,130 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     done
   done
   pass "a stale window with no open captain call keeps alarming on every new hash"
+}
+
+
+# A blocked worker whose blocker was already surfaced by its status wake must not
+# keep waking the captain on new pane hashes: the status line is the actionable
+# event, the stale alarm after it repeats the same question. A worker line that
+# is not blocked keeps alarming as before.
+test_surfaced_blocked_line_bounds_stale_wakes() {
+  local dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (blocked stale bound)"; return 0; }
+  dir=$(make_hold_home blocked-bound 'blocked [key=push-rejected]: push rejected with 403' nohold) \
+    || fail "could not build a blocked fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, elapsed' 3 \
+    || fail "the watcher exited on a surfaced blocked line's stale churn"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] || fail "a surfaced blocked line produced $wakes stale wakes instead of none"
+  dir=$(make_hold_home blocked-control 'working: re-running lint' nohold) \
+    || fail "could not build the control fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "the non-blocked control stopped alarming"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the non-blocked control produced $wakes wakes instead of one"
+  pass "a surfaced blocked line bounds stale wakes; a working line still alarms"
+}
+
+
+# A blocked line under an OPEN captain call: the call's first sight must still
+# alarm. The blocked bound runs after the call bound declined and may not
+# overwrite its declaration or absorb the alarm the call bound just let through.
+test_blocked_line_under_open_call_first_sight_still_alarms() {
+  local dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (blocked + hold first sight)"; return 0; }
+  dir=$(make_hold_home blocked-held 'blocked [key=push-rejected]: push rejected with 403' hold) \
+    || fail "could not build a blocked + held fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of a blocked line under an open captain call did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "blocked + open call first sight produced $wakes wakes instead of one"
+  pass "a blocked line under an open captain call still alarms on first sight"
+}
+
+
+# The bound only covers a blocker whose status wake was already delivered. A
+# blocked line nobody has seen yet must still wake on first sight: the bound may
+# not stand in for the status wake it relies on.
+test_unsurfaced_blocked_line_still_wakes() {
+  local dir state out capture stale signal
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (unsurfaced blocked line)"; return 0; }
+  dir=$(make_hold_home blocked-unseen 'blocked [key=push-rejected]: push rejected with 403' nohold) \
+    || fail "could not build an unsurfaced blocked fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  rm -f "$state/.seen-held-merge_status"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "an unsurfaced blocked line did not wake: $(cat "$out")"
+  stale=$(hold_stale_wakes "$state")
+  signal=$(awk -F '\t' '$3 == "signal" { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ $((stale + signal)) -ge 1 ] \
+    || fail "an unsurfaced blocked line queued no wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "a blocked line not yet surfaced still wakes on first sight"
+}
+
+
+# When the backlog cannot say whether a captain call is open, the call bound
+# keeps alarming (a wait it cannot prove is not a wait). The blocked bound runs
+# right after it and must not absorb that alarm instead.
+test_blocked_line_with_unreadable_backlog_still_alarms() {
+  local dir state out capture wakes rc
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (blocked + unreadable backlog)"; return 0; }
+  dir=$(make_hold_home blocked-unreadable 'blocked [key=push-rejected]: push rejected with 403' hold) \
+    || fail "could not build a blocked + held fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  chmod 000 "$dir/data/backlog.md"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" open held-merge >/dev/null 2>&1
+  then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 2 ]; then
+    chmod 600 "$dir/data/backlog.md"
+    echo "skip: an unreadable backlog did not make the open read uncertain here (rc=$rc)"
+    return 0
+  fi
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || { chmod 600 "$dir/data/backlog.md"; fail "a blocked line with an unreadable backlog did not surface"; }
+  chmod 600 "$dir/data/backlog.md"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "a blocked line with an unreadable backlog produced $wakes stale wakes instead of one"
+  pass "a blocked line still alarms when the backlog cannot say whether a captain call is open"
+}
+
+
+# An open captain call whose record read hits its bound makes `open` exit 124:
+# the call IS open, but its identity could not be read. That exit proves nothing
+# about a wait either, so the blocked bound must still let the alarm through
+# rather than treat any non-2 exit as "no call". The stub keeps the row probe
+# real and wedges only the identity read (the `--full` show).
+test_blocked_line_with_wedged_identity_read_still_alarms() {
+  local dir state out capture wakes rc real
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (blocked + wedged identity read)"; return 0; }
+  real=$(command -v tasks-axi)
+  dir=$(make_hold_home blocked-wedged-read 'blocked [key=push-rejected]: push rejected with 403' hold) \
+    || fail "could not build a blocked + held fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" --full "*) exit 124 ;; esac\nexec %q "$@"\n' "$real" \
+    > "$dir/fakebin/tasks-axi"
+  chmod +x "$dir/fakebin/tasks-axi"
+  if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" open held-merge --identity >/dev/null 2>&1
+  then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 124 ]; then
+    echo "skip: a wedged identity read did not make the open exit 124 here (rc=$rc)"
+    return 0
+  fi
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "a blocked line with a wedged identity read did not surface: $(cat "$out")"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "a blocked line with a wedged identity read produced $wakes stale wakes instead of one"
+  pass "a blocked line still alarms when the open captain call's record read hits its bound"
 }
 
 
@@ -7073,6 +7196,11 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
+test_surfaced_blocked_line_bounds_stale_wakes
+test_blocked_line_under_open_call_first_sight_still_alarms
+test_unsurfaced_blocked_line_still_wakes
+test_blocked_line_with_unreadable_backlog_still_alarms
+test_blocked_line_with_wedged_identity_read_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode

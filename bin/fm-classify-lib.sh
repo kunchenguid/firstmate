@@ -343,6 +343,15 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line is a `blocked` declaration. Not a wait: the status line is
+# itself the actionable wake, so this only lets the stale path recognise a blocker
+# its status wake already surfaced (see fm-watch.sh, surfaced-blocked bound).
+status_is_blocked() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = blocked ]
+}
+
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
