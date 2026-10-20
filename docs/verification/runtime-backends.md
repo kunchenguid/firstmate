@@ -622,8 +622,11 @@ Gemini, launched `GEMINI_CLI_TRUST_WORKSPACE=true gemini -y` with no `GEMINI_API
 
 The real pane renders this inside a bordered box, omitted here for readability; that border is exactly what proves the point below.
 
-That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
+That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY/Kilo busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
+
+kilo (Kilo Code 7.8.8, verified 2026-10-10 on macOS) renders NO trust, sign-in, or first-run dialog into a fresh directory launch: the composer appears immediately (see [kilo.md](kilo.md)), so `fm_busy_launch_prompt_parked` deliberately has no kilo signature and kilo is not exercised by the launch-prompt live guard.
+Its busy footer, interrupt, and exit are recorded in [kilo.md](kilo.md).
 
 ## Worker account pin sign-in check
 

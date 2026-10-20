@@ -1063,6 +1063,66 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_kilo_plugin_anchors_guard_to_worktree() {
+  local plugin parent worktree_dir wrong_dir out status
+  plugin="$ROOT/.kilo/plugin/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked kilo primary plugin is missing"
+  parent="$TMP_ROOT/kilo-plugin-parent"
+  git init -q "$parent"
+  worktree_dir="$parent/nested/kilo-plugin-worktree"
+  wrong_dir="$TMP_ROOT/kilo-plugin-cwd/subdir"
+  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  # The kilo plugin uses the documented Kilo module shape (export default { id,
+  # server }), so the test invokes mod.default.server rather than a named export.
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (typeof mod.default?.server !== "function") {
+  console.error("kilo plugin must use the module shape export default { id, server }");
+  process.exit(1);
+}
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.default.server({
+  client,
+  directory: process.env.DIRECTORY,
+  worktree: process.env.WORKTREE,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
+  console.error(`untyped operational prompt: ${promptBody}`);
+  process.exit(1);
+}
+if (!promptBody.includes("guard-fired")) {
+  console.error(`missing prompt body: ${promptBody}`);
+  process.exit(1);
+}
+if (!promptBody.includes("watcher cycle is missing, failed, or unhealthy")) {
+  console.error(`missing recovery-only preamble: ${promptBody}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "kilo plugin must run the guard from worktree even when directory is elsewhere"
+  [ -z "$out" ] || fail "kilo plugin worktree-root test printed output: $out"
+  pass ".kilo primary plugin: guard path is anchored to worktree, not directory"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -2352,6 +2412,7 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_kilo_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_pi_extension_keeps_marker_of_live_ancestor_session

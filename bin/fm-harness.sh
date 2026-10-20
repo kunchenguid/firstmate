@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|kilo|commandcode|polytoken|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -128,6 +128,22 @@ harness_marker() {
     echo omp
     return
   fi
+  # kilo (Kilo Code, an OpenCode fork) publishes no harness-identity marker on
+  # its CLI process tree: its KILO*/KILOCODE* variables belong to the VS Code
+  # extension host, not the CLI child, and it exports OPENCODE=1 (the fork
+  # lineage), which must NEVER be registered as a marker because it would rename
+  # every markerless child a genuine kilo started. FM_KILO_HARNESS=kilo is a
+  # Firstmate-OWNED launch marker established by bin/fm-spawn.sh at the kilo
+  # launch boundary (which also clears every foreign marker) and by the README's
+  # primary launch command. Like omp's it is a PRECEDENCE override, never
+  # evidence on its own: it wins over an inherited CLAUDECODE only when a real
+  # kilo process is in the ancestry, so a value leaking into a worker whose
+  # ancestry holds no kilo changes nothing, and the anchored ancestry arm below
+  # covers a plain hand-started `kilo` by itself.
+  if [ "${FM_KILO_HARNESS:-}" = kilo ] && ancestry_names_kilo; then
+    echo kilo
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -143,8 +159,9 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, agy, devin, commandcode, and polytoken publish no harness-identity marker at all, so
-  # they are never named here and are identified by ancestry alone. That is the
+  # codex, opencode, kimi, muse, agy, devin, kilo, commandcode, and polytoken
+  # publish no harness-identity marker at all, so they are never named here and
+  # are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
   # muse's only documented child variable is MUSE_CURRENT_SESSION_LOG, a
@@ -163,6 +180,22 @@ ancestry_names_omp() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
+# True when an exact `kilo` process sits within eight parents of this one. Kept
+# separate for the same reason as ancestry_names_omp: the FM_KILO_HARNESS marker
+# precedence above must see real process evidence before trusting it. The live
+# CLI is a bash wrapper that execs the versioned libexec binary, whose basename
+# is `kilo` on both, so the anchored comm match holds.
+ancestry_names_kilo() {
+  local pid=$$ comm
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    [ "$(basename -- "$comm")" = kilo ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -238,6 +271,12 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # kilo (Kilo Code, an OpenCode fork) is a Bun-compiled single binary whose
+    # process name is exactly `kilo` (verified live, kilo 7.8.8: `ps -o comm=`
+    # reports the versioned libexec path whose basename is kilo, and the
+    # Homebrew bin/kilo wrapper execs that same binary). Anchored, never *kilo*,
+    # so unrelated commands are not misread as this harness.
+    kilo) echo "comm kilo"; return ;;
     # polytoken (Polytoken CLI) is a daemon-plus-TUI whose per-session daemon
     # process name is exactly `polytoken` (verified live on 0.8.19: a TUI
     # session's daemon runs as comm `polytoken` at ppid 1, and a shell tool
@@ -415,7 +454,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|kilo|commandcode|polytoken)
       printf '%s\n' "$pin"
       ;;
     *)
@@ -434,7 +473,7 @@ supervision_primary_pin() {
 #     (pi-signed, which ancestry can only see as pi).
 #   - Different harness, structural ancestor: ancestry wins. This is what stops
 #     an inherited or multiplexer-retained CLAUDECODE from renaming a markerless
-#     codex, opencode, kimi, or muse session, and symmetrically stops a retained
+#     codex, opencode, kimi, muse, or kilo session, and symmetrically stops a retained
 #     CURSOR_AGENT from renaming a claude worker nested under cursor.
 #   - Different harness, interpreter-args ancestor only: the marker wins, because
 #     a harness-shaped path in some node process's arguments is weaker evidence

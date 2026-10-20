@@ -217,6 +217,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/kilo.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -461,6 +465,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/kilo.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/pi.md",
       "audience": "agent-runtime"
     },
@@ -506,6 +514,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/kilo.md",
       "audience": "maintainer-verification"
     },
     {

@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, devin, commandcode, and polytoken.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, devin, kilo, commandcode, and polytoken.
 user-invocable: false
 metadata:
   internal: true
@@ -43,6 +43,7 @@ Muse, Gemini, AGY, Devin, Command Code, and Polytoken are verified only for crew
 A marker names its harness, but a structural ancestor of a different harness outranks it, because a marker is ordinary environment state a child or a multiplexer can retain while ancestry is what proves who owns the process tree.
 Only `FM_PI_HARNESS=pi-signed` at the launch boundary together with `PI_CODING_AGENT=true` selects Pi-signed; shared unmarked launcher ancestry remains Pi.
 omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch marker and the anchored process name `omp` is its ancestry evidence, as `references/harness/omp.md` records.
+kilo (Kilo Code) publishes no marker on its CLI process tree either and exports `OPENCODE=1` from its fork lineage, which is deliberately NOT a marker; `FM_KILO_HARNESS=kilo` is Firstmate's launch marker and the anchored process name `kilo` is its ancestry evidence, as `references/harness/kilo.md` records.
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
 `../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
 `../../../bin/fm-harness.sh secondmate` resolves `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own harness.
@@ -97,6 +98,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "omp": "references/harness/omp.md",
     "agy": "references/harness/agy.md",
     "devin": "references/harness/devin.md",
+    "kilo": "references/harness/kilo.md",
     "commandcode": "references/harness/commandcode.md",
     "polytoken": "references/harness/polytoken.md"
   }

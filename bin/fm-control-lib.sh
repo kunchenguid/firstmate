@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin kilo commandcode polytoken
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -82,7 +82,7 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, `devin` and
+# is exact for the same reason on an even shorter name, `devin`, `kilo`, and
 # `commandcode` are exact as well, and an unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
@@ -91,6 +91,9 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    # kilo is anchored exactly like omp and agy: its live process name is the
+    # bare word `kilo`, and a `kilo*` glob would claim unrelated commands.
+    kilo) printf 'kilo' ;;
     commandcode) printf 'commandcode' ;;
     polytoken) printf 'polytoken' ;;
     claude*) printf 'claude' ;;
@@ -133,7 +136,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'key' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|kilo|commandcode) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -147,22 +150,27 @@ fm_control_interrupt_transport() {  # <harness>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). kilo (Kilo Code, an OpenCode fork) interrupts on Escape, sent
+# TWICE like OpenCode: a first press renders `esc again to interrupt` in its
+# footer (verified live, kilo 7.8.8), so it is not complete on one press. Kilo
+# intercepts Ctrl+C for its own two-press exit confirmation, which is why C-c is
+# deliberately NOT its interrupt key.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|kilo|commandcode) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
 
-# How many times the interrupt key must be delivered. OpenCode and Devin need a double
-# Escape; every other verified adapter interrupts on a single press. Command Code
-# cancels a running turn on one Escape (verified live, Command Code 1.74.1), and a
-# second press is exactly what opens its rewind picker, so it gets one.
+# How many times the interrupt key must be delivered. OpenCode, Devin, and kilo
+# (an OpenCode fork) need a double Escape; every other verified adapter
+# interrupts on a single press. Command Code cancels a running turn on one
+# Escape (verified live, Command Code 1.74.1), and a second press is exactly
+# what opens its rewind picker, so it gets one.
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
-    opencode|devin) printf '2' ;;
+    opencode|devin|kilo) printf '2' ;;
     claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode) printf '1' ;;
     *) return 1 ;;
   esac
@@ -182,7 +190,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kilo|commandcode) ;;
     *) return 1 ;;
   esac
 }
@@ -197,7 +205,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kilo) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -220,7 +228,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kilo) ;;
     *) return 1 ;;
   esac
 }
@@ -241,7 +249,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|kilo|commandcode) ;;
     *) return 1 ;;
   esac
 }
@@ -256,7 +264,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|kilo|commandcode) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -264,7 +272,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|kilo) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken) printf '/quit' ;;
     *) return 1 ;;
   esac

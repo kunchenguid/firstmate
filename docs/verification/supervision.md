@@ -896,3 +896,15 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Kilo Code adapter, 2026-10-10
+
+The `kilo` adapter was added on 2026-10-10 against kilo 7.8.8 on macOS, driven by a local `pty.fork` harness because no tmux was installed.
+
+Live-verified: the anchored process name `kilo`, the `--auto --prompt` launch with no folder-trust dialog, the `esc interrupt` busy footer, the double-Escape interrupt, and the `/exit` exit command.
+The raw captures and exact commands are in [`kilo.md`](kilo.md).
+
+Not live-verified: the primary plugin runtime (`.kilo/plugin/` discovery and the `client.session.promptAsync` injection call), which is shipped as OpenCode parity from the Kilo plugin documentation, and the secondmate path, which rests on the same launch/control facts as a crewmate.
+The opt-in gate that settles the plugin runtime is `FM_KILO_PRIMARY_LIVE_E2E=1 tests/fm-kilo-primary-live-e2e.test.sh`.
+Kilo is deliberately NOT a verified supervision-host engine, so a kilo primary always runs the plain watcher arm.
+`tests/fm-kilo-harness.test.sh` pins the portable detection, launch, busy, and control facts; the live guard refreshes the vendor surfaces and is `FM_KILO_SIGNALS_LIVE=1 tests/fm-kilo-signals-live-e2e.test.sh`.

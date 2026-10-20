@@ -276,6 +276,21 @@ test_grok_is_background_notify() {
   pass "grok supervision is Claude-shaped background notify with passive Stop-hook backstop"
 }
 
+test_kilo_is_plugin_wake() {
+  local out ordinary
+  out=$("$RENDER" --harness kilo)
+  assert_contains "$out" "Mode: Kilo Code TUI plugin background wake." "kilo snippet missing plugin-wake mode"
+  assert_contains "$out" ".kilo/plugin/fm-primary-watch-arm.js" "kilo snippet missing its watch-arm plugin path"
+  assert_contains "$out" "client.session.promptAsync" "kilo snippet missing the SDK follow-up delivery"
+  assert_not_contains "$out" "Supervision host" "a kilo primary must not render the host protocol"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Kilo TUI plugin already owns watcher continuity" \
+    "kilo ordinary-wake semantics lost their plugin-owned continuity"
+  out=$("$RENDER" --harness kilo --repair-line)
+  assert_contains "$out" "Kilo TUI plugin arm after idle" "kilo recovery line lost its plugin-arm repair"
+  pass "kilo supervision is a plugin-owned background wake with no host protocol"
+}
+
 test_grok_command_sources_effective_config() {
   local home config out
   home="$TMP_ROOT/grok-home"
@@ -314,5 +329,6 @@ test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
+test_kilo_is_plugin_wake
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

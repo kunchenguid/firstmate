@@ -19,7 +19,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 
 ## Ownership
 
-On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
+On Pi, omp, OpenCode, kilo, Cursor, and Claude primaries, one component owns re-arming the watcher.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
@@ -27,14 +27,15 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | Pi | `.pi/extensions/fm-primary-pi-watch.ts` |
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
+| kilo | `.kilo/plugin/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
-### Pi, omp, and OpenCode adapters
+### Pi, omp, OpenCode, and kilo adapters
 
-Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
+Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, OpenCode's `.opencode/plugins/fm-primary-watch-arm.js`, and kilo's `.kilo/plugin/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter:
 
 - Starts the next arm before delivering the wake prompt.
@@ -130,21 +131,21 @@ The host owns successive watcher cycles through the same arm.
 
 This section covers what each re-arm owner does between an actionable close and the wake reaching the model.
 
-### Pi, omp, and OpenCode successor start
+### Pi, omp, OpenCode, and kilo successor start
 
-After an actionable Pi, omp, or OpenCode child close, the adapter:
+After an actionable Pi, omp, OpenCode, or kilo child close, the adapter:
 
 1. Waits for the predecessor process to close.
 2. Starts and verifies one singleton successor.
-3. Confirms the handling handoff before scheduling the follow-up: Pi confirms against the restoration's own recovery token, while omp and OpenCode confirm against the current successor.
+3. Confirms the handling handoff before scheduling the follow-up: Pi confirms against the restoration's own recovery token, while omp, OpenCode, and kilo confirm against the current successor.
 4. Delivers the original wake.
 
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.
 
-If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
+If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp, OpenCode, and kilo against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
-Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
+Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp, OpenCode, and kilo retire the current successor whenever the restoration's watcher pid is no longer alive.
 On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
 The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
@@ -523,9 +524,9 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 ## Active limits and verification
 
-The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
+The goal is continuity without a Pi, omp, OpenCode, or kilo model-memory re-arm step.
 No zero-latency guarantee is claimed, because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
-OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
+OpenCode and kilo support targets persistent TUI sessions rather than headless `opencode run` / `kilo run`.
 
 The other harnesses rely on these mechanisms:
 

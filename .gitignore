@@ -13,3 +13,6 @@ __pycache__/
 config/
 
 .tools/
+
+# Kilo's own transient plan files; the tracked Kilo surface is .kilo/plugin/.
+.kilo/plans/
