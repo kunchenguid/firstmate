@@ -397,9 +397,9 @@ function show() {
   const r = current();
   if (!r) {
     if (REPORTS.length) {
-      // An unknown or empty anchor lands on the newest report instead of an
-      // empty pane, and replace() keeps that redirect out of the history.
-      const newest = REPORTS.slice().sort((a, b) => b.ts - a.ts)[0];
+      const newest = REPORTS.filter(entry => entry.kind === "report")
+        .sort((a, b) => b.ts - a.ts)[0]
+        || REPORTS.slice().sort((a, b) => b.ts - a.ts)[0];
       location.replace("#" + encodeURIComponent(newest.id));
       return;
     }

@@ -93,6 +93,46 @@ html_of() {  # <page> <id>
   payload_of "$1" | jq -r --arg id "$2" '.entries[] | select(.id == $id) | .html'
 }
 
+fallback_anchor_of() {  # <page> <initial hash>
+  node - "$1" "$2" <<'NODE'
+const fs = require("fs");
+const vm = require("vm");
+const page = fs.readFileSync(process.argv[2], "utf8");
+const payload = page.match(/<script id="reports-data" type="application\/json">([\s\S]*?)<\/script>/)[1];
+const script = page.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+function element() {
+  return {
+    children: [], classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener() {}, append(...items) { this.children.push(...items); },
+    setAttribute() {}, setPointerCapture() {}, releasePointerCapture() {},
+    focus() {}, select() {}, style: { setProperty() {}, removeProperty() {} },
+    set textContent(value) { this._text = value; }, get textContent() { return this._text || ""; }
+  };
+}
+const ids = ["reports-data", "q", "sort", "count", "list", "report", "where", "scroll", "grip", "scrim", "gaps", "toggle", "prev", "next"];
+const elements = Object.fromEntries(ids.map(id => [id, element()]));
+elements["reports-data"].textContent = payload;
+elements.sort.value = "new";
+elements.q.value = "";
+let redirected = "";
+const document = {
+  body: element(), documentElement: element(), title: "",
+  getElementById(id) { return elements[id]; },
+  createElement() { return element(); }, addEventListener() {}
+};
+const context = {
+  document, location: { hash: process.argv[3], replace(value) { redirected = value; } },
+  window: { addEventListener() {}, matchMedia() { return { matches: false }; }, innerWidth: 1000 },
+  localStorage: { getItem() { return null; }, setItem() {} },
+  getComputedStyle() { return { getPropertyValue() { return ""; } }; },
+  encodeURIComponent, decodeURIComponent
+};
+vm.runInNewContext(script, context);
+if (!redirected) throw new Error("page did not redirect its unknown or empty anchor");
+process.stdout.write(redirected);
+NODE
+}
+
 # One entry's searchable text, derived exactly as the page's own script derives
 # it, so a search case is proved against the built page and not against a
 # report's source text.
@@ -525,6 +565,60 @@ test_decision_without_a_report_becomes_its_own_entry() {
   pass "a decision that gated no report becomes its own anchored entry"
 }
 
+test_empty_anchor_falls_back_to_newest_report() {
+  local home actual
+  home=$(decision_home)
+  write_report "$home" letzter-bericht '# Letzter Bericht'
+  touch -d '2026-10-18 10:00' "$home/data/letzter-bericht/report.md" 2>/dev/null \
+    || touch -t 202610181000 "$home/data/letzter-bericht/report.md" \
+    || fail "cannot age the fixture report"
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] neueste-entscheidung-20261020 - Neue Entscheidung (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: answered
+
+  Captain decision:
+  Diese Entscheidung ist neuer als der Bericht.'
+  build "$home" >/dev/null || fail "build failed"
+  actual=$(fallback_anchor_of "$home/state/reports.html" "") \
+    || fail "could not open the built page with an empty anchor"
+  assert_equals '#letzter-bericht' "$actual" \
+    "an empty anchor must prefer the newest report over a newer decision"
+  pass "an empty anchor falls back to the newest report"
+}
+
+test_unknown_anchor_falls_back_to_newest_decision_without_reports() {
+  local home actual
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] alte-entscheidung-20261018 - Alte Entscheidung (kind: captain) (done 2026-10-18) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: answered
+
+  Captain decision:
+  Die fruehere Entscheidung.
+
+- [x] neue-entscheidung-20261020 - Neue Entscheidung (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: bbbb1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: answered
+
+  Captain decision:
+  Die neueste Entscheidung.'
+  build "$home" >/dev/null || fail "build failed"
+  actual=$(fallback_anchor_of "$home/state/reports.html" '#does-not-exist') \
+    || fail "could not open the built page with an unknown anchor"
+  assert_equals '#neue-entscheidung-20261020' "$actual" \
+    "without reports, an unknown anchor must fall back to the newest entry"
+  pass "an unknown anchor falls back to the newest decision when no reports exist"
+}
+
 test_filename_sort_keeps_decisions_without_reports() {
   local home page
   home=$(decision_home)
@@ -810,6 +904,8 @@ test_build_refuses_a_template_without_a_slot
 test_page_fetches_nothing
 test_recorded_decision_reaches_the_report_it_gated
 test_decision_without_a_report_becomes_its_own_entry
+test_empty_anchor_falls_back_to_newest_report
+test_unknown_anchor_falls_back_to_newest_decision_without_reports
 test_filename_sort_keeps_decisions_without_reports
 test_report_without_a_decision_carries_no_decision_section
 test_search_finds_a_phrase_only_the_decision_carries
