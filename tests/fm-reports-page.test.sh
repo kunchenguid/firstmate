@@ -384,6 +384,54 @@ Text.'
   pass "a heading carries an id"
 }
 
+test_malformed_in_report_fragment_does_not_throw_or_navigate() {
+  local home page
+  home=$(new_home)
+  write_report "$home" anchored '# Anchored
+
+[broken](#%)'
+  build "$home" >/dev/null || fail "build failed"
+  page="$home/state/reports.html"
+  node - "$page" <<'NODE' || fail "built page behavior failed"
+const fs = require("fs");
+const vm = require("vm");
+const page = fs.readFileSync(process.argv[2], "utf8");
+const payload = page.match(/<script id="reports-data" type="application\/json">([\s\S]*?)<\/script>/)[1];
+const script = page.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+let click;
+let navigated = false;
+function element() {
+  return {
+    children: [], classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener(type, fn) { if (this.id === "report" && type === "click") click = fn; },
+    append(...items) { this.children.push(...items); }, setAttribute() {}, querySelector() { return null; },
+    setPointerCapture() {}, releasePointerCapture() {}, focus() {}, select() {},
+    style: { setProperty() {}, removeProperty() {} },
+    set textContent(value) { this._text = value; }, get textContent() { return this._text || ""; }
+  };
+}
+const ids = ["reports-data", "q", "sort", "count", "list", "report", "where", "scroll", "grip", "scrim", "gaps", "toggle", "prev", "next"];
+const elements = Object.fromEntries(ids.map(id => { const el = element(); el.id = id; return [id, el]; }));
+elements["reports-data"].textContent = payload;
+elements.sort.value = "new";
+elements.q.value = "";
+const document = { body: element(), documentElement: element(), title: "", getElementById(id) { return elements[id]; }, createElement() { return element(); }, addEventListener() {} };
+const context = {
+  document, location: { hash: "#anchored", replace() { navigated = true; } },
+  window: { addEventListener() {}, matchMedia() { return { matches: false }; }, innerWidth: 1000, CSS: { escape: value => value } },
+  localStorage: { getItem() { return null; }, setItem() {} },
+  getComputedStyle() { return { getPropertyValue() { return ""; } }; }, encodeURIComponent, decodeURIComponent
+};
+vm.runInNewContext(script, context);
+const html = JSON.parse(payload).entries[0].html;
+const href = html.match(/href="([^"]*)"/)[1];
+let prevented = false;
+click({ target: { closest() { return { getAttribute() { return href; } }; } }, preventDefault() { prevented = true; } });
+if (!prevented || navigated || context.location.hash !== "#anchored") throw new Error("malformed in-report link navigated");
+NODE
+  pass "a malformed in-report fragment leaves the report in place"
+}
+
 test_nested_list_dedent_and_reindent_keep_siblings_at_their_level() {
   local home html
   home=$(new_home)
@@ -905,6 +953,7 @@ test_report_cannot_impersonate_a_page_slot
 test_title_comes_from_the_first_heading
 test_hard_break_becomes_a_line_break
 test_heading_gets_an_id_to_jump_to
+test_malformed_in_report_fragment_does_not_throw_or_navigate
 test_nested_list_dedent_and_reindent_keep_siblings_at_their_level
 test_symlinked_report_is_not_read
 test_path_prints_the_page_path

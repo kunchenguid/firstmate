@@ -468,7 +468,9 @@ el.report.addEventListener("click", e => {
   const a = e.target.closest ? e.target.closest('a[href^="#"]') : null;
   if (!a) return;
   e.preventDefault();
-  const id = decodeURIComponent(a.getAttribute("href").slice(1));
+  let id;
+  try { id = decodeURIComponent(a.getAttribute("href").slice(1)); }
+  catch (_) { return; }
   const target = id && el.report.querySelector("#" + (window.CSS && CSS.escape ? CSS.escape(id) : id));
   if (target) target.scrollIntoView({ block: "start" });
 });
