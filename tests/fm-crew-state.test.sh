@@ -5699,6 +5699,148 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+
+# Git/run-backed delivery-stall cases exercise the public state reader and
+# watcher tick with the same real fixture repositories and fake CLI surfaces.
+make_committed_case() {  # <name>
+  reset_fakes
+  local d gen
+  d=$(new_case "$1")
+  make_fakebin "$d" >/dev/null
+  make_repo_on_branch "$d/wt" task
+  git -C "$d/wt" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' \
+    git -C "$d/wt" commit -q --allow-empty -m change
+  fm_write_meta "$d/state/task.meta" 'window=sess:fm-task' 'kind=ship' 'harness=claude' \
+    'mode=no-mistakes' "worktree=$d/wt"
+  arm_idle_record "$d/state" task
+  NM_HOME="$d/nm"; export NM_HOME
+  mkdir -p "$NM_HOME" "$d/config"
+  python3 - "$NM_HOME/state.sqlite" "$d/wt" <<'PYDB'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.executescript("CREATE TABLE repos (id TEXT, working_path TEXT); "
+                     "CREATE TABLE runs (repo_id TEXT, branch TEXT, status TEXT, head_sha TEXT);")
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (sys.argv[2],))
+PYDB
+  FM_FAKE_AXI_HOME="repo: $d/wt
+count: 0 of 0 total
+runs[0]{id,branch,status,head,pr}:"
+  export FM_FAKE_AXI_HOME
+}
+
+committed_tick() {  # <case-dir>
+  PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+    FM_CREW_STATE_BIN="$CREW_STATE" bash -c '
+      . "$1/bin/fm-watch.sh"
+      wake() { printf "%s\n" "$1"; }
+      committed_not_shipped_tick
+    ' _ "$ROOT"
+}
+
+test_committed_not_shipped_state() {
+  local scenario d out gen head
+  for scenario in eligible dirty busy active finished zero direct local scout secondmate unknown inventory; do
+    make_committed_case "committed-$scenario"
+    d="$TMP_ROOT/committed-$scenario"
+    head=$(git -C "$d/wt" rev-parse HEAD)
+    case "$scenario" in
+      dirty) printf 'uncommitted\n' > "$d/wt/untracked" ;;
+      busy|unknown)
+        gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" task)
+        if [ "$scenario" = busy ]; then
+          "$ROOT/bin/fm-busy-event.sh" apply "$d/state" task busy --gen "$gen" \
+            --source claude-hook --event user-prompt-submit >/dev/null
+        fi ;;
+      active|finished)
+        python3 - "$NM_HOME/state.sqlite" "$head" "$scenario" <<'PYDB'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("INSERT INTO runs VALUES ('repo', 'task', ?, ?)",
+               ('running' if sys.argv[3] == 'active' else 'completed', sys.argv[2]))
+PYDB
+        ;;
+      zero) git -C "$d/wt" update-ref refs/remotes/origin/main "$head" ;;
+      direct) printf 'mode=direct-PR\n' >> "$d/state/task.meta" ;;
+      local) printf 'mode=local-only\n' >> "$d/state/task.meta" ;;
+      scout|secondmate) printf 'kind=%s\n' "$scenario" >> "$d/state/task.meta" ;;
+      inventory) rm "$NM_HOME/state.sqlite" ;;
+    esac
+    out=$(run_crew_state "$d" task)
+    if [ "$scenario" = eligible ]; then
+      assert_contains "$out" "state: committed-not-shipped" 'ahead clean idle ship with no run is detected'
+      assert_contains "$out" "head: $head" 'state carries exact head identity'
+    else
+      case "$out" in *'state: committed-not-shipped'*) fail "$scenario falsely classified as undelivered" ;; esac
+    fi
+  done
+  pass 'committed-not-shipped requires ahead, clean, idle, no run and no-mistakes ship mode'
+}
+
+test_committed_handoff_window() {
+  make_committed_case committed-handoff
+  local d="$TMP_ROOT/committed-handoff" out now
+  now=$(date +%s)
+  printf 'done [at=%s]: ready for pipeline\n' "$now" > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: done' 'fresh current-head handoff keeps ordinary done state'
+  [ -z "$(committed_tick "$d")" ] || fail 'fresh handoff emitted a duplicate detector wake'
+  printf 'done [at=%s]: ready for pipeline\n' "$((now - 300))" > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: committed-not-shipped' 'unanswered handoff surfaces after response window'
+  printf 'done [at=1]: previous head completed\n' > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: committed-not-shipped' 'handoff predating current commit never masks it'
+  printf 'done: ready for pipeline\n' > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: committed-not-shipped' 'untimed handoff receives no grace'
+  out=$(committed_tick "$d")
+  assert_contains "$out" 'check: committed-not-shipped: task head=' 'untimed handoff surfaces detector wake'
+  printf 'paused [at=%s]: waiting for external condition\n' "$now" > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: paused' 'declared external wait remains authoritative'
+  pass 'current-head done handoff retains normal window and older handoffs cannot hide work'
+}
+
+test_committed_wake_and_opt_in() {
+  make_committed_case committed-wake
+  local d="$TMP_ROOT/committed-wake" out head first
+  out=$(committed_tick "$d")
+  assert_contains "$out" 'check: committed-not-shipped: task head=' 'default detector surfaces actionable wake'
+  [ ! -d "$d/state/task.inbox" ] || fail 'default-off detector steered worker'
+  first=$(wc -l < "$d/state/.wake-queue" | tr -d ' ')
+  [ "$first" = 1 ] || fail 'first detector check did not queue exactly one wake'
+  out=$(committed_tick "$d")
+  [ -z "$out" ] || fail 'same head woke again after watcher restart'
+  [ "$(wc -l < "$d/state/.wake-queue" | tr -d ' ')" = 1 ] || fail 'same head queued twice'
+  git -C "$d/wt" commit -q --allow-empty -m next
+  out=$(committed_tick "$d")
+  assert_contains "$out" 'check: committed-not-shipped:' 'a new head wakes independently'
+  [ "$(wc -l < "$d/state/.wake-queue" | tr -d ' ')" = 2 ] || fail 'new head did not queue another wake'
+
+  make_committed_case committed-steer
+  d="$TMP_ROOT/committed-steer"
+  touch "$d/config/committed-not-shipped-steer"
+  out=$(committed_tick "$d")
+  [ -z "$out" ] || fail "opt-in steer unexpectedly woke: $out"
+  [ ! -s "$d/state/.wake-queue" ] || fail 'successful opt-in steer also queued detector wake'
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  [ -f "$d/state/.committed-not-shipped-task-$head" ] || fail 'opt-in steer has no per-head receipt'
+  first=$(find "$d/state/task.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$first" = 1 ] || fail 'opt-in did not send exactly one durable message'
+  out=$(cat "$d/state/task.inbox/"*.msg)
+  assert_contains "$out" 'Start the no-mistakes pipeline with /no-mistakes' 'opt-in uses standard pipeline steer'
+  committed_tick "$d" >/dev/null
+  [ "$(find "$d/state/task.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] || fail 'opt-in repeated a steer for the same head'
+  pass 'watcher wakes once per head and steers only with explicit opt-in'
+}
+
+test_committed_not_shipped_state
+test_committed_handoff_window
+test_committed_wake_and_opt_in
+
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
