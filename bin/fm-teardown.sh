@@ -307,11 +307,19 @@
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches.
-#     Cwd alone is not ownership: only descendants of the live endpoint shell
-#     or members of its dedicated process group are signaled. Every other
-#     process (a foreign session shell, a reparented orphan, any backend
-#     without an endpoint pid) is spared and reported individually; it never
-#     blocks teardown, which goes on to close the pane. A treehouse worktree
+#     Cwd alone is not ownership: only descendants of the live endpoint shell,
+#     members of its dedicated process group, and members of the session it
+#     leads (so an init-reparented leaked child is still reaped) are signaled.
+#     The session id comes from /proc or, where /proc is absent, python3's
+#     os.getsid; an unreadable session id proves nothing, so that process is
+#     spared.
+#     Every other process (a shell in another session such as a login shell
+#     on another TTY, and every process on a backend without an endpoint pid:
+#     cmux, orca, zellij) is spared and reported individually; it never
+#     blocks teardown, which goes on to close the pane. Each kill and each
+#     spare appends one tab-separated line to state/teardown-processes.log:
+#     UTC time, task id, pid, verdict (killed, force-killed, spared), reason,
+#     command. A treehouse worktree
 #     with a spared process still in it is not force-returned: the return
 #     waits until after the pane close, re-scans the worktree, and the
 #     worktree is kept (surviving pids named) only if a spared process with
@@ -2411,7 +2419,53 @@ task_process_is_owned() {  # <pid>
         pid = parent[pid]
       }
       exit 1
-    }'
+    }' && return 0
+  task_process_in_endpoint_session "$1"
+}
+
+task_process_session() {  # <pid>
+  local pid=$1 proc_root stat_line
+  local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 4 ] || return 1
+    printf '%s\n' "${stat_fields[3]}"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$pid" 2>/dev/null
+}
+
+task_process_in_endpoint_session() {  # <pid>
+  local leader_sid candidate_sid own_sid
+  leader_sid=$(task_process_session "$TASK_REAP_LEADER") || return 1
+  [ "$leader_sid" = "$TASK_REAP_LEADER" ] || return 1
+  own_sid=$(task_process_session "$$") || return 1
+  [ "$own_sid" != "$leader_sid" ] || return 1
+  candidate_sid=$(task_process_session "$1") || return 1
+  [ "$candidate_sid" = "$leader_sid" ] || return 1
+  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY"
+}
+
+teardown_process_log() {  # <pid> <verdict> <reason> [command]
+  local command=${4-}
+  if [ "$#" -lt 4 ]; then
+    command=$(LC_ALL=C ps -p "$1" -o command= 2>/dev/null) || command="<unavailable>"
+  fi
+  command=$(printf '%s' "$command" | tr '\t\n\r' '   ')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" "$1" "$2" "$3" "$command" \
+    >> "$STATE/teardown-processes.log" 2>/dev/null \
+    || echo "warning: could not append to $STATE/teardown-processes.log" >&2
+}
+
+task_spare_reason() {
+  if [ -n "$TASK_REAP_LEADER" ]; then
+    printf 'outside endpoint %s descendants and session\n' "$TASK_REAP_LEADER"
+  else
+    printf 'no endpoint pid on %s\n' "$BACKEND"
+  fi
 }
 
 TEARDOWN_SPARED_PIDS=
@@ -2442,6 +2496,7 @@ $dir_pids"
       fi
       if ! task_pid_list_contains "$TASK_REAP_REPORTED" "$pid"; then
         echo "teardown: spared unowned process $pid: $command" >&2
+        teardown_process_log "$pid" spared "$(task_spare_reason)" "$command"
         identity=$(task_process_identity "$pid") || identity=
         TEARDOWN_SPARED_PIDS="${TEARDOWN_SPARED_PIDS}${TEARDOWN_SPARED_PIDS:+$'\n'}$pid"$'\t'"$identity"
         TASK_REAP_REPORTED="${TASK_REAP_REPORTED}${TASK_REAP_REPORTED:+$'\n'}$pid"
@@ -2486,12 +2541,16 @@ reap_task_backend_process_group() {  # <label>
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
+  teardown_process_log "-$pgid" killed "endpoint process group (lsof unavailable)" \
+    "$(LC_ALL=C ps -p "$leader" -o command= 2>/dev/null || echo "<unavailable>")"
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
   if task_process_identity_matches "$leader" "$leader_start" \
      && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
+    teardown_process_log "-$pgid" force-killed "endpoint process group (lsof unavailable)" \
+      "$(LC_ALL=C ps -p "$leader" -o command= 2>/dev/null || echo "<unavailable>")"
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
 }
@@ -2557,6 +2616,7 @@ EOF
       if task_pid_list_contains "$current_pids" "$pid" \
          && task_process_identity_matches "$pid" "$identity" \
          && task_process_is_owned "$pid"; then
+        teardown_process_log "$pid" killed "task-owned via endpoint $TASK_REAP_LEADER"
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -2591,6 +2651,7 @@ EOF
         if task_pid_list_contains "$current_pids" "$pid" \
            && task_process_identity_matches "$pid" "$identity" \
            && task_process_is_owned "$pid"; then
+          teardown_process_log "$pid" force-killed "task-owned via endpoint $TASK_REAP_LEADER"
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done

@@ -5148,7 +5148,63 @@ PYTHON
   assert_grep "kept worktree" "$case_dir/stderr" "foreign-session: kept worktree not reported"
   assert_grep "spared unowned process $foreign: bash" "$case_dir/stderr" \
     "foreign-session: teardown did not report the foreign pid and command"
-  pass "foreign TTY shell survives and is reported while the task-owned child is reaped"
+  grep -Eq "^[^	]+	task-x1	$foreign	spared	[^	]+	.*bash" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the spared shell was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  grep -Eq "^[^	]+	task-x1	$owned	killed	[^	]+	.*sleep" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the reaped child was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  pass "foreign TTY shell survives and is reported while the task-owned child is reaped, and both are logged durably"
+}
+
+test_reparented_child_in_endpoint_session_is_reaped() {
+  local case_dir rc endpoint orphan i
+  case_dir=$(make_case endpoint-session-orphan)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -MPOSIX -e '
+    my ($dir, $file) = @ARGV;
+    POSIX::setsid() or die "setsid";
+    my $parent = fork();
+    die "fork" unless defined $parent;
+    if (!$parent) {
+      my $child = fork();
+      die "fork" unless defined $child;
+      if (!$child) { setpgrp(0, 0); chdir $dir or die; exec "sleep", "300"; }
+      open my $fh, ">", $file or die;
+      print {$fh} "$child\n";
+      close $fh;
+      POSIX::_exit(0);
+    }
+    waitpid($parent, 0);
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/orphan.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/orphan.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: fixture processes did not start"
+  orphan=$(cat "$case_dir/orphan.pid")
+  for ((i=0; i<100; i++)); do
+    [ "$(ps -p "$orphan" -o ppid= 2>/dev/null | tr -d '[:space:]')" != "$endpoint" ] \
+      && [ "$(ps -p "$orphan" -o comm= 2>/dev/null | tr -d '[:space:]')" = sleep ] && break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: child was not reparented away from the endpoint"
+  [ "$(ps -p "$orphan" -o pgid= | tr -d '[:space:]')" = "$orphan" ] \
+    || fail "endpoint-session-orphan: child does not have its own process group"
+
+  rc=0
+  FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  if kill -0 "$orphan" 2>/dev/null; then
+    kill -KILL "$orphan" 2>/dev/null || true
+    fail "endpoint-session-orphan: reparented child in the endpoint session survived: $(cat "$case_dir/stderr")"
+  fi
+  expect_code 0 "$rc" "endpoint-session-orphan: teardown should complete"
+  grep -Eq "^[^	]+	task-x1	$orphan	killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "endpoint-session-orphan: the reaped child was not logged durably"
+  pass "an init-reparented child in the endpoint shell's session is reaped and logged"
 }
 
 test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree() {
@@ -6426,6 +6482,7 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_foreign_session_survives_and_is_reported
+test_reparented_child_in_endpoint_session_is_reaped
 test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
