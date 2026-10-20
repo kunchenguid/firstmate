@@ -4,6 +4,7 @@ description: >-
   Agent-only procedure for diagnosing reported bugs.
   Use before scoping a reported bug and before acting on a diagnostic report.
   Owns end-user-aligned reproduction, causal separation, divergent-path and history inspection, counterfactual testing, and disconfirming evidence.
+  Also load before asserting a capability or fix works: verify the behavioral effect end to end, or label it an unverified hypothesis, rather than inferring it from an API or tool surface alone.
 user-invocable: false
 metadata:
   internal: true
