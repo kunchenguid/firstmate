@@ -39,6 +39,11 @@
 #            flow; this primitive only automates the deterministic subset.
 #            The registered runner starts on the watcher's next cycle via
 #            `fm-procevent.sh reconcile`; arm never blocks on the condition.
+#            Refuses loudly, before registering anything, when the state root
+#            fails fm-procevent.sh's own private-directory check (e.g. a
+#            group/world-writable state/) - that check would otherwise reject
+#            every later reconcile identically, leaving a registered watch
+#            that can never be polled.
 # classify   Print the captured outcome class a handler should act on:
 #            fired, action-failed, condition-error, never-true, ambiguous,
 #            rejected, or unknown.
@@ -186,6 +191,23 @@ cmd_arm() {
   done
 
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+  # A watch registered here starts only on the watcher's own reconcile cycle
+  # (see the `arm` usage note above), and that cycle's fm-procevent.sh runner
+  # refuses to operate against a group/world-writable state root. Registering
+  # against a state root that already fails that check would create a watch
+  # that can never be polled, with no clear signal why - fail loudly here
+  # instead, using the exact same check fm-procevent.sh applies to itself.
+  # Diagnose rather than just gate: "chmod 750" is only the right remedy for
+  # the bad-mode case - a state root owned by another user stays broken after
+  # that chmod with no hint why.
+  local state_root_reason
+  state_root_reason=$(fm_procevent_private_directory_diagnose "$STATE" 0 1)
+  case "$state_root_reason" in
+    ok) ;;
+    bad-mode) die "process-event state root is not a private directory - chmod 750 $STATE, then re-arm" ;;
+    not-owned) die "process-event state root ($STATE) is not owned by the current user - chmod will not fix this; fix ownership, then re-arm" ;;
+    *) die "process-event state root ($STATE) is not usable ($state_root_reason), then re-arm" ;;
+  esac
   fm_procevent_source_lock_acquire "$sid" || die "cannot lock the watch source"
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
