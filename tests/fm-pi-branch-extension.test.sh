@@ -1579,7 +1579,7 @@ if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_p
 for (const tool of mainTools) {
   if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
 }
-if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process,fm-heartbeat-request,fm-stow-request,fm-task-continuation") throw new Error("operational message allowlist changed");
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process,fm-heartbeat-request,fm-idle-reminder-request,fm-stow-request,fm-task-continuation") throw new Error("operational message allowlist changed");
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});

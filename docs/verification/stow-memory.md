@@ -40,3 +40,18 @@ $ # Historical rich-lifecycle live matrix removed; retain the portable periodic-
 
 The live guard provisions, addresses, stops, and deletes only through `bin/fm-herdr-lab.sh`; that helper verifies the default Herdr fleet before and after the run.
 Installation evidence is not enablement: the repository contains no `config/periodic-stow.json`, and choosing an enabled home and frequency remains a later operator action.
+
+## 2026-10-20 idle-reminder verification
+
+The focused coordinator suite uses controlled clocks and canonical task records to prove the 1800-second due boundary, structural busy deferral, verified main-session lock and role binding, one reminder after prolonged busy time, repeat eligibility for an unchanged decision, completed and archived exclusion, empty-inventory silence, and successful-settlement pacing across extension reload.
+The same suite reruns the pre-existing manual, pre-compaction, maintenance, fixed-cutoff, recovery, receipt, and escalation cases so the lightweight reminder cannot replace or consume maintenance custody.
+
+```text
+$ tests/fm-periodic-stow.test.sh
+ok - Pi coordinator bounds heartbeat delivery and hands exhaustion to one executable main turn
+ok - idle reminders defer at busy boundaries, collapse missed intervals, repeat unresolved decisions, and persist successful delivery cadence
+ok - idle reminder stays quiet for an empty canonical inventory
+ok - old requested maintenance keeps its custody without suppressing a due idle reminder
+ok - heartbeat retains failed duties and completes only with three unchanged bound readbacks
+ok - heartbeat persists paced recovery across generations without resetting attempts or fabricating progress
+```

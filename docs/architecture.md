@@ -351,6 +351,9 @@ When a home explicitly enables heartbeat maintenance through the compatible `con
 `bin/fm-stow-run.sh` binds the physical home, session file, session-tree fingerprint, generation, compare-and-swap revision, fixed cutoff, prepared operations, readback receipts, and bounded redelivery; it never decides what knowledge to keep and never treats message delivery or `agent_end` as success.
 The full maintenance pass is default-off, but the same in-process timer still drives bounded [live task continuation](pi-supervision-branch.md#live-task-continuation) while Pi remains alive; it creates no cron entry, daemon, or agent, grants the supervision branch no memory-write authority, and preserves unresolved partial work instead of claiming a cross-file transaction.
 [`configuration.md`](configuration.md#heartbeat-maintenance-configperiodic-stowjson) owns the opt-in, scheduling, and heartbeat-receipt contract.
+The same Pi extension can independently enable a lightweight 1800-second idle reminder through `config/idle-reminder.json`; it checks the canonical Bearings projection at the verified lock-owning idle boundary, delivers one hidden operational follow-up through Pi's existing message path, and records cadence only after the resulting assistant response settles or the canonical projection proves empty.
+Reminder requests and successful handling receipts are persisted in the current session tree, so a reload reconstructs both an already queued request and its most recent successful boundary without creating a second scheduler or touching stow custody.
+[`configuration.md`](configuration.md#idle-reminders-configidle-reminderjson) owns the operator contract, content boundary, activation, and Pi-only applicability.
 
 ## Local clones stay fresh
 

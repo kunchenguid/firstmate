@@ -321,6 +321,7 @@ await emit("session_start", { type: "session_start", reason: "startup" });
 if (messages.length !== 0 || existsSync(`${process.env.FM_HOME}/state/stow/state.json`)) {
   throw new Error("absent default-off configuration registered work");
 }
+
 writeFileSync(`${process.env.FM_HOME}/config/periodic-stow.json`,
   JSON.stringify({ version: 1, enabled: true, interval_seconds: 60, min_interval_seconds: 60 }));
 await emit("session_start", { type: "session_start", reason: "startup" });
@@ -382,6 +383,295 @@ EOF
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.attempts')" -eq 3 ] || fail "durable attempt count missing: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.escalations')" -eq 1 ] || fail "executable heartbeat handoff missing: $out"
   pass "Pi coordinator bounds heartbeat delivery and hands exhaustion to one executable main turn"
+}
+test_idle_reminder_uses_successful_settlement_cadence() {
+  local home session out body
+  home=$(new_home idle-reminder)
+  session=$(seed_session "$home" session)
+  mkdir -p "$home/projects/example"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add unfinished-work 'Finish the open outcome' --kind ship >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add choose-path 'Choose the rollout path' --kind ship >/dev/null
+  body="$home/decision-body"
+  printf '%s\n' 'Choose option A for the smaller reversible rollout or option B for the broader immediate rollout.' >"$body"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" update choose-path --body-file "$body" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" hold choose-path --kind captain \
+    --reason 'Choose option A: smaller reversible rollout, or option B: broader immediate rollout.' >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add done-work 'Already done' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" 'done' done-work --note 'landed' >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add archived-work 'Already archived' --kind scout --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive archived-work --report data/archived-work/report.md >/dev/null
+  out=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_PERIODIC_STOW_TICK_MS=1000000 PLUGIN="$ROOT/.pi/extensions/fm-periodic-stow.ts" \
+    SESSION_FILE="$session" bash -c 'exec -a pi node --input-type=module' launcher 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let now = 2_000_000_000_000;
+Date.now = () => now;
+const configTime = new Date(now - 1_799_000);
+writeFileSync(`${process.env.FM_HOME}/config/idle-reminder.json`,
+  JSON.stringify({ version: 1, enabled: true, interval_seconds: 1800 }));
+utimesSync(`${process.env.FM_HOME}/config/idle-reminder.json`, configTime, configTime);
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+
+const branch = [{ type: "session", id: "root-1", timestamp: new Date(now - 5000).toISOString() },
+  { type: "message", id: "entry-1", timestamp: new Date(now - 4000).toISOString(),
+    message: { role: "assistant", content: [{ type: "text", text: "ready" }], stopReason: "stop", timestamp: now - 4000 } }];
+let nextEntry = 2;
+let pending = false;
+let editor = "";
+let idle = false;
+
+function runtime() {
+  const handlers = new Map();
+  const messages = [];
+  const entries = [];
+  const pi = {
+    on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
+    events: { on() {}, emit() {} },
+    registerCommand() {},
+    appendEntry(customType, data) {
+      const entry = { type: "custom", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(), customType, data };
+      branch.push(entry); entries.push(entry);
+    },
+    sendMessage(message, options) {
+      messages.push({ message, options });
+      branch.push({ type: "custom_message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+        customType: message.customType, content: message.content, display: message.display, details: message.details });
+    },
+    async exec(command, args, options) {
+      const result = spawnSync(command, args, { encoding: "utf8", cwd: options?.cwd, timeout: options?.timeout, env: process.env });
+      return { stdout: result.stdout || "", stderr: result.stderr || "", code: result.status ?? 99, killed: false };
+    },
+  };
+  const ctx = {
+    mode: "tui", hasUI: true, isIdle: () => idle, hasPendingMessages: () => pending,
+    ui: { getEditorText: () => editor, notify() {} },
+    sessionManager: {
+      getSessionId: () => "session-1", getSessionFile: () => process.env.SESSION_FILE,
+      getLeafId: () => "entry-1", getBranch: () => branch,
+    },
+  };
+  const emit = async (name, event = { type: name }) => {
+    for (const handler of handlers.get(name) || []) await handler(event, ctx);
+  };
+  return { pi, ctx, emit, messages, entries };
+}
+
+async function settleAsync() {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+async function finishReminder(rt, sent) {
+  await rt.emit("before_agent_start", { type: "before_agent_start", messageType: "custom", message: sent.message,
+    systemPrompt: "", systemPromptOptions: {} });
+  const assistant = { role: "assistant", content: [{ type: "text", text: "captain，提醒内容" }],
+    stopReason: "stop", timestamp: now };
+  branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(), message: assistant });
+  await rt.emit("message_end", { type: "message_end", message: assistant });
+  await rt.emit("agent_settled", { type: "agent_settled", aborted: false });
+  await settleAsync();
+}
+
+const first = runtime();
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(first.pi);
+await first.emit("session_start", { type: "session_start", reason: "startup" });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("reminder fired before 1800 seconds");
+
+now += 1000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("busy main session was interrupted");
+idle = true;
+process.env.FM_TASK_ID = "worker";
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("worker identity emitted a main-session reminder");
+delete process.env.FM_TASK_ID;
+unlinkSync(`${process.env.FM_HOME}/state/.lock`);
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("session without the fleet lock emitted a reminder");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await first.emit("tool_execution_start", { type: "tool_execution_start" });
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("active tool was interrupted");
+await first.emit("tool_execution_end", { type: "tool_execution_end" });
+pending = true;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("pending input was interrupted");
+pending = false; editor = "draft";
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("editor input was interrupted");
+editor = "";
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 1) throw new Error(`expected one due reminder, got ${first.messages.length}`);
+const request = first.messages[0];
+if (request.message.customType !== "fm-idle-reminder-request" || request.message.display !== false ||
+    request.options.triggerTurn !== true || request.options.deliverAs !== "followUp") throw new Error("wrong reminder delivery surface");
+if (!request.message.content.includes("unfinished-work") || !request.message.content.includes("choose-path")) {
+  throw new Error("canonical unfinished work or decision was missing");
+}
+if (request.message.content.includes("done-work") || request.message.content.includes("archived-work")) {
+  throw new Error("terminal task leaked into reminder inventory");
+}
+if (!request.message.content.includes("Simplified Chinese") || !request.message.content.includes("captain")) {
+  throw new Error("runtime prompt lost language or address contract");
+}
+await finishReminder(first, request);
+if (!first.entries.some((entry) => entry.customType === "fm-idle-reminder-delivered")) {
+  throw new Error("successful assistant settlement did not create delivery evidence");
+}
+
+now += 1_799_000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 1) throw new Error("successful delivery did not anchor the next interval");
+now += 1000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 2) throw new Error("unchanged decision was not eligible at the next interval");
+await finishReminder(first, first.messages[1]);
+
+idle = false;
+now += 7_200_000;
+for (let i = 0; i < 4; i++) {
+  await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+  await settleAsync();
+}
+if (first.messages.length !== 2) throw new Error("prolonged busy interval emitted a reminder");
+idle = true;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 3) throw new Error("idle recovery did not collapse missed intervals to one reminder");
+await finishReminder(first, first.messages[2]);
+await first.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+
+const reloaded = runtime();
+const reloadMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?reload=1`);
+reloadMod.default(reloaded.pi);
+await reloaded.emit("session_start", { type: "session_start", reason: "reload" });
+await settleAsync();
+if (reloaded.messages.length !== 0) throw new Error("extension reload duplicated a handled reminder");
+await reloaded.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+console.log(JSON.stringify({ reminders: first.messages.length, receipts: first.entries.filter((e) => e.customType === "fm-idle-reminder-delivered").length }));
+EOF
+  ) || fail "idle reminder lifecycle failed: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.reminders')" -eq 3 ] || fail "idle reminder count evidence missing: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.receipts')" -eq 3 ] || fail "idle reminder receipt evidence missing: $out"
+  pass "idle reminders defer at busy boundaries, collapse missed intervals, repeat unresolved decisions, and persist successful delivery cadence"
+}
+
+test_idle_reminder_stays_silent_for_empty_inventory() {
+  local home session out
+  home=$(new_home idle-reminder-empty)
+  session=$(seed_session "$home" session)
+  out=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_PERIODIC_STOW_TICK_MS=1000000 PLUGIN="$ROOT/.pi/extensions/fm-periodic-stow.ts" \
+    SESSION_FILE="$session" bash -c 'exec -a pi node --input-type=module' launcher 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+let now = 2_000_000_000_000;
+Date.now = () => now;
+writeFileSync(`${process.env.FM_HOME}/config/idle-reminder.json`, JSON.stringify({ version: 1, enabled: true, interval_seconds: 1800 }));
+const old = new Date(now - 3_600_000);
+utimesSync(`${process.env.FM_HOME}/config/idle-reminder.json`, old, old);
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const branch = [{ id: "entry-1" }];
+const handlers = new Map();
+const messages = [];
+const entries = [];
+const pi = {
+  on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
+  events: { on() {}, emit() {} }, registerCommand() {}, sendMessage(message) { messages.push(message); },
+  appendEntry(customType, data) { entries.push({ customType, data }); branch.push({ type: "custom", customType, data, timestamp: new Date(now).toISOString() }); },
+  async exec(command, args, options) { const result = spawnSync(command, args, { encoding: "utf8", cwd: options?.cwd, timeout: options?.timeout, env: process.env });
+    return { stdout: result.stdout || "", stderr: result.stderr || "", code: result.status ?? 99, killed: false }; },
+};
+const ctx = { mode: "tui", hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+  ui: { getEditorText: () => "", notify() {} }, sessionManager: { getSessionId: () => "session-1",
+    getSessionFile: () => process.env.SESSION_FILE, getLeafId: () => "entry-1", getBranch: () => branch } };
+const emit = async (name, event = { type: name }) => { for (const handler of handlers.get(name) || []) await handler(event, ctx); };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await emit("session_start", { type: "session_start", reason: "startup" });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (messages.length !== 0) throw new Error("empty inventory emitted a reminder");
+if (entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length !== 1) throw new Error("empty inventory lacked a checked cadence receipt");
+await emit("agent_settled", { type: "agent_settled", aborted: false });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (messages.length !== 0 || entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length !== 1) {
+  throw new Error("empty inventory was rechecked before the next interval");
+}
+await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+console.log(JSON.stringify({ empty: 1 }));
+EOF
+  ) || fail "empty idle reminder lifecycle failed: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.empty')" -eq 1 ] || fail "empty reminder evidence missing: $out"
+  pass "idle reminder stays quiet for an empty canonical inventory"
+}
+
+test_idle_reminder_is_not_suppressed_by_old_maintenance() {
+  local home session out
+  home=$(new_home idle-reminder-maintenance)
+  session=$(seed_session "$home" session)
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add unfinished-work 'Finish the open outcome' --kind ship >/dev/null
+  out=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_PERIODIC_STOW_TICK_MS=1000000 PLUGIN="$ROOT/.pi/extensions/fm-periodic-stow.ts" \
+    RUN_SCRIPT="$RUN" SESSION_FILE="$session" bash -c 'exec -a pi node --input-type=module' launcher 2>&1 <<'EOF'
+import { readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+const now = Date.now();
+writeFileSync(`${process.env.FM_HOME}/config/idle-reminder.json`, JSON.stringify({ version: 1, enabled: true, interval_seconds: 1800 }));
+const old = new Date(now - 3_600_000);
+utimesSync(`${process.env.FM_HOME}/config/idle-reminder.json`, old, old);
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const common = ["--session-id", "session-1", "--session-file", process.env.SESSION_FILE,
+  "--target-entry-id", "entry-1", "--branch-fingerprint", "a".repeat(64)];
+for (const reason of ["manual", "precompact"]) {
+  const requested = spawnSync(process.env.RUN_SCRIPT, ["request", "--reason", reason, ...common], { encoding: "utf8", env: process.env });
+  if (requested.status !== 0) throw new Error(`could not seed old maintenance: ${requested.stdout} ${requested.stderr}`);
+}
+const handlers = new Map();
+const messages = [];
+const branch = [{ id: "root-1" }, { id: "entry-1" }];
+const pi = {
+  on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
+  events: { on() {}, emit() {} }, registerCommand() {}, appendEntry() {},
+  sendMessage(message, options) { messages.push({ message, options }); },
+  async exec(command, args, options) { const result = spawnSync(command, args, { encoding: "utf8", cwd: options?.cwd, timeout: options?.timeout, env: process.env });
+    return { stdout: result.stdout || "", stderr: result.stderr || "", code: result.status ?? 99, killed: false }; },
+};
+const ctx = { mode: "tui", hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+  ui: { getEditorText: () => "", notify() {} }, sessionManager: { getSessionId: () => "session-1",
+    getSessionFile: () => process.env.SESSION_FILE, getLeafId: () => "entry-1", getBranch: () => branch } };
+const emit = async (name, event = { type: name }) => { for (const handler of handlers.get(name) || []) await handler(event, ctx); };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await emit("session_start", { type: "session_start", reason: "startup" });
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (messages.length !== 1 || messages[0].message.customType !== "fm-idle-reminder-request") {
+  throw new Error("old requested maintenance ran before or suppressed the due idle reminder");
+}
+const state = JSON.parse(readFileSync(`${process.env.FM_HOME}/state/stow/state.json`, "utf8"));
+if (!state.active.reasons.includes("manual") || !state.active.reasons.includes("precompact")) {
+  throw new Error("idle reminder changed old maintenance custody");
+}
+await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+console.log(JSON.stringify({ first: messages[0].message.customType, reasons: state.active.reasons.length }));
+EOF
+  ) || fail "old-maintenance idle reminder priority failed: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.first')" = fm-idle-reminder-request ] || fail "idle reminder priority evidence missing: $out"
+  pass "old requested maintenance keeps its custody without suppressing a due idle reminder"
 }
 
 test_heartbeat_requires_three_verified_duties() {
@@ -479,6 +769,9 @@ test_later_cutoff_is_promoted_after_completed_run
 test_disable_withdraws_only_unconsumed_periodic_work
 test_receipts_and_corrupt_state_fail_closed
 test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
+test_idle_reminder_uses_successful_settlement_cadence
+test_idle_reminder_stays_silent_for_empty_inventory
+test_idle_reminder_is_not_suppressed_by_old_maintenance
 
 test_heartbeat_requires_three_verified_duties
 
