@@ -24,6 +24,8 @@ make_home() {
   cat > "$home/bin/fm-control.sh" <<'SH'
 #!/usr/bin/env bash
 dir=$(cd "$(dirname "$0")/.." && pwd)
+[ -n "${FM_HOME:-}" ] || exit 1
+printf '%s\n' "$FM_HOME" >> "$dir/control-home.log"
 printf '%s\n' "$*" >> "$dir/control.log"
 [ ! -e "$dir/control-fail" ]
 SH
@@ -104,6 +106,20 @@ test_park_records_baseline_arms_watch_and_stops_worker() {
     "$home/when.log" "park must arm the change watch with this script as condition and action"
   assert_grep "t1 exit" "$home/control.log" "park must stop the worker through fm-control.sh exit"
   pass "park: records the baseline, arms the watch, then stops the worker"
+}
+
+test_park_resolves_default_home_for_control() {
+  local home out
+  home=$(make_home default-home)
+  out=$(
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    PATH="$home/fakebin:$PATH" "$home/bin/fm-pr-park.sh" park t1 "$PR_URL"
+  ) || fail "park with FM_HOME unset failed: $out"
+  assert_contains "$out" "parked: t1 on $PR_URL" "default-home park must succeed"
+  [ -f "$home/state/t1.park" ] || fail "default-home park rolled back its record"
+  [ "$(cat "$home/control-home.log")" = "$home" ] || fail "control must receive the resolved default home"
+  assert_grep "t1 exit" "$home/control.log" "default-home park must stop the worker"
+  pass "park: resolves and passes the default home to control"
 }
 
 test_condition_and_action_follow_the_pr() {
@@ -194,6 +210,7 @@ test_long_task_ids_use_distinct_bounded_watches() {
 
 test_fingerprint_changes_only_when_a_check_appears_or_finishes
 test_park_records_baseline_arms_watch_and_stops_worker
+test_park_resolves_default_home_for_control
 test_condition_and_action_follow_the_pr
 test_park_refusals_change_nothing
 test_failed_stop_rolls_back_and_unpark_is_idempotent

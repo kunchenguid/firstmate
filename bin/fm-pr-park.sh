@@ -181,7 +181,7 @@ cmd_park() {
     rm -f -- "$file"
     die "cannot arm the park watch for $id; the worker keeps its session"
   fi
-  if ! "$SCRIPT_DIR/fm-control.sh" "$id" exit; then
+  if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-control.sh" "$id" exit; then
     "$SCRIPT_DIR/fm-procevent-when.sh" retire "$name" >/dev/null 2>&1 || true
     rm -f -- "$file"
     die "cannot stop the worker for $id; the park was rolled back and the worker keeps its session"
