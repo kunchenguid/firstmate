@@ -12,7 +12,11 @@
 #   4. Once the owner releases the hold, the steer is delivered.
 #   5. A --resolve-key send that answers the target's own hold is delivered;
 #      one that answers some other task's hold does not lift the target's.
-#   6. An unheld task, and a home with no backlog, steer as before.
+#   6. The supervision branch cannot self-answer the target's own hold with
+#      --resolve-key, even under the away-posture record.
+#   7. A window target that resolves to a held task's meta is refused.
+#   8. A backlog that exists but cannot be read refuses.
+#   9. An unheld task, and a home with no backlog, steer as before.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -148,6 +152,49 @@ test_resolve_key_answering_own_hold_passes() {
   pass "fm-send captain hold: only an answer to the target's own hold is exempt"
 }
 
+test_branch_cannot_self_release_with_resolve_key() {
+  local dir rc
+  dir=$(make_case branch-resolve)
+  add_task "$dir" t1
+  hold_task "$dir" t1 "Resume only on his word"
+  printf '%s\n' 'version: 1' 'entered: 2026-09-20T01:00:00Z' 'entered_epoch: 1789600000' \
+    'expected_return: 2026-09-20T09:00:00Z' 'reach_channels: none' \
+    'reach_announced: No phone channel is configured; anything that needs you waits for your return.' \
+    'spend_max_concurrent_workers: 3' 'merge_grants:' 'confirmed: 2026-09-20T01:00:05Z' \
+    'confirmed_epoch: 1789600005' 'words: |-' '  away' 'clauses:' 'refused:' >"$dir/home/state/.afk-contract"
+  in_home "$dir" env FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key t1 "resume" >/dev/null 2>"$dir/send.err"
+  rc=$?
+  assert_contains "$(cat "$dir/send.err")" "away-posture record" "the away posture should pass the lease gate"
+  [ "$rc" -ne 0 ] || fail "the branch self-released a held task with --resolve-key"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "the branch's own-hold --resolve-key still recorded a steer"
+  [ ! -s "$dir/send.log" ] || fail "the branch's own-hold --resolve-key still rang the terminal"
+  pass "fm-send captain hold: the branch cannot lift a hold with --resolve-key"
+}
+
+test_window_target_refuses() {
+  local dir
+  dir=$(make_case window)
+  add_task "$dir" t1
+  hold_task "$dir" t1 "Resume only on his word"
+  send "$dir" sess:fm-t1 "resume the work" && fail "a window target bypassed the captain hold"
+  assert_contains "$(cat "$dir/send.err")" "held for the captain" "the window-target refusal should say the task is held"
+  [ ! -s "$dir/send.log" ] || fail "a refused window-target steer still rang the terminal"
+  pass "fm-send captain hold: a window target of a held task is refused"
+}
+
+test_unreadable_backlog_refuses() {
+  local dir
+  dir=$(make_case unreadable)
+  add_task "$dir" t1
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$dir/fakebin/tasks-axi"
+  chmod +x "$dir/fakebin/tasks-axi"
+  send "$dir" t1 "resume the work" && fail "an unreadable backlog let a steer through"
+  assert_contains "$(cat "$dir/send.err")" "cannot be read" "the refusal should name the cause"
+  assert_contains "$(cat "$dir/send.err")" "t1" "the refusal should name the task"
+  [ ! -s "$dir/send.log" ] || fail "a steer still rang the terminal with an unreadable backlog"
+  pass "fm-send captain hold: an unreadable backlog refuses"
+}
+
 test_unheld_and_backlogless_homes_steer() {
   local dir
   dir=$(make_case unheld)
@@ -163,4 +210,7 @@ test_expired_hold_still_refuses
 test_key_send_passes_while_held
 test_release_lets_steer_through
 test_resolve_key_answering_own_hold_passes
+test_branch_cannot_self_release_with_resolve_key
+test_window_target_refuses
+test_unreadable_backlog_refuses
 test_unheld_and_backlogless_homes_steer

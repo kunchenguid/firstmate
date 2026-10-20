@@ -222,8 +222,12 @@
 # answer first. A --resolve-key send that answers the target's own hold is the
 # only exempt text steer, since it is the captain's answer. --key sends,
 # bin/fm-control.sh lifecycle verbs, and explicit backend targets are not
-# steers to a held task and are never refused. An unreadable backlog warns and
-# sends.
+# steers to a held task and are never refused. The exemption does not extend to
+# the supervision branch (main or away posture): its --resolve-key on the
+# target's own hold is refused too, so only `answer --release` lifts the hold.
+# Any target that resolves to a recorded task meta is checked, including a
+# window/terminal target. A backlog that exists but cannot be read refuses; a
+# home with no backlog sends.
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
 # text was accepted, but the harness needs a beat to spin up the turn before its
@@ -802,8 +806,9 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # the owner stopped that work, and no supervisor may restart or redirect it. The
 # hold is read through bin/fm-captain-hold.sh, which counts a date-expired hold
 # as held until it is answered or released. The one exempt send answers the
-# hold itself through --resolve-key. A backlog that cannot be read warns and
-# lets the steer through, because many homes keep no tasks-axi backlog.
+# hold itself through --resolve-key, and never for the supervision branch. A
+# missing backlog (exit 3) sends; an unreadable one (exit 2) may hide a live
+# hold, so it refuses.
 fm_send_refuse_if_captain_held() { # <task-id>
   local id=$1 rc=0 show reason
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null 2>&1 || rc=$?
@@ -811,11 +816,13 @@ fm_send_refuse_if_captain_held() { # <task-id>
   0) ;;
   1 | 3) return 0 ;;
   *)
-    echo "warning: could not read the captain hold of $id; sending without the hold check" >&2
-    return 0
+    echo "error: steer not sent to $id: its backlog cannot be read (fm-captain-hold.sh open exited $rc: tasks-axi missing or incompatible, or the backlog read failed), so a captain hold cannot be ruled out. Fix the backlog, then steer again." >&2
+    return 1
     ;;
   esac
-  case " $RESOLVE_HOLD_KEYS " in *" $id "*) return 0 ;; esac
+  case " $RESOLVE_HOLD_KEYS " in
+  *" $id "*) [ "$(fm_lease_actor 2>/dev/null)" = branch ] || return 0 ;;
+  esac
   show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || show=
   reason=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p' | head -1)
   reason=$(printf '%s' "$reason" | perl -MJSON::PP -e 'local $/; my $v = <STDIN>; my $d = eval { JSON::PP->new->allow_nonref->decode($v) }; $d = $v unless defined $d; print((split /\n/, $d)[0] // "")' 2>/dev/null) || reason=
@@ -823,7 +830,7 @@ fm_send_refuse_if_captain_held() { # <task-id>
   return 1
 }
 
-if [ "${1:-}" != "--key" ] && [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
+if [ "${1:-}" != "--key" ] && [ -n "$TARGET_META" ]; then
   fm_send_refuse_if_captain_held "$(fm_send_id_from_meta "$TARGET_META")" || exit 1
 fi
 
