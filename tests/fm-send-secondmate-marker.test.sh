@@ -268,6 +268,41 @@ test_marked_send_preserves_trailing_newlines() {
   pass "fm-send: marked secondmate payload preserves trailing newline bytes in its record"
 }
 
+
+test_orca_secondmate_inbox_and_correlated_reply() {
+  local dir fb log home mate got corr
+  dir="$TMP_ROOT/orca"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_SEND_LOG"
+case "$1 $2" in
+  'terminal read') printf '{"ok":true,"result":{"text":"❯"}}\n' ;;
+  *) printf '{"ok":true}\n' ;;
+esac
+SH
+  chmod +x "$fb/orca"
+  home=$(setup_home orca-parent)
+  mate=$(setup_home orca-mate)
+  printf 'domain\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" > "$mate/.fm-secondmate-parent"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$mate" fm-domain
+  printf 'backend=orca\nterminal=term-domain\norca_worktree_id=repo-domain::%s\nendpoint_task_id=domain\n' "$mate" >> "$home/state/domain.meta"
+  run_send "$fb" "$home" "$log" domain 'read-only proof' || fail 'Orca secondmate steer failed'
+  got=$(record_body "$home/state/domain.inbox/001.msg")
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -n "$corr" ] || fail 'Orca steer lost correlation'
+  assert_contains "$(cat "$log")" '--terminal term-domain' 'doorbell did not use recorded Orca terminal'
+  assert_not_contains "$(cat "$log")" 'read-only proof' 'payload leaked into terminal doorbell'
+  mkdir -p "$home/state/domain.inbox/handled"
+  mv "$home/state/domain.inbox/001.msg" "$home/state/domain.inbox/handled/001.msg"
+  FM_HOME="$mate" "$ROOT/bin/fm-secondmate-report.sh" 'done' "$corr" 'read-only proof complete' || fail 'parent report failed'
+  fm_pending_reply_try_resolve "$home/state" "$corr" || fail 'Orca correlated reply did not settle parent request'
+  assert_grep 'phase=resolved' "$(fm_pending_reply_path "$home/state" "$corr")" 'request stayed pending'
+  pass 'Orca secondmate steers acknowledge the durable inbox and resolve through the existing parent channel'
+}
+
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
@@ -276,3 +311,5 @@ test_key_path_is_not_marked
 test_marker_is_label_plus_invisible_separator
 test_marker_transformation_is_idempotent
 test_marked_send_preserves_trailing_newlines
+
+test_orca_secondmate_inbox_and_correlated_reply

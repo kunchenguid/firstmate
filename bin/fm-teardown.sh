@@ -3319,6 +3319,9 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+      elif [ "$child_backend" = orca ] && [ "$child_kind" = secondmate ]; then
+        fm_backend_source orca || return 1
+        fm_backend_orca_home_close "$child_wt" "$(meta_value "$child_meta" orca_worktree_id)" "$child_t" || return 1
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -3334,6 +3337,9 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return $?
+        if [ "$child_backend" = orca ]; then
+          fm_backend_orca_home_retire "$child_home" || return 1
+        fi
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
@@ -3786,6 +3792,9 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  fm_backend_source orca || exit 1
+  fm_backend_orca_home_close "$HOME_PATH" "$ORCA_WORKTREE_ID" "$T" || exit 1
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
@@ -3830,6 +3839,11 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
+  if [ "$BACKEND" = orca ] && ! fm_backend_orca_home_retire "$HOME_PATH"; then
+    handoff_wake_retire_stage_restore \
+      || echo "error: receiver wake restoration failed; recovery state remains at $HANDOFF_WAKE_RETIRE_STAGE" >&2
+    exit 1
+  fi
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
     :
   else
