@@ -56,11 +56,22 @@ def clean_inline:
   | gsub("`|\\*|~~"; "")
   | gsub("^[[:space:]]+|[[:space:]]+$"; "");
 
+def decode_url_entities:
+  gsub("(?i)&#(?<n>x[0-9a-f]+|[0-9]+);"; . as $m
+    | ($m.n | ascii_downcase
+       | if startswith("x") then .[1:] | explode
+         | reduce .[] as $d (0; . * 16 +
+             (if $d <= 57 then $d - 48 else $d - 87 end))
+         else tonumber end) as $cp
+    | if $cp > 0 and $cp <= 1114111 then [$cp] | implode else " " end)
+  | gsub("(?i)&colon;"; ":")
+  | gsub("(?i)&tab;"; "\t")
+  | gsub("(?i)&newline;"; "\n");
+
 def unsafe_url($url; $image):
   ($url
    | gsub("(?i)&amp;"; "&")
-   | gsub("(?i)&#(?:0*58|x0*3a);"; ":")
-   | gsub("(?i)&colon;"; ":")
+   | decode_url_entities
    | explode | map(select(. > 32 and (. < 127 or . > 159))) | implode
    | ascii_downcase) as $check
   | if ($check | test("^(javascript|vbscript|file):")) then true

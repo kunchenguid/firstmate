@@ -299,6 +299,7 @@ test_unsafe_link_and_image_schemes_are_rejected() {
 
 [javascript](javascript:alert(1)) [vbscript](vbscript:alert(1)) [file](file:///etc/passwd)
 [obfuscated](java&#58;script:alert(1))
+[control-obfuscated](java&#x09;script&#58;alert(1))
 ![bad data](data:text/html,alert(1)) ![bad file](file:///etc/passwd)
 [good](https://example.test/path)'
   build "$home" >/dev/null || fail "build failed"
@@ -308,6 +309,8 @@ test_unsafe_link_and_image_schemes_are_rejected() {
   assert_not_contains "$html" 'href="vbscript:' "vbscript links must be inert"
   assert_not_contains "$html" 'href="file:' "file links must be inert"
   assert_not_contains "$html" 'href="javascript&#58;' "entity-obfuscated schemes must be inert"
+  assert_not_contains "$html" 'href="java&amp;#x09;script' \
+    "numeric references must be decoded before control characters are stripped"
   assert_not_contains "$html" 'src="data:' "unsafe data images must be inert"
   assert_not_contains "$html" 'src="file:' "file images must be inert"
   assert_contains "$html" 'href="https://example.test/path"' "https links must remain usable"
