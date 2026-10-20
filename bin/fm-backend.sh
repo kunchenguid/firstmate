@@ -424,6 +424,9 @@ fm_backend_orca_worktree_id_valid() {  # <value>
 
 # The repair path printed with the worktree-identity refusal below, so a record
 # that cannot name its copy is a repairable state rather than a dead end.
+# One path serves all three refused shapes, because each one ends in the same
+# place: the record has to carry exactly one worktree= line, whether that means
+# adding it, filling it in, or dropping all but the right one of several.
 # It names only evidence this system writes by itself: the project's own
 # worktree list, which maps the task's recorded branch back to its copy, and the
 # record snapshot bin/fm-control.sh preserves before a relaunch.
@@ -439,9 +442,11 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   prior="${meta%.meta}.control-relaunch.meta-prior"
   project=$(fm_meta_get "$meta" project)
   branch=$(fm_meta_get "$meta" branch)
-  echo "Restore exactly one worktree= line naming the copy this task holds, then re-run."
+  echo "The record needs exactly one worktree= line naming the copy this task holds: add it, fill it in, or keep only the right one of several, then re-run."
   if [ -n "$project" ]; then
-    echo "git -C $project worktree list names the copy checked out on this task's recorded branch${branch:+ $branch}."
+    # Quoted, so the printed command survives a project path with spaces and
+    # can be copied and run exactly as it reads.
+    echo "git -C $(printf '%q' "$project") worktree list names the copy checked out on this task's recorded branch${branch:+ $branch}."
   fi
   if [ -f "$prior" ] && [ ! -L "$prior" ]; then
     echo "The record as it stood before the last relaunch still carries that line at $prior."

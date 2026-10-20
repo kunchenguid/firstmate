@@ -119,7 +119,7 @@ test_invalid_endpoint_records_refuse_before_mutation() {
 # The refusal itself does not change: it still names what is wrong first, still
 # preserves the record, and still refuses under --force.
 test_worktree_identity_refusal_names_the_repair_path() {
-  local dir id=repair-hint err
+  local dir id=repair-hint err printed
 
   dir=$(make_case repair-hint)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -131,8 +131,10 @@ test_worktree_identity_refusal_names_the_repair_path() {
   err=$(cat "$dir/stderr")
   assert_contains "$err" "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." \
     "the refusal must still name what is wrong and that the record is kept"
-  assert_contains "$err" "Restore exactly one worktree= line" \
-    "the refusal must name the repair itself"
+  assert_contains "$err" "exactly one worktree= line" \
+    "the repair must name the end state all three refused shapes share"
+  assert_contains "$err" "add it, fill it in, or keep only the right one of several" \
+    "the repair must cover a line that is missing, empty, or duplicated, not only a missing one"
   assert_contains "$err" "git -C $dir/project worktree list" \
     "the repair path must name the listing that maps the recorded branch back to its copy"
   assert_contains "$err" "recorded branch fm/$id" \
@@ -141,7 +143,25 @@ test_worktree_identity_refusal_names_the_repair_path() {
     "the repair path must name the preserved pre-relaunch record when one exists"
   assert_contains "$err" ".fm-slot-owner" \
     "the repair path must say how a reassigned pool slot is proved and why restoring stays safe"
-  pass "fm-teardown: an unusable worktree identity refuses as before and names how to restore the line"
+
+  # The listing is only useful if it can be copied and run as printed, which a
+  # project path with a space breaks unless the command is quoted. Prove it by
+  # running exactly what the refusal printed, against exactly such a path.
+  dir=$(make_case repair-hint-spaced)
+  mv "$dir/project" "$dir/project dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project dir" "branch=fm/$id" "kind=ship"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  set -e
+  printed=$(sed -n 's/^\(git -C .* worktree list\) names the copy.*/\1/p' "$dir/stderr")
+  [ -n "$printed" ] || fail "the refusal printed no runnable worktree listing: $(cat "$dir/stderr")"
+  eval "$printed" > "$dir/listing" 2> "$dir/listing-err" \
+    || fail "the printed listing did not run as printed: $printed"$'\n'"$(cat "$dir/listing-err")"
+  assert_contains "$(cat "$dir/listing")" "$dir/project dir" \
+    "the printed listing must inspect the project the record names"
+  pass "fm-teardown: an unusable worktree identity refuses as before and names a repair path that runs as printed"
 }
 
 test_control_lock_contention_refuses_before_mutation() {
