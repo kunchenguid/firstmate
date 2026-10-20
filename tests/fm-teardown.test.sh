@@ -5266,6 +5266,26 @@ test_term_resistant_owned_children_are_reaped_with_the_leader() {
   pass "TERM-resistant task-owned processes are force-killed without being spared when the endpoint shell dies"
 }
 
+test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree() {
+  local case_dir rc agent
+  case_dir=$(make_case no-oracle-agent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e 'chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  agent=$!
+  sleep 0.3
+  rc=0
+  FM_FAKE_KILL_PID="$agent" FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 0 "$rc" "no-oracle-agent: teardown should complete"
+  assert_grep "spared unowned process $agent:" "$case_dir/stderr" \
+    "no-oracle-agent: the unproven agent was not reported"
+  [ -s "$case_dir/treehouse.log" ] || fail "no-oracle-agent: worktree was not returned after the pane close ended the agent"
+  pass "an unproven agent that ends at pane close does not keep the worktree"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
