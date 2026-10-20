@@ -248,6 +248,14 @@ test_pi_pin_selects_the_root_and_the_declared_provider() {
   launch=$(cat "$CASE/launch.log")
   assert_contains "$launch" "--provider 'openai-codex' --model 'openai-codex/gpt-5.5'" \
     "the launch should confine Pi's model lookup to the declared provider"
+  # Pi's project trust is keyed per absolute path in the pinned root's own
+  # store (bin/fm-pi-trust.sh), so a pinned spawn must register there and never
+  # in the invoking process's default root.
+  [ "$(node -e 'const j=require(process.argv[1]);process.stdout.write(String(j[process.argv[2]]))' \
+    "$CASE/pi-work/trust.json" "$(cd -P -- "$WT" && pwd -P)" 2>/dev/null)" = true ] \
+    || fail "the pinned root's trust store should carry the worktree: $(cat "$CASE/pi-work/trust.json" 2>/dev/null)"
+  assert_absent "$HOME_DIR/user-home/.pi/agent/trust.json" \
+    "the ambient Pi root must not receive the trust entry"
   run_pane
   assert_grep "PI_CODING_AGENT_DIR=$CASE/pi-work" "$CASE/pi-worker" "the worker should run under the pinned Pi root"
   assert_grep "--provider openai-codex --model openai-codex/gpt-5.5" "$CASE/pi-worker" \

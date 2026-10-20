@@ -577,6 +577,34 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
 
+## Pi worker-worktree project trust
+
+[`bin/fm-pi-trust.sh`](../../bin/fm-pi-trust.sh) owns the worker-worktree registration mechanics, and [`pi.md`](../../.agents/skills/harness-adapters/references/harness/pi.md#operating-facts) owns the operating facts.
+A crewmate or scout spawn registers one absolute worktree path before launch, because a fresh pooled slot is a new path to Pi every time and the dialog otherwise parks an unattended worker indefinitely.
+
+Verified 2026-10-20 on pi 0.84.2 (package 0.84.2) through the default-on live guard (disposable `HOME` and `PI_CODING_AGENT_DIR` only; never `~/.pi`).
+The guard drives the installed package's own `ProjectTrustStore` and `resolveProjectTrusted`, which are what the TUI consults before it renders the dialog, and asserts the verdict flips only because `bin/fm-pi-trust.sh` wrote the entry.
+
+```sh
+bash tests/fm-pi-trust-live-e2e.test.sh
+```
+
+```
+# live pi version: 0.84.2 (package 0.84.2)
+# baseline: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent","trustGating":true,"decision":null,"resolved":false}
+ok - pi 0.84.2: an unregistered task worktree resolves untrusted
+# after registration: {"agentDir":".../fm-pi-trust-live.3ZhDwr/agent","trustGating":true,"decision":true,"resolved":true}
+ok - pi 0.84.2: the worktree fm-pi-trust.sh registered resolves trusted with no dialog
+# all fm-pi-trust-live-e2e checks passed (2)
+```
+
+What the installed package establishes, read from `dist/config.js`, `dist/core/trust-manager.js`, and `dist/core/project-trust.js`:
+The store is `<agentDir>/trust.json`, where `agentDir` is `PI_CODING_AGENT_DIR` when set and else `<homedir>/.pi/agent`.
+The file is one JSON object keyed by the absolute realpath-resolved directory, valued `true` (trusted), `false` (declined), or `null` (recorded undecided), sorted with two-space indentation and a trailing newline.
+A lookup walks the directory's ancestors and takes the nearest entry, and `resolveProjectTrusted` returns a recorded decision before any prompt, so a pre-written entry suppresses the dialog entirely.
+
+The portable half lives in `tests/fm-pi-trust.test.sh`: a fresh worktree is registered, a canonical path is recorded for a symlinked fixture root, an existing registration writes nothing, unrelated entries and a recorded decline are preserved, an unwritable or malformed store fails loudly, out-of-scope paths are refused, the store root follows the pin then `PI_CODING_AGENT_DIR` then `~/.pi/agent`, a pi and pi-signed spawn register their worktree without gaining `--approve`, a failed registration refuses the spawn, and a codex spawn never touches the Pi store.
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
