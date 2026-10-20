@@ -2,7 +2,9 @@
 # Correlation creation must work without the optional OpenSSL executable.
 set -eu
 
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pending-reply-id)
@@ -10,6 +12,7 @@ trap 'fm_test_remove_tree "$TMP_ROOT"' EXIT
 
 (
   # Hide only OpenSSL discovery; all fallback tools remain real executables.
+  # shellcheck disable=SC2329 # Shadowed builtin, called indirectly by the pending-reply helper.
   command() {
     if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = openssl ]; then
       return 1
