@@ -759,7 +759,7 @@ $ ls "$TURNEND"
 <turn-end file present>
 ```
 
-`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
+`tests/fm-codex-hook-layer-live-e2e.test.sh` checks current flag acceptance; it does not repeat the composer and notification probe above.
 It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the installed Codex accepts the requested hook-disablement flag.
 It does not claim that a managed policy cannot re-enable hooks after launch.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
