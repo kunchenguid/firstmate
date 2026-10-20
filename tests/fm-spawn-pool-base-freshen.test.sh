@@ -849,6 +849,37 @@ test_every_home_allocates_from_its_own_pool_root() {
   pass "every home allocates from its own stable Treehouse pool root outside any firstmate checkout"
 }
 
+# With no TREEHOUSE_ROOT, the default root is the `root` key of the project's
+# treehouse.toml, written as either a TOML basic or literal string, exactly as
+# Treehouse itself reads it.
+test_pool_root_follows_the_project_treehouse_toml() {
+  local rec id out status pane_log quote th_real root
+  for quote in basic literal; do
+    id="pool-root-toml-$quote-r1"
+    rec=$(make_case "pool-root-toml-$quote" "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/th-config"
+    th_real=$(cd "$CASE_DIR/th-config" && pwd -P)
+    if [ "$quote" = basic ]; then
+      printf 'max_trees = 4\nroot = "%s" # pools\n' "$CASE_DIR/th-config" > "$PROJECT_DIR/treehouse.toml"
+    else
+      printf "max_trees = 4\nroot = '%s' # pools\n" "$CASE_DIR/th-config" > "$PROJECT_DIR/treehouse.toml"
+    fi
+    pane_log="$CASE_DIR/pane.log"
+    : > "$pane_log"
+    out=$(FM_TEST_TREEHOUSE_ROOT='' FM_TEST_SPAWN_HOME="$CASE_DIR/user" FM_FAKE_PANE_LOG="$pane_log" \
+      run_spawn "$id" --scout)
+    status=$?
+    expect_code 0 "$status" "a $quote-string treehouse.toml root should launch"$'\n'"$out"
+    root=$(sed -n "s|^treehouse --root '\\(.*\\)' get\$|\\1|p" "$pane_log")
+    case "$root" in
+      "$th_real"/fm-homes/?*) ;;
+      *) fail "a $quote-string treehouse.toml root was not honored: got '$root', expected under '$th_real/fm-homes'" ;;
+    esac
+  done
+  pass "the pool root follows a basic or literal root in the project's treehouse.toml"
+}
+
 # A pool root inside this firstmate home, or under a directory other than $HOME
 # and its ancestors that carries CLAUDE.md or AGENTS.md, would put that file above every task copy, so
 # the spawn refuses before it asks Treehouse for a slot. Instructions at $HOME
@@ -1320,6 +1351,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_foreign_clone_slot_is_refused_before_any_mutation
 test_every_home_allocates_from_its_own_pool_root
+test_pool_root_follows_the_project_treehouse_toml
 test_pool_root_under_agent_instructions_is_refused
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock

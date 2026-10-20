@@ -3927,7 +3927,8 @@ spawn_treehouse_pool_root() {
   top=$(git -C "$PROJ_ABS_REAL" rev-parse --show-toplevel 2>/dev/null) || top=$PROJ_ABS_REAL
   base=${TREEHOUSE_ROOT:-}
   if [ -z "$base" ] && [ -f "$top/treehouse.toml" ]; then
-    base=$(sed -n 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$top/treehouse.toml" | head -n 1)
+    base=$(sed -n -e 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      -e "s/^[[:space:]]*root[[:space:]]*=[[:space:]]*'\\([^']*\\)'.*/\\1/p" "$top/treehouse.toml" | head -n 1)
   fi
   [ -n "$base" ] || base=${HOME:?}
   case "$base" in /*) ;; *) base=$top/$base ;; esac
