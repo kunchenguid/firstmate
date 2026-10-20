@@ -6,12 +6,11 @@
 # Usage:
 #   fm-pr-park.sh park <task-id> <pr-url>
 #   fm-pr-park.sh unpark <task-id>
-#   fm-pr-park.sh fingerprint <pr-url>
 #   fm-pr-park.sh changed <task-id>
 #   fm-pr-park.sh resume-note <task-id>
 #
 # park         Record the pull request's current fingerprint as the baseline in
-#              state/<id>.park, arm the condition->action watch "park-<id>"
+#              state/<id>.park, arm the condition->action watch "park-<digest>"
 #              (bin/fm-procevent-when.sh) that polls it every 300 seconds, then
 #              stop the worker with `bin/fm-control.sh <id> exit`, which keeps
 #              its endpoint, worktree, and every uncommitted change.
@@ -22,11 +21,6 @@
 #              keeps its session.
 # unpark       Retire the watch and remove the park record. Idempotent.
 #              Run it after relaunching a parked worker and before re-parking.
-# fingerprint  Print the pull request's state, head commit, review decision,
-#              review count, comment count, and every check reduced to a
-#              pending, passed, or terminal result, on one line. Queued and
-#              running checks share the pending result, so only a check that
-#              appears or finishes changes the fingerprint.
 # changed      The watch's condition: exit 0 when the fingerprint differs from
 #              the baseline, 1 when it is unchanged, and 2 when the record or
 #              the pull request cannot be read.
@@ -34,9 +28,16 @@
 #              relaunch note that names the pull request and its baseline and
 #              current fingerprints, and print its path.
 #
-# When the watch fires, firstmate is woken with its outcome and relaunches the
-# worker with `bin/fm-control.sh <id> relaunch --note-file
-# data/<id>/park-resume.md`, then runs `fm-pr-park.sh unpark <id>`.
+# The watch name is park- followed by the first 54 hex digits of the SHA-256
+# of the task id (without a newline); its source id is when-park-<digest>.
+# On a wake, match the digest against task ids from state/*.park using that
+# hash rule. If no park record matches, only acknowledge the result.
+# Otherwise classify the result with fm-procevent-when.sh classify <result-file>.
+# Only for fired, relaunch with `bin/fm-control.sh <id> relaunch --note-file
+# data/<id>/park-resume.md`, then run `fm-pr-park.sh unpark <id>` and acknowledge.
+# For condition-error, never-true (including deadline expiry), rejected, and
+# every other non-fired outcome, use the existing when diagnostic handling in
+# process-event-sources; keep the park record until recovery is decided.
 # The relaunch stays a firstmate decision rather than the watch's action, so a
 # relaunch refusal, such as a signed-out worker account, reaches firstmate
 # instead of failing inside the watch.
@@ -56,7 +57,14 @@ POLL_INTERVAL=300
 
 die() { echo "error: fm-pr-park: $*" >&2; exit 1; }
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+usage() { sed -n '2,/^set -u/{ /^set -u/d; p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+
+watch_name() {
+  local digest
+  digest=$(printf '%s' "$1" | fm_pr_sha256 -) || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf 'park-%.54s\n' "$digest"
+}
 
 record_file() { printf '%s/%s.park\n' "$STATE" "$1"; }
 
@@ -104,12 +112,6 @@ read_record() {  # <task-id>
   [ "$version" = fm-pr-park-v1 ] && [ -n "$PARK_URL" ] && [ -n "$PARK_BASELINE" ]
 }
 
-cmd_fingerprint() {
-  [ "$#" -eq 1 ] || usage
-  github_url "$1"
-  fingerprint "$FM_PR_URL" || die "cannot read pull request $FM_PR_URL"
-}
-
 cmd_changed() {
   local current
   [ "$#" -eq 1 ] || usage
@@ -141,18 +143,21 @@ cmd_resume_note() {
 
 cmd_unpark() {
   [ "$#" -eq 1 ] || usage
+  local name
   valid_id "$1"
-  "$SCRIPT_DIR/fm-procevent-when.sh" retire "park-$1" >/dev/null || die "cannot retire the park watch for $1"
+  name=$(watch_name "$1") || die "cannot name the park watch for $1"
+  "$SCRIPT_DIR/fm-procevent-when.sh" retire "$name" >/dev/null || die "cannot retire the park watch for $1"
   rm -f -- "$(record_file "$1")" || die "cannot remove the park record for $1"
   printf 'unparked: %s\n' "$1"
 }
 
 cmd_park() {
-  local id url meta kind baseline file tmp
+  local id url meta kind baseline file tmp name
   [ "$#" -eq 2 ] || usage
   id=$1
   url=$2
   valid_id "$id"
+  name=$(watch_name "$id") || die "cannot name the park watch for $id"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || die "no task record for $id in this home"
   kind=$(fm_meta_get "$meta" kind)
@@ -170,14 +175,14 @@ cmd_park() {
     rm -f -- "$tmp"
     die "cannot write the park record for $id"
   fi
-  if ! "$SCRIPT_DIR/fm-procevent-when.sh" arm "park-$id" --interval "$POLL_INTERVAL" --stable 1 \
+  if ! "$SCRIPT_DIR/fm-procevent-when.sh" arm "$name" --interval "$POLL_INTERVAL" --stable 1 \
     --condition "$SCRIPT_DIR/fm-pr-park.sh" changed "$id" \
     --action "$SCRIPT_DIR/fm-pr-park.sh" resume-note "$id" >/dev/null; then
     rm -f -- "$file"
     die "cannot arm the park watch for $id; the worker keeps its session"
   fi
   if ! "$SCRIPT_DIR/fm-control.sh" "$id" exit; then
-    "$SCRIPT_DIR/fm-procevent-when.sh" retire "park-$id" >/dev/null 2>&1 || true
+    "$SCRIPT_DIR/fm-procevent-when.sh" retire "$name" >/dev/null 2>&1 || true
     rm -f -- "$file"
     die "cannot stop the worker for $id; the park was rolled back and the worker keeps its session"
   fi
@@ -187,7 +192,6 @@ cmd_park() {
 case "${1:-}" in
   park) shift; cmd_park "$@" ;;
   unpark) shift; cmd_unpark "$@" ;;
-  fingerprint) shift; cmd_fingerprint "$@" ;;
   changed) shift; cmd_changed "$@" ;;
   resume-note) shift; cmd_resume_note "$@" ;;
   -h|--help) usage 0 ;;

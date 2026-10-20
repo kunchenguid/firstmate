@@ -9,6 +9,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pr-park)
 PR_URL=https://github.com/acme/widget/pull/42
+T1_WATCH=park-628b49d96dcde97a430dd4f597705899e09a968f793491e4b704ca
 
 command -v jq >/dev/null 2>&1 || fail "jq is required to stand in for gh's built-in jq"
 
@@ -30,6 +31,7 @@ SH
 #!/usr/bin/env bash
 dir=$(cd "$(dirname "$0")/.." && pwd)
 printf '%s\n' "$*" >> "$dir/when.log"
+[ "${#2}" -le 59 ] || exit 1
 [ ! -e "$dir/when-fail" ]
 SH
   chmod +x "$home/bin/"*.sh
@@ -72,18 +74,21 @@ park() {  # <home> <args...>
 }
 
 test_fingerprint_changes_only_when_a_check_appears_or_finishes() {
-  local home queued running finished
+  local home baseline status
   home=$(make_home fingerprint)
-  queued=$(park "$home" fingerprint "$PR_URL") || fail "fingerprint of a readable PR failed"
-  assert_contains "$queued" "OPEN abc123" "fingerprint must carry the PR state and head"
-  assert_contains "$queued" "lint=pending,test=pending" "fingerprint must reduce unfinished checks to pending"
+  park "$home" park t1 "$PR_URL" >/dev/null || fail "park of a readable PR failed"
+  baseline=$(sed -n '3p' "$home/state/t1.park")
+  [ "$baseline" = 'OPEN abc123  0 1 lint=pending,test=pending' ] || fail "unexpected baseline: $baseline"
   write_pr "$home" IN_PROGRESS
-  running=$(park "$home" fingerprint "$PR_URL")
-  [ "$running" = "$queued" ] || fail "a queued check that starts running must not change the fingerprint"
+  park "$home" changed t1; status=$?
+  expect_code 1 "$status" "a queued check that starts running must not change the fingerprint"
   write_pr "$home" COMPLETED SUCCESS
-  finished=$(park "$home" fingerprint "$PR_URL")
-  [ "$finished" != "$running" ] || fail "a check that finishes must change the fingerprint"
-  assert_contains "$finished" "test=success" "a finished check must carry its conclusion"
+  park "$home" changed t1; status=$?
+  expect_code 0 "$status" "a check that finishes must change the fingerprint"
+  park "$home" unpark t1 >/dev/null || fail "unpark failed"
+  park "$home" park t1 "$PR_URL" >/dev/null || fail "re-park failed"
+  baseline=$(sed -n '3p' "$home/state/t1.park")
+  [ "$baseline" = 'OPEN abc123  0 1 lint=pending,test=success' ] || fail "unexpected completed baseline: $baseline"
   pass "fingerprint: running and queued checks agree; a finished check changes it"
 }
 
@@ -95,7 +100,7 @@ test_park_records_baseline_arms_watch_and_stops_worker() {
   [ "$(stat -c %a "$home/state/t1.park" 2>/dev/null || stat -f %Lp "$home/state/t1.park")" = 600 ] \
     || fail "the park record must be private"
   assert_grep "$PR_URL" "$home/state/t1.park" "the park record must name the PR"
-  assert_grep "arm park-t1 --interval 300 --stable 1 --condition $home/bin/fm-pr-park.sh changed t1 --action $home/bin/fm-pr-park.sh resume-note t1" \
+  assert_grep "arm $T1_WATCH --interval 300 --stable 1 --condition $home/bin/fm-pr-park.sh changed t1 --action $home/bin/fm-pr-park.sh resume-note t1" \
     "$home/when.log" "park must arm the change watch with this script as condition and action"
   assert_grep "t1 exit" "$home/control.log" "park must stop the worker through fm-control.sh exit"
   pass "park: records the baseline, arms the watch, then stops the worker"
@@ -155,14 +160,36 @@ test_failed_stop_rolls_back_and_unpark_is_idempotent() {
   expect_code 1 "$status" "a worker that cannot be stopped must fail the park"
   assert_contains "$out" "keeps its session" "the failure must say the worker keeps its session"
   [ ! -e "$home/state/t1.park" ] || fail "a rolled-back park left its record"
-  assert_grep "retire park-t1" "$home/when.log" "a rolled-back park must retire its watch"
+  assert_grep "retire $T1_WATCH" "$home/when.log" "a rolled-back park must retire its watch"
   rm -f "$home/control-fail" "$home/when.log"
   park "$home" park t1 "$PR_URL" >/dev/null || fail "park failed"
   park "$home" unpark t1 >/dev/null || fail "unpark failed"
   [ ! -e "$home/state/t1.park" ] || fail "unpark left the record"
-  assert_grep "retire park-t1" "$home/when.log" "unpark must retire the watch"
+  assert_grep "retire $T1_WATCH" "$home/when.log" "unpark must retire the watch"
   park "$home" unpark t1 >/dev/null || fail "a second unpark must succeed"
   pass "park: a failed stop rolls back; unpark retires the watch and is idempotent"
+}
+
+test_long_task_ids_use_distinct_bounded_watches() {
+  local home id other name other_name status
+  home=$(make_home long-ids)
+  id=$(printf '%064d' 0)
+  other="${id%?}1"
+  printf 'kind=ship\n' > "$home/state/$id.meta"
+  printf 'kind=scout\n' > "$home/state/$other.meta"
+  park "$home" park "$id" "$PR_URL" >/dev/null || fail "64-character task must park"
+  name=$(awk '$1 == "arm" { print $2; exit }' "$home/when.log")
+  [ "${#name}" -le 59 ] || fail "watch source exceeds 64 characters"
+  park "$home" unpark "$id" >/dev/null || fail "long task must unpark"
+  assert_grep "retire $name" "$home/when.log" "unpark must retire the armed watch"
+  : > "$home/control-fail"
+  park "$home" park "$other" "$PR_URL" >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "failed stop must roll back a long task"
+  other_name=$(awk '$1 == "arm" { name=$2 } END { print name }' "$home/when.log")
+  [ "$name" != "$other_name" ] || fail "task ids differing at character 64 must have distinct watches"
+  assert_grep "retire $other_name" "$home/when.log" "rollback must retire its own watch"
+  [ ! -e "$home/state/$other.park" ] || fail "rollback left a long task parked"
+  pass "long task ids: bounded distinct watches in park, unpark, and rollback"
 }
 
 test_fingerprint_changes_only_when_a_check_appears_or_finishes
@@ -170,3 +197,5 @@ test_park_records_baseline_arms_watch_and_stops_worker
 test_condition_and_action_follow_the_pr
 test_park_refusals_change_nothing
 test_failed_stop_rolls_back_and_unpark_is_idempotent
+
+test_long_task_ids_use_distinct_bounded_watches

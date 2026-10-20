@@ -696,7 +696,7 @@ test_parked_task_watch_retires_with_teardown() {
   add_fork_with_pushed_branch "$case_dir"
   printf 'fm-pr-park-v1\nhttps://github.com/acme/widget/pull/42\nOPEN abc 0 0 test=pending\n' > "$case_dir/state/task-x1.park"
   chmod 0600 "$case_dir/state/task-x1.park"
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-procevent-when.sh" arm park-task-x1 \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-procevent-when.sh" arm park-bfd54ac3352a2bfad127f5e6bcfea91d770a3547d8daa688ebd210 \
     --interval 300 --stable 1 --condition "$ROOT/bin/fm-pr-park.sh" changed task-x1 \
     --action "$ROOT/bin/fm-pr-park.sh" resume-note task-x1 >/dev/null \
     || fail "parked-watch: could not arm the fixture park watch"
@@ -709,7 +709,7 @@ test_parked_task_watch_retires_with_teardown() {
   expect_code 0 "$rc" "parked-watch: teardown of a landed parked task should succeed"$'\n'"$(cat "$case_dir/stderr")"
   [ ! -e "$case_dir/state/task-x1.park" ] || fail "parked-watch: teardown left the park record"
   ! FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-procevent.sh" list \
-    | grep -q when-park-task-x1 || fail "parked-watch: teardown left the park watch registered"
+    | grep -q when-park-bfd54ac3352a2bfad127f5e6bcfea91d770a3547d8daa688ebd210 || fail "parked-watch: teardown left the park watch registered"
   pass "teardown retires a parked task's PR watch and record"
 }
 
