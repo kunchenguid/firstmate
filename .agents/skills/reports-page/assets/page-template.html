@@ -352,7 +352,12 @@ function matches(i, needle) {
 }
 
 function current() {
-  const id = decodeURIComponent(location.hash.replace(/^#/, ""));
+  let id;
+  try {
+    id = decodeURIComponent(location.hash.replace(/^#/, ""));
+  } catch (e) {
+    return null;
+  }
   return REPORTS.find(r => r.id === id) || null;
 }
 

@@ -590,6 +590,18 @@ test_empty_anchor_falls_back_to_newest_report() {
   pass "an empty anchor falls back to the newest report"
 }
 
+test_malformed_anchor_falls_back_to_newest_report() {
+  local home actual
+  home=$(new_home)
+  write_report "$home" sicherer-fallback '# Sicherer Fallback'
+  build "$home" >/dev/null || fail "build failed"
+  actual=$(fallback_anchor_of "$home/state/reports.html" '#%') \
+    || fail "opening the built page with a malformed anchor threw"
+  assert_equals '#sicherer-fallback' "$actual" \
+    "a malformed anchor must behave like an unknown anchor"
+  pass "a malformed anchor falls back to the newest report"
+}
+
 test_unknown_anchor_falls_back_to_newest_decision_without_reports() {
   local home actual
   home=$(decision_home)
@@ -905,6 +917,7 @@ test_page_fetches_nothing
 test_recorded_decision_reaches_the_report_it_gated
 test_decision_without_a_report_becomes_its_own_entry
 test_empty_anchor_falls_back_to_newest_report
+test_malformed_anchor_falls_back_to_newest_report
 test_unknown_anchor_falls_back_to_newest_decision_without_reports
 test_filename_sort_keeps_decisions_without_reports
 test_report_without_a_decision_carries_no_decision_section
