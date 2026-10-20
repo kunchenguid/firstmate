@@ -268,6 +268,21 @@ test_supported_backend_endpoint_records_validate() {
     "window=lab:w1:p2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
     "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Herdr endpoint refused"
+  [ "$FM_BACKEND_BOUND_META" = "$dir/home/state/$id.meta" ] \
+    || fail "Herdr validation did not bind the exact record it validated"
+  printf '%s\n' 'herdr_terminal_id=term_65c25992c49523' >> "$dir/home/state/$id.meta"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "valid Herdr endpoint with a terminal identity refused"
+  printf '%s\n' 'herdr_terminal_id=term_other' >> "$dir/home/state/$id.meta"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "a Herdr endpoint with two terminal identities validated"
+  [ -z "$FM_BACKEND_BOUND_META" ] || fail "a refused Herdr endpoint left a record bound"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" \
+    "herdr_terminal_id="
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null \
+    && fail "a Herdr endpoint with an empty terminal identity validated"
 
   id=zellij-task
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -295,7 +310,7 @@ test_supported_backend_endpoint_records_validate() {
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate, a Herdr terminal identity must be single and non-empty, and every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {

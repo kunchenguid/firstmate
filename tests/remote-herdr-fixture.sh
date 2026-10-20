@@ -83,7 +83,7 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s"}}}\n' "$pane" "${pane//:/-}"
     fi
     ;;
   "pane close")
