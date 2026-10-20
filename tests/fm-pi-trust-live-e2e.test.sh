@@ -115,6 +115,7 @@ if ! AFTER=$(probe_trust); then
   fail "the installed Pi package could not be probed after registration: $AFTER"
 fi
 printf '# after registration: %s\n' "$AFTER"
+# shellcheck disable=SC2016 # the JS template literals are literal here
 node -e '
   const [raw, wantStore] = process.argv.slice(1);
   const r = JSON.parse(raw);
