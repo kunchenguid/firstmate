@@ -423,7 +423,7 @@
 #   --approve-for-me, with model-reviewed approvals in workspace-write.
 #   Any other value or unreadable file refuses before mutation, like the Claude
 #   file. Both files apply to ships, scouts, secondmates, and relaunches.
-#   bin/fm-approval-failover.sh owns firstmate-invoked durable failover after
+#   bin/fm-approval-failover.sh owns captain-approved durable failover after
 #   firstmate observes a bypass approval prompt or policy refusal; no polling.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools

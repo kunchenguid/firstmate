@@ -24,16 +24,14 @@ fm_lease_guard "$1" 'test lifecycle control'
 if [ -n "${CHECK_INHERIT_SETTING:-}" ]; then
   links=$("$REAL_PERL" -e 'print((stat($ARGV[0]))[3])' "$FM_HOME/config/$CHECK_INHERIT_SETTING")
   [ "$links" = 1 ] || { echo 'error: saved fallback is still hardlinked during recovery' >&2; exit 1; }
-  empty_hash=$(printf '' | shasum -a 256 | awk '{print $1}')
-  "$TEST_ROOT/bin/fm-remote-inherit.sh" absent "config/$CHECK_INHERIT_SETTING" 0 "$empty_hash" 1 >> "$FM_HOME/inherit.log"
+  printf 'single-linked: %s\n' "$CHECK_INHERIT_SETTING" >> "$FM_HOME/publication.log"
 fi
 printf '%s\n' "$*" >> "$FM_HOME/control.log"
 [ "${FAIL_CONTROL:-0}" != 1 ]
 SH
 chmod +x "$BIN/fm-control.sh"
 REAL_PERL=$(command -v perl)
-TEST_ROOT=$ROOT
-export REAL_PERL TEST_ROOT
+export REAL_PERL
 cat > "$BIN/perl" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -94,13 +92,13 @@ for harness in codex claude; do
   [ "$(cat "$lab/config/$setting")" = "$fallback" ] || fail 'lab fallback was not saved'
   assert_grep 'task interrupt' "$lab/control.log" 'lab did not cancel the pending turn'
   assert_grep 'task relaunch --note ' "$lab/control.log" 'lab did not relaunch'
-  [ "$(wc -l < "$lab/inherit.log" | tr -d ' ')" = 2 ] || fail 'lab fallback was not inheritable at both lifecycle boundaries'
+  [ "$(wc -l < "$lab/publication.log" | tr -d ' ')" = 2 ] || fail 'lab fallback remained hardlinked at a lifecycle boundary'
   pass "$harness permits disposable lab recovery only through its stock layout"
 
   run_apply FM_SUPERVISION_ACTOR=branch CHECK_INHERIT_SETTING="$setting" >/dev/null || fail "$harness apply failed"
   [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail "$harness fallback was not saved"
-  [ "$(wc -l < "$home/inherit.log" | tr -d ' ')" = 2 ] || fail 'fallback was not inheritable during interrupt and relaunch'
-  pass "$harness publishes a single-linked setting usable by remote inheritance during recovery"
+  [ "$(wc -l < "$home/publication.log" | tr -d ' ')" = 2 ] || fail 'fallback remained hardlinked during interrupt or relaunch'
+  pass "$harness publishes a single-linked setting before interrupt and relaunch"
   assert_grep 'task interrupt' "$home/control.log" 'pending turn was not cancelled'
   assert_grep 'task relaunch --note ' "$home/control.log" 'guarded relaunch was not called'
   before=$(wc -l < "$home/control.log")
@@ -183,9 +181,9 @@ for setting in codex-approval-mode claude-permission-mode; do
   printf '%s\n' "$fallback" > "$local_config/$setting"
   printf '%s\n' "$fallback" > "$remote_home/config/$setting"
   propagate_inheritable_config "$primary" "$local_config" || fail 'local inheritance failed'
-  [ "$(cat "$local_config/$setting")" = "$fallback" ] || fail 'primary absence erased local fallback'
+  [ ! -e "$local_config/$setting" ] || fail 'primary absence did not clear local fallback'
   FM_HOME="$remote_home" "$ROOT/bin/fm-remote-inherit.sh" absent "config/$setting" 0 "$empty_hash" 1 >/dev/null || fail 'remote absence transfer failed'
-  [ "$(cat "$remote_home/config/$setting")" = "$fallback" ] || fail 'primary absence erased remote fallback'
+  [ ! -e "$remote_home/config/$setting" ] || fail 'primary absence did not clear remote fallback'
   printf 'bypass\n' > "$primary/$setting"
   propagate_inheritable_config "$primary" "$local_config" || fail 'explicit primary inheritance failed'
   [ "$(cat "$local_config/$setting")" = bypass ] || fail 'explicit primary did not replace local fallback'
@@ -194,7 +192,7 @@ for setting in codex-approval-mode claude-permission-mode; do
   rm "$primary/$setting"
   propagate_inheritable_config "$primary" "$local_config" || fail 'local primary removal failed'
   FM_HOME="$remote_home" "$ROOT/bin/fm-remote-inherit.sh" absent "config/$setting" 0 "$empty_hash" 3 >/dev/null || fail 'remote primary removal failed'
-  [ "$(cat "$local_config/$setting")" = bypass ] && [ "$(cat "$remote_home/config/$setting")" = bypass ] || fail 'primary removal erased local choice'
-  pass "$setting preserves home-local values on primary absence and honors explicit primary precedence locally and remotely"
+  [ ! -e "$local_config/$setting" ] && [ ! -e "$remote_home/config/$setting" ] || fail 'primary removal did not clear inherited modes'
+  pass "$setting follows primary values and absence locally and remotely"
 done
 echo '# all fm-approval-failover tests passed'

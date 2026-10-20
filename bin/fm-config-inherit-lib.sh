@@ -25,7 +25,8 @@
 # to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
-# Approval-setting inheritance follows the primary-absence exception below.
+# Primary approval-mode settings follow the same inheritance rules as other
+# declared configuration.
 # Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
 # a secondmate's own crewmates keep AI co-author trailers too.
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
@@ -52,9 +53,7 @@
 # (bin/fm-bootstrap.sh), and the focused mid-session config push
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
-# primary; an item the primary does not set is mirrored as absence downstream,
-# except codex-approval-mode and claude-permission-mode, which retain home-local
-# choices and persistent managed-policy fallbacks when the primary has no file.
+# primary; an item the primary does not set is mirrored as absence downstream.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
@@ -131,13 +130,6 @@ fm_config_inherit_items() {
     printf 'config/%s\n' "$item"
   done
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
-}
-
-fm_config_inherit_item_preserves_absence() {
-  case "$1" in
-    codex-approval-mode|claude-permission-mode) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 fm_config_source_present() {
@@ -234,8 +226,8 @@ destination_allows_inherited_item() {
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
 # churns mtimes). A source item proven absent is mirrored as a missing
-# destination item except for the approval-setting preservation described above.
-# Inspection errors or existing nonregular sources
+# destination item, so clearing the primary's value clears it downstream too
+# (primary-authoritative). Inspection errors or existing nonregular sources
 # leave that destination item unchanged and report an error; inaccessible paths
 # and dangling source links must never silently remove an inherited grant.
 # The destination dir is created lazily, only when there is something to copy;
@@ -779,8 +771,6 @@ propagate_inheritable_config() {
       warn_inheritable_config_error "$item" "$src" "$reason"
       record_inheritable_config_result "$item" error "$reason"
       rc=1
-    elif fm_config_inherit_item_preserves_absence "$item"; then
-      record_inheritable_config_result "$item" unchanged ""
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
