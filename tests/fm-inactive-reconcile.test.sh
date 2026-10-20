@@ -137,7 +137,7 @@ run_report() { # <home> <child>
 }
 
 wake_count() { # <home> <key prefix>
-  [ -f "$1/state/.wake-queue" ] || { echo 0; return; }
+  [ -f "$1/state/.wake-queue" ] || { printf '0\n'; return; }
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
 
