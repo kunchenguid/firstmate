@@ -12,7 +12,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
-| Permissions | `--dangerously-skip-permissions` by default; `config/claude-permission-mode=auto` selects model-reviewed approvals (the `auto` launch shape verified on 2.1.269), explicitly or using [`fm-approval-failover.sh`](../../../../../bin/fm-approval-failover.sh) after firstmate observes a policy refusal of a bypass session; see [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) and [`persistent failover`](../../../../../docs/configuration.md#persistent-managed-policy-failover). |
+| Permissions | See [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) and [`persistent failover`](../../../../../docs/configuration.md#persistent-managed-policy-failover); the `auto` launch shape was verified on 2.1.269. |
 
 ## Workspace trust
 
