@@ -15,6 +15,9 @@
 # emitted. The capability check includes the official optional --model field so
 # an explicit dispatch selection cannot reach an older incompatible create
 # parser.
+# Keep stdin connected until the tool response arrives: official MCP may stop
+# outstanding work after EOF. The existing request timeout also bounds this
+# connection; a timeout never authorizes replay of a submission.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +64,17 @@ fi
 
 root=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-bytedcli-mcp.XXXXXX") \
   || { printf 'error: cannot create private MCP temporary storage\n' >&2; exit 1; }
-trap 'rm -rf -- "$root"' EXIT
+writer_pid=
+cleanup() {
+  if [ -n "$writer_pid" ]; then
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$root"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 request="$root/request.ndjson"
 response="$root/response.ndjson"
 error="$root/error"
@@ -92,14 +105,36 @@ chmod 0600 "$request"
 
 # Keep `mcp` as the first non-option token so bytedcli retains its stdio server;
 # select the required user identity through the CLI's equivalent environment input.
-if ! BYTECLOUD_AUTH_AS=user fm_ida_run_bytedcli mcp --allow-domains ida \
-    <"$request" >"$response" 2>"$error"; then
+mkfifo "$root/stdin" || exit 1
+budget=30
+if [ "$mode" = ida_deep_research_create ]; then
+  budget=$(jq -r '(.timeoutMs | tonumber / 1000 | ceil) + 5' "$input")
+fi
+# This writer owns only the connection, never the provider process. The
+# foreground CLI retains its ordinary timeout/process-group supervision.
+(
+  cat "$request"
+  deadline=$((SECONDS + budget))
+  while ! jq -se 'any(.[]; .id == 2 or .id == "2")' "$response" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$deadline" ]; then : >"$root/timed-out"; break; fi
+    sleep 0.1
+  done
+) >"$root/stdin" &
+writer_pid=$!
+transport_rc=0
+BYTECLOUD_AUTH_AS=user fm_ida_run_bytedcli mcp --allow-domains ida \
+  <"$root/stdin" >"$response" 2>"$error" || transport_rc=$?
+kill "$writer_pid" 2>/dev/null || true
+wait "$writer_pid" 2>/dev/null || true
+writer_pid=
+if [ -e "$root/timed-out" ] || [ "$transport_rc" -ne 0 ]; then
   code=MCP_TRANSPORT_ERROR
   case "$(tr '[:lower:]' '[:upper:]' <"$error")" in
     *AUTH*|*SSO*|*FORBIDDEN*|*HTTP*401*|*HTTP*403*) code=MCP_TRANSPORT_AUTH ;;
     *TIMEOUT*|*TIMED*OUT*) code=MCP_TRANSPORT_TIMEOUT ;;
     *NETWORK*|*FETCH*FAILED*|*ECONN*|*UNAVAILABLE*|*HTTP*50[234]*) code=MCP_TRANSPORT_UNAVAILABLE ;;
   esac
+  [ ! -e "$root/timed-out" ] || code=MCP_TRANSPORT_TIMEOUT
   jq -n --arg code "$code" \
     '{status:"error",data:null,error:{code:$code,message:"bytedcli MCP transport failed"}}'
   exit 1
