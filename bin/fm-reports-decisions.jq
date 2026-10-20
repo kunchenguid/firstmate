@@ -57,9 +57,16 @@ def toon_record:
 # two-space indented lines that follow, grouped under `## ` sections that an
 # archive file dates.
 
+# A task line ends in the tag groups tasks-axi appends, and those are not part
+# of the title. They come in two shapes: `(name: value)` for every keyed tag,
+# and `(word date)` for the four dated ones. The dated words are listed by name
+# rather than matched as "any word", because a title may legitimately end in an
+# ordinary parenthesis - "(siehe oben)" must survive, "(merged 2026-10-11)"
+# must not. A new tasks-axi tag has to be added here, or it shows up raw in the
+# list title and in the entry heading.
 def strip_tags:
-  until(test(" \\((?:[a-z][a-z-]*:|done |since )[^()]*\\)$") | not;
-        sub(" \\((?:[a-z][a-z-]*:|done |since )[^()]*\\)$"; ""));
+  (" \\((?:[a-z][a-z-]*:|(?:done|since|merged|reported) )[^()]*\\)$") as $tag
+  | until(test($tag) | not; sub($tag; ""));
 
 def tag($name):
   (capture("\\(" + $name + ": (?<v>[^)]*)\\)") // null)

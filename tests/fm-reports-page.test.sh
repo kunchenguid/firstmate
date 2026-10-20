@@ -662,6 +662,42 @@ test_still_open_reconciliation_note_is_rendered_as_reconciled() {
   pass "a still-open reconcile note appears as a reconciled outcome"
 }
 
+test_task_line_tags_never_reach_the_title() {
+  local home entries title
+  home=$(decision_home)
+  # A finished task line ends in the tag groups tasks-axi appends. None of them
+  # is part of the title, and a title that legitimately ends in parentheses has
+  # to survive the stripping.
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] mit-anhang-20261011 - Firstmate: Rueckfragen ueber Lavish (AGENTS.md) (repo: firstmate) (kind: ship) (merged 2026-10-11) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 4444444444444444444444444444444444444444444444444444444444444444
+  Resolution mode: answered
+
+  Captain decision:
+  Freigegeben.
+- [x] gemeldet-20261012 - Eine Untersuchung (siehe oben) (repo: firstmate) (kind: scout) (reported 2026-10-12)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 5151515151515151515151515151515151515151515151515151515151515151
+  Resolution mode: answered
+
+  Captain decision:
+  Zur Kenntnis genommen.'
+  build "$home" >/dev/null || fail "build failed"
+  entries=$(entries_of "$home/state/reports.html")
+  title=$(printf '%s' "$entries" | jq -r '.[] | select(.id == "mit-anhang-20261011") | .title')
+  assert_equals 'Firstmate: Rueckfragen ueber Lavish (AGENTS.md)' "$title" \
+    "no task-line tag group may survive into an entry title"
+  title=$(printf '%s' "$entries" | jq -r '.[] | select(.id == "gemeldet-20261012") | .title')
+  assert_equals 'Eine Untersuchung (siehe oben)' "$title" \
+    "stripping the tag groups must leave an ordinary trailing parenthesis alone"
+  assert_not_contains "$(html_of "$home/state/reports.html" mit-anhang-20261011)" '(merged 2026-10-11)' \
+    "the entry heading must not show a tag group either"
+  pass "task-line tag groups never reach an entry title"
+}
+
 test_decision_without_a_report_becomes_its_own_entry() {
   local home out entries link
   home=$(decision_home)
@@ -1146,6 +1182,7 @@ test_empty_anchor_falls_back_to_newest_report
 test_malformed_anchor_falls_back_to_newest_report
 test_unknown_anchor_falls_back_to_newest_decision_without_reports
 test_filename_sort_keeps_decisions_without_reports
+test_task_line_tags_never_reach_the_title
 test_report_without_a_decision_carries_no_decision_section
 test_search_finds_a_phrase_only_the_decision_carries
 test_every_decision_of_one_task_appears_newest_first
