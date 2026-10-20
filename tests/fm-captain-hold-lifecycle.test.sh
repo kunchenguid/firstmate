@@ -1287,6 +1287,41 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
+# A merge poll authenticates only while the task record ends with its pr=
+# block (bin/fm-pr-lib.sh), so the attestation keys must land ahead of it.
+test_completion_attestation_keeps_an_armed_merge_poll_verifiable() {
+  local home id url head arm valid
+  home=$(make_home attested-armed-poll)
+  id=sample-attested-ship
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship a sample change" --kind ship --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id" ship
+  url=https://github.com/example/repo/pull/52
+  head=0123456789abcdef0123456789abcdef01234552
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$home/state/$id.meta"
+  printf 'done: shipped\n' > "$home/state/$id.status"
+  # shellcheck disable=SC2016 # $1..$4 expand inside the probe's own shell.
+  arm='. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$3" || exit 1
+    fm_pr_poll_prepare "$2" "$4" "$FM_PR_PROVIDER" "$3" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+      "$1/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared'
+  # shellcheck disable=SC2016 # $1..$3 expand inside the probe's own shell.
+  valid='. "$1/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"'
+  bash -c "$arm" _ "$ROOT" "$home/state" "$url" "$id" || fail "could not arm the merge poll fixture"
+  bash -c "$valid" _ "$ROOT" "$home/state" "$id" || fail "the armed merge poll fixture did not authenticate"
+
+  chmod 0600 "$home/state/$id.meta"
+  (umask 022; run_captain "$home" complete "$id" --none >/dev/null) \
+    || fail "completion attestation of a task with an armed merge poll failed"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  [ -n "$(find "$home/state/$id.meta" -perm 0600)" ] \
+    || fail "attestation under umask 022 left the task record readable beyond its owner"
+  [ "$(tail -n 2 "$home/state/$id.meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the attested record does not end with its pr= block: $(cat "$home/state/$id.meta")"
+  bash -c "$valid" _ "$ROOT" "$home/state" "$id" \
+    || fail "the completion attestation disarmed the task's merge poll: $(cat "$home/state/$id.meta")"
+  pass "completion attestation lands ahead of the pr= block and keeps the record private, so an armed merge poll still authenticates"
+}
+
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   local home id open secondmate
   home=$(make_home stale-terminal-decision)
@@ -4647,6 +4682,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
+test_completion_attestation_keeps_an_armed_merge_poll_verifiable
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers

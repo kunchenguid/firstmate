@@ -357,6 +357,46 @@ test_weak_identity_still_presents_and_advances() {
   pass "fallback identity still presents and advances status state"
 }
 
+# APFS renumbers a volume's st_dev at every remount while each file keeps its
+# inode and birth time. The identity reader seam stands in for that remount by
+# moving only the device field of an otherwise unchanged file.
+test_volume_renumber_does_not_replay_presented_history() {
+  local dir state out second third reader device_file
+  dir=$(make_case volume-renumber); state="$dir/state"
+  out="$dir/first.out"; second="$dir/second.out"; third="$dir/third.out"
+  reader="$dir/identity-reader"; device_file="$dir/device"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf 'strong:%s:%s:1789386111.132545147' "$(cat "$FM_TEST_DEVICE_FILE")" "$(cat "$FM_TEST_INODE_FILE")"
+SH
+  chmod +x "$reader"
+  printf '16777231' > "$device_file"
+  printf '363584892' > "$dir/inode"
+  printf 'note: settled history before the reboot\n' > "$state/remount.status"
+  FM_TEST_DEVICE_FILE="$device_file" FM_TEST_INODE_FILE="$dir/inode" FM_STATUS_IDENTITY_READER="$reader" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed before the renumber"
+  grep -F 'settled history before the reboot' "$out" >/dev/null \
+    || fail "setup error: first drain did not present the history: $(cat "$out")"
+
+  printf '16777234' > "$device_file"
+  printf 'note: first event after the reboot\n' >> "$state/remount.status"
+  FM_TEST_DEVICE_FILE="$device_file" FM_TEST_INODE_FILE="$dir/inode" FM_STATUS_IDENTITY_READER="$reader" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" || fail "drain failed after the renumber"
+  grep -F 'remount note: first event after the reboot' "$second" >/dev/null \
+    || fail "the new line after a renumber was not presented: $(cat "$second")"
+  if grep -F 'settled history before the reboot' "$second" >/dev/null; then
+    fail "a volume renumber replayed already-presented history: $(cat "$second")"
+  fi
+
+  # A different inode is a replaced file, so the whole log is unread again.
+  printf '363584999' > "$dir/inode"
+  FM_TEST_DEVICE_FILE="$device_file" FM_TEST_INODE_FILE="$dir/inode" FM_STATUS_IDENTITY_READER="$reader" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$third" || fail "drain failed after the file was replaced"
+  grep -F 'settled history before the reboot' "$third" >/dev/null \
+    || fail "a replaced status file kept the old file's presentation offset: $(cat "$third")"
+  pass "a volume renumber keeps the presentation cursor while a replaced file still starts unread"
+}
+
 test_snapshot_failure_is_visible() {
   local dir state out reader
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
@@ -459,6 +499,7 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
+test_volume_renumber_does_not_replay_presented_history
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
