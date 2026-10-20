@@ -2499,6 +2499,8 @@ $TEARDOWN_SPARED_PIDS
 EOF
 }
 
+TEARDOWN_SPARED_PIDS=
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
