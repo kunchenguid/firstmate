@@ -2474,8 +2474,8 @@ launch_template() {
   # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
   # PRIMARY-session infrastructure that already stands down in a child worktree.
   # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
-  # hooks; disabling the feature runs none of them and leaves the operator's
-  # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
+  # hooks; when honored, disabling the feature runs none of them and leaves the
+  # operator's ~/.codex untouched. An unknown feature name is a hard codex error, so a future
   # release that drops this flag stops the launch rather than silently restoring
   # the modal. A managed policy can override the requested disablement, so its
   # effective hook state is not guaranteed.
