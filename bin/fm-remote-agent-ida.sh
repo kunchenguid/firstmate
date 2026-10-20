@@ -11,6 +11,9 @@
 # followups get at most two 30-second session-get reads (transient retry only)
 # plus one 30-second raw session-info control read, never another create.
 # `state` performs that diagnosis too unless --durable-only is requested.
+# Diagnosis includes submission_response (null for legacy/unrecorded calls):
+# exit_code, response_kind=success|error|invalid|empty, and a bounded error_code.
+# It describes only the local response, never whether the provider wrote.
 # `adopt` replays the exact recorded action through followup to reconcile/re-arm;
 # only a retained receipt or exact marker/task binding permits progress.
 #   fm-remote-agent-ida.sh followup <task-id> --action-id <id> --expected-terminal-generation <n> --instructions <private-file>
@@ -307,7 +310,7 @@ cmd_followup() (
     provider=$(jq -c --arg action "$action" --arg marker "$marker" --argjson parent "$expected" \
       --argjson baseline "$baseline" --arg report "$preserved_report" \
       '.provider_state + {parent_generation:$parent,parent_task_id:.provider_state.task_id,parent_report_ref:$report,
-        followup_action_id:$action,session_marker:$marker,task_id:null,baseline_task_ids:$baseline,submit_attempted:true}' "$REMOTE_STATE_FILE")
+        followup_action_id:$action,session_marker:$marker,task_id:null,baseline_task_ids:$baseline,submit_attempted:true,submission_response:null}' "$REMOTE_STATE_FILE")
     fm_remote_state_begin_followup "$id" "$expected" "$instructions" "$sha" "$provider" || die 'cannot checkpoint followup; no provider create issued'
     jq -n --rawfile content "$instructions" --arg name "$marker" --arg session "$session" \
       '{content:$content,name:$name,timeoutMs:"30000",sessionId:$session}' > "$root/arguments"
@@ -332,6 +335,12 @@ cmd_followup() (
         task=$detail_task
       fi
     fi
+    # Retain only response structure and a bounded code before recovery can
+    # replace the visible symptom. Never retain raw provider text or prompts.
+    provider=$(fm_ida_submission_evidence "$output" "$rc") || die 'cannot normalize submission evidence; no create repeated'
+    fm_remote_state_transition "$id" submission-unknown followup-submission-unconfirmed '' \
+      followup-response-recorded not-armed '' '' '' "$provider" \
+      || die 'cannot retain submission evidence; no create repeated'
     if [ -z "$task" ]; then
       fm_ida_state_load "$id" || exit 1
       if ! fm_ida_followup_recover "$root"; then

@@ -303,6 +303,24 @@ fm_ida_followup_recover() { # <private-scratch-dir>; sets IDA_RECOVERY_*
   return 1
 }
 
+# Project only submission framing, exit status and an official code into the
+# current generation. This evidence never proves non-execution or turn identity.
+fm_ida_submission_evidence() { # <normalized-response-file> <exit-code>
+  local out=$1 rc=$2 kind=invalid code=''
+  if [ ! -s "$out" ]; then
+    kind=empty
+  elif jq -se 'length==1 and (.[0]|type=="object")' "$out" >/dev/null 2>&1; then
+    if fm_ida_structured_success "$out"; then kind=success
+    elif jq -e '.status=="error" and .data==null and (.error|type=="object")' "$out" >/dev/null 2>&1; then
+      kind=error
+      code=$(jq -r '.error.code | select(type=="string" and test("^(MCP_|IDA_|AUTH_|CLI_|HTTP_)[A-Z0-9_]{1,70}$"))' "$out")
+    fi
+  fi
+  jq -cn --arg kind "$kind" --arg code "$code" --argjson rc "$rc" '
+    {submission_response:{exit_code:$rc,response_kind:$kind,
+      error_code:(if $code=="" then null else $code end)}}'
+}
+
 fm_ida_followup_diagnosis() { # <task-id>; follows fm_ida_followup_recover
   jq -n --arg id "$1" --arg session "$IDA_STATE_SESSION_ID" --arg task "$IDA_RECOVERY_TASK" \
     --arg outcome "$IDA_RECOVERY_OUTCOME" --arg class "$IDA_RECOVERY_CLASS" \
@@ -312,6 +330,7 @@ fm_ida_followup_diagnosis() { # <task-id>; follows fm_ida_followup_recover
      generation:$state[0].generation,action_id:$state[0].provider_state.followup_action_id,
      outcome:$outcome,task_id_remote:(if $task=="" then null else $task end),
      error_class:(if $class=="" then null else $class end),session_get_attempts:$reads,session_info:$info,
+     submission_response:($state[0].provider_state.submission_response // null),
      next_action:(if $outcome=="confirmed" then "adopt"
        elif $outcome=="local-repair-required" then "repair-local-readback-then-diagnose"
        elif $outcome=="read-retry-exhausted" then "resolve-read-failure-then-diagnose"

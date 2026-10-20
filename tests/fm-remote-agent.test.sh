@@ -147,6 +147,20 @@ case "$args" in
         tools/call)
           tool=$(printf '%s\n' "$line" | jq -r '.params.name')
           printf 'tool:%s\n' "$tool" >>"$log"
+          # Model official MCP's EOF shutdown while a tool is still pending.
+          # A connected client gets the response after this bounded wait;
+          # an EOF client loses it before the tool can publish a receipt.
+          if [ "$mode" = mcp-eof-sensitive ]; then
+            if IFS= read -r -t 1 trailing; then
+              exit 21
+            else
+              read_rc=$?
+              if [ "$read_rc" -eq 1 ]; then
+                printf 'premature-eof\n' >>"$log"
+                exit 0
+              fi
+            fi
+          fi
           case "$mode" in
             mcp-wrong-id)
               printf '{"jsonrpc":"2.0","id":"%s","result":{"content":[]}}\n' "$request_id"
@@ -217,6 +231,13 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
           printf 'command:ida-region-sg-deep-research-create\n' >>"$log"
           printf 'create-model:%s\n' "${selected_model:-omitted}" >>"$log"
           case "$mode" in
+            create-missing) exit 0 ;;
+            create-malformed) result='not-json' ;;
+            mcp-eof-sensitive)
+              printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"
+              # Official create --no-wait omits answer, events and result.
+              result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":false},"error":null,"context":{"source":"IDA API"}}' "$session" "$remote_task")
+              ;;
             timeout-created) printf '%s\t%s\trunning\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; exit 124 ;;
             timeout-zero) exit 124 ;;
             explicit-auth) result='{"status":"error","data":null,"error":{"code":"AUTH_REQUIRED","message":"authentication required"}}' ;;
@@ -490,6 +511,15 @@ test_mcp_response_contract() {
     'MCP subprocess did not retain the required user identity'
   assert_no_grep 'argv:--as user mcp ' "$home/bytedcli.log" \
     'MCP invocation retained the clean-exit-before-stdin argument order'
+
+  out=$(run_mcp_helper "$home" "$fakebin" mcp-eof-sensitive) \
+    || fail 'MCP stdin closed before the pending capability response'
+  printf '%s\n' "$out" | jq -e '.status=="success"' >/dev/null || fail 'delayed capability result lost'
+  out=$(run_mcp_create_helper "$home" "$fakebin" mcp-eof-sensitive) \
+    || fail 'MCP stdin closed before the pending create receipt'
+  printf '%s\n' "$out" | jq -e '.status=="success" and .data.task_id==80001' >/dev/null \
+    || fail 'delayed create receipt lost its task identity'
+  assert_no_grep 'premature-eof' "$home/bytedcli.log" 'MCP client disconnected with an outstanding request'
 
   for mode in mcp-empty mcp-malformed mcp-duplicate mcp-wrong-id mcp-invalid-result mcp-malformed-iserror; do
     case "$mode" in
@@ -1888,7 +1918,7 @@ SH
 }
 
 test_followup_identity_and_unknown_submission() {
-  local home fakebin id=ida-followup old_sha creates outcome mode rc=0
+  local home fakebin id=ida-followup old_sha creates outcome mode expected rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
@@ -1904,10 +1934,12 @@ test_followup_identity_and_unknown_submission() {
   assert_grep 'unsupported-continuation' "$home/unsupported.out" 'missing capability reason'
   [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 1 ] || fail 'capability refusal created a remote turn'
   pass 'unsupported continuation refuses before create without fallback'
-  outcome=$(FM_IDA_FAKE_HIDE_FOLLOWUP_MARKER=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" 2>&1) || fail "followup: $outcome"
+  outcome=$(FM_IDA_FAKE_MODE=mcp-eof-sensitive FM_IDA_FAKE_HIDE_FOLLOWUP_MARKER=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" 2>&1) || fail "followup: $outcome"
   wait_phase "$home" "$id" terminal-success || fail 'receipt-bound followup with no returned marker did not complete'
   jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001" and .provider_checkpoint=="result-verified"' "$(state_file "$home" "$id")" >/dev/null || fail 'followup did not bind and read the exact receipt turn'
   assert_grep 'Verified iDA answer.' "$home/data/$id/report.md" 'receipt-bound followup result was not read without its marker'
+  jq -e '.provider_state.submission_response=={exit_code:0,response_kind:"success",error_code:null}' "$(state_file "$home" "$id")" >/dev/null \
+    || fail 'delayed official no-wait receipt lost its safe response evidence'
   jq -e '.phase=="terminal-success" and .provider_state.task_id=="80001"' "$home/state/remote-tasks/$id/generations/1.json" >/dev/null || fail 'prior terminal overwritten'
   [ "$old_sha" = "$(shasum -a 256 "$home/data/$id/turn-1-report.md" | cut -d' ' -f1)" ] || fail 'prior report changed'
   run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null || fail 'same followup replay'
@@ -1954,7 +1986,7 @@ test_followup_identity_and_unknown_submission() {
   [ "$creates" = 2 ] || fail "conflicting error receipt repeated create: $creates total"
   pass 'conflicting structured error receipt aliases stay unknown without duplicate create'
 
-  for mode in renamed-invalid-success renamed-invalid-data; do
+  for mode in renamed-invalid-success renamed-invalid-data create-missing create-malformed; do
     id="ida-followup-$mode"
     home=$(new_home "followup-$mode"); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
     : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
@@ -1969,6 +2001,19 @@ test_followup_identity_and_unknown_submission() {
     fi
     [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail "$mode invalid receipt lost submission-unknown"
     jq -e '.provider_state.task_id==null' "$(state_file "$home" "$id")" >/dev/null || fail "$mode invalid receipt bound an unverified task"
+    case "$mode" in
+      create-missing) expected=MCP_RESPONSE_MISSING ;;
+      create-malformed) expected=MCP_RESULT_INVALID ;;
+      *) expected='' ;;
+    esac
+    jq -e --arg code "$expected" '
+      .provider_state.submission_response as $s
+      | if $code=="" then $s.response_kind=="invalid" and $s.error_code==null
+        else $s.response_kind=="error" and $s.error_code==$code and $s.exit_code==1 end
+    ' "$(state_file "$home" "$id")" >/dev/null || fail "$mode lost submission framing evidence"
+    run_ida "$home" "$fakebin" diagnose "$id" >"$home/diagnosis" || fail "$mode diagnosis failed"
+    jq -e '.submission_response!=null and .provider_write_performed==false and .outcome=="identity-unproven"' "$home/diagnosis" >/dev/null \
+      || fail "$mode diagnosis hid the original submission boundary"
     if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt-replay" 2>&1; then
       fail "$mode invalid receipt replay inferred a task without exact evidence"
     fi

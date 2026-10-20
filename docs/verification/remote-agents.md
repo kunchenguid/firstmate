@@ -37,6 +37,23 @@ The installed `IdaSendOptions`, create handler, service, and client pass that st
 The SG model-list response returned structured model names including `auto`, `usecase-frontend-doubao-seed-2.1-pro`, and `usecase-frontend-deepseek-v4-pro`; the implementation validates the current response rather than pinning this observed list.
 Together these checks establish the official SG selector, structured user-identity reads, domain-restricted command runner, and advertised Deep Research create, model-selection, raw-list, session-get, and close commands with their required options.
 
+## MCP connection lifetime
+
+On 2026-10-20, installed official `bytedcli` 0.173.0 exposed an EOF compatibility gap in the private-payload wrapper.
+Its MCP proxy closes the worker ten seconds after client stdin ends, even while a tool request is pending.
+A bounded read-only `run_command` for `ida --region sg session get --session-id <recorded-session>` exited with code zero after 10.41 seconds with only initialization response `id:1` when stdin came from a completed request file.
+The same official read with stdin kept connected until response `id:2` returned a normalized success in 6.30 seconds.
+Independent official session reads also measured a successful 11.61-second response, so a session read alone can exceed that EOF window.
+A controlled offline counterfactual used the installed official MCP proxy with a synthetic worker: a 100ms response passed through the original wrapper in 0.64 seconds, an 11-second response lost its reply in 10.62 seconds (`MCP_RESPONSE_MISSING`), and that same 11-second response passed through the corrected wrapper in 11.62 seconds.
+The synthetic worker returned only a fixture no-wait receipt; no provider was contacted.
+These observations establish a local response-loss mechanism; absent historical create responses do not establish that it caused every earlier uncertain submission.
+No create, followup, replay, cancellation, adoption, or business query was performed for this verification.
+
+`bin/fm-bytedcli-mcp-call.sh` now keeps stdin connected until the matching response arrives or its request budget expires, preserving the existing response validation.
+The public MCP regression models a pending tool that drops its response on early EOF; it fails before the correction and accepts both capability and source-derived official no-wait receipt shapes afterward.
+Refresh the portable evidence with `FM_REMOTE_TEST_CASE=mcp bin/fm-test-run.sh tests/fm-remote-agent.test.sh` and the full followup boundary with `FM_REMOTE_TEST_CASE=followup bin/fm-test-run.sh tests/fm-remote-agent.test.sh`.
+The latter also checks that missing or malformed create responses retain bounded diagnostic evidence without a duplicate create, guessed task identity, or changes to prior terminal generations.
+
 ## Direct-dispatch failure separation
 
 The public `bin/fm-task-dispatch.sh remote-agent/ida` path was reproduced against a mode-`0600` copy of the current iDA config and an ordinary private task brief/instruction:
