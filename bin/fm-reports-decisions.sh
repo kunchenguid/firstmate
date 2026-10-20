@@ -33,10 +33,9 @@
 #
 # NO SOURCE IS REQUIRED AND NONE FAILS THE BUILD. A home on another backlog
 # store, with no archive files, or with an unreadable .tasks.toml still gets its
-# page; it simply shows fewer decisions or none. Every source that is missing,
-# skipped, or unreadable is named in the `sources` array instead, so the page
-# Every configured or default data source that should have contributed but
-# could not is named. A missing .tasks.toml is not such a source because its
+# page; it simply shows fewer decisions or none. Every configured or default
+# data source that should have contributed but could not is named in the
+# `sources` array. A missing .tasks.toml is not such a source because its
 # absence selects the default paths. Only a missing jq or an unusable home is
 # refused, because then there is no output at all.
 #
