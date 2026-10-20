@@ -5373,7 +5373,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
         sleep 300;
         exit 0;
       }
-      $SIG{CHLD} = 'IGNORE';
+      $SIG{CHLD} = "IGNORE";
       sleep 300;
     ' "$case_dir/wt" "$child_file" "$case_dir/worker.pid" &
   leader=$!
