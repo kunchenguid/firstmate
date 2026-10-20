@@ -96,7 +96,8 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+# `treehouse return --force <wt>`: record the call, succeed silently.
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -5130,7 +5131,7 @@ PYTHON
     || fail "foreign-session: shell does not have its own process group"
 
   rc=0
-  FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   kill -0 "$foreign" 2>/dev/null && survived=1
   kill -KILL "$foreign" "$launcher" "$endpoint" 2>/dev/null || true
   wait "$launcher" "$endpoint" 2>/dev/null || true
@@ -5140,6 +5141,8 @@ PYTHON
   fi
   [ "$survived" -eq 1 ] || fail "foreign-session: teardown killed an unowned shell"
   expect_code 0 "$rc" "foreign-session: unproven ownership must not block teardown"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "foreign-session: treehouse return ran with a spared process"
+  assert_grep "kept worktree" "$case_dir/stderr" "foreign-session: kept worktree not reported"
   assert_grep "spared unowned process $foreign: bash" "$case_dir/stderr" \
     "foreign-session: teardown did not report the foreign pid and command"
   pass "foreign TTY shell survives and is reported while the task-owned child is reaped"
