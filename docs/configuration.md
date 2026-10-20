@@ -91,7 +91,6 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-- The Treehouse pool root for this home's own task copies under `state/treehouse/` (`bin/fm-spawn.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -425,13 +424,17 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `paseo` | Experimental; no dedicated real-backend CI lane | [`docs/paseo-backend.md`](paseo-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, and paseo, since herdr, zellij, cmux, and paseo are session providers only; Orca provides both the task worktree and terminal endpoint.
-Every home's Treehouse spawns, primary or secondmate, run `treehouse --root <state>/treehouse get`, so they need Treehouse v2.2.0 or later; earlier releases reject `--root` as an unknown flag.
+Every home's Treehouse spawns, primary or secondmate, run `treehouse --root <default-root>/fm-homes/<home-id> get`, so they need Treehouse v2.2.0 or later; earlier releases reject `--root` as an unknown flag.
+`<default-root>` is the root Treehouse itself resolves without `--root`: `TREEHOUSE_ROOT`, else the `root` key of the project's `treehouse.toml`, else `$HOME`, with a relative value resolving from the project's repository root.
+`<home-id>` is the first 12 hex digits of `git hash-object --stdin` over the home directory's physical path (`pwd -P`), so the same home always maps to the same root; `printf '%s' "$(cd <home> && pwd -P)" | git hash-object --stdin | cut -c1-12` prints it.
+Task copies therefore land at `<default-root>/fm-homes/<home-id>/.treehouse/<pool>/`, outside every Firstmate checkout.
+Agent harnesses load every `CLAUDE.md` and `AGENTS.md` above a worker's directory, so a spawn refuses before allocation when that root lies inside the home or its state directory, or under any directory carrying either file other than `$HOME` and its own ancestors, whose files already reach every project.
 
 ### Legacy cross-clone Treehouse slots
 
-Treehouse keys a pool by the clone's directory name and origin, so before every home allocated from its own `state/treehouse/` root, a secondmate home's clone, the primary home's clone, and any other checkout of the same project could share one pool under Treehouse's default root.
+Treehouse keys a pool by the clone's directory name and origin, so before every home allocated from its own `fm-homes/<home-id>` root, a secondmate home's clone, the primary home's clone, and any other checkout of the same project could share one pool under Treehouse's default root.
 Slots created that way remain in the default-root pool after upgrade, and one of them may belong to another clone than the one now spawning from it.
-New spawns always pass `--root`, which overrides `TREEHOUSE_ROOT` and Treehouse config, so no operator configuration sends a new spawn back to a default-root slot; the refusal below remains the last-resort guard should a spawn still meet another clone's copy.
+New spawns always pass `--root`, which overrides `TREEHOUSE_ROOT` and Treehouse config; Firstmate derives that root from them but always places it below `fm-homes/<home-id>`, so no operator configuration sends a new spawn back to a default-root slot; the refusal below remains the last-resort guard should a spawn still meet another clone's copy.
 A task already running on a default-root slot keeps it: teardown and relaunch use the worktree path the task recorded, never a recomputed root, so that task runs to completion and its slot is returned to the default-root pool it came from.
 A Treehouse spawn refuses such a slot before any fetch, reset, slot claim, or launch: the spawn fails with `treehouse get did not enter an isolated worktree within 60s`, naming `it belongs to a different clone` and both common git dirs.
 That refusal leaves the slot and its contents as found: Firstmate does not migrate, quarantine, or delete it or run `treehouse return` on it, and it does not recover any older task that used it.

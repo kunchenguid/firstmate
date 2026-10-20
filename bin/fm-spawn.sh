@@ -293,8 +293,9 @@
 #   git dir: Treehouse keys a pool by clone directory name and origin, so a
 #   free slot another clone of the same origin created is refused before any
 #   fetch, reset, or slot claim. Every home, primary or secondmate, runs
-#   `treehouse --root <state>/treehouse get`, so its clones allocate from a pool
-#   root of their own and never from Treehouse's shared default root. Teardown
+#   `treehouse --root <default-root>/fm-homes/<home-id> get`, so its clones
+#   allocate from a pool root of their own, outside every firstmate checkout,
+#   and never from Treehouse's shared default root. Teardown
 #   and relaunch find a slot by the worktree path its task recorded and never
 #   recompute the root, so a task already on a default-root slot still runs to
 #   completion and is returned there.
@@ -3909,6 +3910,53 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
+# The Treehouse pool root dedicated to this home: <default>/fm-homes/<home-id>.
+# <default> is the root Treehouse itself resolves with no --root: TREEHOUSE_ROOT,
+# else the `root` key of the project's treehouse.toml, else $HOME, a relative
+# value resolving from the project's repository root. <home-id> is the first 12
+# hex digits of `git hash-object` over this home's physical path, so one home
+# always maps to one root. Agent harnesses load every CLAUDE.md and AGENTS.md
+# above a worker's directory, so the root must not lie under this home, its
+# state, or any directory that carries one of those files, except $HOME and its
+# own ancestors, whose files already reach every project. SPAWN_TREEHOUSE_ROOT
+# is left holding the root, or the refusal is printed and this returns non-zero.
+SPAWN_TREEHOUSE_ROOT=
+spawn_treehouse_pool_root() {
+  local top base home_real state_real home_id dir user_home
+  SPAWN_TREEHOUSE_ROOT=
+  top=$(git -C "$PROJ_ABS_REAL" rev-parse --show-toplevel 2>/dev/null) || top=$PROJ_ABS_REAL
+  base=${TREEHOUSE_ROOT:-}
+  if [ -z "$base" ] && [ -f "$top/treehouse.toml" ]; then
+    base=$(sed -n 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$top/treehouse.toml" | head -n 1)
+  fi
+  [ -n "$base" ] || base=${HOME:?}
+  case "$base" in /*) ;; *) base=$top/$base ;; esac
+  base=$(cd "$base" 2>/dev/null && pwd -P || printf '%s\n' "${base%/}")
+  home_real=$(cd "$FM_HOME" && pwd -P) || return 1
+  state_real=$(cd "$STATE" && pwd -P) || return 1
+  home_id=$(printf '%s' "$home_real" | git hash-object --stdin) || return 1
+  SPAWN_TREEHOUSE_ROOT=$base/fm-homes/${home_id:0:12}
+  case "$SPAWN_TREEHOUSE_ROOT" in
+    "$home_real"/*|"$state_real"/*)
+      echo "error: Treehouse pool root '$SPAWN_TREEHOUSE_ROOT' lies inside this firstmate home '$home_real'; refusing to place task copies under its agent instructions" >&2
+      return 1 ;;
+  esac
+  user_home=$(cd "${HOME:?}" 2>/dev/null && pwd -P) || user_home=$HOME
+  dir=$SPAWN_TREEHOUSE_ROOT
+  while [ "$dir" != / ] && [ -n "$dir" ]; do
+    case "$user_home/" in
+      "$dir"/*) ;;
+      *)
+        if [ -e "$dir/CLAUDE.md" ] || [ -L "$dir/CLAUDE.md" ] || [ -e "$dir/AGENTS.md" ] || [ -L "$dir/AGENTS.md" ]; then
+          echo "error: Treehouse pool root '$SPAWN_TREEHOUSE_ROOT' lies under '$dir', which carries agent instructions (CLAUDE.md or AGENTS.md) every task copy would load; refusing to spawn" >&2
+          return 1
+        fi ;;
+    esac
+    dir=$(dirname "$dir")
+  done
+  return 0
+}
+
 # spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
 # fresh polytoken spawn closes its endpoint on abort, so only it points away
 # from the window; every other harness keeps the plain inspect pointer.
@@ -5037,11 +5085,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Treehouse names a pool after the clone's directory and origin, so any two
   # clones of one project - another home's, or an operator's own checkout -
   # would share one pool under the default root and hand each other's slots
-  # out. Every home therefore allocates from its own pool root under its state
-  # directory, using Treehouse's documented --root. A slot from any other clone
-  # that still reaches this spawn is refused by the ownership screen below.
-  spawn_treehouse_root=$(cd "$STATE" && pwd -P)/treehouse || exit 1
-  spawn_send_text_line "$WT_TARGET" "treehouse --root '${spawn_treehouse_root//\'/\'\\\'\'}' get"
+  # out. Every home therefore allocates from its own pool root, chosen by
+  # spawn_treehouse_pool_root, using Treehouse's documented --root. A slot from
+  # any other clone that still reaches this spawn is refused by the ownership
+  # screen below.
+  spawn_treehouse_pool_root || exit 1
+  spawn_send_text_line "$WT_TARGET" "treehouse --root '${SPAWN_TREEHOUSE_ROOT//\'/\'\\\'\'}' get"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

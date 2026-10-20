@@ -806,28 +806,87 @@ test_foreign_clone_slot_is_refused_before_any_mutation() {
   pass "a slot from another clone of the same origin is refused before any fetch, reset, or claim, and its owner still launches"
 }
 
-# Every home allocates from its own Treehouse root under its state directory,
+# Every home allocates from its own Treehouse root, <default>/fm-homes/<home-id>,
 # so neither a secondmate home's clone nor the primary home's clone ever shares
-# a pool under the default root with another clone of the same origin.
+# a pool with another clone of the same origin, and no copy sits inside a
+# firstmate checkout whose agent instructions it would load.
 test_every_home_allocates_from_its_own_pool_root() {
-  local rec id out status pane_log state_real shape
-  for shape in primary secondmate; do
+  local rec id out status pane_log shape th_real root first_root='' primary_root='' first_home=''
+  for shape in primary primary-again secondmate; do
     id="pool-root-$shape-r1"
     rec=$(make_case "pool-root-$shape" "$id")
     read_case_record "$rec"
-    [ "$shape" = primary ] || printf 'sm-qa\n' > "$HOME_DIR/.fm-secondmate-home"
+    if [ "$shape" = primary-again ]; then
+      HOME_DIR=$first_home
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+    fi
+    [ "$shape" != secondmate ] || printf 'sm-qa\n' > "$HOME_DIR/.fm-secondmate-home"
+    mkdir -p "$CASE_DIR/th"
+    th_real=$(cd "$CASE_DIR/th" && pwd -P)
     pane_log="$CASE_DIR/pane.log"
     : > "$pane_log"
-    out=$(FM_FAKE_PANE_LOG="$pane_log" run_spawn "$id" --scout)
+    out=$(FM_TEST_TREEHOUSE_ROOT="$CASE_DIR/th" FM_FAKE_PANE_LOG="$pane_log" run_spawn "$id" --scout)
     status=$?
     expect_code 0 "$status" "a $shape home spawn should launch"$'\n'"$out"
-    state_real=$(cd "$HOME_DIR/state" && pwd -P)
-    grep -Fxq "treehouse --root '$state_real/treehouse' get" "$pane_log" \
-      || fail "the $shape home did not allocate from its own pool root: $(cat "$pane_log")"
-    ! grep -Fxq 'treehouse get' "$pane_log" \
-      || fail "the $shape home allocated from the shared default pool root: $(cat "$pane_log")"
+    root=$(sed -n "s|^treehouse --root '\\(.*\\)' get\$|\\1|p" "$pane_log")
+    [ "$(grep -c '^treehouse' "$pane_log")" = 1 ] && [ -n "$root" ] \
+      || fail "the $shape home did not allocate through one --root: $(cat "$pane_log")"
+    case "$root" in
+      "$th_real"/fm-homes/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) fail "the $shape home's pool root '$root' is not <default>/fm-homes/<home-id> under '$th_real'" ;;
+    esac
+    case "$root" in
+      "$(cd "$HOME_DIR" && pwd -P)"/*) fail "the $shape home's pool root '$root' lies inside the home" ;;
+    esac
+    case "$shape" in
+      primary) first_root=${root#"$th_real"/}; first_home=$HOME_DIR; primary_root=$first_root ;;
+      primary-again) [ "${root#"$th_real"/}" = "$first_root" ] \
+        || fail "one home mapped to two pool roots: '$first_root' then '${root#"$th_real"/}'" ;;
+      secondmate) [ "${root#"$th_real"/}" != "$primary_root" ] \
+        || fail "the secondmate home shared the primary home's pool root '$root'" ;;
+    esac
   done
-  pass "every home, primary or secondmate, allocates from its own Treehouse pool root"
+  pass "every home allocates from its own stable Treehouse pool root outside any firstmate checkout"
+}
+
+# A pool root inside this firstmate home, or under a directory other than $HOME
+# and its ancestors that carries CLAUDE.md or AGENTS.md, would put that file above every task copy, so
+# the spawn refuses before it asks Treehouse for a slot. Instructions at $HOME
+# itself already reach every project, so they do not refuse.
+test_pool_root_under_agent_instructions_is_refused() {
+  local rec id out status pane_log shape root user expect
+  for shape in inside-home instructed-ancestor home-level; do
+    id="pool-root-refuse-$shape-r1"
+    rec=$(make_case "pool-root-refuse-$shape" "$id")
+    read_case_record "$rec"
+    user="$CASE_DIR/user"
+    mkdir -p "$user/checkout"
+    case "$shape" in
+      inside-home) root="$HOME_DIR/pools"; expect="inside this firstmate home" ;;
+      instructed-ancestor)
+        printf 'You are the first mate.\n' > "$user/checkout/AGENTS.md"
+        root="$user/checkout/pools"; expect="carries agent instructions" ;;
+      home-level)
+        printf 'personal notes\n' > "$user/CLAUDE.md"
+        root="$user/pools"; expect= ;;
+    esac
+    mkdir -p "$root"
+    pane_log="$CASE_DIR/pane.log"
+    : > "$pane_log"
+    out=$(FM_TEST_SPAWN_HOME="$user" FM_TEST_TREEHOUSE_ROOT="$root" FM_FAKE_PANE_LOG="$pane_log" \
+      run_spawn "$id" --scout)
+    status=$?
+    if [ -z "$expect" ]; then
+      expect_code 0 "$status" "$shape: a pool root under \$HOME's own instructions should launch"$'\n'"$out"
+      continue
+    fi
+    [ "$status" -ne 0 ] || fail "$shape: spawn launched with a pool root under agent instructions"$'\n'"$out"
+    assert_contains "$out" "$expect" "$shape: the refusal did not name why the root was refused"
+    ! grep -q '^treehouse' "$pane_log" \
+      || fail "$shape: the refused spawn still asked Treehouse for a slot: $(cat "$pane_log")"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$shape: the refused spawn published task metadata"
+  done
+  pass "a pool root inside the home or under an instructed ancestor is refused before allocation"
 }
 
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
@@ -1261,6 +1320,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_foreign_clone_slot_is_refused_before_any_mutation
 test_every_home_allocates_from_its_own_pool_root
+test_pool_root_under_agent_instructions_is_refused
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window
