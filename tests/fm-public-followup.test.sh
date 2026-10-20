@@ -53,7 +53,12 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ] && kill "$pid" 2>/dev/null; then
+      for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+      done
+    fi
   fi
   fm_test_cleanup
 }

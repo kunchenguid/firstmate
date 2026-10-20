@@ -25,7 +25,6 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | Ship child PR ready | the child's `done:` PR ready line, whose accepted spellings the publisher below owns; `pr=` in the child's record once registered | `bin/fm-inactive-reconcile.sh` on the next poll with the child's line; `bin/fm-pr-check.sh` at registration with the canonical URL |
 | Scout child findings | the child's `done:` line plus `data/<child>/report.md` | `bin/fm-inactive-reconcile.sh` on the next poll, with the report pointer |
 | Child failed | the child's `failed:` line | `bin/fm-inactive-reconcile.sh` on the next poll |
-| Child wait overdue or cleared | the episode governed by [Waiting-state escalation](configuration.md#waiting-state-escalation) | `bin/fm-wait-timers-lib.sh` |
 | Child decision escalated to the captain | the task held for the captain in the mate backlog | `bin/fm-captain-hold.sh hold`, and its answer by `answer` |
 | PR merged | the merge poll or the mate's own merge | `bin/fm-merge-outcome-lib.sh` |
 | Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
@@ -46,7 +45,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
-- No separate channel-owned escalation timer: [Waiting-state escalation](configuration.md#waiting-state-escalation) owns the watcher policy, and `bin/fm-wait-timers-lib.sh` publishes its overdue-child reports and resolutions through this channel.
+- No threshold escalation of a child's open decision or blocker in the fork: the optional firstmate-addons wait-timers add-on owns that escalation and publishes it through this channel when installed; a decision the mate neither answers nor escalates is a supervision-quality question, separable from channel delivery.
 - No second watcher or standalone scanner: a lightweight ledger pass runs inside the existing inactive-outcome command on every watcher poll and reuses its receipts and upstream append.
 - No orphan lifecycle: teardown refuses instead of removing an undelivered outcome, the same way it refuses on other unlanded conditions.
 

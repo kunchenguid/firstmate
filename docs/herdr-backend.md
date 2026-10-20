@@ -757,7 +757,7 @@ Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-s
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
 
-The watcher maps the pane back to the task, applies the [shared native-evidence admission and active-hold policy](configuration.md#waiting-state-escalation), and skips these:
+The watcher maps the pane back to the task and skips these (the optional wait-timers add-on applies its own native-evidence admission and active-hold policy on top when installed):
 
 - Secondmate endpoints.
 - Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
@@ -768,7 +768,7 @@ The watcher maps the pane back to the task, applies the [shared native-evidence 
 ### Polling fallback
 
 The push path only shortens latency.
-[Waiting-state escalation](configuration.md#waiting-state-escalation) owns the independent recorded-pane polling timers and owner routing.
+The optional firstmate-addons wait-timers add-on owns the independent recorded-pane polling timers and owner routing.
 Polling runs every cycle and remains the permanent fallback when any of these is unavailable:
 
 - Protocol 16.

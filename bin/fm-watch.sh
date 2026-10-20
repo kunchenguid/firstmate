@@ -285,7 +285,7 @@ WATCH_HOME_EXISTED=0
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # shellcheck source=/dev/null # Canonical lint root with its own parent-channel graph.
-. "$SCRIPT_DIR/fm-wait-timers-lib.sh"
+[ ! -r "${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/wait-timers/bin/fm-wait-timers-lib.sh" ] || . "${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/wait-timers/bin/fm-wait-timers-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -3545,10 +3545,7 @@ EOF
   # next, so a continuous result stream cannot starve them.
   procevent_surface_queued
 
-  fm_wait_timers_tick || {
-    echo "watcher: waiting-state timer check failed" >&2
-    exit 1
-  }
+  if declare -F fm_wait_timers_tick >/dev/null; then fm_wait_timers_tick || { echo "watcher: waiting-state timer check failed" >&2; exit 1; }; fi
 
   host_memory_surface_queued
 

@@ -17,7 +17,6 @@
 #   - bin/fm-inactive-reconcile.sh   a direct child's terminal done or failed
 #                                    ledger line, on every watcher poll, plus
 #                                    the silent-ledger inactive-outcome fallback
-#   - bin/fm-wait-timers-lib.sh      overdue child waits and their resolution
 #   - bin/fm-pr-check.sh             a registered PR-ready line carrying the
 #                                    canonical URL
 #   - bin/fm-captain-hold.sh         a task held for the captain and its answer

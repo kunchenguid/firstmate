@@ -2962,48 +2962,6 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
-# A Main-owned waiting-state escalation is a check wake: the producer queues it
-# as check, so its delivered reason line must open with "check:" for every
-# consumer that classifies a close by that leading word. When it does not, the
-# host reads the close as no wake at all and the Stop hook treats the same close
-# as a broken arm, so the escalation reaches nobody. This drives the real
-# watcher, arm, host, and Stop hook in a fixture home whose Main-owned wait is
-# overdue, and asserts the close is handed to main with its reason line.
-test_main_owned_wait_escalation_reaches_main_as_a_check_wake() {
-  local home record sig since owner key
-  home=$(make_primary_home wait-escalation)
-  printf 'blocked [at=%s] [key=wait]: external condition until 2099-01-01T00:00Z\n' "$(date +%s)" \
-    > "$home/state/demo.status"
-  # The declaration is already surfaced, so the episode arms on a quiet cycle
-  # instead of that cycle ending on the new status file's signal wake.
-  prime_status_seen "$home/state" "$home/state/demo.status"
-  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_HOME_SUMMARY_INTERVAL=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
-    FM_BUSY_TURN_MAX_SECS=999999 FM_STALE_ESCALATE_SECS=999999 start_hook_session "$home"
-  turn_end "$home"
-  wait_until 200 watcher_live "$home" \
-    || fail "wait escalation: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
-  record="$home/state/.waiting-timers/demo"
-  wait_until 200 test -e "$record" \
-    || fail "wait escalation: no waiting-state episode was armed: $(cat "$home/hook.err" 2>/dev/null)"
-  IFS=$'\t' read -r sig since owner _parent key _misses < "$record"
-  # One overdue owner delivery, exactly as an episode whose owning lead never
-  # answered records it, puts the escalation branch due on the next poll.
-  printf '%s\t%s\t%s\t0\t%s\t0\n' "$sig" "$since" "$(( $(date +%s) - 700 ))" "$key" > "$record"
-  wait_until 300 grep -q '	pass-through	' "$home/state/.supervision-host.log" \
-    || fail "wait escalation: the escalation never closed a watcher cycle: $(cat "$home/state/.supervision-host.log")"
-  assert_no_re '	pass-through	a close without a wake' "$home/state/.supervision-host.log" \
-    "the escalation close was classified as no wake at all"
-  assert_re '	pass-through	attended	main-only	check: waiting-state demo .*level=main' \
-    "$home/state/.supervision-host.log" "the host did not hand the escalation close to main with its reason line"
-  wait_until 300 hook_exited "$home" \
-    || fail "wait escalation: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
-  assert_rewoke_main "$home" "wait escalation"
-  assert_re '^check: waiting-state demo .*level=main' "$home/hook.err" \
-    "the escalation must reach main as an actionable wake"
-  pass "host+hook: a Main-owned waiting-state escalation reaches main as an actionable check wake"
-}
-
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
@@ -3040,7 +2998,6 @@ test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
-test_main_owned_wait_escalation_reaches_main_as_a_check_wake
 test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end

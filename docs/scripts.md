@@ -158,7 +158,6 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-role.sh`             | Report this home's firstmate role and check the self-repository publication gate ([configuration.md](configuration.md#firstmate-role-configfirstmate-role)) |
 | `fm-role-lib.sh`         | Own the role parser, self-repository detection, and the publication gate the dispatch surfaces share |
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
-| `fm-wait-timers-lib.sh`  | Waiting-state episodes for recorded blocked, needs-decision, and declared paused waits: owner and escalation wakes, native Herdr blocked admission, and parent-channel reports ([configuration.md](configuration.md#waiting-state-escalation)) |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and validate the native-only `ultra` effort |

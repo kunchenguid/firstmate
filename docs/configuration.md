@@ -635,35 +635,6 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
-## Waiting-state escalation
-
-Every watch poll checks recorded workers and leads for open `blocked` or `needs-decision` declarations and declared `paused` waits, independently of pane activity and the existing stale/wedge heuristics.
-The watcher scans actionable signals and runs due checks before this timer on every cycle, so a cycle that exits on a signal or process-event wake defers the timer's alerts to the first cycle that reaches them; a continuous signal or process-event stream can delay a wait alert but never starves a due check.
-Herdr's bounded `agent list` read admits `agent_status=blocked` except for Cursor, whose declarations stay on the status-log path; admitted native evidence takes precedence for each recorded pane, even while its status log says working.
-Polling and native push escalation share this admission rule; Cursor declarations remain monitored.
-The mandatory `agent list` lookup uses the portable timeout runner, including on hosts without coreutils, with a positive `FM_BACKEND_HERDR_READ_TIMEOUT` deadline (default 10 seconds).
-A failed or malformed native read for one Herdr session prints one diagnostic line, marks that session's lanes unknown for that poll, and keeps their episodes untouched; every other lane is still monitored and the watcher keeps running.
-
-| Environment setting | Default | Meaning |
-| --- | --- | --- |
-| `FM_WAIT_ALERT_SECS` | `300` | Observed waiting seconds before one alert wakes the owning lead, or Main for its own workers and leads, for an open `blocked` or `needs-decision` declaration. A declared `paused` wait instead rechecks at `FM_PAUSE_RESURFACE_SECS`. |
-| `FM_WAIT_ESCALATE_SECS` | `900` | Owner alert threshold plus the response interval: a lead's overdue wait escalates to its parent, and a Main-owned wait gets one escalation wake to Main, both `FM_WAIT_ESCALATE_SECS - FM_WAIT_ALERT_SECS` seconds after successful owner wake output. |
-
-Both values must be positive decimal seconds of at most nine digits, with escalation later than the owner alert; invalid settings stop the check.
-The durable episode under `state/.waiting-timers/` starts at first observation, survives watcher restarts, and re-arms when the effective declaration or endpoint changes or clears.
-A paused episode keys on window, verb and phase key instead of the full declaration line, so refreshed pause prose re-arms nothing and keeps the original observation time; a different phase key is a different wait and re-arms.
-Pane output and unrelated status events cannot reset an open blocker or decision.
-An episode ends only after two consecutive polls without that declaration, so a blocked/working flicker keeps the original observation time.
-An immediate native push wake for an admitted blocked pane counts as that episode's owner wake, so the timer raises no second owner recheck; parent escalation still follows the normal lead-response interval.
-The independent timer excludes a paused wait while its declared `until` time is in the future; observation starts when the wait is first seen due, and it raises one owner recheck per episode on the `FM_PAUSE_RESURFACE_SECS` cadence (four hours by default, the same bound the stale path uses), never at the `FM_WAIT_ALERT_SECS` owner-alert threshold and never a parent escalation.
-The separate stale/wedge recheck cadence is unchanged.
-An active captain hold on the task suppresses the timer's owner alert and escalation, including native blocked transitions, in every posture; the timer checks the hold for each lane with a current declaration before arming an episode, so a held lane never arms one. The stale/wedge path keeps its existing bounds.
-Each alert names the item, observed wait duration, and the supervisor who must act.
-Local and remote secondmate routes use the existing parent channel; the escalation is automatically resolved when the episode ends.
-Main has no parent, so a Main-owned overdue wait raises one escalation wake to Main itself, never a captain page; Main seeks a human only when it cannot unblock the item itself.
-The existing steering-inbox retry and secondmate wake-loop recovery paths still attempt safe delivery before raising their own escalation; the owner timer itself queues and delivers an actionable wake before parent escalation becomes due.
-Timer mechanics are owned by [`bin/fm-wait-timers-lib.sh`](../bin/fm-wait-timers-lib.sh); [runtime backend verification](verification/runtime-backends.md#waiting-state-native-list-probe) owns the evidence and regression entry points.
-
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off second form of wait evidence in the watcher's wedge timer.
@@ -2703,8 +2674,6 @@ FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|read
 FM_CLASSIFY_PAUSED_VERB=paused     # leading declared-wait status verb; bin/fm-classify-lib.sh owns its meaning and legacy external-wait label; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # no-activity seconds before a provably-working stale pane escalates (docs/architecture.md owns activity absorption and validation-execution rechecks), unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without activity (busy_turn_over_age in bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_WAIT_ALERT_SECS=300   # waiting-state owner alert threshold; default and validation: "Waiting-state escalation" in this file
-FM_WAIT_ESCALATE_SECS=900   # waiting-state escalation threshold; default and validation: "Waiting-state escalation" in this file
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture; an idle `paused:` claim contradicted by a parked run the worker never escalated wakes once per run state instead of taking this cadence (docs/architecture.md owns the contract)
 FM_SECONDMATE_WAKE_STALL_SECS=180  # no-progress interval for foreign secondmate queues (docs/architecture.md) and local queue reminders (docs/watcher-continuity.md "Durable queue and turn-end backstop"); zero or invalid values use 180
 FM_HOST_MEMORY_SECS=10          # independent sampler cadence; see Host memory guard above
