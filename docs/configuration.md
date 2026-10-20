@@ -13,6 +13,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Toolchain checks | [Toolchain](#toolchain), [watched tool updates](#watched-tool-updates-configwatched-toolsjson), and [tool provenance pins](#tool-provenance-pins-configtool-provenance) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -1666,6 +1667,23 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
+
+## Tool provenance pins (config/tool-provenance)
+
+`config/tool-provenance` is an optional local, gitignored list of tools whose installed build matters, not only their version: for example a locally patched build that an upstream release does not carry yet.
+A plain reinstall can replace such a build with an upstream one of the same version and the same flags, which neither a version floor nor a feature probe can tell apart.
+
+Each non-blank line is `<tool> <absolute-path-prefix>`; `#` starts a comment.
+At every session start, and in `bin/fm-doctor.sh`, bootstrap resolves `<tool>` on `PATH`, follows every symlink, and prints a `TOOL_PROVENANCE:` line when the result does not start with the prefix, when the tool is not on `PATH`, or when a line is malformed.
+It only reports; it never runs, installs, or changes the tool.
+
+```text
+# tasks-axi carries a local patch until the upstream release includes it
+tasks-axi /home/me/.local/src/tasks-axi-patched/
+```
+
+Remove a pin once the upstream release carries what it was protecting, or the check reports every correct upgrade.
+The file is not inherited by secondmate homes; each home pins the builds it actually depends on.
 
 ## Mail plane (.env)
 
