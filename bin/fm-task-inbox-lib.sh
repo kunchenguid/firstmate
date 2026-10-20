@@ -387,10 +387,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
 # A codex composer that holds only mouse reports and an idle agent gets one
-# C-c (never a second: it can exit some harnesses), then a fresh read. The idle
-# check repeats immediately before the key, so a turn that starts after the
-# first check is not interrupted. Only an
-# empty read lets the doorbell type; anything else is the ordinary skip.
+# C-c (never a second: it can exit some harnesses), then a fresh read. One idle
+# check runs right before the key; the residual window is the time between that
+# read and the key. Only an empty read lets the doorbell type; anything else is
+# the ordinary skip.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
   local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -401,8 +401,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   if [ "$cstate" = pending ] && [ "$harness" = codex ] \
-     && fm_task_inbox_composer_is_mouse_noise "$backend" "$target" "$label" \
-     && fm_task_inbox_agent_idle "$backend" "$target" codex "$label"; then
+     && fm_task_inbox_composer_is_mouse_noise "$backend" "$target" "$label"; then
     fm_task_inbox_agent_idle "$backend" "$target" codex "$label" || return 1
     fm_backend_send_key "$backend" "$target" C-c "$label" >/dev/null 2>&1 || return 2
     sleep 0.3

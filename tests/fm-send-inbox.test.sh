@@ -67,6 +67,7 @@ case "${1:-}" in
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
     else
       printf '%s\n' "$*" >> "$FM_SEND_LOG.keys"
+      case "$*" in *C-c*) cat "$FM_SEND_LOG.lastbusy" >> "$FM_SEND_LOG.cc-busy" 2>/dev/null ;; esac
     fi
     exit 0 ;;
   display-message)
@@ -89,7 +90,11 @@ case "${1:-}" in
           codex-noise-unreadable) [ "$cleared" = 1 ] && { printf 'banner\n'; exit 0; } ;;
           codex-noise-text) row="$glyph [<65;192;52M please keep this draft" ;;
         esac
-        [ "$FM_FAKE_TMUX_COMPOSER" = codex-noise-late-busy ] && [ "$n" -ge "$FM_FAKE_BUSY_FROM_READ" ] && footer='  Working (3s • esc to interrupt)'
+        printf '0\n' > "$FM_SEND_LOG.lastbusy"
+        [ "$FM_FAKE_TMUX_COMPOSER" = codex-noise-late-busy ] && [ "$n" -ge "$FM_FAKE_BUSY_FROM_READ" ] && {
+          footer='  Working (3s • esc to interrupt)'
+          printf '1\n' > "$FM_SEND_LOG.lastbusy"
+        }
         [ "$FM_FAKE_TMUX_COMPOSER" = codex-noise-busy ] && footer='  Working (3s • esc to interrupt)'
         printf 'banner\n%s\n\n%s\n' "$row" "$footer"
         exit 0 ;;
@@ -133,7 +138,7 @@ run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   shift
   : >"$dir/send.log"
   : >"$dir/send.log.keys"
-  rm -f "$dir/send.log.reads"
+  rm -f "$dir/send.log.reads" "$dir/send.log.lastbusy" "$dir/send.log.cc-busy"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
@@ -304,16 +309,22 @@ test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto() {
 }
 
 test_codex_turn_starting_between_reads_is_not_interrupted() {
-  local dir err
+  local dir err from sent=0 held=0
   dir=$(setup_case codexlatebusy codex)
   err="$dir/send.err"
-  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=codex-noise-late-busy FM_FAKE_BUSY_FROM_READ=5 -- t1 "wake up"
-  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] || fail "baseline: a pane idle until the key should be cleared"
-  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=codex-noise-late-busy FM_FAKE_BUSY_FROM_READ=4 -- t1 "wake up"
-  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] ||
-    fail "a turn that started after the first idle check was interrupted"
-  [ ! -s "$dir/send.log" ] || fail "nothing may be typed when the worker turned busy"
-  pass "fm-send inbox: a turn that starts between the idle check and the key is not interrupted"
+  for from in 1 2 3 4 5 6 7 8; do
+    run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=codex-noise-late-busy FM_FAKE_BUSY_FROM_READ=$from -- t1 "wake up"
+    if [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ]; then
+      held=$((held + 1))
+      [ ! -s "$dir/send.log" ] || fail "nothing may be typed when the worker turned busy (busy from read $from)"
+    else
+      sent=$((sent + 1))
+      [ "$(cat "$dir/send.log.cc-busy")" = 0 ] ||
+        fail "C-c was sent although the last read before it showed a turn (busy from read $from)"
+    fi
+  done
+  [ "$sent" -ge 1 ] && [ "$held" -ge 1 ] || fail "sweep must cover both outcomes (sent=$sent held=$held)"
+  pass "fm-send inbox: no C-c follows a final pre-key read that shows a turn"
 }
 
 test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted() {

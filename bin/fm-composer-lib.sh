@@ -2224,7 +2224,7 @@ fm_composer_codex_mouse_noise_only() {  # <screen>
   [ -n "$held" ] || return 1
   rest=$(printf '%s' "$held" | LC_ALL=C tr -d '\033[:space:]' \
     | LC_ALL=C sed -E 's/\[<[0-9]+;[0-9]+;[0-9]+[Mm]//g')
-  [ -z "$(printf '%s' "$rest" | tr -d '[:space:]')" ]
+  [ -z "$rest" ]
 }
 
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
