@@ -296,14 +296,30 @@ done
 # A short proof budget keeps the exhausted-proof path fast; the count below is
 # what proves the proof was exhausted rather than skipped.
 C_PROOF_POLLS=3
+# On a stealing release the wrong-focus window lasts only from the explicit
+# close to the restore backstop's corrective tab focus, which can be shorter
+# than one sampler iteration. Hold the operation just after the close until the
+# sampler has recorded a non-anchor sample (bounded), so the non-vacuity check
+# below never depends on how the sampler and the operation interleave.
+C_HOLD_SAMPLES=
+[ "$STEAL_LIVE" = 1 ] && C_HOLD_SAMPLES=$C_FOCUS_SAMPLES
 C_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$C_CALL_LOG" \
+  FM_FLASH_HOLD_SAMPLES="$C_HOLD_SAMPLES" FM_FLASH_BEFORE="$C_BEFORE" \
   FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$C_PROOF_POLLS" bash -c '
   . "$1/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
-    local session=$1
+    local session=$1 status hold=0
     shift
     printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
     HERDR_SESSION="$session" herdr "$@" --session "$session"
+    status=$?
+    if [ "$status" -eq 0 ] && [ "$1 ${2:-}" = "pane close" ] && [ -n "$FM_FLASH_HOLD_SAMPLES" ]; then
+      while [ "$hold" -lt 100 ] && ! grep -Fvxq -- "$FM_FLASH_BEFORE" "$FM_FLASH_HOLD_SAMPLES"; do
+        sleep 0.05
+        hold=$((hold + 1))
+      done
+    fi
+    return "$status"
   }
   fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
 ' _ "$ROOT" "$HERDR_LAB_SESSION" "$C_DOOMED_PANE" 2>&1)

@@ -404,8 +404,10 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          shopt -s nullglob
-          inputs=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-*.json)
+          # globstar: the Herdr artifact uploads several paths, so its timing
+          # JSON keeps a nested fm-test/ directory after the merged download.
+          shopt -s nullglob globstar
+          inputs=("$RUNNER_TEMP"/fm-test-aggregate/**/fm-test-timing-*.json)
           if [ "${#inputs[@]}" -eq 0 ]; then
             echo "::warning::no per-lane timing JSON found to aggregate"
             exit 0

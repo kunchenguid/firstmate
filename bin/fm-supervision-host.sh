@@ -546,6 +546,9 @@ await_close() {
     done
   done
   wait "$ARM_PID" 2>/dev/null || true
+  # An arm that closed between polls still streams its status line first, so
+  # an exit that prints no close still has output.
+  [ "$READY_PENDING" -eq 0 ] || stream_ready_line
   ARM_TEXT=$(cat "$ARM_OUT" 2>/dev/null || true)
   if [ -n "$READY_LINE" ]; then
     # Already printed: drop its first occurrence from this first close.
