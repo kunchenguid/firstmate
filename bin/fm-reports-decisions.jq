@@ -146,14 +146,15 @@ def blocks_of:
 
 def dedupe:
   reduce .[] as $b ({seen: {}, out: []};
-    (($b.digest // $b.words)) as $k
+    (($b.digest // $b.key)) as $k
     | if .seen[$k] then . else .seen[$k] = true | .out += [$b] end)
   | .out;
 
 # --- one task record, from either source, -> one group ----------------------
 
 def group_of:
-  ((.body // "") | normalize_escapes | trim) as $body
+  . as $task
+  | ((.body // "") | normalize_escapes | trim) as $body
   | ($body | field("Captain hold set")) as $holdset
   | {id: .id,
      rank: .rank,
@@ -164,7 +165,9 @@ def group_of:
      held: (((.hold_kind | val) == "captain") or ((.kind | val) == "captain") or ($holdset != null)),
      ts: ((.closed | epoch_of) // ($holdset | epoch_of) // (.archived | epoch_of)),
      body: $body,
-     blocks: ($body | blocks_of),
+     blocks: ($body | blocks_of | to_entries
+              | map(.value + {key: (.value.digest //
+                  ("undigested-" + ($task.id | tostring) + "-" + ($task.rank | tostring) + "-" + (.key | tostring)))})),
      notes: ($body | reconciled_notes),
      haystack: (((.title // "") + "\n" + ((.links // "") | tostring) + "\n" + $body))};
 
@@ -210,7 +213,7 @@ def target_of($reports):
          when: (if $g.ts == 0 then null else ($g.ts | strftime("%d.%m.%Y")) end),
          question: $g.question,
          items: ([$g.blocks[]
-                  | {state: .state, key: (.digest // .words),
+                  | {state: .state, key: .key,
                      digest: .digest, mode: .mode, words: .words}]
                  + $g.notes
                  + (if ($g.blocks | length) == 0 and ($g.notes | length) == 0 and $g.body != ""

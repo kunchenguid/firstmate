@@ -907,6 +907,31 @@ test_every_decision_of_one_task_appears_newest_first() {
   pass "every decision of one task appears, newest first"
 }
 
+test_same_text_without_checksums_keeps_distinct_resolution_blocks() {
+  local home html
+  home=$(decision_home)
+  write_note_archive "$home" '# Notes
+
+## Archived 2026-10-20
+- [x] gleiche-antwort - Same response twice (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Resolution mode: answered
+
+  Captain decision:
+  Same answer.
+
+  Resolution recorded by fm-captain-hold.
+  Resolution mode: answered
+
+  Captain decision:
+  Same answer.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" gleiche-antwort)
+  assert_equals 2 "$(printf '%s' "$html" | grep -o 'Same answer\.' | wc -l | tr -d ' ')" \
+    "two blocks without checksums must remain separate even with identical text"
+  pass "identical checksum-free decisions remain distinct"
+}
+
 test_a_decision_reached_through_two_sources_appears_once() {
   local home html
   home=$(decision_home)
@@ -1098,6 +1123,7 @@ test_filename_sort_keeps_decisions_without_reports
 test_report_without_a_decision_carries_no_decision_section
 test_search_finds_a_phrase_only_the_decision_carries
 test_every_decision_of_one_task_appears_newest_first
+test_same_text_without_checksums_keeps_distinct_resolution_blocks
 test_a_decision_reached_through_two_sources_appears_once
 test_home_without_archive_files_still_builds
 test_missing_tasks_toml_uses_readable_default_sources_without_warning
