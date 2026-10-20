@@ -25,9 +25,7 @@
 # to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
-# Primary config/claude-permission-mode is a captain-wide safety preference
-# (bypass or auto for every claude launch), so it flows down too and a
-# secondmate's own claude crewmates launch on the same permission posture.
+# Approval-setting inheritance follows the primary-absence exception below.
 # Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
 # a secondmate's own crewmates keep AI co-author trailers too.
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
