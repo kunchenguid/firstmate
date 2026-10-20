@@ -25,6 +25,10 @@
 # It matches a delegation-SHAPED tool name rather than a fixed list, so a future
 # tool that ships before anyone updates a local deny list is still refused.
 #
+# Messaging an existing session is not delegation, so the exact name of a tool
+# that only carries text to one is excluded below; the stem that matches it still
+# denies any other name built on it.
+#
 # The guard is narrow by design. It classifies ONE thing: the shape of the tool
 # name. It makes no judgment about whether the work should be delegated at all,
 # which is a reasoning boundary no tool-shape hook can enforce.
@@ -78,6 +82,18 @@ OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput kil
 # widen by accident.
 PLAN_ONLY_TOOLS='taskcreate taskupdate'
 
+# Exact lowercase tool names that match a stem above but only carry text to a
+# session that already exists. Claude's SendMessage delivers to a peer session
+# by name and cannot create a recipient. It can wake an in-process subagent or
+# teammate by name, which would be delegation, but every tool that creates one
+# stays denied here, so a guarded primary has no such recipient to wake.
+# Denying it left the primary unable to answer the user's own other sessions,
+# which is messaging rather than dispatch. A peer that acts on the text does so
+# in a session the user already runs, under that session's own guards.
+# Exact-name like the lists above, so a messaging tool that also creates or
+# targets new work under any other name stays denied.
+MESSAGE_ONLY_TOOLS='sendmessage'
+
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
@@ -98,6 +114,9 @@ outside any local fixed list.
 Fires only in a genuine firstmate primary home; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
+Sending a message to an existing session (the exact name SendMessage) is
+allowed, because it carries text and starts no work the fleet would not see;
+any other name built on a delegation stem is still denied.
 Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
 Malformed transport fails open.
@@ -152,7 +171,7 @@ case "$TOOL" in
   mcp__*) exit 0 ;;
 esac
 
-for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
+for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS $MESSAGE_ONLY_TOOLS; do
   [ "$NORMALIZED" != "$allowed" ] || exit 0
 done
 
