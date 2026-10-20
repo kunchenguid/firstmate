@@ -915,6 +915,28 @@ test_opencode_without_model_keeps_permission_only_config() {
   pass "opencode without a model keeps its permission-only launch config"
 }
 
+test_opencode_model_with_quote_stays_a_safe_launch_assignment() {
+  local rec id out status launch
+  id=profile-opencode-quote-z7f
+  rec=$(make_spawn_case profile-opencode-quote opencode "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "opencode/a'b\$(touch $WT_DIR/pwned)")
+  status=$?
+  expect_code 0 "$status" "opencode spawn with a quoted model id should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "\"model\":\"opencode/a'\\''b\$(touch $WT_DIR/pwned)\"}' opencode --prompt" \
+    "opencode launch must close and reopen the single quote around the model id"
+  # The launch line must stay one valid single-quoted assignment: evaluating it
+  # as a shell prefix must hand opencode the exact model id and run nothing.
+  local seen
+  seen=$(eval "${launch%% opencode --prompt*} bash -c 'printf %s \"\$OPENCODE_CONFIG_CONTENT\"'")
+  assert_contains "$seen" "\"model\":\"opencode/a'b\$(touch $WT_DIR/pwned)\"" "evaluated config lost the model id"
+  [ ! -e "$WT_DIR/pwned" ] || fail "model id metacharacters were executed by the launch line"
+  pass "opencode model ids with quotes and metacharacters stay safely quoted"
+}
+
 test_opencode_omits_variant_when_model_family_lacks_effort() {
   local rec id out status launch
   id=profile-opencode-omit-z7d
@@ -2333,6 +2355,7 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_without_model_keeps_permission_only_config
+test_opencode_model_with_quote_stays_a_safe_launch_assignment
 test_opencode_omits_variant_when_model_family_lacks_effort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
