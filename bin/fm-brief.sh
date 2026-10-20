@@ -16,11 +16,20 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--budget-wall-secs <n>] [--budget-output-tokens <n>] [--tests <none|focused|safe-suite|full>] [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--budget-wall-secs <n>] [--budget-output-tokens <n>] [--tests <none|focused|safe-suite|full>] [--base-branch <branch>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --landing-crew [--budget-wall-secs <n>] [--budget-output-tokens <n>] [--tests <none|focused|safe-suite|full>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the legacy board-compatibility floor; otherwise it asks for a text report.
+#   --landing-crew writes the merge-queue landing crew contract: the crew builds
+#   candidate branches from freshly fetched origin default-branch plus the member
+#   pull requests firstmate names, pushes each only under a firstmate lease, and
+#   never touches a pull request or rewrites history. It carries no delivery
+#   contract, keeps its record in data/<task-id>/report.md, and is spawned with
+#   bin/fm-spawn.sh --scout so cleanup treats its copy as scratch once that
+#   report exists. Its test scope defaults to none because the candidate's CI
+#   run is the proof. docs/merge-queue.md owns the queue mechanics.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -81,7 +90,7 @@
 # change.
 # It defaults to squash on gerrit and is refused without it.
 # --budget-wall-secs and --budget-output-tokens select per-brief task limits;
-# defaults are 21600 seconds and 1000000 tokens for ship/scout briefs.
+# defaults are 21600 seconds and 1000000 tokens for ship, scout, and landing-crew briefs.
 # Spawn reads the Task budget line and may override it on a fresh launch.
 # --tests selects the task's local test scope: none, focused, safe-suite, or full.
 # It defaults to none for no-mistakes and direct-PR ship briefs, whose CI runs
@@ -90,20 +99,20 @@
 # pass --tests full explicitly for it.
 # safe-suite uses tests/safe-suite-exclusions.txt, whose family selections are
 # owned by bin/fm-test-run.sh; bin/fm-dod-lib.sh owns the rendered section, which
-# bin/fm-promote.sh shares. Only ship and scout task briefs accept this flag.
+# bin/fm-promote.sh shares. Only ship, scout, and landing-crew task briefs accept this flag.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
 # on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
 # whose explicit --mode or registered forge disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
-# Both crewmate scaffolds carry one shared rule against administering the
+# Every crewmate scaffold carries one shared rule against administering the
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
-# their own slot came from - so ship and scout cannot drift apart. A secondmate
+# their own slot came from - so ship, scout, and landing crew cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
-# --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
-# scout's deliverable is a report rather than a merge, and a charter is not a
-# delivery contract. --tests applies to ship and scout task briefs, not charters.
+# --mode, --forge, and --shape are refused on scout, landing-crew, and secondmate
+# scaffolds: a scout's deliverable is a report rather than a merge, and a charter is not a
+# delivery contract. --tests applies to ship, scout, and landing-crew task briefs, not charters.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -200,6 +209,7 @@ fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
+LANDING_CREW=0
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
@@ -241,6 +251,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --landing-crew) LANDING_CREW=1 ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
@@ -267,6 +278,10 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+if [ "$LANDING_CREW" -eq 1 ]; then
+  [ "$KIND" = ship ] || { echo "error: --landing-crew cannot be combined with --scout or --secondmate" >&2; exit 1; }
+  KIND=landing
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -296,7 +311,7 @@ if [ "$KIND" = secondmate ] && [ "$TEST_SCOPE_SET" -eq 1 ]; then
 fi
 if [ "$TEST_SCOPE_SET" -eq 0 ]; then
   case "$KIND:$MODE" in
-    ship:no-mistakes|ship:direct-PR) TEST_SCOPE=none ;;
+    ship:no-mistakes|ship:direct-PR|landing:) TEST_SCOPE=none ;;
     *) TEST_SCOPE=focused ;;
   esac
 fi
@@ -347,7 +362,7 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
-  if [ "$KIND" = secondmate ] || [ -z "$BASE_BRANCH" ]; then
+  if [ "$KIND" = secondmate ] || [ "$KIND" = landing ] || [ -z "$BASE_BRANCH" ]; then
     echo "error: --base-branch takes a branch name and applies only to ship and scout briefs" >&2
     exit 1
   fi
@@ -563,7 +578,7 @@ fi
 
 REPO=${POS[1]}
 
-TEST_SCOPE_SECTION=$(fm_test_scope_section "$TEST_SCOPE" "${MODE:-scout}")
+TEST_SCOPE_SECTION=$(fm_test_scope_section "$TEST_SCOPE" "${MODE:-$KIND}")
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -614,7 +629,7 @@ TASK_SECTION="$TASK_SECTION
 
 $TEST_SCOPE_SECTION"
 
-# One shared string keeps the ship and scout infrastructure rule identical.
+# One shared string keeps the crewmate infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate
 # legitimately allocates and returns slots for crewmates in its own home.
@@ -644,7 +659,7 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
-# Shared worker safety text is generated for both ship and scout even when no
+# Shared worker safety text is generated for every crewmate scaffold even when no
 # home brief include exists. The optional include remains additive.
 IFS= read -r -d '' SHARED_HOST_SAFETY <<EOF || true
 # Shared-host safety
@@ -721,6 +736,70 @@ If your findings reveal work that should ship (e.g. you reproduced a bug and the
 EOF
 append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+exit 0
+fi
+
+# Landing crew: the merge-queue contract. docs/merge-queue.md owns the build,
+# lease, and cleanup mechanics; this text owns only what the crew may do.
+if [ "$KIND" = landing ]; then
+cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$TASK_SECTION
+
+$TASK_BUDGET_LINE
+
+$HERDR_SECTION
+
+# Setup
+$SETUP_BASE
+This is a LANDING CREW task: you build merge-queue candidate branches that one CI run proves; firstmate opens and merges every pull request itself - the batch pull request by default, member pull requests only in the fallback - and you never open or merge one.
+\`$FM_ROOT/docs/merge-queue.md\` owns the candidate mechanics; read it before the first build.
+
+# Rules
+1. Never open, close, edit, approve, or merge a pull request, and never push to the default branch or to any member pull request's branch.
+   Push only a candidate branch, only after a firstmate steering message grants a lease naming that branch and head, and only once per lease; never pass \`--no-verify\`.
+   Delete a remote candidate branch only when a firstmate steering message says its batch landed or was abandoned.
+2. Never rebase, reset, amend, or force-push, and never delete a local branch; a rebuilt candidate is a new branch with the next batch number.
+   The next batch number is 1 + the highest \`<n>\` of any \`fm/batch-<n>\` seen across \`git ls-remote --heads origin\` and the local refs of the shared repository (\`git for-each-ref refs/heads/fm/batch-*\`), so no batch number is reused while those refs remain.
+   Stay inside this worktree; the only files you may write outside it are the report, the status file, and the steering-inbox acknowledgements below.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+   \`$STATUS_APPEND\`
+   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
+   Each append wakes firstmate, so report sparingly: a built candidate, a pushed candidate, and the needs-decision/blocked/paused/done/failed states.
+   Whenever you mention a PR anywhere - a status line, your terminal, the report - write its full
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   copies that URL from your line rather than assembling one.
+   When a candidate is built, ask for its lease with \`needs-decision [at=<epoch>] [key=batch-<n>-lease]: candidate fm/batch-<n> head=<sha> base=<sha> members=<PR url>,... dropped=<PR url> (<reason>),...; push lease?\` and end your turn.
+   After the leased push, append \`$PAUSED_VERB [at=<epoch>] [key=batch-<n>]: candidate fm/batch-<n> head=<sha> pushed; waiting for firstmate to report its CI result\` and wait for the next steering message.
+$CREWMATE_PAUSE_INSTRUCTIONS
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
+$TASK_BUDGET_RULE
+6. If a decision belongs above you (which member to drop, how to resolve a conflict, anything destructive),
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+$SHARED_INFRA_RULE
+
+$SHARED_HOST_SAFETY
+
+$WAIT_BLOCK$INBOX_SECTION
+
+# Building a candidate
+Fetch origin immediately before every build and start the candidate from origin's default branch at that fetch; never reuse an older base.
+Merge each member at exactly the head commit firstmate named, in the order firstmate named them.
+A member whose forge head no longer matches that commit, or whose merge conflicts with the candidate so far, is dropped: abort that merge, continue with the next member, and report the drop with its reason.
+Never resolve a conflict or change a member's code yourself.
+
+# Definition of done
+Keep a running record in \`$DATA/$ID/report.md\`: for every candidate, its branch, base and head commits, each member's PR URL and head commit, every dropped member and why, the CI result firstmate reports, any batch PR URL firstmate reports, and whether its remote branch was deleted.
+When a firstmate steering message says the queue is finished, complete the report, leave the worktree clean, append \`done [at=<epoch>]: {batches built and members they carried}\` to the status file, and stop.
+Before every \`done\`, \`failed\`, or stopping \`blocked\` line, run \`git switch --detach\` so teardown finds no checked-out \`fm/batch-*\` branch to delete and every local batch ref survives.
+EOF
+append_brief_include
+echo "scaffolded: $BRIEF (landing crew; replace {TASK} and {FIRSTMATE_SPEC}; spawn with --scout)"
 exit 0
 fi
 

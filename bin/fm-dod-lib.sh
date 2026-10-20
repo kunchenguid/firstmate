@@ -152,9 +152,10 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 }
 
 # Single owner of the task test-scope declaration: bin/fm-brief.sh renders it
-# into ship and scout briefs and bin/fm-promote.sh into promoted ship
-# instructions; each caller owns its default. Only no-mistakes and direct-PR
-# reach CI, so none promises CI only there. The no-mistakes Test-step skip
+# into ship, scout, and landing-crew briefs and bin/fm-promote.sh into promoted
+# ship instructions; each caller owns its default. Only no-mistakes and
+# direct-PR reach CI, so none promises CI only there, and a landing crew's none
+# names its candidate's CI run as the proof. The no-mistakes Test-step skip
 # answer is limited to none and focused because safe-suite and full ask for the
 # suite to run, while the timeout-means-needs-decision rule holds at every
 # scope. The Firstmate figures are bin/fm-test-run.sh --estimate-ms over the
@@ -167,7 +168,7 @@ fm_test_scope_valid() {  # <scope>
   return 1
 }
 
-fm_test_scope_section() {  # <none|focused|safe-suite|full> <no-mistakes|direct-PR|local-only|scout>
+fm_test_scope_section() {  # <none|focused|safe-suite|full> <no-mistakes|direct-PR|local-only|scout|landing>
   local scope=$1 flow=$2 lib_dir estimate_ms no_figure
   local test_step_skip='When the no-mistakes Test step asks for approval, answer with skip because fork CI runs the suite.'
   lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -178,6 +179,8 @@ fm_test_scope_section() {  # <none|focused|safe-suite|full> <no-mistakes|direct-
       case "$flow" in
         no-mistakes|direct-PR)
           printf '%s\n' 'Permits: no local test runs; still write any regression test the task requires, and CI runs it.' ;;
+        landing)
+          printf '%s\n' "Permits: no local test runs; the candidate's CI run is the only proof." ;;
         *)
           printf '%s\n' 'Permits: no local test runs, and no CI will run tests for this task.' ;;
       esac

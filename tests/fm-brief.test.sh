@@ -1037,6 +1037,70 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Contract: a merge-queue landing crew builds and pushes candidate branches only.
+# It never touches a pull request, never rewrites history or deletes a local
+# branch, builds every candidate from a freshly fetched default branch, pushes
+# only under a firstmate lease, and reports each candidate's head and membership
+# in status. It is not a ship, so spawn never reads a delivery mode from it, and
+# its durable record is the report a scout-kind cleanup requires.
+test_landing_crew_scaffold() {
+  local brief id=brief-landing-q6
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" alpha --landing-crew >/dev/null 2>&1 \
+    || fail "fm-brief.sh landing-crew scaffold exited non-zero"
+  brief="$BRIEF_HOME/data/$id/brief.md"
+  assert_present "$brief" "landing-crew brief was not scaffolded"
+  assert_grep "## Captain's intent" "$brief" "landing-crew brief missing Captain's intent subsection"
+  assert_grep "{FIRSTMATE_SPEC}" "$brief" "landing-crew brief missing the spec placeholder"
+  assert_grep "This is a LANDING CREW task" "$brief" "landing-crew brief must declare its kind"
+  assert_no_grep "Delivery contract: mode=" "$brief" \
+    "a landing crew is not a ship and must carry no delivery contract for spawn to read"
+  assert_grep "Never open, close, edit, approve, or merge a pull request" "$brief" \
+    "landing crew must never open or merge a pull request"
+  assert_grep "never push to the default branch or to any member pull request's branch" "$brief" \
+    "landing crew must never push to main or a member branch"
+  assert_grep "only after a firstmate steering message grants a lease naming that branch and head" "$brief" \
+    "landing crew must push only under a firstmate lease"
+  assert_grep "never pass \`--no-verify\`" "$brief" "landing crew must never bypass a pre-push hook"
+  assert_grep "Never rebase, reset, amend, or force-push, and never delete a local branch" "$brief" \
+    "landing crew must never rewrite history or delete a local branch"
+  assert_grep "The next batch number is 1 + the highest \`<n>\` of any \`fm/batch-<n>\` seen across \`git ls-remote --heads origin\` and the local refs of the shared repository (\`git for-each-ref refs/heads/fm/batch-*\`)" "$brief" \
+    "landing crew must number batches from the remote and local fm/batch refs so no number is reused while those refs remain"
+  assert_grep "Before every \`done\`, \`failed\`, or stopping \`blocked\` line, run \`git switch --detach\`" "$brief" \
+    "landing crew must detach before teardown so no local batch ref is deleted"
+  assert_grep "Fetch origin immediately before every build" "$brief" \
+    "landing crew must build each candidate from a fresh fetch"
+  assert_grep "[key=batch-<n>-lease]: candidate fm/batch-<n> head=<sha> base=<sha> members=" "$brief" \
+    "landing crew must report candidate head and membership in status"
+  assert_grep "$BRIEF_HOME/data/$id/report.md" "$brief" "landing crew must keep its record in the task report"
+  assert_grep "$ROOT/docs/merge-queue.md" "$brief" "landing crew must point at the merge-queue mechanics owner"
+  assert_grep "Scope: none." "$brief" "landing crew runs no local tests by default"
+  assert_grep "the candidate's CI run is the only proof" "$brief" "landing crew test scope must name the candidate run as proof"
+  assert_no_grep "EOF" "$brief" "landing-crew brief leaked a heredoc EOF marker"
+  pass "fm-brief.sh: --landing-crew scaffolds the merge-queue landing contract"
+}
+
+test_landing_crew_refuses_delivery_flags() {
+  local home out status label args expect
+  home="$TMP_ROOT/landing-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+    assert_absent "$home/data/${args%% *}/brief.md" "$label: a refused scaffold still wrote a brief"
+  done <<'ROWS'
+mode|landing-r1 alpha --landing-crew --mode direct-PR|--mode applies only to ship briefs
+scout|landing-r2 alpha --landing-crew --scout|--landing-crew cannot be combined with --scout or --secondmate
+branch prefix|landing-r3 alpha --landing-crew --branch-prefix fix/|--branch-prefix applies only to ship briefs
+base branch|landing-r4 alpha --landing-crew --base-branch release|--base-branch takes a branch name and applies only to ship and scout briefs
+forge|landing-r5 alpha --landing-crew --forge gerrit|--forge and --shape apply only to ship briefs
+ROWS
+  pass "fm-brief.sh: --landing-crew refuses ship-only and conflicting kind flags"
+}
+
 # Contract: a waiting worker spends no turns. A decision wait ends the turn, an
 # external wait sleeps in one bounded blocking shell command sized per harness,
 # and a waiting worker neither polls its inbox nor polls a pipeline between holds.
@@ -1522,6 +1586,8 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_landing_crew_scaffold
+test_landing_crew_refuses_delivery_flags
 test_scout_lavish_line_follows_presentation_floor
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief

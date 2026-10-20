@@ -393,6 +393,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/merge-queue.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/fleet-ledger.md",
       "audience": "operator-current"
     },

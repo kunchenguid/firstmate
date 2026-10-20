@@ -919,7 +919,7 @@ The address selects the existing shared server; it does not authorize starting o
 
 ## Home brief include (config/brief-include.md)
 
-The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.
+The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship, scout, and landing-crew brief.
 This keeps private brief content out of tracked files.
 When the file exists, `bin/fm-brief.sh` appends its text verbatim as the scaffold's last section, `# Home brief additions`, which defers to every other section of the brief, including the ship contract a later scout promotion appends below it.
 
@@ -931,7 +931,7 @@ The generated shared-host safety rules apply without this include; homes still c
 
 ## Contained worker experiments
 
-The worker-facing risk gate and containment rule are owned by `bin/fm-brief.sh` and generated for ship and scout briefs.
+The worker-facing risk gate and containment rule are owned by `bin/fm-brief.sh` and generated for ship, scout, and landing-crew briefs.
 For an approved experiment, the user-scope command shape is `systemd-run --user --scope -p TasksMax=<n> -p MemoryMax=<size> -p MemorySwapMax=0 -p RuntimeMaxSec=<seconds> -- <command>`; size each placeholder to the job, not as host-wide limits.
 Script authors must resolve a binary's real path with `type -P <name>` before any wrapper directory is prepended to PATH, not `command -v`, which may return a shell function's bare name rather than an executable path.
 
