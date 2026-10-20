@@ -56,8 +56,8 @@
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
-#     pr.url prefers recorded pr=, else a canonical URL from the latest exact
-#     `done: PR <url> [checks green]` event (with an optional emission stamp).
+#     pr.url prefers recorded pr=, else a canonical URL only when the latest
+#     status line is exactly `done: PR <url> [checks green]` (optional stamp).
 #     pr.source is meta, status_event, or absent; scouts never claim a PR URL.
 #     fm_pf_pr_url_valid owns status-link classification, not landing proof.
 #     paths.status_log.last_event is historical wake-event data only, never

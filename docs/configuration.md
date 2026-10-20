@@ -391,7 +391,7 @@ Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegati
 ### Required tools and manual mode
 
 Compatible means the installed build passes the shared version and feature probe owned by [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh), including the atomic multi-ID move required by handoff delegation.
-[`fm_pf_pr_url_valid`](../bin/fm-public-followup-lib.sh) owns static review-link classification for snapshots, inactive returns and public follow-ups; acceptance of Forgejo links does not add Forgejo merge or watch support.
+[`fm_pf_pr_url_valid`](../bin/fm-public-followup-lib.sh) owns static review-link classification for snapshots, inactive returns and public follow-ups; accepted links are not landing proof (see [architecture.md](architecture.md)).
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
 
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
@@ -1663,7 +1663,7 @@ Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+A GitLab project needs no forge token; its watch, merge, review and cleanup readers require `glab` and `jq` on `PATH`, with `glab` authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
