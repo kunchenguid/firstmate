@@ -25,6 +25,8 @@ Collect successful per-script measurements for every member before calculating a
 That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The 2026-10-07 polytoken adapter tests carry provisional local measurements instead - 21090 ms for `tests/fm-polytoken-harness.test.sh` and the 103 ms live-guard skip for `tests/fm-polytoken-signals-live-e2e.test.sh`, both measured on the adapter-verification macOS host - until the next CI refresh replaces them with Ubuntu measurements, because they postdate the 2026-09-30 baseline.
+The 2026-10-20 wedge-cap suite carries provisional local measurements instead - 1003000 ms for `tests/fm-watch-wedge-cap.test.sh` and the 155 ms live-guard skip for `tests/fm-watch-wedge-cap-live.test.sh`, both measured on the change host - until the next CI refresh replaces them with Ubuntu measurements, because they postdate the 2026-09-30 baseline.
+They are not a formality: without them the suite is packed on the 45000 ms default, which put it beside a shard already holding about 17 minutes of measured work, so that shard would have run for about 34 minutes and been cancelled at the 30-minute job cap while the coverage guard still passed.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
 
 ## Parallel lanes
