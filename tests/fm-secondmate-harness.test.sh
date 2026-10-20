@@ -1768,7 +1768,7 @@ test_approval_mode_inheritance_present_and_absent() {
     printf '%s\n' "$fallback" > "$w/sm/config/$setting"
     out=$(run_config_push "$w" 2>"$err"); status=$?
     expect_code 0 "$status" "$setting primary-absent push should succeed"
-    [ "$(cat "$w/sm/config/$setting")" = "$fallback" ] || fail "$setting local fallback erased by primary absence"
+    [ ! -e "$w/sm/config/$setting" ] || fail "$setting local fallback survived primary absence"
 
     printf 'bypass\n' > "$w/home/config/$setting"
     out=$(run_config_push "$w" 2>"$err"); status=$?
@@ -1779,9 +1779,9 @@ test_approval_mode_inheritance_present_and_absent() {
     rm -f "$w/home/config/$setting"
     out=$(run_config_push "$w" 2>"$err"); status=$?
     expect_code 0 "$status" "$setting absence push should succeed"
-    [ "$(cat "$w/sm/config/$setting")" = bypass ] || fail "$setting local choice erased by primary absence"
+    [ ! -e "$w/sm/config/$setting" ] || fail "$setting inherited value survived primary absence"
   done
-  pass "B12c approval mode inheritance preserves local choices on primary absence and honors explicit primary values"
+  pass "B12c approval modes follow primary values and primary absence"
 }
 
 test_backend_inheritance_present_and_absent() {

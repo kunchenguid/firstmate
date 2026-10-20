@@ -180,7 +180,7 @@ case "$COMMAND" in
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
     commit_generation
-    if fm_config_inherit_item_preserves_absence "$BASE" || [ ! -e "$DEST" ]; then
+    if [ ! -e "$DEST" ]; then
       printf 'unchanged: %s\n' "$REL"
       exit 0
     fi

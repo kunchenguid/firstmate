@@ -3,6 +3,8 @@
 # Usage: FM_HOME=<owning-home> fm-approval-failover.sh apply <task-id>
 # Firstmate must first observe a defeated bypass: a Codex command-approval
 # prompt under its bypass launch, or a Claude policy refusal of a bypass session.
+# Obtain the captain's explicit approval before running apply; observing the
+# failure alone does not authorize a lasting permission change or relaunch.
 # This command does not detect, poll, capture a screen, or answer an approval.
 # It saves approve-for-me (Codex) or auto (Claude) only when the owning home's
 # mode file is absent, then uses fm-control interrupt/relaunch to preserve and
@@ -18,7 +20,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 case "${1:-}" in
   --help|-h)
     printf '%s\n' 'Usage: FM_HOME=<owning-home> fm-approval-failover.sh apply <task-id>' \
-      'Run only after observing a defeated bypass. Saves the runtime fallback once and relaunches through fm-control.'
+      "Run only after observing a defeated bypass and obtaining the captain's explicit approval." \
+      'Saves the runtime fallback once and relaunches through fm-control.'
     exit 0
     ;;
   apply) [ "$#" -eq 2 ] || { echo 'error: apply requires one task id' >&2; exit 2; } ;;
