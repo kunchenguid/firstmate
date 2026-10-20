@@ -345,7 +345,7 @@ fm_test_run_spawn() {
   # That throwaway HOME sits inside the test home, where bin/fm-spawn.sh refuses
   # a Treehouse pool root, so TREEHOUSE_ROOT is pinned beside the test home
   # unless a test names its own through FM_TEST_TREEHOUSE_ROOT; an empty value
-  # leaves the choice to the project's treehouse.toml. A test that needs HOME
+  # leaves it unset, so the default base applies. A test that needs HOME
   # outside the test home names it through FM_TEST_SPAWN_HOME.
   local spawn_home=${FM_TEST_SPAWN_HOME:-$home/user-home}
   mkdir -p "$spawn_home"

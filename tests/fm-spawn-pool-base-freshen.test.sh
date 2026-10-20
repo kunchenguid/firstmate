@@ -849,41 +849,43 @@ test_every_home_allocates_from_its_own_pool_root() {
   pass "every home allocates from its own stable Treehouse pool root outside any firstmate checkout"
 }
 
-# With no TREEHOUSE_ROOT, the default root is the `root` key of the project's
-# treehouse.toml, written as either a TOML basic or literal string, exactly as
-# Treehouse itself reads it.
-test_pool_root_follows_the_project_treehouse_toml() {
-  local rec id out status pane_log quote th_real root
-  for quote in basic literal; do
-    id="pool-root-toml-$quote-r1"
-    rec=$(make_case "pool-root-toml-$quote" "$id")
+# The pool root's base is an absolute TREEHOUSE_ROOT or $HOME/.treehouse, never
+# a project's in-project treehouse.toml root or a relative TREEHOUSE_ROOT, so
+# no home's copies land inside a project checkout.
+test_pool_root_ignores_in_project_and_relative_roots() {
+  local rec id out status pane_log shape user_real root th
+  for shape in in-project-toml relative-env; do
+    id="pool-root-ignore-$shape-r1"
+    rec=$(make_case "pool-root-ignore-$shape" "$id")
     read_case_record "$rec"
-    mkdir -p "$CASE_DIR/th-config"
-    th_real=$(cd "$CASE_DIR/th-config" && pwd -P)
-    if [ "$quote" = basic ]; then
-      printf 'max_trees = 4\nroot = "%s" # pools\n' "$CASE_DIR/th-config" > "$PROJECT_DIR/treehouse.toml"
+    mkdir -p "$CASE_DIR/user"
+    user_real=$(cd "$CASE_DIR/user" && pwd -P)
+    th=
+    if [ "$shape" = in-project-toml ]; then
+      printf "root = '.'\n" > "$PROJECT_DIR/treehouse.toml"
     else
-      printf "max_trees = 4\nroot = '%s' # pools\n" "$CASE_DIR/th-config" > "$PROJECT_DIR/treehouse.toml"
+      th=relative/pools
     fi
     pane_log="$CASE_DIR/pane.log"
     : > "$pane_log"
-    out=$(FM_TEST_TREEHOUSE_ROOT='' FM_TEST_SPAWN_HOME="$CASE_DIR/user" FM_FAKE_PANE_LOG="$pane_log" \
+    out=$(FM_TEST_TREEHOUSE_ROOT=$th FM_TEST_SPAWN_HOME="$CASE_DIR/user" FM_FAKE_PANE_LOG="$pane_log" \
       run_spawn "$id" --scout)
     status=$?
-    expect_code 0 "$status" "a $quote-string treehouse.toml root should launch"$'\n'"$out"
+    expect_code 0 "$status" "$shape: spawn should launch from the default base"$'\n'"$out"
     root=$(sed -n "s|^treehouse --root '\\(.*\\)' get\$|\\1|p" "$pane_log")
     case "$root" in
-      "$th_real"/fm-homes/?*) ;;
-      *) fail "a $quote-string treehouse.toml root was not honored: got '$root', expected under '$th_real/fm-homes'" ;;
+      "$user_real"/.treehouse/fm-homes/?*) ;;
+      *) fail "$shape: pool root '$root' is not under \$HOME/.treehouse/fm-homes ('$user_real')" ;;
     esac
   done
-  pass "the pool root follows a basic or literal root in the project's treehouse.toml"
+  pass "an in-project treehouse.toml root and a relative TREEHOUSE_ROOT are ignored for the pool root"
 }
 
-# A pool root inside this firstmate home, or under a directory other than $HOME
-# and its ancestors that carries CLAUDE.md or AGENTS.md, would put that file above every task copy, so
-# the spawn refuses before it asks Treehouse for a slot. Instructions at $HOME
-# itself already reach every project, so they do not refuse.
+# A pool root inside this firstmate home, or under a directory strictly below
+# $HOME that carries CLAUDE.md or AGENTS.md, such as a project checkout, would
+# put that file above every task copy, so the spawn refuses before it asks
+# Treehouse for a slot. Instructions at $HOME itself already reach every
+# project, so they do not refuse the default $HOME/.treehouse base.
 test_pool_root_under_agent_instructions_is_refused() {
   local rec id out status pane_log shape root user expect
   for shape in inside-home instructed-ancestor home-level; do
@@ -899,16 +901,16 @@ test_pool_root_under_agent_instructions_is_refused() {
         root="$user/checkout/pools"; expect="carries agent instructions" ;;
       home-level)
         printf 'personal notes\n' > "$user/CLAUDE.md"
-        root="$user/pools"; expect= ;;
+        root=; expect= ;;
     esac
-    mkdir -p "$root"
+    [ -z "$root" ] || mkdir -p "$root"
     pane_log="$CASE_DIR/pane.log"
     : > "$pane_log"
     out=$(FM_TEST_SPAWN_HOME="$user" FM_TEST_TREEHOUSE_ROOT="$root" FM_FAKE_PANE_LOG="$pane_log" \
       run_spawn "$id" --scout)
     status=$?
     if [ -z "$expect" ]; then
-      expect_code 0 "$status" "$shape: a pool root under \$HOME's own instructions should launch"$'\n'"$out"
+      expect_code 0 "$status" "$shape: \$HOME's own CLAUDE.md should not refuse the default pool root"$'\n'"$out"
       continue
     fi
     [ "$status" -ne 0 ] || fail "$shape: spawn launched with a pool root under agent instructions"$'\n'"$out"
@@ -1351,7 +1353,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_foreign_clone_slot_is_refused_before_any_mutation
 test_every_home_allocates_from_its_own_pool_root
-test_pool_root_follows_the_project_treehouse_toml
+test_pool_root_ignores_in_project_and_relative_roots
 test_pool_root_under_agent_instructions_is_refused
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock

@@ -293,7 +293,7 @@
 #   git dir: Treehouse keys a pool by clone directory name and origin, so a
 #   free slot another clone of the same origin created is refused before any
 #   fetch, reset, or slot claim. Every home, primary or secondmate, runs
-#   `treehouse --root <default-root>/fm-homes/<home-id> get`, so its clones
+#   `treehouse --root <base>/fm-homes/<home-id> get`, so its clones
 #   allocate from a pool root of their own, outside every firstmate checkout,
 #   and never from Treehouse's shared default root. Teardown
 #   and relaunch find a slot by the worktree path its task recorded and never
@@ -3910,28 +3910,26 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# The Treehouse pool root dedicated to this home: <default>/fm-homes/<home-id>.
-# <default> is the root Treehouse itself resolves with no --root: TREEHOUSE_ROOT,
-# else the `root` key of the project's treehouse.toml, else $HOME, a relative
-# value resolving from the project's repository root. <home-id> is the first 12
-# hex digits of `git hash-object` over this home's physical path, so one home
-# always maps to one root. Agent harnesses load every CLAUDE.md and AGENTS.md
-# above a worker's directory, so the root must not lie under this home, its
-# state, or any directory that carries one of those files, except $HOME and its
-# own ancestors, whose files already reach every project. SPAWN_TREEHOUSE_ROOT
-# is left holding the root, or the refusal is printed and this returns non-zero.
+# The Treehouse pool root dedicated to this home: <base>/fm-homes/<home-id>.
+# <base> is TREEHOUSE_ROOT when it is set and absolute, else $HOME/.treehouse;
+# it never comes from a project checkout or its treehouse.toml, so a project's
+# own relative or in-project pool never places another home's copies inside it.
+# <home-id> is the first 12 hex digits of `git hash-object` over this home's
+# physical path, so one home always maps to one root. Agent harnesses load
+# every CLAUDE.md and AGENTS.md above a worker's directory, so the root must not
+# lie inside this home or its state, nor under a directory strictly below $HOME
+# that carries one of those files; $HOME itself and its ancestors are exempt.
+# SPAWN_TREEHOUSE_ROOT is left holding the root, or the refusal is printed and
+# this returns non-zero.
 SPAWN_TREEHOUSE_ROOT=
 spawn_treehouse_pool_root() {
-  local top base home_real state_real home_id dir user_home
+  local base home_real state_real home_id dir user_home
   SPAWN_TREEHOUSE_ROOT=
-  top=$(git -C "$PROJ_ABS_REAL" rev-parse --show-toplevel 2>/dev/null) || top=$PROJ_ABS_REAL
-  base=${TREEHOUSE_ROOT:-}
-  if [ -z "$base" ] && [ -f "$top/treehouse.toml" ]; then
-    base=$(sed -n -e 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-      -e "s/^[[:space:]]*root[[:space:]]*=[[:space:]]*'\\([^']*\\)'.*/\\1/p" "$top/treehouse.toml" | head -n 1)
-  fi
-  [ -n "$base" ] || base=${HOME:?}
-  case "$base" in /*) ;; *) base=$top/$base ;; esac
+  user_home=$(cd "${HOME:?}" 2>/dev/null && pwd -P || printf '%s\n' "${HOME%/}")
+  case "${TREEHOUSE_ROOT:-}" in
+    /*) base=$TREEHOUSE_ROOT ;;
+    *) base=$user_home/.treehouse ;;
+  esac
   base=$(cd "$base" 2>/dev/null && pwd -P || printf '%s\n' "${base%/}")
   home_real=$(cd "$FM_HOME" && pwd -P) || return 1
   state_real=$(cd "$STATE" && pwd -P) || return 1
@@ -3942,17 +3940,12 @@ spawn_treehouse_pool_root() {
       echo "error: Treehouse pool root '$SPAWN_TREEHOUSE_ROOT' lies inside this firstmate home '$home_real'; refusing to place task copies under its agent instructions" >&2
       return 1 ;;
   esac
-  user_home=$(cd "${HOME:?}" 2>/dev/null && pwd -P) || user_home=$HOME
   dir=$SPAWN_TREEHOUSE_ROOT
-  while [ "$dir" != / ] && [ -n "$dir" ]; do
-    case "$user_home/" in
-      "$dir"/*) ;;
-      *)
-        if [ -e "$dir/CLAUDE.md" ] || [ -L "$dir/CLAUDE.md" ] || [ -e "$dir/AGENTS.md" ] || [ -L "$dir/AGENTS.md" ]; then
-          echo "error: Treehouse pool root '$SPAWN_TREEHOUSE_ROOT' lies under '$dir', which carries agent instructions (CLAUDE.md or AGENTS.md) every task copy would load; refusing to spawn" >&2
-          return 1
-        fi ;;
-    esac
+  while case "$dir" in "$user_home"/?*) true ;; *) false ;; esac; do
+    if [ -e "$dir/CLAUDE.md" ] || [ -L "$dir/CLAUDE.md" ] || [ -e "$dir/AGENTS.md" ] || [ -L "$dir/AGENTS.md" ]; then
+      echo "error: Treehouse pool root '$SPAWN_TREEHOUSE_ROOT' lies under '$dir', which carries agent instructions (CLAUDE.md or AGENTS.md) every task copy would load; refusing to spawn" >&2
+      return 1
+    fi
     dir=$(dirname "$dir")
   done
   return 0
