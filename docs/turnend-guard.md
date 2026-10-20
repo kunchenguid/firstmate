@@ -68,6 +68,7 @@ The marker must meet both of these conditions:
 
 An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
+A session carrying the `FM_TASK_ID` mark that `bin/fm-spawn.sh` gives ship and scout panes is never primary, even in a recycled pool slot that still carries a former secondmate home's marker.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 ### Supervision need

@@ -140,6 +140,7 @@ A home is in scope when it has `AGENTS.md`, a `bin/` directory, an existing stat
 A marked secondmate home is in scope on purpose: it operates its own fleet and must dispatch through it for the same durability reasons.
 
 A crewmate's disposable task worktree is a linked git worktree, which is the shape `bin/fm-spawn.sh` always hands out, so it is out of scope.
+A ship or scout session carrying the `FM_TASK_ID` mark is out of scope even when its worktree still carries a stale secondmate marker ([turn-end guard primary scope](turnend-guard.md#primary-scope)).
 A crewmate using delegation tools inside its own task worktree is legitimate and stays allowed.
 A non-firstmate repo is out of scope.
 Any failure to confirm the home is inert, never a block, so a broken environment can never deny a tool call.
