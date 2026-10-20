@@ -422,14 +422,16 @@ let nextEntry = 2;
 let pending = false;
 let editor = "";
 let idle = false;
+let snapshotFails = false;
 
 function runtime() {
   const handlers = new Map();
   const messages = [];
   const entries = [];
+  const emitted = [];
   const pi = {
     on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
-    events: { on() {}, emit() {} },
+    events: { on() {}, emit(name) { emitted.push(name); } },
     registerCommand() {},
     appendEntry(customType, data) {
       const entry = { type: "custom", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(), customType, data };
@@ -441,6 +443,9 @@ function runtime() {
         customType: message.customType, content: message.content, display: message.display, details: message.details });
     },
     async exec(command, args, options) {
+      if (snapshotFails && args.includes("--all-in-flight")) {
+        return { stdout: "", stderr: "snapshot unavailable", code: 1, killed: false };
+      }
       const result = spawnSync(command, args, { encoding: "utf8", cwd: options?.cwd, timeout: options?.timeout, env: process.env });
       return { stdout: result.stdout || "", stderr: result.stderr || "", code: result.status ?? 99, killed: false };
     },
@@ -450,13 +455,13 @@ function runtime() {
     ui: { getEditorText: () => editor, notify() {} },
     sessionManager: {
       getSessionId: () => "session-1", getSessionFile: () => process.env.SESSION_FILE,
-      getLeafId: () => "entry-1", getBranch: () => branch,
+      getLeafId: () => branch.at(-1)?.id, getBranch: () => branch,
     },
   };
   const emit = async (name, event = { type: name }) => {
     for (const handler of handlers.get(name) || []) await handler(event, ctx);
   };
-  return { pi, ctx, emit, messages, entries };
+  return { pi, ctx, emit, messages, entries, emitted };
 }
 
 async function settleAsync() {
@@ -510,6 +515,16 @@ await first.emit("agent_settled", { type: "agent_settled", aborted: false });
 await settleAsync();
 if (first.messages.length !== 0) throw new Error("editor input was interrupted");
 editor = "";
+snapshotFails = true;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("failed inventory collection emitted a reminder");
+if (!first.emitted.includes("firstmate:heartbeat-tick")) throw new Error("failed reminder collection starved existing scheduling");
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 0) throw new Error("failed inventory collection retried on the same clock boundary");
+snapshotFails = false;
+now += 60_000;
 await first.emit("agent_settled", { type: "agent_settled", aborted: false });
 await settleAsync();
 if (first.messages.length !== 1) throw new Error(`expected one due reminder, got ${first.messages.length}`);
@@ -560,7 +575,46 @@ reloadMod.default(reloaded.pi);
 await reloaded.emit("session_start", { type: "session_start", reason: "reload" });
 await settleAsync();
 if (reloaded.messages.length !== 0) throw new Error("extension reload duplicated a handled reminder");
-await reloaded.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+now += 1_800_000;
+branch.push({ type: "custom_message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  customType: "fm-idle-reminder-request", content: "orphaned request", display: false,
+  details: { version: 1, reminder_id: "orphaned-after-restart" } });
+await reloaded.emit("session_shutdown", { type: "session_shutdown", reason: "cold-restart" });
+
+const restarted = runtime();
+const restartMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?reload=2`);
+restartMod.default(restarted.pi);
+await restarted.emit("session_start", { type: "session_start", reason: "startup" });
+await settleAsync();
+if (restarted.messages.length !== 0) throw new Error("cold restart duplicated an orphaned reminder request");
+now += 60_000;
+await restarted.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (restarted.messages.length !== 1) throw new Error("cold restart did not release the orphaned reminder after a paced boundary");
+const failed = restarted.messages[0];
+await restarted.emit("before_agent_start", { type: "before_agent_start", messageType: "custom", message: failed.message,
+  systemPrompt: "", systemPromptOptions: {} });
+const toolPreamble = { role: "assistant", content: [{ type: "text", text: "reading details" }],
+  stopReason: "toolUse", timestamp: now };
+branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(), message: toolPreamble });
+await restarted.emit("message_end", { type: "message_end", message: toolPreamble });
+await restarted.emit("agent_settled", { type: "agent_settled", aborted: true });
+await settleAsync();
+if (restarted.messages.length !== 1) throw new Error("aborted reminder retried from its own settlement");
+await restarted.emit("session_shutdown", { type: "session_shutdown", reason: "failed-restart" });
+
+const failedReload = runtime();
+const failedMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?reload=3`);
+failedMod.default(failedReload.pi);
+await failedReload.emit("session_start", { type: "session_start", reason: "startup" });
+await settleAsync();
+if (failedReload.messages.length !== 0) throw new Error("tool preamble or failed receipt was reconstructed as successful delivery");
+now += 60_000;
+await failedReload.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (failedReload.messages.length !== 1) throw new Error("failed reminder did not retry at a paced later boundary");
+await finishReminder(failedReload, failedReload.messages[0]);
+await failedReload.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 console.log(JSON.stringify({ reminders: first.messages.length, receipts: first.entries.filter((e) => e.customType === "fm-idle-reminder-delivered").length }));
 EOF
   ) || fail "idle reminder lifecycle failed: $out"
@@ -761,6 +815,32 @@ DATE
   pass "heartbeat persists paced recovery across generations without resetting attempts or fabricating progress"
 }
 
+test_idle_reminder_runs_through_installed_pi() {
+  local home out sdk status=0
+  sdk=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: installed-Pi idle reminder regression requires installed Pi SDK\n'
+    return
+  fi
+  home=$(new_home installed-pi-idle-reminder)
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add installed-pi-work \
+    'Continue the installed Pi reminder validation' --kind ship >/dev/null
+  set +e
+  # shellcheck disable=SC2016 # Positional parameters belong to the nested shell.
+  out=$(env -u FIRSTMATE_OP -u FM_TASK_ID -u FM_SUPERVISION_ACTOR FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PERIODIC_STOW_TICK_MS=20 bash -c \
+    'exec -a pi node "$1" "$2" "$3" "$4"' launcher \
+    "$ROOT/tests/fm-periodic-stow-installed.mjs" "$ROOT" "$home" "$sdk" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "installed Pi idle reminder lifecycle failed: $out"
+  case "$out" in
+    *'"providerCalls":2'*'"networkCalls":0'*'"runtime":"installed AgentSession + DefaultResourceLoader"'*) ;;
+    *) fail "installed Pi idle reminder evidence was incomplete: $out" ;;
+  esac
+  pass "installed Pi delivers one idle reminder and restores its successful cadence without network access"
+}
+
 test_status_is_read_only_and_default_idle
 test_request_delivery_begin_and_verified_finish
 test_cas_generation_and_role_refuse_stale_callers
@@ -772,6 +852,7 @@ test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
 test_idle_reminder_uses_successful_settlement_cadence
 test_idle_reminder_stays_silent_for_empty_inventory
 test_idle_reminder_is_not_suppressed_by_old_maintenance
+test_idle_reminder_runs_through_installed_pi
 
 test_heartbeat_requires_three_verified_duties
 

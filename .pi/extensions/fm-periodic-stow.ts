@@ -68,6 +68,7 @@ type CoordinatorGeneration = {
   reminderChecking: boolean;
   reminderPendingId: string | null;
   reminderLastHandledAt: number;
+  reminderRetryAfter: number;
   reminderRun: IdleReminderRun | null;
 };
 
@@ -275,6 +276,7 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
       const details = entry.details as { version?: unknown; reminder_id?: unknown } | undefined;
       if (details?.version === 1 && typeof details.reminder_id === "string") {
         pending = { id: details.reminder_id, at: entryTime(entry.timestamp) };
+        recovered = null;
       }
       continue;
     }
@@ -283,20 +285,29 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
       const handledAt = entryTime(data?.handled_at);
       if (data?.version === 1 && handledAt > 0) {
         generation.reminderLastHandledAt = Math.max(generation.reminderLastHandledAt, handledAt);
-        if (pending && (entry.customType === reminderEmptyType || data?.reminder_id === pending.id)) pending = null;
+        if (pending && (entry.customType === reminderEmptyType || data?.reminder_id === pending.id)) {
+          pending = null;
+          recovered = null;
+        }
       }
       continue;
     }
     if (entry.type === "custom" && entry.customType === reminderFailedType) {
-      const data = entry.data as { reminder_id?: unknown } | undefined;
-      if (pending && data?.reminder_id === pending.id) pending = null;
+      const data = entry.data as { reminder_id?: unknown; failed_at?: unknown } | undefined;
+      if ((pending && data?.reminder_id === pending.id) || data?.reminder_id === recovered?.id) {
+        pending = null;
+        recovered = null;
+        const failedAt = entryTime(data?.failed_at);
+        if (failedAt > 0) generation.reminderRetryAfter = Math.max(
+          generation.reminderRetryAfter, failedAt + reminderRetryDelay());
+      }
       continue;
     }
     if (pending && entry.type === "message") {
       const message = entry.message as { stopReason?: unknown } | undefined;
       if (assistantText(message) && message?.stopReason !== "error" && message?.stopReason !== "aborted") {
         recovered = { id: pending.id, at: entryTime(entry.timestamp) || entryTime((message as { timestamp?: unknown }).timestamp) };
-        pending = null;
+        if (message?.stopReason === "toolUse") recovered = null;
       }
     }
   }
@@ -305,8 +316,20 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
     pi.appendEntry(reminderReceiptType, { version: 1, reminder_id: recovered.id,
       handled_at: new Date(recovered.at).toISOString(), session_id: generation.sessionId,
       session_file: generation.sessionFile });
+    pending = null;
+  }
+  // A hot reload retains Pi's queued follow-up and can continue observing it.
+  // A cold restart has no live queue ownership, so release an orphaned request
+  // and retry only on a later clock boundary.
+  if (pending && !ctx.hasPendingMessages()) {
+    generation.reminderRetryAfter = Date.now() + reminderRetryDelay();
+    pending = null;
   }
   generation.reminderPendingId = pending?.id ?? null;
+}
+
+function reminderRetryDelay(): number {
+  return Math.max(1000, Math.min(tickMs, 60_000));
 }
 
 function reminderLockOwned(): boolean {
@@ -357,21 +380,23 @@ function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string): 
 async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
   const generation = activeGeneration;
   if (!generation?.live || !isMainEligible()) return false;
-  if (generation.reminderChecking || generation.reminderPendingId) return true;
   const configured = readReminderConfig();
   if (configured.error) {
     notifyReminderConfiguration(ctx, configured.error);
     return false;
   }
   const config = configured.config;
-  if (!config?.enabled || !reminderDue(config, generation) || !safeSettled(ctx) || !reminderLockOwned()) return false;
+  if (!config?.enabled) return false;
+  if (generation.reminderChecking || generation.reminderPendingId) return true;
+  if (Date.now() < generation.reminderRetryAfter || !reminderDue(config, generation) ||
+      !safeSettled(ctx) || !reminderLockOwned()) return false;
   lastReminderConfigurationError = "";
   generation.reminderChecking = true;
   try {
     const result = await pi.exec("bash", [bearingsScript, "--json", "--all-in-flight", "--all-decisions", "--all-queued"], {
       cwd: fmRoot, timeout: 30_000,
     });
-    if (activeGeneration !== generation || !generation.live || !safeSettled(ctx) || !reminderLockOwned()) return true;
+    if (activeGeneration !== generation || !generation.live || !safeSettled(ctx) || !reminderLockOwned()) return false;
     if (result.code !== 0) throw new Error(result.stderr.trim() || "canonical reminder inventory failed");
     const snapshot = JSON.parse(result.stdout) as unknown;
     if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") {
@@ -389,16 +414,17 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
     pi.sendMessage({ customType: reminderMessageType, display: false,
       content: reminderPrompt(reminderInventory(snapshot), reminderId),
       details: { version: 1, reminder_id: reminderId, session_id: generation.sessionId,
-        session_file: generation.sessionFile, requested_at: new Date().toISOString() } },
+        session_file: generation.sessionFile, requested_at: new Date(Date.now()).toISOString() } },
     { triggerTurn: true, deliverAs: "followUp" });
     lastDispatchError = "";
     return true;
   } catch (error) {
     generation.reminderPendingId = null;
+    generation.reminderRetryAfter = Date.now() + reminderRetryDelay();
     const detail = String(error);
     if (ctx.hasUI && detail !== lastDispatchError) ctx.ui.notify(`Idle reminder waiting: ${detail}`, "warning");
     lastDispatchError = detail;
-    return true;
+    return false;
   } finally {
     generation.reminderChecking = false;
   }
@@ -567,7 +593,8 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
     token: randomUUID(), sessionId: identity.id, sessionFile: identity.file,
     live: true, timer: null, due: false, dispatching: false, lastOfferAt: 0,
     submittedEscalations: new Set(),
-    reminderChecking: false, reminderPendingId: null, reminderLastHandledAt: 0, reminderRun: null,
+    reminderChecking: false, reminderPendingId: null, reminderLastHandledAt: 0,
+    reminderRetryAfter: 0, reminderRun: null,
   };
   activeGeneration = generation;
   restoreReminderState(pi, ctx, generation);
@@ -672,8 +699,9 @@ export default function periodicStow(pi: ExtensionAPI): void {
         generation.reminderLastHandledAt = handledAt;
       } else {
         pi.appendEntry(reminderFailedType, { version: 1, reminder_id: run.id,
-          failed_at: new Date().toISOString(), session_id: generation.sessionId,
+          failed_at: new Date(Date.now()).toISOString(), session_id: generation.sessionId,
           session_file: generation.sessionFile });
+        generation.reminderRetryAfter = Date.now() + reminderRetryDelay();
       }
       generation.reminderPendingId = null;
       generation.reminderRun = null;

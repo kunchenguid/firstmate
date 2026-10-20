@@ -44,6 +44,8 @@ Installation evidence is not enablement: the repository contains no `config/peri
 ## 2026-10-20 idle-reminder verification
 
 The focused coordinator suite uses controlled clocks and canonical task records to prove the 1800-second due boundary, structural busy deferral, verified main-session lock and role binding, one reminder after prolonged busy time, repeat eligibility for an unchanged decision, completed and archived exclusion, empty-inventory silence, and successful-settlement pacing across extension reload.
+It also proves that snapshot failures release existing maintenance and continuation scheduling, failed or aborted model turns retry only at a later boundary, tool-use preambles are not delivery evidence, and a cold restart releases an orphaned request without an immediate duplicate.
+An offline deterministic provider then drives the extension through the installed Pi 1.3.0 `DefaultResourceLoader` and `AgentSession`: a real settled TUI turn reaches one hidden reminder follow-up and persisted delivery receipt, and reopening that session does not duplicate it.
 The same suite reruns the pre-existing manual, pre-compaction, maintenance, fixed-cutoff, recovery, receipt, and escalation cases so the lightweight reminder cannot replace or consume maintenance custody.
 
 ```text
@@ -52,6 +54,7 @@ ok - Pi coordinator bounds heartbeat delivery and hands exhaustion to one execut
 ok - idle reminders defer at busy boundaries, collapse missed intervals, repeat unresolved decisions, and persist successful delivery cadence
 ok - idle reminder stays quiet for an empty canonical inventory
 ok - old requested maintenance keeps its custody without suppressing a due idle reminder
+ok - installed Pi delivers one idle reminder and restores its successful cadence without network access
 ok - heartbeat retains failed duties and completes only with three unchanged bound readbacks
 ok - heartbeat persists paced recovery across generations without resetting attempts or fabricating progress
 ```
