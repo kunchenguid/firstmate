@@ -32,10 +32,11 @@
 #               entries: <n>
 #            or, when the rebuilt page would be byte-identical apart from its
 #            own build stamp, the same with `unchanged: <path>` as its first
-#            line. Every source of decisions that was missing, skipped, or
-#            unreadable is named on its own `source:` line, and the page names
-#            it too, so a gap stays visible instead of passing for a complete
-#            record. A home with no report and no decision publishes the page's
+#            line. Every configured or default data source that should have
+#            contributed but could not is named on its own `source:` line, and
+#            the page names it too. A missing .tasks.toml is not such a source
+#            because its absence selects the default paths. A home with no
+#            report and no decision publishes the page's
 #            empty state rather than refusing, so the path a skill hands out
 #            always resolves.
 # path       Print the stable page path for this home.

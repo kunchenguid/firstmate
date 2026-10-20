@@ -35,8 +35,10 @@
 # store, with no archive files, or with an unreadable .tasks.toml still gets its
 # page; it simply shows fewer decisions or none. Every source that is missing,
 # skipped, or unreadable is named in the `sources` array instead, so the page
-# can show the gap rather than imply completeness. Only a missing jq or an
-# unusable home is refused, because then there is no output at all.
+# Every configured or default data source that should have contributed but
+# could not is named. A missing .tasks.toml is not such a source because its
+# absence selects the default paths. Only a missing jq or an unusable home is
+# refused, because then there is no output at all.
 #
 # THE HOME IS READ, NEVER WRITTEN. This command writes nothing inside the home;
 # its staging file lives under TMPDIR and is removed on every path out.

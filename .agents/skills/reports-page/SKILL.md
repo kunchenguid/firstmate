@@ -46,7 +46,7 @@ Inside an entry, a link to one of its own headings jumps to that heading and sta
 
 A report whose task recorded a decision carries that decision under the report, with the captain's own words, the resolution, and the record's checksum, so the work the report describes can be traced back to the word that allowed it.
 A decision that gated no report of this home is its own entry in the same list, marked as a decision, with its own anchor.
-The count line names both numbers, and a source of decisions that was missing, skipped, or unreadable at build time is named on the page rather than passed off as "there were none".
+The count line names both numbers. Every configured or default data source that should have contributed but could not is named on the page; a missing `.tasks.toml` is not such a source because its absence selects the default paths.
 
 ## For report authors
 

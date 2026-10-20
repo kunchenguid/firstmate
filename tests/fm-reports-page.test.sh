@@ -922,6 +922,47 @@ test_home_without_archive_files_still_builds() {
   pass "a home without archive files still builds, and names the gap"
 }
 
+test_missing_tasks_toml_uses_readable_default_sources_without_warning() {
+  local home out
+  home=$(new_home)
+  : > "$home/data/backlog.md"
+  : > "$home/data/done-archive.md"
+  : > "$home/data/note-archive.md"
+  out=$(build "$home") || fail "build failed without .tasks.toml: $out"
+  assert_not_contains "$out" 'source: store configuration' \
+    "the absent optional config selects defaults and is not a missing data source"
+  pass "missing task configuration uses readable default sources quietly"
+}
+
+test_unreadable_tasks_toml_is_reported() {
+  local home out
+  home=$(new_home)
+  : > "$home/data/backlog.md"
+  : > "$home/data/done-archive.md"
+  : > "$home/data/note-archive.md"
+  mkdir "$home/.tasks.toml" || fail "cannot create the unreadable config fixture"
+  out=$(build "$home") || fail "build failed with unreadable .tasks.toml: $out"
+  assert_contains "$out" 'source: store configuration unreadable' \
+    "an existing config path that cannot be read must be named"
+  pass "an unreadable task configuration is reported"
+}
+
+test_missing_configured_archive_path_is_reported_precisely() {
+  local home out missing
+  home=$(new_home)
+  printf 'backend = "markdown"\npath = "data/backlog.md"\narchive = "data/custom-archive.md"\n' \
+    > "$home/.tasks.toml" || fail "cannot write configured paths"
+  : > "$home/data/backlog.md"
+  : > "$home/data/note-archive.md"
+  out=$(build "$home") || fail "build failed with missing configured archive: $out"
+  assert_contains "$out" 'source: data/custom-archive.md absent - not present in this home' \
+    "the configured data source that could not contribute must be named"
+  missing=$(printf '%s\n' "$out" | sed -n '/^source: .* absent - /p')
+  assert_equals 'source: data/custom-archive.md absent - not present in this home' "$missing" \
+    "only the missing configured archive should be reported absent"
+  pass "a missing configured archive is reported by its exact path"
+}
+
 test_home_on_another_backlog_store_still_builds() {
   local home out
   home=$(decision_home)
@@ -1026,6 +1067,9 @@ test_search_finds_a_phrase_only_the_decision_carries
 test_every_decision_of_one_task_appears_newest_first
 test_a_decision_reached_through_two_sources_appears_once
 test_home_without_archive_files_still_builds
+test_missing_tasks_toml_uses_readable_default_sources_without_warning
+test_unreadable_tasks_toml_is_reported
+test_missing_configured_archive_path_is_reported_precisely
 test_home_on_another_backlog_store_still_builds
 test_decision_text_never_becomes_markup
 test_decisions_can_be_switched_off_for_a_build
