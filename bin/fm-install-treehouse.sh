@@ -10,7 +10,7 @@
 #   fm-install-treehouse.sh <destination-directory>
 #
 # Pins Treehouse v2.3.0, the version exercised by the local real-Herdr suite.
-# It must be at least v2.2.0: a secondmate home's spawn runs `treehouse --root`,
+# It must be at least v2.2.0: every home's spawn runs `treehouse --root`,
 # which earlier releases reject as an unknown flag.
 set -eu
 

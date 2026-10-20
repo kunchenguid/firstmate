@@ -806,10 +806,10 @@ test_foreign_clone_slot_is_refused_before_any_mutation() {
   pass "a slot from another clone of the same origin is refused before any fetch, reset, or claim, and its owner still launches"
 }
 
-# A secondmate home allocates from its own Treehouse root under its state
-# directory, so its clone never shares a pool with the primary home's clone of
-# the same origin; the primary home keeps the default root.
-test_secondmate_home_allocates_from_its_own_pool_root() {
+# Every home allocates from its own Treehouse root under its state directory,
+# so neither a secondmate home's clone nor the primary home's clone ever shares
+# a pool under the default root with another clone of the same origin.
+test_every_home_allocates_from_its_own_pool_root() {
   local rec id out status pane_log state_real shape
   for shape in primary secondmate; do
     id="pool-root-$shape-r1"
@@ -822,15 +822,12 @@ test_secondmate_home_allocates_from_its_own_pool_root() {
     status=$?
     expect_code 0 "$status" "a $shape home spawn should launch"$'\n'"$out"
     state_real=$(cd "$HOME_DIR/state" && pwd -P)
-    if [ "$shape" = primary ]; then
-      grep -Fxq 'treehouse get' "$pane_log" \
-        || fail "the primary home did not allocate from the default pool root: $(cat "$pane_log")"
-    else
-      grep -Fxq "treehouse --root '$state_real/treehouse' get" "$pane_log" \
-        || fail "the secondmate home did not allocate from its own pool root: $(cat "$pane_log")"
-    fi
+    grep -Fxq "treehouse --root '$state_real/treehouse' get" "$pane_log" \
+      || fail "the $shape home did not allocate from its own pool root: $(cat "$pane_log")"
+    ! grep -Fxq 'treehouse get' "$pane_log" \
+      || fail "the $shape home allocated from the shared default pool root: $(cat "$pane_log")"
   done
-  pass "a secondmate home allocates from its own Treehouse pool root while the primary keeps the default"
+  pass "every home, primary or secondmate, allocates from its own Treehouse pool root"
 }
 
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
@@ -892,7 +889,7 @@ case "$cmd" in
     rm -f "$world/$w.id" "$world/$w.path"
     ;;
   send-keys)
-    if [ "$text" = "treehouse get Enter" ]; then
+    if [[ "$text" = "treehouse --root "*" get Enter" ]]; then
       w=$(window_name "$target")
       for slot in "$slots"/*/project; do
         grep -qxF -- "$slot" "$world"/*.path 2>/dev/null && continue
@@ -1263,7 +1260,7 @@ test_scout_base_branch_refused_on_gerrit_forge() {
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_foreign_clone_slot_is_refused_before_any_mutation
-test_secondmate_home_allocates_from_its_own_pool_root
+test_every_home_allocates_from_its_own_pool_root
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window

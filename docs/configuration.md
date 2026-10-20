@@ -91,7 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-- In a secondmate home, the Treehouse pool root for its own task copies under `state/treehouse/` (`bin/fm-spawn.sh`); the primary home uses Treehouse's default root.
+- The Treehouse pool root for this home's own task copies under `state/treehouse/` (`bin/fm-spawn.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -425,12 +425,14 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `paseo` | Experimental; no dedicated real-backend CI lane | [`docs/paseo-backend.md`](paseo-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, and paseo, since herdr, zellij, cmux, and paseo are session providers only; Orca provides both the task worktree and terminal endpoint.
-A secondmate home's Treehouse spawns run `treehouse --root <state>/treehouse get`, so they need Treehouse v2.2.0 or later; earlier releases reject `--root` as an unknown flag.
+Every home's Treehouse spawns, primary or secondmate, run `treehouse --root <state>/treehouse get`, so they need Treehouse v2.2.0 or later; earlier releases reject `--root` as an unknown flag.
 
 ### Legacy cross-clone Treehouse slots
 
-Treehouse keys a pool by the clone's directory name and origin, so before secondmate homes allocated from their own `state/treehouse/` root, a secondmate home's clone and the primary home's clone of the same project could share one pool under Treehouse's default root.
+Treehouse keys a pool by the clone's directory name and origin, so before every home allocated from its own `state/treehouse/` root, a secondmate home's clone, the primary home's clone, and any other checkout of the same project could share one pool under Treehouse's default root.
 Slots created that way remain in the default-root pool after upgrade, and one of them may belong to another clone than the one now spawning from it.
+New spawns no longer allocate from the default root, so such a slot reaches a spawn only through a Treehouse configuration (`TREEHOUSE_ROOT` or a config file) that points back at it.
+A task already running on a default-root slot keeps it: teardown and relaunch use the worktree path the task recorded, never a recomputed root, so that task runs to completion and its slot is returned to the default-root pool it came from.
 A Treehouse spawn refuses such a slot before any fetch, reset, slot claim, or launch: the spawn fails with `treehouse get did not enter an isolated worktree within 60s`, naming `it belongs to a different clone` and both common git dirs.
 That refusal leaves the slot and its contents as found: Firstmate does not migrate, quarantine, or delete it or run `treehouse return` on it, and it does not recover any older task that used it.
 Retrying the spawn does not fix the routing, because Treehouse may hand the same free slot out again.
@@ -442,7 +444,20 @@ To identify which clone a refused slot belongs to, gather read-only evidence onl
 - Read the named home's task record for that task, if one exists, before drawing any conclusion about the slot's work.
 
 Stop if the evidence is ambiguous: common git dirs that match no known clone, a claim naming a home or task that cannot be found, or a claim that disagrees with the common git dir.
-Any future migration, return, or deletion of a legacy slot is a separate change that needs explicit human authority for that slot, given only after its landed and unlanded work, including uncommitted changes and unpushed commits, has been checked.
+Beyond the one-time cleanup below, any migration, return, or deletion of a legacy slot is a separate change that needs explicit human authority for that slot, given only after its landed and unlanded work, including uncommitted changes and unpushed commits, has been checked.
+
+#### One-time cleanup of orphaned default-root pools
+
+After the upgrade, nothing allocates new slots from a default-root pool, so its slots only drain.
+Firstmate never cleans them up itself.
+Once a pool is idle, an operator may remove it once, by hand, per pool:
+
+1. Confirm no task still uses the pool: no `state/*.meta` in any home records a `worktree=` under the pool directory, and every teardown for such a task has finished.
+2. From the project clone, run `treehouse status` and confirm every slot of that pool reads `available`, with nothing in use or leased.
+3. Check each slot's landed and unlanded work with the read-only steps above, including uncommitted changes and unpushed commits, and stop on any ambiguity.
+4. Preview the removal with `treehouse destroy <pool-path> --all`; this is a dry run that removes nothing and lists anything it would skip.
+5. Only when the preview lists every slot as disposable, run `treehouse destroy <pool-path> --all --yes`.
+   Never add `--include-unlanded`, `--include-in-use`, or `--include-leased`; a slot the bare destroy skips stays until its work is resolved.
 
 ### Backend selection order
 
