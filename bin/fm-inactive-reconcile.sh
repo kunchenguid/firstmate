@@ -329,21 +329,27 @@ scan_marker_age() { # [marker]
   if [ "$now" -lt "$m" ]; then printf '0\n'; else printf '%s\n' $((now - m)); fi
 }
 
+active_scan_marker() {
+  if [ "$SCAN_EARLY_ONLY" -eq 1 ]; then printf '%s\n' "$EARLY_MARKER"; else printf '%s\n' "$SCAN_MARKER"; fi
+}
+
 scan_marker_cursor() {
-  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
-  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local marker
+  marker=$(active_scan_marker)
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  grep '^cursor=' "$marker" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 write_scan_marker() { # <cursor>
-  local cursor=$1 marker_tmp
-  [ "$SCAN_EARLY_ONLY" -eq 0 ] || return 0
+  local cursor=$1 marker marker_tmp
+  marker=$(active_scan_marker)
   marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
   {
     printf 'epoch=%s\n' "$(reconcile_now)"
     printf 'cursor=%s\n' "$cursor"
   } > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
   chmod 600 "$marker_tmp" 2>/dev/null || true
-  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+  mv -f "$marker_tmp" "$marker" || { rm -f "$marker_tmp"; return 1; }
 }
 
 meta_field() {
@@ -799,7 +805,6 @@ scan() {
       done
       [ "$SCAN_EARLY_ONLY" -eq 1 ] || return 0
       [ "$(scan_marker_age "$EARLY_MARKER")" -ge 60 ] || return 0
-      : > "$EARLY_MARKER" || return 1
     fi
   fi
   cursor=$(scan_marker_cursor)
