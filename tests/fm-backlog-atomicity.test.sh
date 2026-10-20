@@ -2098,6 +2098,46 @@ SH
   pass "session start replays a recorded Gerrit close with its change URL as a note"
 }
 
+test_recovery_replays_a_gitlab_close_with_its_merge_request_url_as_a_note() {
+  local case_dir id out real_tasks_axi enabled gitlab_url=https://gitlab.example.com/group/project/-/merge_requests/3
+  for enabled in 0 1; do
+    id="atomic-heal-gitlab-b9-$enabled"
+    case_dir=$(make_home "heal-pending-gitlab-close-$enabled")
+    if [ "$enabled" = 1 ]; then
+      printf '%s\n' 1 > "$(home_of "$case_dir")/config/gitlab-support"
+    fi
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    # Upstream records GitLab artifact notes independently of home opt-in.
+    printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab\narg=--pr\narg=%s\n' \
+      "$id" "$(home_of "$case_dir")/data" "$gitlab_url" \
+      > "$(home_of "$case_dir")/state/$id.backlog-close"
+    real_tasks_axi=$(command -v tasks-axi)
+    cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+    chmod +x "$case_dir/fakebin/tasks-axi"
+    out=$(run_bootstrap "$case_dir")
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "session start left a recorded GitLab close at $(row_state "$case_dir" "$id"): $out"
+    tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+      | grep -F "body: \"GitLab merge request $gitlab_url\"" >/dev/null \
+      || fail "the replayed GitLab close did not record its merge request URL as a note"
+    assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+      "a replayed GitLab close left its record behind"
+  done
+  pass "upstream GitLab artifact replay stays available with the home integration disabled or enabled"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3064,6 +3104,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_recovery_replays_a_gitlab_close_with_its_merge_request_url_as_a_note
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config

@@ -244,6 +244,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 COMPLETION_FILE="$STATE/.session-start-complete"
 AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 
@@ -1009,7 +1011,7 @@ fi
 
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
-# secondmate that could not be relaunched, broken GitHub auth), and the section
+# secondmate that could not be relaunched, broken forge auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
 # Deliberately here and not earlier: this is the last point in the digest, so the
 # worker started at step 1 has had the whole composition above to finish in. It
@@ -1018,7 +1020,9 @@ fi
 stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
-  printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
+  auth=GitHub
+  if fm_pr_gitlab_support_enabled; then auth=forge; fi
+  printf 'skipped (read-only session) - %s authentication, project clone refresh,\n' "$auth"
   printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'

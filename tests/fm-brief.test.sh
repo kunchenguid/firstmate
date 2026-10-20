@@ -280,6 +280,8 @@ test_forge_selection_renders_correct_cli() {
   assert_no_grep 'gh-axi pr ready' "$brief" \
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi to clear a draft"
 
+  mkdir -p "$home/config"
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue
     # shellcheck disable=SC2086 # The row's arguments must split into words.
@@ -288,8 +290,8 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
+a value outside the closed set|--mode direct-PR --forge bitbucket|expected none, gerrit, gitlab, forgejo, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, gitlab, forgejo, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs

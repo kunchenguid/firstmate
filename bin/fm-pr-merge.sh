@@ -55,12 +55,11 @@
 # green unless separately waived by --allow-red. It matches the required
 # context name even for an app-bound requirement, and never waives an unreadable
 # required source or producer read. Both are
-# refused while the away-posture record exists, and neither
-# applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded, or on Forgejo, where a merge already requires the head's combined
-# commit status to have succeeded. After gh returns success, GitHub's live
-# state is read back and
-# accepted only when the pull request is merged or in the merge queue. gh's
+# refused while the away-posture record exists, and neither applies on GitLab,
+# whose pipeline requirements the flags cannot waive, or on Forgejo, where a
+# merge already requires the head's combined commit status to have succeeded.
+# After gh returns success, GitHub's live state is read back and accepted only
+# when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
 # refuses, reporting the failed gh read and naming both failed reads when the
@@ -107,6 +106,12 @@
 # reported rather than trusted, because a rebase moves the head and leaves the
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
+#
+# The additional GitLab integration requires config/gitlab-support=1.
+# Without it, the existing waiver and URL-only operations retain upstream's
+# reads, arguments and outcomes. Enabled homes read raw safety fields, require
+# boolean-false draft and readable false project policy for an absent pipeline,
+# submit ordinary merges synchronously and require merged-state readback.
 #
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
@@ -278,6 +283,10 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
+GITLAB_SUPPORT_ENABLED=0
+if fm_pr_gitlab_support_enabled; then
+  GITLAB_SUPPORT_ENABLED=1
+fi
 # --allow-red names one check run to waive, which only GitHub's per-check
 # reading can match. GitLab and Forgejo each collapse their checks into a
 # single head verdict - a head pipeline status and a combined commit status -
@@ -407,6 +416,21 @@ reject_protected_forge_args() {
       --auto|--auto=*|--admin|--admin=*|--delete-branch|--delete-branch=*|--remove-source-branch|--remove-source-branch=*)
         echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
         return 1
+        ;;
+      --auto-merge|--when-pipeline-succeeds)
+        [ "$PROVIDER" = gitlab ] && [ "$GITLAB_SUPPORT_ENABLED" = 1 ] || continue
+        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+        return 1
+        ;;
+      --auto-merge=*|--when-pipeline-succeeds=*)
+        [ "$PROVIDER" = gitlab ] && [ "$GITLAB_SUPPORT_ENABLED" = 1 ] || continue
+        case "${arg#*=}" in
+          [fF]|[fF][aA][lL][sS][eE]|0) ;;
+          *)
+            echo "error: extra merge arguments must not request auto-merge; pass --attended-override only for an explicit captain instruction" >&2
+            return 1
+            ;;
+        esac
         ;;
       --*) ;;
       # A single-dash argument is a short-option cluster. -d is gh's
@@ -546,32 +570,46 @@ if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
-# Pre-merge conditions for a GitLab merge request, read from one live view of
-# the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
+# Pre-merge conditions for a GitLab merge request, read from live MR and project
+# API responses. Sets FM_PR_MERGE_HEAD to the verified head on success and
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
-  local json fields line pipeline_waived
+  local json='' fields line pipeline_waived read_status=0 expected_fields=9
   local total=0 named=0 refusals=''
-  local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
+  local state='' draft='' detail='' conflicts='' discussions=''
+  local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local pipeline_absent='' pipeline_required='' project_id project_json
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
   # operator's configured default.
-  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
-    || [ -z "$json" ]; then
+  # The enabled integration reads raw JSON because mr view normalizes unreadable
+  # draft/pipeline fields. Disabled URL-only operations retain the upstream read.
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then
+    expected_fields=10
+    if ! project_id=$(jq -rn --arg path "$FM_PR_PATH" '$path | @uri') \
+      || ! json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id/merge_requests/$PR_NUMBER" \
+        --hostname "$FM_PR_HOST" --repo "$PROJECT_URL" 2>/dev/null); then
+      read_status=1
+    fi
+  else
+    json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) || read_status=$?
+  fi
+  if [ "$read_status" -ne 0 ] || [ -z "$json" ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
-  # One named field per line. The names keep a trailing empty value readable
-  # after command substitution strips blank lines, and an absent or null field
-  # becomes an empty string or the literal "null", neither of which satisfies any
-  # check below, so an unreadable field refuses the merge instead of passing it.
-  if ! fields=$(printf '%s' "$json" | jq -r '
+  # One named field per line keeps a trailing empty value readable after command
+  # substitution strips blank lines. Pipeline presence is recorded separately
+  # from its status and SHA.
+  if ! fields=$(printf '%s' "$json" | jq -r --argjson enabled "$GITLAB_SUPPORT_ENABLED" '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
+        (if $enabled == 1 then
+          "draft=" + (if (.draft | type) == "boolean" then .draft | tostring else "unreadable" end)
+          else empty end),
         "detail=" + ((.detailed_merge_status // "") | tostring),
         "conflicts=" + (.has_conflicts | tostring),
         "discussions=" + (.blocking_discussions_resolved | tostring),
@@ -590,6 +628,7 @@ gitlab_verify_mergeable() {
     total=$((total + 1))
     case "$line" in
       state=*) state=${line#state=} ;;
+      draft=*) draft=${line#draft=} ;;
       detail=*) detail=${line#detail=} ;;
       conflicts=*) conflicts=${line#conflicts=} ;;
       discussions=*) discussions=${line#discussions=} ;;
@@ -607,7 +646,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne "$expected_fields" ] || [ "$total" -ne "$expected_fields" ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -623,9 +662,35 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_absent" = true ]; then
+    if ! project_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id" \
+        --hostname "$FM_PR_HOST" --repo "$PROJECT_URL" 2>/dev/null) \
+      || ! pipeline_required=$(printf '%s' "$project_json" | jq -er '
+        if type == "object" and (.only_allow_merge_if_pipeline_succeeds | type) == "boolean"
+        then .only_allow_merge_if_pipeline_succeeds | tostring
+        else error("unreadable pipeline requirement") end' 2>/dev/null); then
+      pipeline_required=unreadable
+    fi
+    case "$pipeline_required" in
+      false) ;;
+      true)
+        refusals="$refusals  - the project requires pipelines to succeed, but the merge request has no head pipeline
+"
+        ;;
+      *)
+        refusals="$refusals  - could not read project setting only_allow_merge_if_pipeline_succeeds for $PROJECT_URL
+"
+        ;;
+    esac
+  fi
+
   [ "$state" = opened ] \
     || refusals="$refusals  - state is \"${state:-unreadable}\", not open
 "
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ "$draft" != false ]; then
+    refusals="$refusals  - draft is \"${draft:-unreadable}\", not boolean false
+"
+  fi
   [ "$detail" = mergeable ] \
     || refusals="$refusals  - detailed_merge_status is \"${detail:-unreadable}\", not mergeable
 "
@@ -1500,9 +1565,9 @@ github_merge_command_succeeded() {
   [ "$FM_PR_GITHUB_MERGE_ACCEPTED" = true ]
 }
 
-github_report_forge_output() {
-  local output=$1 line
-  github_merge_command_succeeded || return 0
+report_forge_output() {  # <command-succeeded> <output>
+  local succeeded=$1 output=$2 line
+  [ "$succeeded" = true ] || return 0
   [ -n "$output" ] || return 0
   echo "error: the merge command's own output follows, quoted; it is the forge CLI's report, not this script's verdict:" >&2
   while IFS= read -r line; do
@@ -1600,21 +1665,29 @@ github_report_unmerged_outcome() {
 }
 
 gitlab_confirm_merged() {
-  local json state
+  local json state level=actionable
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then level=error; fi
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
     -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
+    printf '%s: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$level" "$URL" >&2
     return 2
   fi
   if ! state=$(printf '%s' "$json" | jq -r \
     'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
     2>/dev/null); then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
+    printf '%s: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$level" "$URL" >&2
     return 2
   fi
-  [ "$state" = merged ]
+  if [ "$state" != merged ]; then
+    if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then
+      printf 'error: GitLab accepted the merge request for %s but it reads back as state=%s, not merged; no landed outcome is proven and the merge poll remains armed\n' \
+        "$URL" "$state" >&2
+    fi
+    return 1
+  fi
+  return 0
 }
 
 # Unlike gh and glab, "tea api" reports an HTTP-level failure (a rejected or
@@ -1721,7 +1794,7 @@ case "$PROVIDER" in
       exit "$merge_status"
     fi
     if ! github_read_outcome; then
-      github_report_forge_output "$merge_output"
+      report_forge_output "$FM_PR_GITHUB_MERGE_ACCEPTED" "$merge_output"
       exit 1
     fi
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
@@ -1732,7 +1805,7 @@ case "$PROVIDER" in
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
       exit 0
     else
-      github_report_forge_output "$merge_output"
+      report_forge_output "$FM_PR_GITHUB_MERGE_ACCEPTED" "$merge_output"
       github_report_unmerged_outcome
       exit 1
     fi
@@ -1751,15 +1824,23 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     gitlab_merge_args=()
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    if [ "$FM_PR_AWAY_POSTURE" = true ] \
+      || { [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ "$FM_PR_GITLAB_ASYNC_REQUESTED" != true ]; }; then
       gitlab_merge_args=(--auto-merge=false)
     fi
-    GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
-      --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
+    merge_output=
+    if [ "$GITLAB_SUPPORT_ENABLED" = 1 ]; then
+      merge_output=$(GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
+        --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" 2>&1) || merge_status=$?
+    else
+      GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
+        --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
+    fi
     if [ "$merge_status" -ne 0 ]; then
       fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
+      [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
       exit "$merge_status"
     fi
     persist_accepted_merge_authority || exit 1
@@ -1768,7 +1849,12 @@ case "$PROVIDER" in
     MERGE_CONTROL_LOCK=
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    if [ "$gitlab_confirm_rc" -ne 0 ]; then
+      [ "$GITLAB_SUPPORT_ENABLED" = 1 ] || exit 0
+      report_forge_output true "$merge_output"
+      exit 1
+    fi
+    [ -z "$merge_output" ] || printf '%s\n' "$merge_output"
     ;;
   forgejo)
     forgejo_reject_unsupported_args "$@" || exit 1

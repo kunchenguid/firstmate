@@ -8,6 +8,12 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 (the default keeps gh, gh-axi and NEEDS_GH_AUTH checks;
+#                 config/gitlab-support=1 opts into github_in_use scoping),
+#                 "NEEDS_GLAB_AUTH: <host> (run: glab auth login --hostname <host>)",
+#                 (only in an explicitly GitLab-enabled home for registered
+#                 forge=gitlab project clones; gitlab_project_prerequisites
+#                 owns the local binding and origin-host lookup),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -185,6 +191,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-env-lib.sh"
+# shellcheck source=bin/fm-forge-host-lib.sh
+. "$SCRIPT_DIR/fm-forge-host-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -851,7 +859,7 @@ secondmate_handoff_detect() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|glab|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -884,11 +892,72 @@ missing_tool_diagnostic() {
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
+GITLAB_SUPPORT_ENABLED=0
+if fm_pr_gitlab_support_enabled; then GITLAB_SUPPORT_ENABLED=1; fi
+
+# With config/gitlab-support=1, GitHub tooling follows local origin evidence.
+# The default keeps the existing universal requirements and broad auth probe.
+# The signal needs no network: the origin remote of the code root and every
+# project clone under projects/. Any github.com or *.github.com origin, or an
+# explicit GH_HOST, retains GitHub checks. An origin-less home retains them too.
+
+github_in_use() {
+  local dir url host seen=0
+  # GH_HOST is an existing explicit GitHub target, not a GitLab setting.
+  [ -z "${GH_HOST:-}" ] || return 0
+  for dir in "$FM_ROOT" "$PROJECTS"/*; do
+    [ -d "$dir" ] || continue
+    # The configured URL, before any insteadOf rewrite: the forge is what the
+    # remote names, not where this machine happens to fetch it from.
+    url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null) || continue
+    [ -n "$url" ] || continue
+    seen=1
+    host=$(fm_forge_origin_host "$url") || continue
+    case "$host" in
+      github.com|*.github.com) return 0 ;;
+    esac
+  done
+  [ "$seen" = 0 ]
+}
+
+# The binding, not a guessed provider, selects GitLab's tools. Hosts come from
+# each bound clone's configured origin before insteadOf rewrites, and are
+# deduplicated so the network phase validates each instance's login once.
+gitlab_project_prerequisites() {
+  local dir forge origin host
+  GITLAB_IN_USE=0
+  GITLAB_HOSTS=
+  [ "$GITLAB_SUPPORT_ENABLED" = 1 ] || return 0
+  for dir in "$PROJECTS"/*; do
+    [ -d "$dir" ] || continue
+    forge=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge "${dir##*/}" 2>/dev/null) || continue
+    [ "$forge" = gitlab ] || continue
+    GITLAB_IN_USE=1
+    origin=$(git -C "$dir" config --get remote.origin.url 2>/dev/null) || continue
+    host=$(fm_forge_origin_host "$origin" gitlab) || continue
+    fm_pr_forge_host_valid "$host" || continue
+    GITLAB_HOSTS="${GITLAB_HOSTS:+$GITLAB_HOSTS
+}$host"
+  done
+  [ -z "$GITLAB_HOSTS" ] || GITLAB_HOSTS=$(printf '%s\n' "$GITLAB_HOSTS" | LC_ALL=C sort -u)
+}
+
+gitlab_project_prerequisites
+
+GITHUB_IN_USE=1
+if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && ! github_in_use; then
+  GITHUB_IN_USE=0
+  COMMON_TOOLS="node git no-mistakes chrome-devtools-axi tasks-axi quota-axi"
+fi
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_VALID=0
   BACKEND_TOOLS=""
+fi
+if [ "$GITLAB_IN_USE" = 1 ]; then
+  COMMON_TOOLS="$COMMON_TOOLS glab"
+  fm_backend_list_contains "$BACKEND_TOOLS" jq || COMMON_TOOLS="$COMMON_TOOLS jq"
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.46.0
@@ -1476,7 +1545,7 @@ detect_local_tools() {
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
-  if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
+  if [ "$GITHUB_IN_USE" = 1 ] && command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
   if ! tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"; then
@@ -1608,10 +1677,25 @@ detect_home_summary_publication() {
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
-if network_phase; then
+if network_phase && [ "$GITHUB_IN_USE" = 1 ]; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  if [ "$GITLAB_SUPPORT_ENABLED" = 1 ] && [ -z "${GH_HOST:-}" ]; then
+    gh auth status --active --hostname github.com >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  else
+    gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  fi
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
+fi
+if network_phase && [ "$GITLAB_IN_USE" = 1 ] && command -v glab >/dev/null 2>&1; then
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  while IFS= read -r gitlab_host; do
+    [ -n "$gitlab_host" ] || continue
+    glab auth status --hostname "$gitlab_host" >/dev/null 2>&1 \
+      || printf 'NEEDS_GLAB_AUTH: %s (run: glab auth login --hostname %s)\n' "$gitlab_host" "$gitlab_host"
+  done <<EOF
+$GITLAB_HOSTS
+EOF
+  fm_timing_record phase glab-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 

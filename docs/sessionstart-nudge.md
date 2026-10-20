@@ -224,7 +224,7 @@ These conditions therefore surface as follows:
 
 - A lock another session holds surfaces as digest text.
 - A truncated digest surfaces as digest text.
-- Broken GitHub auth surfaces through the deferred network result, inline or as a wake.
+- Broken GitHub authentication surfaces through the deferred network result, inline or as a wake; an explicitly GitLab-enabled home adds its bound instances' authentication checks.
 
 None of these becomes a refusal to open the session.
 

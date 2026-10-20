@@ -346,7 +346,7 @@ SH
 
 # glab mock recording every invocation together with the GITLAB_HOST it was
 # given, so a test can prove the instance came from the URL. `mr view` answers
-# from the case's JSON payload; marker files in the case dir drive the failure
+# from the case's JSON payload with glab's typed-field defaults; marker files drive failure
 # modes, so no test has to leak environment into a shared runner.
 add_glab_mock() {
   local case_dir=$1
@@ -357,16 +357,55 @@ case_dir=$(dirname "$FM_TEST_GLAB_JSON")
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
-    if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
+    if [ -e "$case_dir/glab-merge-called" ] && [ -e "$case_dir/glab-post-view-fails" ]; then
+      exit 1
+    fi
+    if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ] && [ ! -e "$case_dir/glab-auto-queued" ]; then
       cat "$case_dir/mr-post.json"
+    elif [ -e "$case_dir/glab-normalizes-json" ]; then
+      # Native glab 1.114.0 normalizes these fields; raw-API safety cases
+      # opt into that representation separately from malformed-output faults.
+      jq 'if type == "object" then
+        .draft = (if .draft == null then false else .draft end) |
+        .head_pipeline = .head_pipeline
+        else . end' "$FM_TEST_GLAB_JSON"
     else
       cat "$FM_TEST_GLAB_JSON"
     fi
     exit 0
     ;;
+  "api projects/"*"/merge_requests/"*)
+    [ ! -e "$case_dir/glab-view-fails" ] || exit 1
+    if [ -e "$case_dir/away-record-after-view" ]; then
+      mv "$case_dir/away-record-after-view" "$case_dir/state/.afk-contract"
+    fi
+    cat "$FM_TEST_GLAB_JSON"
+    exit 0
+    ;;
+  "api projects/"*)
+    [ ! -e "$case_dir/glab-project-fails" ] || exit 1
+    cat "$case_dir/project.json"
+    exit 0
+    ;;
   "mr merge")
     [ ! -e "$case_dir/glab-merge-fails" ] || { echo "error: mr merge failed" >&2 ; exit 1 ; }
+    expected_head=$(jq -r .sha "$FM_TEST_GLAB_JSON")
+    head='' want_head=0 auto=true
+    for arg in "$@"; do
+      if [ "$want_head" = 1 ]; then head=$arg; want_head=0; continue; fi
+      case "$arg" in
+        --sha) want_head=1 ;;
+        --sha=*) head=${arg#*=} ;;
+        --auto-merge=false|--auto-merge=0|--when-pipeline-succeeds=false) auto=false ;;
+        --auto-merge|--auto-merge=true|--when-pipeline-succeeds) auto=true ;;
+      esac
+    done
+    [ "$head" = "$expected_head" ] || { echo 'error: verified head did not match the current source head' >&2; exit 1; }
+    if [ -e "$case_dir/glab-pipeline-starts-after-verify" ] && [ "$auto" = true ]; then
+      : > "$case_dir/glab-auto-queued"
+    fi
     : > "$case_dir/glab-merge-called"
+    printf '%s\n' 'GitLab CLI accepted the request'
     exit 0
     ;;
 esac
@@ -382,7 +421,7 @@ SH
 # written into the JSON as-is, so a value may carry a JSON escape.
 write_mr_json() {
   local file=$1 kv key value
-  local state=opened detail=mergeable conflicts=false discussions=true
+  local state=opened draft=false detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
   local merge_when_pipeline_succeeds=false merge_after=null
   shift
@@ -391,6 +430,7 @@ write_mr_json() {
     value=${kv#*=}
     case "$key" in
       state) state=$value ;;
+      draft) draft=$value ;;
       detail) detail=$value ;;
       conflicts) conflicts=$value ;;
       discussions) discussions=$value ;;
@@ -406,8 +446,8 @@ write_mr_json() {
   if [ "$pipeline" = present ]; then
     pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
   fi
-  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
-    "$state" "$detail" "$conflicts" > "$file"
+  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,"draft":%s,' \
+    "$state" "$detail" "$conflicts" "$draft" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
   printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
@@ -617,12 +657,16 @@ make_gitlab_case() {
   shift
   case_dir=$(make_case "$name")
   mkdir -p "$case_dir/wt"
+  if [ "${FM_TEST_GITLAB_SUPPORT:-1}" = 1 ]; then
+    printf '%s\n' 1 > "$case_dir/home/config/gitlab-support"
+  fi
   add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
   add_glab_mock "$case_dir"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/glab.log"
   write_mr_json "$case_dir/mr.json" "$@"
   write_mr_json "$case_dir/mr-post.json" state=merged
+  printf '%s\n' '{"only_allow_merge_if_pipeline_succeeds":false}' > "$case_dir/project.json"
   printf '%s\n' "$case_dir"
 }
 
@@ -1949,15 +1993,62 @@ test_gitlab_url_resolves_and_merges() {
   expect_code 0 "$rc" "gitlab-merges: a well-formed merge request URL should merge, not error"
   assert_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
     "gitlab-merges: pr= was not recorded before merging"
-  assert_grep "GITLAB_HOST=$MR_HOST mr view 7 -R $MR_PROJECT_URL -F json" "$case_dir/glab.log" \
+  assert_grep "GITLAB_HOST=$MR_HOST api projects/group%2Fsubgroup%2Fproject/merge_requests/7 --hostname $MR_HOST --repo $MR_PROJECT_URL" "$case_dir/glab.log" \
     "gitlab-merges: the pre-merge state was not read from the project URL"
   merge_line=$(glab_merge_line "$case_dir/glab.log")
-  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --auto-merge=false" ] \
     || fail "gitlab-merges: unexpected merge invocation: '$merge_line'"
   assert_grep "successful pipeline at head $MR_HEAD" "$case_dir/stderr" \
     "gitlab-merges: the verified head was not reported"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
+}
+
+test_gitlab_async_arguments_require_exact_attended_authority() {
+  local case_dir flag rc n=0
+  for flag in --auto-merge --auto-merge=true --when-pipeline-succeeds --when-pipeline-succeeds=true; do
+    n=$((n + 1))
+    case_dir=$(make_gitlab_case "gitlab-async-refused-$n")
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" -- "$flag" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$flag: an asynchronous request bypassed attended authority"
+    assert_absent "$case_dir/glab-merge-called" "$flag: an unauthorized asynchronous merge reached the forge"
+    assert_no_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" "$flag: an unauthorized request modified the task record"
+
+    case_dir=$(make_gitlab_case "gitlab-async-attended-$n")
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" --attended-override -- "$flag" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "$flag: explicit attended authority was refused"
+    assert_present "$case_dir/glab-merge-called" "$flag: the authorized request never reached merging"
+  done
+
+  case_dir=$(make_gitlab_case gitlab-ordinary-explicitly-sync)
+  : > "$case_dir/glab-pipeline-starts-after-verify"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "an ordinary merge inherited glab's asynchronous default"
+  assert_absent "$case_dir/glab-auto-queued" "an ordinary merge was queued after a pipeline transition"
+  pass "GitLab asynchronous requests require explicit attended authority and ordinary merging stays synchronous"
+}
+
+test_gitlab_merge_requires_an_independent_boolean_false_draft() {
+  local case_dir draft rc n=0
+  for draft in true null '"false"'; do
+    n=$((n + 1))
+    case_dir=$(make_gitlab_case "gitlab-merge-draft-$n" "draft=$draft")
+    : > "$case_dir/glab-normalizes-json"
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$draft: mergeable detail masked a draft or unreadable draft field"
+    assert_absent "$case_dir/glab-merge-called" "$draft: merging reached the forge without a boolean-false draft field"
+  done
+  case_dir=$(make_gitlab_case gitlab-merge-draft-missing)
+  : > "$case_dir/glab-normalizes-json"
+  "$JQ_BIN" 'del(.draft)' "$case_dir/mr.json" > "$case_dir/mr-incomplete.json"
+  mv "$case_dir/mr-incomplete.json" "$case_dir/mr.json"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing draft field was accepted at merge time"
+  assert_absent "$case_dir/glab-merge-called" "a missing draft field reached merging"
+  pass "GitLab merge-time draft verification is independent of mergeable detail and requires boolean false"
 }
 
 test_gitlab_host_comes_from_the_url() {
@@ -1975,7 +2066,7 @@ test_gitlab_host_comes_from_the_url() {
   set -e
 
   expect_code 0 "$rc" "gitlab-host-from-url: a self-hosted merge request should merge"
-  assert_grep "GITLAB_HOST=$host mr view 31 -R $project_url -F json" "$case_dir/glab.log" \
+  assert_grep "GITLAB_HOST=$host api projects/deep%2Fnested%2Fgroup%2Fproject/merge_requests/31 --hostname $host --repo $project_url" "$case_dir/glab.log" \
     "gitlab-host-from-url: the read did not use the host from the URL"
   assert_grep "GITLAB_HOST=$host mr merge 31 -R $project_url" "$case_dir/glab.log" \
     "gitlab-host-from-url: the merge did not use the host from the URL"
@@ -2028,7 +2119,7 @@ test_gitlab_extra_args_forwarded() {
   set -e
   expect_code 0 "$rc" "gitlab-extra-args-attended: attended override should merge"
   merge_line=$(glab_merge_line "$case_dir/glab.log")
-  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --remove-source-branch" ] \
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --remove-source-branch --auto-merge=false" ] \
     || fail "gitlab-extra-args-attended: extra glab flags were not forwarded: '$merge_line'"
   pass "fm-pr-merge refuses GitLab source-branch deletion unless --attended-override is passed"
 }
@@ -2063,7 +2154,7 @@ test_gitlab_each_condition_refuses_independently() {
     "discussions|discussions=false|blocking_discussions_resolved is \"false\", not true" \
     "pipeline-status|pipeline_status=failed|the head pipeline status is \"failed\", not success" \
     "pipeline-sha|pipeline_sha=$MR_STALE_HEAD|the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" \
-    "no-pipeline|pipeline=null|the head pipeline status is \"none\", not success"
+    "pipeline-running|pipeline_status=running|the head pipeline status is \"running\", not success"
   for spec in "$@"; do
     name=${spec%%|*}
     expected=${spec##*|}
@@ -2089,6 +2180,66 @@ test_gitlab_each_condition_refuses_independently() {
       "gitlab-refuse-$name: a refusal should still leave the merge poll armed"
   done
   pass "fm-pr-merge refuses on each GitLab pre-merge condition independently"
+}
+
+test_gitlab_no_pipeline_respects_the_project_requirement() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-allowed pipeline=null)
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "a project without required pipelines refused a merge request with no pipeline"
+  assert_present "$case_dir/glab-merge-called" "the permitted no-pipeline merge was never attempted"
+
+  case_dir=$(make_gitlab_case gitlab-no-pipeline-required pipeline=null)
+  printf '%s\n' '{"only_allow_merge_if_pipeline_succeeds":true}' > "$case_dir/project.json"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a project requiring pipelines merged a request with no head pipeline"
+  assert_absent "$case_dir/glab-merge-called" "a required-pipeline refusal still attempted a merge"
+  assert_grep 'project requires pipelines to succeed' "$case_dir/stderr" \
+    "the refusal did not explain the project's missing pipeline requirement"
+
+  case_dir=$(make_gitlab_case gitlab-required-success)
+  printf '%s\n' '{"only_allow_merge_if_pipeline_succeeds":true}' > "$case_dir/project.json"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "a successful current-head pipeline did not satisfy the project requirement"
+  assert_present "$case_dir/glab-merge-called" "a satisfied pipeline requirement never reached merging"
+
+  case_dir=$(make_gitlab_case gitlab-pipeline-field-missing)
+  : > "$case_dir/glab-normalizes-json"
+  "$JQ_BIN" 'del(.head_pipeline)' "$case_dir/mr.json" > "$case_dir/mr-incomplete.json"
+  mv "$case_dir/mr-incomplete.json" "$case_dir/mr.json"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an incomplete MR payload was mistaken for an explicitly absent pipeline"
+  assert_absent "$case_dir/glab-merge-called" "an unreadable pipeline field still reached merging"
+  pass "GitLab permits no pipeline only when the project does not require one and preserves successful required-pipeline delivery"
+}
+
+test_gitlab_unreadable_project_requirement_refuses() {
+  local case_dir name rc
+  for name in api-fails missing not-boolean multiple-records; do
+    case_dir=$(make_gitlab_case "gitlab-project-unreadable-$name" pipeline=null)
+    case "$name" in
+      api-fails) : > "$case_dir/glab-project-fails" ;;
+      missing) printf '%s\n' '{}' > "$case_dir/project.json" ;;
+      not-boolean) printf '%s\n' '{"only_allow_merge_if_pipeline_succeeds":"false"}' > "$case_dir/project.json" ;;
+      multiple-records)
+        printf '%s\n' '{"only_allow_merge_if_pipeline_succeeds":false}' \
+          '{"only_allow_merge_if_pipeline_succeeds":true}' > "$case_dir/project.json" ;;
+    esac
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$name: an unreadable project requirement was treated as optional"
+    assert_absent "$case_dir/glab-merge-called" "$name: an unreadable requirement still attempted a merge"
+    assert_grep 'could not read project setting only_allow_merge_if_pipeline_succeeds' "$case_dir/stderr" \
+      "$name: the refusal did not name the requirement that could not be read"
+  done
+  case_dir=$(make_gitlab_case gitlab-project-unreadable-with-pipeline)
+  : > "$case_dir/glab-project-fails"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "a successful current-head pipeline was blocked by an unreadable project setting"
+  assert_present "$case_dir/glab-merge-called" "a successful current-head pipeline never reached merging"
+  pass "GitLab reads a project pipeline requirement only when the head pipeline is absent"
 }
 
 test_gitlab_reports_every_failing_condition() {
@@ -2756,23 +2907,24 @@ test_gitlab_merge_reports_upward() {
   pass "a landed GitLab merge request is reported upward on the same channel"
 }
 
-test_queued_gitlab_merge_leaves_the_poll_armed() {
-  local case_dir
-  case_dir=$(make_gitlab_case queued-gitlab-merge)
-  mkdir -p "$case_dir/home"
-  : >"$case_dir/glab-stays-open"
-
-  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
-    >"$case_dir/stdout" 2>"$case_dir/stderr" \
-    || fail "queued-gitlab-merge: accepted merge command failed"
-
-  assert_absent "$case_dir/state/.wake-queue" \
-    "queued-gitlab-merge: a queued merge was reported as landed"
-  [ -f "$case_dir/state/task-x1.check.sh" ] \
-    || fail "queued-gitlab-merge: the merge poll was not left armed"
-  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
-    || fail "queued-gitlab-merge: a queued merge was marked as reported"
-  pass "a queued GitLab merge stays silent and leaves confirmation to the armed poll"
+test_gitlab_unproven_outcome_refuses_and_preserves_monitoring() {
+  local case_dir state rc n=0
+  for state in opened closed unreadable; do
+    n=$((n + 1))
+    case_dir=$(make_gitlab_case "gitlab-outcome-unproven-$n")
+    case "$state" in
+      unreadable) : > "$case_dir/glab-post-view-fails" ;;
+      *) write_mr_json "$case_dir/mr-post.json" "state=$state" ;;
+    esac
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$state: a zero-exit submission was reported as a proven merge"
+    assert_present "$case_dir/state/task-x1.check.sh" "$state: an unproven outcome lost its merge poll"
+    assert_absent "$case_dir/state/.wake-queue" "$state: an unproven outcome reported a landed merge"
+    assert_grep 'error: > GitLab CLI accepted the request' "$case_dir/stderr" \
+      "$state: the CLI report was not separated from the local outcome verdict"
+  done
+  pass "GitLab open, closed and unreadable post-submission states return failure without losing monitoring"
 }
 
 test_main_home_merge_leaves_a_durable_wake() {
@@ -2922,6 +3074,142 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_gitlab_requires_an_explicit_no_pipeline_waiver() {
+  local case_dir rc expected actual
+  case_dir=$(make_gitlab_case gitlab-no-implicit-pipeline-waiver pipeline=null)
+  : > "$case_dir/glab-project-fails"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "GitLab support implicitly waived upstream's successful-head-pipeline requirement"
+  assert_absent "$case_dir/glab-merge-called" "an absent pipeline merged without its dedicated waiver"
+  expected="error: refusing to merge $MR_URL
+  - the head pipeline status is \"none\", not success
+  - the head pipeline ran at \"none\", not at the current head $MR_HEAD"
+  actual=$(cat "$case_dir/stderr")
+  actual="error: refusing to merge ${actual#*'error: refusing to merge '}"
+  assert_equals "$expected" "$actual" "the default no-pipeline refusal changed upstream's checks or text"
+
+  case_dir=$(make_gitlab_case gitlab-one-run-pipeline-waiver pipeline=null)
+  rm -f "$case_dir/home/config/gitlab-support"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "the explicit one-run waiver required unrelated home consent"
+  assert_present "$case_dir/glab-merge-called" "an explicit allowed no-pipeline merge never reached the forge"
+  pass "an absent GitLab pipeline requires its explicit one-run waiver, independently of home support"
+}
+
+test_unopted_gitlab_url_keeps_legacy_merge_behavior() {
+  local case_dir
+  case_dir=$(make_gitlab_case gitlab-legacy-draft-null draft=null)
+  rm -f "$case_dir/home/config/gitlab-support"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "an unopted URL-only merge changed upstream's normalized draft behavior"
+  assert_present "$case_dir/glab-merge-called" "the upstream-compatible URL-only merge was not submitted"
+
+  case_dir=$(make_gitlab_case gitlab-legacy-open-outcome)
+  rm -f "$case_dir/home/config/gitlab-support"
+  : > "$case_dir/glab-stays-open"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "an unopted URL-only merge changed upstream's submission exit status"
+  assert_present "$case_dir/state/task-x1.check.sh" "the legacy unconfirmed submission lost its merge monitor"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'no landed outcome is proven' \
+    "an unopted submission acquired the opted-in outcome diagnostic"
+  pass "unopted URL-only GitLab merging retains upstream's reads and unconfirmed-submission behavior"
+}
+
+test_gitlab_pipeline_waiver_is_attended_and_provider_scoped() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-pipeline-waiver-away pipeline=null)
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 2 ] || fail "an attended-only pipeline waiver did not refuse while away"
+  assert_absent "$case_dir/glab-merge-called" "an unattended pipeline waiver reached merging"
+
+  case_dir=$(make_gitlab_case gitlab-pipeline-waiver-away-race pipeline=null)
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a pipeline waiver survived a change to away posture during verification"
+  assert_absent "$case_dir/glab-merge-called" "the locked authority check allowed an unattended pipeline waiver"
+
+  case_dir=$(make_gitlab_case gitlab-pipeline-waiver-takes-no-value pipeline=null)
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline=false \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 2 ] || fail "the boolean pipeline-waiver flag accepted a value"
+  assert_absent "$case_dir/glab-merge-called" "a malformed pipeline waiver reached merging"
+
+  case_dir=$(make_case github-no-gitlab-pipeline-waiver)
+  add_gh_mocks "$case_dir" "$MR_HEAD"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/7 --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a GitLab-only pipeline waiver was accepted on GitHub"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" "an invalid provider waiver modified task metadata"
+  pass "the no-pipeline waiver is boolean, attended-only and GitLab-only"
+}
+
+test_gitlab_pipeline_waiver_never_waives_a_present_pipeline() {
+  local case_dir rc condition
+  for condition in failed stale; do
+    if [ "$condition" = failed ]; then
+      case_dir=$(make_gitlab_case gitlab-waiver-present-failed pipeline_status=failed)
+    else
+      case_dir=$(make_gitlab_case gitlab-waiver-present-stale pipeline_sha="$MR_STALE_HEAD")
+    fi
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "the absence waiver waived a $condition present pipeline"
+    assert_absent "$case_dir/glab-merge-called" "a $condition pipeline reached merging under the absence waiver"
+  done
+  pass "the absent-pipeline waiver preserves both present-pipeline status and current-head requirements"
+}
+
+test_gitlab_async_flags_do_not_change_github_argument_handling() {
+  local case_dir rc url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case github-legacy-unknown-flag)
+  add_gh_mocks "$case_dir" "$MR_HEAD"
+  printf '1\n' > "$case_dir/github-merge-rc"
+  printf 'unknown flag: --auto-merge\n' > "$case_dir/github-merge-output"
+  printf '%s\n' state=OPEN merged=false queued=false base=main > "$case_dir/github-outcome"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$url" -- --auto-merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 1 ] || fail "the native GitHub argument error was not preserved"
+  assert_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "a GitLab-only argument guard intercepted an unopted GitHub invocation"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "an unopted GitHub argument error changed upstream's ready bookkeeping"
+  pass "GitLab async argument guards do not intercept GitHub's native argument handling"
+}
+
+test_upstream_waiver_does_not_enable_home_integration() {
+  local case_dir
+  case_dir=$(make_gitlab_case upstream-waiver-unopted-home draft=null pipeline=null)
+  rm -f "$case_dir/home/config/gitlab-support"
+  : > "$case_dir/glab-normalizes-json"
+  : > "$case_dir/glab-project-fails"
+  : > "$case_dir/glab-stays-open"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "upstream's waiver acquired the home integration's draft, policy or outcome checks"
+  assert_present "$case_dir/glab-merge-called" "the existing upstream waiver was not submitted"
+  assert_present "$case_dir/state/task-x1.check.sh" "the upstream unconfirmed-submission monitor was lost"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'only_allow_merge_if_pipeline_succeeds' \
+    "an unopted upstream waiver acquired another project-policy check"
+  pass "upstream's existing waiver does not enable the additional home integration"
+}
+
+test_upstream_waiver_does_not_enable_home_integration
+test_gitlab_async_flags_do_not_change_github_argument_handling
+test_gitlab_requires_an_explicit_no_pipeline_waiver
+test_unopted_gitlab_url_keeps_legacy_merge_behavior
+test_gitlab_pipeline_waiver_is_attended_and_provider_scoped
+test_gitlab_pipeline_waiver_never_waives_a_present_pipeline
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2966,11 +3254,15 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
+test_gitlab_async_arguments_require_exact_attended_authority
+test_gitlab_merge_requires_an_independent_boolean_false_draft
 test_gitlab_host_comes_from_the_url
 test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
+test_gitlab_no_pipeline_respects_the_project_requirement
+test_gitlab_unreadable_project_requirement_refuses
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
@@ -4445,6 +4737,7 @@ test_allow_missing_refused_on_forgejo() {
 # the merge stays bound to the verified head.
 test_allow_no_pipeline_merges_only_a_null_head_pipeline() {
   local case_dir rc merge_line name spec expected
+  local FM_TEST_GITLAB_SUPPORT=0
   case_dir=$(make_gitlab_case gitlab-no-pipeline-waived pipeline=null)
   run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-pipeline \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
@@ -4512,6 +4805,7 @@ test_allow_no_pipeline_merges_only_a_null_head_pipeline() {
 
 test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
   local case_dir rc head
+  local FM_TEST_GITLAB_SUPPORT=0
   case_dir=$(make_gitlab_case gitlab-no-pipeline-away pipeline=null)
   write_away_record "$case_dir" --words 'merge task-x1'
   set +e
@@ -4566,7 +4860,7 @@ test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward
-test_queued_gitlab_merge_leaves_the_poll_armed
+test_gitlab_unproven_outcome_refuses_and_preserves_monitoring
 test_failed_merge_reports_nothing
 test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake

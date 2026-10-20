@@ -1875,6 +1875,7 @@ test_unreachable_network_never_blocks_the_digest() {
   IFS='|' read -r root home fakebin mate log spawned <<EOF
 $rec
 EOF
+  printf '%s\n' 1 > "$home/config/gitlab-support"
   network_finished="${root%/root}/network-finished"
   install_slow_gh "$fakebin" 12 "$network_finished"
 
@@ -1887,7 +1888,7 @@ EOF
   assert_contains "$out" "SESSION START" "the digest did not complete"
   assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
     "the digest did not disclose that its network checks were still running"
-  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
+  assert_contains "$out" "NOT yet confirmed: forge authentication, dead-secondmate relaunch" \
     "the digest did not name the checks it has not confirmed"
   assert_not_contains "$out" "NEEDS_GH_AUTH" \
     "the digest reported a GitHub-auth verdict it could not yet have"
@@ -1927,15 +1928,21 @@ EOF
 # any action a GitHub-auth verdict would gate. It must say that plainly instead of
 # quietly dropping the checks.
 test_read_only_session_declares_skipped_network_checks() {
-  local rec root home fakebin out
-  rec=$(new_world network-read-only)
-  IFS='|' read -r root home fakebin <<EOF
+  local rec root home fakebin out enabled auth
+  for enabled in 0 1; do
+    rec=$(new_world "network-read-only-$enabled")
+    IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  printf '999999\n' > "$home/state/.lock"
-  cat > "$fakebin/ps" <<'SH'
+    auth=GitHub
+    if [ "$enabled" = 1 ]; then
+      printf '%s\n' 1 > "$home/config/gitlab-support"
+      auth=forge
+    fi
+    make_fake_toolchain "$fakebin"
+    make_fake_ps_claude "$fakebin"
+    printf '999999\n' > "$home/state/.lock"
+    cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
@@ -1944,16 +1951,17 @@ case "$*" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/ps"
+    chmod +x "$fakebin/ps"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+    out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "READ-ONLY SESSION" "the read-only fixture did not actually refuse the lock"
-  assert_contains "$out" "skipped (read-only session) - GitHub authentication" \
-    "a read-only session did not declare its skipped network checks"
-  assert_absent "$home/state/.startup-network.status" \
-    "a read-only session started the deferred stage it has no authority for"
-  pass "session start: a read-only session declares its skipped network checks rather than dropping them"
+    assert_contains "$out" "READ-ONLY SESSION" "the read-only fixture did not actually refuse the lock"
+    assert_contains "$out" "skipped (read-only session) - $auth authentication" \
+      "the read-only authentication label did not respect the home's explicit opt-in"
+    assert_absent "$home/state/.startup-network.status" \
+      "a read-only session started the deferred stage it has no authority for"
+  done
+  pass "session start preserves the upstream read-only message unless GitLab support is enabled"
 }
 
 # The compatibility verdict costs three tasks-axi subprocesses and one session
@@ -3043,6 +3051,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_read_only_session_declares_skipped_network_checks
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
@@ -3056,7 +3065,6 @@ test_deferred_relaunch_is_always_reported
 test_inactive_reconcile_never_blocks_the_digest
 test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
-test_read_only_session_declares_skipped_network_checks
 test_tasks_axi_compatibility_is_probed_once
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux

@@ -50,10 +50,10 @@ The stored record therefore carries `provider`, `url`, `host`, `path`, and `numb
 
 Two things about plain `glab` were established by running it, because assuming either one would have failed silently into a permanent "not merged".
 
-First, plain `glab` has no field selector.
-`gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+The original glab builds used for this record exposed field output and JSON without a selector.
+Current builds can offer `--jq`, and bound GitLab projects require `jq`; [configuration.md](configuration.md#toolchain) owns those prerequisites.
+The poll retains field-output parsing for older builds and URL-only watches, which need no JSON processor.
+Only an exact `merged` wakes firstmate, so a changed format stays silent instead of reporting a merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -184,11 +184,22 @@ The live registration tag is `fm-pr-poll-registration-v2`, which includes the pr
 A `fm-pr-poll-registration-v1` record no longer parses.
 Arm a current watch with `bin/fm-pr-check.sh`.
 
+## Optional GitLab integration
+
+The historical URL-only watch and merge interfaces above remain available with their existing behavior.
+The additional bound-forge integration requires the effective home's `config/gitlab-support` to contain `1`, then an explicit `forge=gitlab` project binding.
+[configuration.md](configuration.md#gitlab-support-configgitlab-support) owns the setting, its bootstrap effects and the disabled-mode contract.
+In the enabled mode, ready registration refuses a positive GitLab draft, merge verification reads raw safety fields, ordinary merges request synchronous submission, and a successful command is not reported as landed without a merged readback.
+Enabled GitLab cleanup can use MR head/content evidence; the existing upstream artifact-note handling remains available independently of this setting.
+Without the setting, existing URL-only operations retain the upstream path rather than acquiring those checks or outcomes.
+
 ## Merging a merge request
 
-`bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
-Every run below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
-That wrapper is why the open fixture merge request could be used as evidence at all: it is `mergeable` with discussions resolved, so the pipeline conditions are the only thing between it and a real merge.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the GitLab merge rule, its explicit opt-ins and verified-head binding.
+The default still requires a successful pipeline at the current head.
+The existing attended `--allow-no-pipeline` flag retains its upstream contract and does not enable the additional home integration.
+With the home setting enabled, raw merge verification additionally corroborates readable boolean-false project policy before applying that waiver.
+The missing-tool evidence below was collected on 2026-08-22 using a throwaway `FM_HOME` and a `glab` wrapper that refused every merge subcommand.
 
 Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
 
@@ -205,8 +216,8 @@ $ echo $?
 
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
-`jq` is not one of firstmate's common tools, which is why the watch poll reads glab's field output instead.
-The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
+The watch poll reads glab's field output without `jq`; [configuration.md](configuration.md#toolchain) owns the additional prerequisites for registered GitLab projects.
+The enabled integration uses raw API reads for merge verification, owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s `gitlab_verify_mergeable`; disabled URL-only runs, including upstream waiver calls, retain the existing `glab mr view` read.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
@@ -268,8 +279,9 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` fetches a pull-request head from the remote when none is recorded, which a merge request has no ref for, so a GitLab task is diffed against its local branch under that script's warning ([architecture.md](architecture.md) owns that fallback).
+`bin/fm-pr-check.sh` currently records `pr_head=` only for GitHub.
+GitLab exposes a source SHA and `refs/merge-requests/<iid>/head`, but ready registration and review-diff refresh do not yet use them; [architecture.md](architecture.md) owns that implementation limit.
+The field is optional by design, and teardown reads the head from the forge before applying its provider-agnostic content check.
 
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.

@@ -11,6 +11,19 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
+FM_CONFIG_OVERRIDE="$TMP_ROOT/enabled-config"
+mkdir -p "$FM_CONFIG_OVERRIDE"
+printf '%s\n' 1 > "$FM_CONFIG_OVERRIDE/gitlab-support"
+export FM_CONFIG_OVERRIDE
+
+reason=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/disabled-config" \
+  fm_forge_valid_for_mode gitlab direct-PR test 2>&1)
+status=$?
+[ "$status" -eq 1 ] || fail "an unopted generated contract accepted a forge upstream main refuses"
+assert_equals "error: test: unknown forge 'gitlab' (expected none, gerrit, forgejo, or external)" \
+  "$reason" "an unopted generated contract changed upstream's forge refusal"
+fm_forge_valid_for_mode gitlab direct-PR test || fail "an opted-in GitLab contract was refused"
+pass "contract validation keeps the upstream forge set until GitLab support is enabled"
 
 accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   fm_dod_accept_ship_done "$@"
