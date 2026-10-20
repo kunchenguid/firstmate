@@ -320,8 +320,9 @@
 #     cmux, orca, zellij) is spared and reported individually; it never
 #     blocks teardown, which goes on to close the pane. Each kill and each
 #     spare appends one tab-separated line to state/teardown-processes.log:
-#     UTC time, task id, pid, verdict (killed, force-killed, spared), reason,
-#     command. A treehouse worktree
+#     UTC time, task id, pid, verdict (killed, force-killed, spared, kept),
+#     reason, command. The pid field is "-" for a kept worktree and a negative
+#     process-group id for the lsof-less group fallback. A treehouse worktree
 #     with a spared process still in it is not force-returned: the return
 #     waits until after the pane close, re-scans the worktree, and the
 #     worktree is kept (surviving pids named) only if a spared process with
