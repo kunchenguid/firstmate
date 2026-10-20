@@ -246,7 +246,11 @@
 #   also adds --approve when that help advertises it, so the first unattended
 #   launch does not stall on Pi's "Trust project folder?" dialog for that home
 #   path; --approve is session-scoped to the launch cwd and does not rewrite the
-#   operator's trust.json. Ordinary Pi worker launches never receive --approve.
+#   operator's trust.json. Ordinary Pi worker launches never receive --approve;
+#   instead their fresh task worktree is written into Pi's own trust.json ahead
+#   of launch by bin/fm-pi-trust.sh, because a worktree path is new on every
+#   spawn and the dialog would otherwise park the worker forever (script header
+#   and docs/verification/runtime-backends.md own the store facts).
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   Devin is worker-only: --permission-mode dangerous and
@@ -5616,6 +5620,14 @@ spawn_assert_agent_worktree
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# Pi gates its first launch in a directory holding trust-requiring resources -
+# which every task worktree does through .agents/skills - behind "Trust project
+# folder?", and remembers the answer per absolute path in its own trust.json, so
+# bin/fm-pi-trust.sh records the one worktree path this spawn uses before the
+# pane exists. Its failure is fatal like claude's: the worker would park there
+# with no one to answer. A Pi secondmate is not registered here, because its
+# launch already carries the session-only --approve for the home it starts in
+# and a persistent home-level entry would widen a grant for no gain.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -5627,6 +5639,22 @@ claude*)
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
     exit 1
+  fi
+  ;;
+pi | pi-signed)
+  # The store is the one the LAUNCH will read: a worker account pin names the
+  # root on the launch line itself, and an unpinned launch inherits the pane's
+  # own PI_CODING_AGENT_DIR (else the user-level ~/.pi/agent). Only the realpath
+  # is registered, because Pi keys its store by the canonical path.
+  if [ "$KIND" != secondmate ]; then
+    spawn_pi_trust_args=("$WT" "$PROJ_ABS")
+    if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+      spawn_pi_trust_args=(--agent-dir "$WORKER_ACCOUNT_ROOT" "${spawn_pi_trust_args[@]}")
+    fi
+    if ! "$FM_ROOT/bin/fm-pi-trust.sh" "${spawn_pi_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Pi project trust for $WT; refusing to launch a $HARNESS worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
   fi
   ;;
 agy)
