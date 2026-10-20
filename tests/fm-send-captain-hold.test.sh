@@ -16,7 +16,7 @@
 #      --resolve-key, even under the away-posture record.
 #   7. A window target that resolves to a held task's meta is refused.
 #   8. A backlog that exists but cannot be read refuses.
-#   9. An unheld task, and a home with no backlog, steer as before.
+#   9. An unheld task, and a home with no backlog or data directory, steer as before.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -204,7 +204,10 @@ test_unheld_and_backlogless_homes_steer() {
   send "$dir" t1 "carry on" || fail "an unheld task should accept a steer: $(cat "$dir/send.err")"
   dir=$(make_case no-backlog 0)
   send "$dir" t1 "carry on" || fail "a home with no backlog should accept a steer: $(cat "$dir/send.err")"
-  pass "fm-send captain hold: unheld tasks and backlog-less homes steer as before"
+  dir=$(make_case no-data 0)
+  rmdir "$dir/home/data"
+  send "$dir" t1 "carry on" || fail "a home with no data directory should accept a steer: $(cat "$dir/send.err")"
+  pass "fm-send captain hold: unheld tasks, backlog-less and data-less homes steer as before"
 }
 
 test_held_task_refuses_steer
