@@ -8,10 +8,17 @@
 # The guard is OFF unless the captain declares it. The declaration lives in
 # <config-dir>/sol-cap and names both the ceiling and the models it covers:
 #
-#   max=4                 # the largest concurrent count the captain allows
-#   ceiling=2             # optional; may lower max, never raise it
-#   models=gpt-6.1-sol    # optional; pipe-delimited exact model ids
-#   model-pattern=^gpt-   # optional; one extended regular expression
+#   max=4
+#   ceiling=2
+#   models=gpt-6.1-sol
+#   model-pattern=^gpt-[0-9.]+-sol$
+#
+# max is required and is the largest concurrent count the captain allows;
+# ceiling is optional and may only lower it; models is a pipe-delimited list
+# of exact model ids and model-pattern is one extended regular expression.
+# At least one of models or model-pattern is required. Every line is a
+# key=value pair: put an explanation on its own comment line, because an
+# inline comment becomes part of the value.
 #
 # An absent declaration leaves the guard inert: no ceiling, no reservation,
 # no behaviour change for a home that never opted in. A malformed declaration
@@ -167,23 +174,23 @@ fm_sol_cap_config() {  # <config-dir>
   fi
   case "$max" in
     '' | *[!0-9]*)
-      FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer"
+      FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer, not '$max'"
       return 1
       ;;
   esac
   if [ "$max" -lt 1 ]; then
-    FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer"
+    FM_SOL_CAP_CONFIG_ERROR="$file must declare max as a positive integer, not '$max'"
     return 1
   fi
   if [ "$seen_ceiling" = 1 ]; then
     case "$ceiling" in
       '' | *[!0-9]*)
-        FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max"
+        FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max, not '$ceiling'"
         return 1
         ;;
     esac
     if [ "$ceiling" -lt 1 ] || [ "$ceiling" -gt "$max" ]; then
-      FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max"
+      FM_SOL_CAP_CONFIG_ERROR="$file must declare ceiling as an integer from 1 through $max, not '$ceiling'"
       return 1
     fi
   else
@@ -257,6 +264,22 @@ fm_sol_cap_state_model_capped() {  # <state-dir> <model>
   }
   [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 1
   fm_sol_cap_model_capped "$model"
+}
+
+# fm_sol_cap_state_covers <state-dir> <model>
+# Does the declaration that governs <state-dir> cover <model>? The
+# declaration is read in its own scope, so the caller's loaded declaration is
+# left exactly as it was. Returns 0 when it covers the model, 1 when it does
+# not or when no declaration exists, and 2 when that declaration is
+# malformed and the question cannot be answered.
+fm_sol_cap_state_covers() {  # <state-dir> <model>
+  local state=$1 model=$2 config
+  config=$(fm_sol_cap_config_dir "$state") || return 2
+  (
+    fm_sol_cap_config "$config" || exit 2
+    [ "$FM_SOL_CAP_ACTIVE" = 1 ] || exit 1
+    fm_sol_cap_model_capped "$model"
+  )
 }
 
 # fm_sol_cap_entry_shape <start> <pid>
@@ -352,7 +375,7 @@ fm_sol_cap_adopt_workers() (
 )
 
 fm_sol_cap_active_count() {  # <first-state>
-  local first=$1 state file id model start pid now age entry home
+  local first=$1 state file id model start pid now age entry home covered
   FM_SOL_COUNT=0
   FM_SOL_ACTIVE_LIST=
   FM_SOL_COUNT_ERROR=
@@ -390,6 +413,20 @@ fm_sol_cap_active_count() {  # <first-state>
         FM_SOL_COUNT_ERROR="Sol registry $file has a malformed row: ${id:-<empty>} ${model:-<empty>} ${start:-<empty>} ${pid:-<empty>}"
         return 1
       fi
+      # Each home's own declaration decides which of its rows count: a home
+      # that declared no ceiling owns no capped occupancy, and a home that
+      # narrowed its declaration no longer counts the models it dropped. The
+      # rows themselves stay as evidence.
+      covered=0
+      fm_sol_cap_state_covers "$state" "$model" || covered=$?
+      case "$covered" in
+        0) ;;
+        1) continue ;;
+        *)
+          FM_SOL_COUNT_ERROR="the Sol declaration of $state could not be read"
+          return 1
+          ;;
+      esac
       fm_sol_cap_entry_live "$start" "$pid" || continue
       age=$((now > start ? now - start : 0))
       entry="$id ($model, age $(fm_sol_cap_age_text "$age"))"
@@ -537,6 +574,16 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
 fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
   local id=$1 state=$2 model registry occupancy config
   registry=$state/$FM_SOL_REGISTRY_NAME
+  # The owning home's own declaration decides whether it holds capped
+  # occupancy at all: a home that declared no ceiling owns none, and a home
+  # that narrowed its declaration no longer owns the models it dropped. The
+  # stored rows stay as evidence either way.
+  config=$(fm_sol_cap_config_dir "$state") || return 1
+  fm_sol_cap_config "$config" || {
+    printf '%s\n' "error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR" >&2
+    return 2
+  }
+  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 1
   occupancy=$(awk -F'\t' -v id="$id" '$1 == id {print "pid:" $4; exit}' "$registry" 2>/dev/null || true)
   if [ -n "$occupancy" ]; then
     occupancy=${occupancy#pid:}
@@ -549,12 +596,6 @@ fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
   fi
   [ -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ] || return 1
   model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$state/$id.meta") || return 1
-  config=$(fm_sol_cap_config_dir "$state") || return 1
-  fm_sol_cap_config "$config" || {
-    printf '%s\n' "error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR" >&2
-    return 2
-  }
-  [ "$FM_SOL_CAP_ACTIVE" = 1 ] || return 1
   fm_sol_cap_model_capped "$model"
 }
 

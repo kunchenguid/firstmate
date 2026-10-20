@@ -2049,14 +2049,21 @@ The ceiling is **off unless the captain declares it**.
 `config/sol-cap` is a local, gitignored file in the dispatching home that names both the ceiling and the models it covers.
 Without that file there is no ceiling, no reservation, and no change to any dispatch: a home that never opted in behaves exactly as it did before this guard existed.
 A malformed file refuses loudly, naming the file and the problem, rather than guessing a ceiling the captain never wrote.
+A declaration the guard cannot read leaves it unable to know its own scope, so the refusal covers every dispatch through the guard, not only a capped model.
 
 ```sh
 # config/sol-cap
-max=4                             # required: the largest concurrent count the captain allows
-ceiling=2                         # optional: may lower max, never raise it
-models=gpt-6.1-sol|gpt-6-sol      # optional: pipe-delimited exact model ids
-model-pattern=^gpt-[0-9.]+-sol$   # optional: one extended regular expression
+# max is required: the largest concurrent count the captain allows.
+# ceiling is optional: it may lower max, never raise it.
+# models is optional: a pipe-delimited list of exact model ids.
+# model-pattern is optional: one extended regular expression.
+max=4
+ceiling=2
+models=gpt-6.1-sol|gpt-6-sol
+model-pattern=^gpt-[0-9.]+-sol$
 ```
+
+Every line is a `key=value` pair, and an explanation belongs on its own comment line: an inline comment becomes part of the value, so `max=4  # the plan limit` is not a valid `max`.
 
 | Key | Requirement |
 | --- | --- |
@@ -2076,7 +2083,7 @@ A fresh launch with `--model default` has no explicit model pin; remote endpoint
 
 - The count registry is one TSV file per Firstmate home on this machine: `<state>/sol-sessions.tsv`, one row per capped session keyed by task id; the [`fm-sol-cap-lib.sh` header](../bin/fm-sol-cap-lib.sh) owns the row format.
 - The guard counts live rows across every local Firstmate home's state directory on this machine (the same enumeration `bin/fm-project-capacity-lib.sh` counts through), so local homes share one ceiling and remote homes are never walked because their workers run on another machine; a remote secondmate is counted in the dispatching home.
-- Each home's own declaration decides which of its sessions are capped, so a home that declared no ceiling owns no capped occupancy and is never adopted into another home's count.
+- Each home's own declaration decides which of its sessions are capped, so a home that declared no ceiling owns no capped occupancy and is never adopted into another home's count; a home that drops its declaration keeps its stored rows as evidence, but those rows stop counting.
 - A registered stale row does not count: its recorded positive pid is no longer alive; age never releases a live worker.
 - A fresh spawn claims its row atomically under the local root home's `state/.sol-cap.lock`, with the spawning process's pid until launch delivery begins.
 - Before delivery, the reservation becomes conservative (pid 0), so an uncertain delivery or later spawn error cannot free a running worker's slot.

@@ -347,6 +347,50 @@ test_declared_model_set_is_the_only_capped_set() {
 
 
 
+# The declaration the documentation ships must parse as written: an example
+# a captain copies has to be a valid declaration, not a refusal.
+test_the_documented_declaration_parses() {
+  local case_dir out
+  case_dir=$(make_case documented)
+  awk '/^# config\/sol-cap$/{f=1} f{print} f&&/^```$/{exit}' "$ROOT/docs/configuration.md" \
+    | sed '$d' > "$case_dir/home/config/sol-cap"
+  [ -s "$case_dir/home/config/sol-cap" ] || fail "the documented declaration was not found in docs/configuration.md"
+  out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" status "$case_dir/home/config") ||
+    fail "the documented declaration did not parse: $out"
+  assert_contains "$out" "max=" "the documented declaration did not report its maximum"
+  assert_contains "$out" "ceiling=" "the documented declaration did not report its ceiling"
+  assert_contains "$out" "models=" "the documented declaration did not report its model set"
+  pass "the declaration documented in docs/configuration.md parses as written"
+}
+
+# A home that drops its declaration owns no capped occupancy: its stored rows
+# stay as evidence, but they neither count against another home's ceiling nor
+# make its own sessions hold a slot.
+test_a_home_that_drops_its_declaration_owns_no_occupancy() {
+  local case_dir out root mate
+  case_dir=$(make_case drop-declaration)
+  root=$case_dir/home
+  mate=$case_dir/mate
+  make_home "$mate"
+  printf '%s\n' schema=fm-secondmate-parent.v1 route=local "parent_home=$root" > "$mate/.fm-secondmate-parent"
+  printf -- '- mate - local mate (home: %s; scope: work; projects: project; added 2026-09-01)\n' "$mate" > "$root/data/secondmates.md"
+  for i in 1 2 3 4; do write_sol_row "$mate" "mate-$i" "$(fresh_start)" 0; done
+  rm -f -- "$mate/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" next gpt-6.1-sol) || fail "a home that dropped its declaration still refused: $out"
+  assert_equals "$out" "claimed" "a home that dropped its declaration still held occupancy"
+  if (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+    . "$ROOT/bin/fm-sol-cap-lib.sh"
+    fm_sol_cap_has_owned_occupancy mate-1 "$mate/state"
+  ); then
+    fail "a home that dropped its declaration still owned a capped session"
+  fi
+  [ "$(grep -c . "$mate/state/sol-sessions.tsv")" -eq 4 ] ||
+    fail "a home that dropped its declaration lost its stored rows"
+  pass "a home that dropped its declaration owns no occupancy and keeps its rows as evidence"
+}
+
 # --- direct library contract -------------------------------------------------
 
 # The ceiling's session-key semantics and loud-config refusals cannot be
@@ -923,6 +967,8 @@ test_non_sol_model_never_claims_a_slot
 test_config_sol_cap_declares_the_ceiling
 test_no_declaration_leaves_the_guard_inert
 test_declared_model_set_is_the_only_capped_set
+test_the_documented_declaration_parses
+test_a_home_that_drops_its_declaration_owns_no_occupancy
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim
