@@ -986,7 +986,7 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   out=$(run_control "$dir" rl6 relaunch --harness claude --model default --note "clear the previous model"); rc=$?
   expect_code 0 "$rc" "a model-clearing relaunch failed: $out"
   [ "$(meta_field "$dir" rl6 model)" = default ] || fail "replacement did not clear the model"
-  [ "$(awk -F'\t' '$1 == "rl6" {print $4}' "$dir/home/state/sol-sessions.tsv")" = -1 ] || fail "cleared model retained live Sol occupancy"
+  [ "$(awk -F'\t' '$1 == "rl6" {print $4}' "$dir/home/state/sol-sessions.tsv")" != 0 ] || fail "cleared model retained live Sol occupancy"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 

@@ -532,7 +532,7 @@ fm_sol_cap_registry_drop() {  # <registry-file> <id>
 # reservation. A malformed declaration, an unavailable count, or a claim lock
 # refuses loudly rather than launching possibly uncounted.
 fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <state-dir>
-  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start existing_model
+  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start existing_model covered
   FM_SOL_CAP_REFUSAL=
   FM_SOL_CLAIM_CREATED=
   [ -n "$id" ] || return 0
@@ -543,20 +543,39 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: $FM_SOL_CAP_CONFIG_ERROR; task $id with model $model was not dispatched rather than launched against an undeclared ceiling"
     return 1
   }
-  if [ "$FM_SOL_CAP_ACTIVE" != 1 ]; then
-    # This home declared no ceiling, so this dispatch reserves nothing. A
-    # replacement still invalidates the prior incarnation's row: a row an
-    # earlier declared incarnation left behind names this task's id while
-    # describing a session that has exited, and adoption would skip it, so
-    # a later declaration would leave this worker uncounted.
-    [ -e "$state/$id.meta" ] || return 0
-    fm_sol_cap_registry_drop "$state/$FM_SOL_REGISTRY_NAME" "$id" || return 1
-    return 0
+  # A dispatch that reserves no slot covers three cases: the home declared
+  # no ceiling, the model the declaration names is not this dispatch's
+  # model, and the dispatch carries no explicit model pin. None of them
+  # claims a slot.
+  covered=0
+  if [ "$FM_SOL_CAP_ACTIVE" = 1 ] && [ -n "$model" ] && [ "$model" != default ] &&
+    fm_sol_cap_model_capped "$model"; then
+    covered=1
   fi
-  [ -n "$model" ] && [ "$model" != default ] || return 0
-  fm_sol_cap_model_capped "$model" || return 0
   root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$state")") || return 1
   lock=$root/state/$FM_SOL_LOCK_NAME
+  if [ "$covered" = 0 ]; then
+    # A genuine endpoint reuse keeps its row: the same session continues, and
+    # the release that ends it is decided at its own publication.
+    [ "$reuse" = reuse ] && return 0
+    # Any other replacement invalidates the prior incarnation's row: a row
+    # an earlier incarnation left behind names this task's id while
+    # describing a session that has exited, and adoption skips it, so a
+    # later declaration would leave this worker uncounted. A first dispatch
+    # has no prior incarnation to invalidate. The invalidation runs under the
+    # same admission boundary as every other registry rewrite, so it cannot
+    # lose an update to a concurrent one.
+    [ -e "$state/$id.meta" ] || return 0
+    if ! fm_sol_cap_lock_acquire "$lock" "task $id"; then
+      return 1
+    fi
+    if ! fm_sol_cap_registry_drop "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
+      fm_lock_release "$lock" || true
+      return 1
+    fi
+    fm_lock_release "$lock" || true
+    return 0
+  fi
   if ! fm_sol_cap_lock_acquire "$lock" "task $id"; then
     return 1
   fi

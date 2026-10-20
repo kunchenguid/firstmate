@@ -2101,6 +2101,7 @@ A fresh launch with `--model default` has no explicit model pin; remote endpoint
 - Adopted claims use pid -2 and are rechecked before counting when their spawn lifecycle lock is available; a proven stop becomes a non-counting stop marker, while uncertain workers retain occupancy.
 - Delivery reservations with pid 0 are not rechecked by unrelated admissions, because a queued launch may still execute after its spawning process exits.
 - Dead-PID rows remain while their task metadata exists, preserving stop evidence against repeated adoption.
+- A replacement that reserves no slot invalidates the prior incarnation's row, so a row naming a session that has exited can never stand in for the newer incarnation of the same task id; a genuine endpoint reuse keeps its row, because the same session continues.
 - Explicit confirmed-stop release records pid -1 while the capped task's metadata remains, even when no registry row or file existed; that row holds no occupancy, prevents re-adoption of the stopped worker, and is replaced by a new admitted incarnation.
 - Launches that own no capped occupancy bypass the admission lock, including retries whose only registry row is a non-counting stop marker or a dead positive PID; these records remain stop evidence until a new admitted incarnation or pruning replaces them.
 - Passing spawns prune stopped rows once their metadata is absent.
