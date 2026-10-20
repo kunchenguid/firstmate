@@ -23,8 +23,13 @@ fm_root_is_secondmate_home() {
 # dir exists yet. A valid secondmate marker force-includes a linked secondmate
 # home. Otherwise only a plain checkout is primary, never a linked task
 # worktree.
+# A session carrying FM_TASK_ID is a ship or scout worker (bin/fm-spawn.sh marks
+# only those panes), so it is never primary. This holds even when its worktree
+# is a recycled pool slot that still carries a former secondmate home's
+# gitignored marker, which would otherwise force-include the worker.
 fm_primary_root_matches() {
   local root=$1 git_dir git_common_dir
+  [ -z "${FM_TASK_ID:-}" ] || return 1
   if ! fm_root_is_secondmate_home "$root"; then
     git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
     git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
