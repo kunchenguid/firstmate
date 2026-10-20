@@ -340,6 +340,7 @@ test_unsafe_link_and_image_schemes_are_rejected() {
 [javascript](javascript:alert(1)) [vbscript](vbscript:alert(1)) [file](file:///etc/passwd)
 [obfuscated](java&#58;script:alert(1))
 [control-obfuscated](java&#x09;script&#58;alert(1))
+[semicolonless-obfuscated](java&#x09script&#58alert(1))
 ![bad data](data:text/html,alert(1)) ![bad file](file:///etc/passwd)
 [good](https://example.test/path)'
   build "$home" >/dev/null || fail "build failed"
@@ -351,6 +352,8 @@ test_unsafe_link_and_image_schemes_are_rejected() {
   assert_not_contains "$html" 'href="javascript&#58;' "entity-obfuscated schemes must be inert"
   assert_not_contains "$html" 'href="java&amp;#x09;script' \
     "numeric references must be decoded before control characters are stripped"
+  assert_not_contains "$html" 'href="java&amp;#x09script' \
+    "semicolonless numeric references must be decoded before scheme validation"
   assert_not_contains "$html" 'src="data:' "unsafe data images must be inert"
   assert_not_contains "$html" 'src="file:' "file images must be inert"
   assert_contains "$html" 'href="https://example.test/path"' "https links must remain usable"
@@ -578,6 +581,53 @@ Gemessen und belegt.'
   assert_contains "$html" 'aaaa1111bbbb' \
     "the decision's checksum must be shown, so the record can be found again"
   pass "a recorded decision reaches the report of the task it gated"
+}
+
+test_reconciliation_evidence_is_rendered_as_reconciled() {
+  local home html
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Done
+- [x] reconciled-evidence - Reconciliation evidence (kind: captain) (done 2026-10-20) (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 88881111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+  Resolution mode: reconciled
+
+  Reconciliation evidence:
+  The question no longer applies after the service retired.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" reconciled-evidence)
+  assert_contains "$html" 'class="dec-state">reconciled<' \
+    "reconciliation evidence must have its own outcome state"
+  assert_contains "$html" 'The question no longer applies after the service retired.' \
+    "the recorded reconciliation evidence must be shown"
+  assert_not_contains "$html" 'class="dec-state">decided<' \
+    "reconciliation evidence must not be presented as the captain's answer"
+  pass "resolution evidence appears as a reconciled outcome"
+}
+
+test_still_open_reconciliation_note_is_rendered_as_reconciled() {
+  local home html
+  home=$(decision_home)
+  write_backlog "$home" '# Backlog
+
+## Active
+- [ ] reconciled-note - Still open (kind: captain) (hold-kind: captain)
+  Captain hold reconciled: 2026-10-20T12:34:56Z
+  Reconcile request: 2026-10-20T12:00:00Z | board | note digest: deadbeef
+  The evidence is incomplete, so the question remains open.'
+  build "$home" >/dev/null || fail "build failed"
+  html=$(html_of "$home/state/reports.html" reconciled-note)
+  assert_contains "$html" 'class="dec-state">reconciled<' \
+    "a still-open reconcile note must have its own outcome state"
+  assert_contains "$html" 'The evidence is incomplete, so the question remains open.' \
+    "the note content must be shown"
+  assert_not_contains "$html" '2026-10-20T12:00:00Z' \
+    "reconcile request bookkeeping must not be shown as the note"
+  assert_not_contains "$html" 'class="dec-state">decided<' \
+    "a reconcile note must not be presented as the captain's answer"
+  pass "a still-open reconcile note appears as a reconciled outcome"
 }
 
 test_decision_without_a_report_becomes_its_own_entry() {
@@ -964,6 +1014,8 @@ test_shipped_template_build_replaces_both_slots
 test_build_refuses_a_template_without_a_slot
 test_page_fetches_nothing
 test_recorded_decision_reaches_the_report_it_gated
+test_reconciliation_evidence_is_rendered_as_reconciled
+test_still_open_reconciliation_note_is_rendered_as_reconciled
 test_decision_without_a_report_becomes_its_own_entry
 test_empty_anchor_falls_back_to_newest_report
 test_malformed_anchor_falls_back_to_newest_report

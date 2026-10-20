@@ -11,11 +11,14 @@
 #
 # Output: {sources: [{name, state, note}], tasks: [group]}, newest group first,
 #   group = {id, title, target, ts, when, question, items}
-#   item  = {state: "decided" | "open", key, digest, mode, words}
+#   item  = {state: "decided" | "open" | "reconciled", key, digest, mode, words}
 #
-# WHAT COUNTS AS A DECISION. The recorded form is the block bin/fm-captain-hold.sh
-# (and the older fm-decision-hold.sh) writes into a task body: a marker line, a
-# `Decision digest:` checksum, a resolution mode, and the captain's own words.
+# WHAT COUNTS AS A DECISION. bin/fm-captain-hold.sh writes exactly three outcome
+# forms: `Captain decision:` for the captain's answer, `Reconciliation evidence:`
+# inside a reconciled resolution block, and a timestamped `Captain hold
+# reconciled:` note outside a resolution block. The older fm-decision-hold.sh
+# wrote the captain-decision form too. A resolution block also carries a marker,
+# a `Decision digest:` checksum, and a resolution mode.
 # That checksum is the identity, so one block reached through the store AND
 # through an archive file is ONE decision, and a block repeated across archive
 # snapshots is shown once. Blocks keep document order, which is newest first
@@ -118,9 +121,15 @@ def field($name):
   | if . == null then null else (.v | trim | val) end;
 
 def words_of:
-  (index("Captain decision:")) as $i
+  (index("Captain decision:") // index("Reconciliation evidence:")) as $i
   | if $i == null then ""
-    else (.[($i + 17):] | sub("^\n"; "") | trim) end;
+    else (.[($i + (if .[$i:($i + 17)] == "Captain decision:" then 17 else 24 end)):]
+          | sub("^\n"; "") | trim) end;
+
+def reconciled_notes:
+  [match("(?ms)^Captain hold reconciled: (?<stamp>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\nReconcile request: [^\\n]*\n(?<note>.*?)(?=\\n\\nCaptain hold reconciled:|\\z)"; "g")
+   | {state: "reconciled", key: .captures[0].string,
+      digest: null, mode: null, words: (.captures[1].string | trim)}];
 
 def blocks_of:
   . as $t
@@ -130,6 +139,8 @@ def blocks_of:
            (if $i + 1 < ($ms | length) then $ms[$i + 1].offset else ($t | length) end)] ]
   | map({digest: field("Decision digest"),
          mode: (field("Resolution mode") // field("Routed identities")),
+         state: (if (field("Resolution mode") // "") == "reconciled"
+                 then "reconciled" else "decided" end),
          words: words_of})
   | map(select(.digest != null or .words != ""));
 
@@ -154,6 +165,7 @@ def group_of:
      ts: ((.closed | epoch_of) // ($holdset | epoch_of) // (.archived | epoch_of)),
      body: $body,
      blocks: ($body | blocks_of),
+     notes: ($body | reconciled_notes),
      haystack: (((.title // "") + "\n" + ((.links // "") | tostring) + "\n" + $body))};
 
 # The report a group belongs to, in the order the plan fixed: the same id, then
@@ -187,7 +199,8 @@ def target_of($reports):
          ts: ([$same[] | .ts | select(. != null)][0] // 0),
          body: ([$same[] | select(.body != "") | .body][0] // ""),
          haystack: ([$same[] | .haystack] | join("\n")),
-         blocks: ([$same[] | .blocks[]] | dedupe)})
+         blocks: ([$same[] | .blocks[]] | dedupe),
+         notes: ([$same[] | .notes[]] | unique_by(.key))})
 | map(. + {target: target_of($reports)})
 | map(. as $g
       | {id: $g.id,
@@ -197,12 +210,13 @@ def target_of($reports):
          when: (if $g.ts == 0 then null else ($g.ts | strftime("%d.%m.%Y")) end),
          question: $g.question,
          items: ([$g.blocks[]
-                  | {state: "decided", key: (.digest // .words),
+                  | {state: .state, key: (.digest // .words),
                      digest: .digest, mode: .mode, words: .words}]
-                 + (if ($g.blocks | length) == 0 and $g.body != ""
+                 + $g.notes
+                 + (if ($g.blocks | length) == 0 and ($g.notes | length) == 0 and $g.body != ""
                     then [{state: (if $g.closed == null then "open" else "decided" end),
                            key: $g.id, digest: null, mode: null, words: $g.body}]
-                    elif ($g.blocks | length) == 0
+                    elif ($g.blocks | length) == 0 and ($g.notes | length) == 0
                     then [{state: "open", key: $g.id, digest: null, mode: null, words: ""}]
                     else [] end))})
 | sort_by(-.ts)

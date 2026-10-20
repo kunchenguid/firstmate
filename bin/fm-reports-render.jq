@@ -57,7 +57,7 @@ def clean_inline:
   | gsub("^[[:space:]]+|[[:space:]]+$"; "");
 
 def decode_url_entities:
-  gsub("(?i)&#(?<n>x[0-9a-f]+|[0-9]+);"; . as $m
+  gsub("(?i)&#(?<n>x[0-9a-f]+|[0-9]+);?"; . as $m
     | ($m.n | ascii_downcase
        | if startswith("x") then .[1:] | explode
          | reduce .[] as $d (0; . * 16 +
