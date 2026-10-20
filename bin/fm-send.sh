@@ -224,7 +224,8 @@
 # bin/fm-control.sh lifecycle verbs, and explicit backend targets are not
 # steers to a held task and are never refused. The exemption does not extend to
 # the supervision branch (main or away posture): its --resolve-key on the
-# target's own hold is refused too, so only `answer --release` lifts the hold.
+# target's own hold is refused too. Both refusals tell the branch only that the
+# owner must release the hold; they do not name the release command.
 # Any target that resolves to a recorded task meta is checked, including a
 # window/terminal target. A backlog that exists but cannot be read refuses; a
 # home with no backlog sends.
@@ -826,7 +827,11 @@ fm_send_refuse_if_captain_held() { # <task-id>
   show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || show=
   reason=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p' | head -1)
   reason=$(printf '%s' "$reason" | perl -MJSON::PP -e 'local $/; my $v = <STDIN>; my $d = eval { JSON::PP->new->allow_nonref->decode($v) }; $d = $v unless defined $d; print((split /\n/, $d)[0] // "")' 2>/dev/null) || reason=
-  echo "error: steer not sent to $id: it is held for the captain${reason:+ (reason: $reason)}. Only the captain's release lifts the hold: record the captain's words with 'bin/fm-captain-hold.sh answer $id --decision-file <path> --release', then steer again." >&2
+  if [ "$(fm_lease_actor 2>/dev/null)" = branch ]; then
+    echo "error: steer not sent to $id: it is held for the captain${reason:+ (reason: $reason)}. Only the owner can release the hold; report it and leave the task alone until they do." >&2
+  else
+    echo "error: steer not sent to $id: it is held for the captain${reason:+ (reason: $reason)}. Only the captain's release lifts the hold: record the captain's words with 'bin/fm-captain-hold.sh answer $id --decision-file <path> --release', then steer again." >&2
+  fi
   return 1
 }
 

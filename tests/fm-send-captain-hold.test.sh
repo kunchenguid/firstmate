@@ -165,6 +165,8 @@ test_branch_cannot_self_release_with_resolve_key() {
   in_home "$dir" env FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key t1 "resume" >/dev/null 2>"$dir/send.err"
   rc=$?
   assert_contains "$(cat "$dir/send.err")" "away-posture record" "the away posture should pass the lease gate"
+  case "$(cat "$dir/send.err")" in *"answer t1"* | *"--release"*) fail "the branch refusal names the release command: $(cat "$dir/send.err")" ;; esac
+  assert_contains "$(cat "$dir/send.err")" "Only the owner can release" "the branch refusal should say the owner must release"
   [ "$rc" -ne 0 ] || fail "the branch self-released a held task with --resolve-key"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "the branch's own-hold --resolve-key still recorded a steer"
   [ ! -s "$dir/send.log" ] || fail "the branch's own-hold --resolve-key still rang the terminal"
