@@ -246,6 +246,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 - For a key the status log still owns, that script's header owns the status-log close.
 - A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
+- A text steer to a task whose item is held for the captain is refused until the owner releases the hold; the `bin/fm-send.sh` header owns the refusal contract and its exemptions.
 
 `bin/fm-procevent.sh` is the captured-result channel:
 
