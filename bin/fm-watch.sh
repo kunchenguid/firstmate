@@ -39,7 +39,12 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. When the pane shows the Claude background-task
+#                          resume. Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
+#                          the escalation at that count carries an extra
+#                          "PERMANENTLY-WEDGED" clause and is the last wedge
+#                          escalation for that WINDOW until its episode ends
+#                          (wedge_timer_check owns that opt-in).
+#                          When the pane shows the Claude background-task
 #                          exit picker, that same parenthetical ends with
 #                          "blocked-on-prompt:" and the picker's name, after the
 #                          demand-deep-inspection clause when that clause is
@@ -1674,7 +1679,7 @@ clear_write_tracking() {  # <window-key>
 # agent here to BE wedged? A wedge is something stuck that might recover, so
 # re-alarming it earns its cost; an agent that is gone never moves again, its pane
 # never churns, the idle timer never resets, and the escalate path below clears its
-# own timer and re-arms with nothing bounding the count.
+# own timer and re-arms with nothing bounding the count by default (FM_WEDGE_MAX_ESCALATIONS is the opt-in ceiling).
 # docs/architecture.md owns that contract and why only these two verdicts license
 # it; what the code needs stated here is the rest.
 #
@@ -2232,8 +2237,10 @@ clear_pause_state() {  # <window-key>
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
-# timer and escalation count, and both deferral chains the timer can take - the
-# write-deferral chain and the wait-deferral throttle. Split out so a caller
+# timer, escalation count, and any cap markers that episode fired, and both
+# deferral chains the timer can take - the write-deferral chain and the
+# wait-deferral throttle.
+# Split out so a caller
 # that must keep a window's DECLARATION-scoped pause state - its .paused-* flag,
 # recheck, and re-surface throttle - can still reset the per-hash half alone.
 clear_stale_hash_tracking() {  # <window-key>
