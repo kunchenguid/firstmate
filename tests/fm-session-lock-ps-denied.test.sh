@@ -695,6 +695,67 @@ SH
   pass "acquisition refuses a live owner with unreadable identity"
 }
 
+test_partial_identity_reads_refuse() {
+  local dir fakebin field got
+  dir="$TMP_ROOT/partial-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$2" in
+  comm=) echo node ;;
+  args=) [ "$FM_TEST_FAILED_FIELD" != args ] || exit 1 ;;
+  ppid=) [ "$FM_TEST_FAILED_FIELD" != ppid ] || exit 1; echo 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  for field in args ppid; do
+    PATH="$fakebin:$PATH" FM_TEST_FAILED_FIELD="$field" bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_session_lock_pid_blocks_reclaim 700 || exit 1
+      [ "$FM_SESSION_LOCK_PID_VERDICT" = unreadable ]
+    ' _ "$LIB" || fail "failed ps $field read permitted reclaim"
+  done
+  PATH="$fakebin:$PATH" FM_TEST_FAILED_FIELD=none bash -c '
+    . "$1"
+    fm_proc_info 700 && [ -z "$FM_PROC_ARGS" ]
+  ' _ "$LIB" || fail "successfully empty ps args were refused"
+  if [ "$(uname -s)" = Linux ]; then
+    mkdir -p "$dir/proc/700"
+    printf '700 (node) S 1 700 700 0 -1 4194304\n' > "$dir/proc/700/stat"
+    make_denied_ps "$fakebin"
+    PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/proc" bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_session_lock_pid_blocks_reclaim 700 || exit 1
+      [ "$FM_SESSION_LOCK_PID_VERDICT" = unreadable ]
+    ' _ "$LIB" || fail "missing cmdline permitted reclaim"
+    : > "$dir/proc/700/cmdline"
+    got=$(FM_PROC_ROOT_OVERRIDE="$dir/proc" bash -c '. "$1"; fm_os_proc_triple 700' _ "$LIB") \
+      || fail "successfully empty cmdline was refused"
+    [ "$got" = "$(printf '1\tnode\t')" ] || fail "empty cmdline changed identity fields"
+  fi
+  pass "partial identity reads block reclaim; successfully empty args remain readable"
+}
+
+test_nonpid_records_allow_acquisition() {
+  local dir record
+  dir="$TMP_ROOT/nonpid-acquisition"
+  mkdir -p "$dir/named" "$dir/state"
+  ln -s "$(command -v bash)" "$dir/named/claude"
+  for record in '' '   ' 'not-a-pid'; do
+    printf '%s\n' "$record" > "$dir/state/.lock"
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_STATE_OVERRIDE="$dir/state" \
+      "$dir/named/claude" -c 'bash "$1/bin/fm-lock.sh"; rc=$?; exit "$rc"' _ "$ROOT" \
+      > "$dir/out" 2>&1 || fail "non-pid record refused acquisition: $record"
+    [ "$(cat "$dir/state/.lock")" != "$record" ] || fail "non-pid record was not replaced"
+  done
+  pass "empty, whitespace and non-numeric lock records allow acquisition"
+}
+
+test_partial_identity_reads_refuse
+test_nonpid_records_allow_acquisition
+
 test_unreadable_owner_refuses_acquisition
 test_denied_route_fields_parse_exactly
 test_provider_shape_violations_rejected

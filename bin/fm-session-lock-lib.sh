@@ -341,13 +341,9 @@ fm_os_proc_triple() {  # <pid>
       proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
       [ -r "$proc_root/$1/stat" ] || return 1
       stat_line=$(cat "$proc_root/$1/stat" 2>/dev/null) || return 1
-      args=''
-      if [ -r "$proc_root/$1/cmdline" ]; then
-        # NUL is the separator; TAB/CR/LF are record delimiters
-        # downstream, so they are flattened here too.
-        args=$(tr '\0\n\r\t' ' ' < "$proc_root/$1/cmdline" 2>/dev/null)
-        args=${args% }
-      fi
+      [ -r "$proc_root/$1/cmdline" ] || return 1
+      args=$(tr '\0\n\r\t' ' ' < "$proc_root/$1/cmdline" 2>/dev/null) || return 1
+      args=${args% }
       fm_linux_stat_triple "$stat_line" "$args"
       ;;
     Darwin)
@@ -417,7 +413,7 @@ _fm_ps_exec_denied() {
 # Returning 1 means "no route can read this pid", which stops a walk
 # exactly as a dead pid always has: nothing here ever fabricates a field.
 fm_proc_info() {  # <pid>
-  local pid=$1 rc=0 out
+  local pid=$1 rc=0 out comm args ppid
   FM_PROC_COMM='' FM_PROC_ARGS='' FM_PROC_PPID=''
   out=$(ps -o comm= -p "$pid" 2>/dev/null) || rc=$?
   case $rc in
@@ -488,9 +484,12 @@ fm_proc_info() {  # <pid>
   # The empty comm is still reported, not invented: FM_PROC_COMM stays
   # empty and the matcher below rejects it, exactly as it rejects a
   # comm it does not recognise.
-  FM_PROC_COMM=$out
-  out=$(ps -o args= -p "$pid" 2>/dev/null) && FM_PROC_ARGS=$out
-  out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') && FM_PROC_PPID=$out
+  comm=$out
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 1
+  ppid=${ppid// /}
+  case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+  FM_PROC_COMM=$comm FM_PROC_ARGS=$args FM_PROC_PPID=$ppid
   return 0
 }
 
@@ -639,6 +638,7 @@ fm_session_pid_identity() {  # <value>
 # that still matches holds the lock, an unreadable-but-live process is refused
 # rather than guessed at, and only a dead process frees the lock.
 fm_session_lock_pid_blocks_reclaim() {
+  case "$1" in ''|*[!0-9]*|0) return 1 ;; esac
   fm_session_lock_pid_verdict "$1"
   case "$FM_SESSION_LOCK_PID_VERDICT" in
     dead) return 1 ;;
