@@ -2359,18 +2359,15 @@ Every home requires:
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
-Registered GitHub projects additionally require `gh`, GitHub authentication, and compatible `gh-axi`.
-Registered GitLab projects additionally require `glab` and GitLab authentication via `glab auth login`.
-Projects with an explicit `forge=gerrit` binding additionally require `gerrit-axi` and `jq` for Gerrit publishing; bootstrap does not probe Gerrit credentials.
-Local-only homes need neither forge delta.
+Provider-specific requirements are defined in the provider delta below; local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-Across these requirements, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, gerrit-axi covers Gerrit publishing, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+Across these requirements, no-mistakes runs the validation pipeline, browser and provider tools cover their respective operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
 
-In the applicable provider/backend deltas, gh-axi covers GitHub operations, chrome-devtools-axi covers browser operations, lavish-axi covers rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+In the applicable backend delta, chrome-devtools-axi covers browser operations, lavish-axi covers rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 `fm_backend_required_tools` in `bin/fm-backend.sh` owns the backend additions:
 
@@ -2389,7 +2386,13 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 The JSON-emitting adapters (`herdr`, `zellij`, `cmux`, `paseo`, `rex`, `tern`) need `jq` because their spawn and liveness paths parse backend JSON.
 Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `paseo`, `rex`, `t3code`, `tern`) uses `treehouse` for worktrees.
 
-The provider delta is required only for registered origins discovered under `projects/`; GitHub projects add `gh`, GitHub auth, and compatible `gh-axi`, while GitLab projects add `glab` and GitLab auth. Local-only homes need neither forge delta.
+The provider delta is required only for registered origins discovered under `projects/`.
+GitHub projects add `gh`, GitHub authentication, and compatible `gh-axi`.
+GitLab projects add `glab` and GitLab authentication.
+Projects with `forge=gerrit` add `gerrit-axi` and `jq`.
+Projects with `forge=forgejo` add `tea`.
+Projects with `forge=external` add no forge CLI.
+Local-only homes need neither forge delta.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI and the Rex server bundle's `rex`.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
@@ -2411,10 +2414,12 @@ An absent required tool with an automated install path reports `MISSING:` with i
 - An absent `no-mistakes` reports `MISSING:` with its install command, while a version below 1.46.0 or an unparseable version reports `OUTDATED:` with the `no-mistakes update` upgrade.
 - An absent `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and a below-floor or feature-incompatible one reports `OUTDATED:` with its required version and any missing feature-probe capability, while retaining that same `npm install -g tasks-axi` upgrade; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
 - An absent `gh-axi` for a registered GitHub project reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
+- An absent `tea` for a registered `forge=forgejo` project reports `MISSING: tea` with the platform-specific install command.
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)` and an incompatible one reports `OUTDATED:` with its `quota-axi update` upgrade; firstmate cannot resolve a profile array without a compatible binary.
 - For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
 - For a project with `forge=gerrit`, an absent `gerrit-axi` or `jq` reports `MISSING` with its install command; Gerrit credentials are not probed by bootstrap.
+- For a project with `forge=forgejo`, bootstrap checks the registered `tea` requirement but does not probe its host login.
 - An unsupported registered origin reports `FORGE_UNSUPPORTED` and is skipped by forge-dependent refreshes.
 
 **Checkout diagnostics**
@@ -2467,7 +2472,8 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 
 ## Forge selection (data/projects.md forge= token)
 
-A project with no `forge=` token is served by the GitHub tooling, `gh` and `gh-axi`, exactly as before the token existed, and the token changes nothing for existing entries.
+A project with no `forge=` token is classified from its origin against the configured GitHub and GitLab host lists.
+Recognized GitHub origins use `gh` and `gh-axi`, recognized GitLab origins use `glab`, and an origin outside those lists reports `FORGE_UNSUPPORTED` until its host is configured or an explicit supported forge binding is added.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
