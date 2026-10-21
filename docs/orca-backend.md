@@ -101,7 +101,6 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 ```sh
 tests/fm-backend-orca.test.sh
-tests/fm-backend-orca.test.sh
 tests/fm-spawn-orca-worktree.test.sh
 tests/fm-orca-submit-restart.test.sh
 tests/fm-orca-typed-restart.test.sh
