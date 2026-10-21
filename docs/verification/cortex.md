@@ -140,7 +140,7 @@ Not verified and therefore unsupported:
 - Whether `Stop` fires for a turn that ends in a model error; such a worker on a rendered error is a stale-worker case.
 - Cortex's onboarding dialogs, which a fresh home with no theme or connection opens; the launch has no backstop signature for them.
 - Whether a later Herdr release recognizes Cortex natively; the self-registration hooks then report from a second source.
-- Zellij, Orca, and cmux, which were not exercised; `fm-spawn.sh` refuses a cortex launch on them because only tmux and Herdr supply the Cortex pane identity that proves its titled composer empty.
+- Zellij, Orca, cmux, and Paseo, which were not exercised; `fm-spawn.sh` refuses a cortex launch on them because only tmux and Herdr supply the Cortex pane identity that proves its titled composer empty.
 - Any primary or secondmate supervision, so the adapter refuses both.
 
 The launch does not pass `--sql-read-only`, so SQL write policy remains the operator's own Cortex configuration, and the account's connection is used as configured.
