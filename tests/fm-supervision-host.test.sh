@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ABOUTME: Exercises supervision routing, outcome custody, and watcher handoffs.
+# ABOUTME: Uses real local lifecycle owners with controlled external engine boundaries.
 # Behavior tests for the supervision host (bin/fm-supervision-host.sh,
 # docs/supervision-host.md): its report surface (bin/fm-branch-report.sh), its
 # dispatch entry (bin/fm-branch-dispatch.mjs), and the host loop itself.
@@ -957,6 +959,75 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
   assert_re '^signal: .*demo.status' "$home/hook.err" "the rewake must carry the close"
   watcher_live "$home" || fail "hook main-only: the pass-through left no successor watcher"
   pass "host+hook: an attended main-only pass-through rewakes main and keeps its successor watcher"
+}
+
+assert_budget_close_after_supervisor_drain() {  # <early|delayed> <write|refuse>
+  local order=$1 restore=$2 home successor real_mktemp engine=$STUB
+  home=$(make_primary_home "hook-budget-$order-$restore")
+  ln -s "$ROOT/.agents" "$home/.agents"
+  mkfifo "$home/stub-release"
+  if [ "$order" = delayed ]; then
+    cat > "$home/engine-boundary" <<SH
+#!/usr/bin/env bash
+printf 'ready\n' > "\$FM_HOME/stub-ready"
+read -r _ < "\$FM_HOME/stub-release"
+"$STUB" "\$@"
+rc=\$?
+[ "$restore" != refuse ] || : > "\$FM_HOME/refuse-restoration"
+exit "\$rc"
+SH
+    chmod +x "$home/engine-boundary"
+    engine="$home/engine-boundary"
+  else
+    echo held > "$home/stub-mode"
+  fi
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/refuse-restoration" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "budget handoff: the watcher did not start"
+  append_status "$home" 'first actionable wake'
+  if [ "$order" = delayed ]; then
+    wait_until 250 test -s "$home/stub-ready" || fail "budget handoff: the engine never reached its pre-drain boundary"
+  else
+    wait_until 250 test -s "$home/engine-drain.1" || fail "budget handoff: the engine never drained its first wake"
+  fi
+  successor=$(cat "$home/state/.watch.lock/pid")
+  printf 'kind=ship\nbudget_id=handoff\nbudget_start_epoch=1\nbudget_wall_secs=1\nbudget_output_tokens=1000000\n' >> "$home/state/demo.meta"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" || fail "budget handoff: the successor did not close on the real budget wake"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 250 hook_exited "$home" || fail "budget handoff: the hook never returned"
+  assert_re $'\tpass-through\tattended\tmain-only\tcheck: task-budget' "$home/state/.supervision-host.log" "the budget wake must be handed to main"
+  if [ "$restore" = refuse ]; then
+    assert_re $'\tpass-through\tdowntime-unrestored\t' "$home/state/.supervision-host.log" "a failed restoration must be explicit"
+    expect_code 2 "$(cat "$home/hook.rc")" "a failed restoration must notify main"
+    assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure notification must be committed"
+    watcher_live "$home" && fail "a failed restoration left a misleading live successor"
+  else
+    assert_rewoke_main "$home" "budget handoff ($order drain)"
+    assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" "the hand-back must restore a deliverable marker"
+    assert_grep 'task-budget:demo:' "$home/state/.wake-queue" "main's budget wake must remain queued"
+    watcher_live "$home" || fail "the delivered handoff lost its successor"
+  fi
+  stop_home_processes "$home"
+}
+
+test_claude_stop_hook_delivers_budget_close_after_supervisor_drain() {
+  assert_budget_close_after_supervisor_drain delayed write
+  assert_budget_close_after_supervisor_drain early write
+  pass "host+hook: an earlier supervisor drain cannot suppress a queued main-only budget handoff"
+}
+
+test_claude_stop_hook_reports_failed_budget_handoff_restoration() {
+  assert_budget_close_after_supervisor_drain delayed refuse
+  pass "host+hook: failed budget handoff restoration notifies main without starting a successor"
 }
 
 # Close the confirmed handling watcher after the engine has acknowledged its
@@ -1985,6 +2056,8 @@ test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_claude_stop_hook_delivers_a_main_only_pass_through
+test_claude_stop_hook_delivers_budget_close_after_supervisor_drain
+test_claude_stop_hook_reports_failed_budget_handoff_restoration
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
