@@ -182,6 +182,22 @@
 # to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
 # decide at all remains ask-user-authority's judgment for either actor.
 #
+# A key `captain-hold-<task>-<n>` still open in this home's copy of a
+# SECONDMATE's ledger names a call held in that mate's own backlog, which only
+# the mate's home can close. After the answer is durably delivered, fm-send
+# therefore also hands the mate home's own bin/fm-captain-hold.sh keyed-answer
+# intake one `<task>\t<answer>\t` line per such key (a local mate
+# through a direct call into its recorded home, a remote mate through
+# fm-remote-secondmate-control.sh `answers`), so the call closes in the mate's
+# home within seconds instead of waiting for its model to read the message. That
+# is one more channel feeding the one intake: fm-send decides nothing about the
+# close. It is best-effort and never changes the exit status, because the answer
+# is already delivered and a resend would duplicate it; a feed that could not run
+# or skipped a task prints a notice, and the mate still closes the call itself
+# when it reads the answer. The reverse mistake, a steer to a secondmate that
+# has such open calls but carries no --resolve-key, prints one notice naming the
+# open keys after the steer is delivered, and never blocks or reads the message text.
+#
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
 # a captain-held task in this home - the key as a task id itself, or through
@@ -743,6 +759,83 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
+# Open `captain-hold-*` keys in this home's copy of the target secondmate's
+# ledger, one per line: calls the mate holds in its own backlog.
+fm_send_open_mate_calls() {
+  local open key rest
+  open=$(status_open_decisions "$STATE/$TARGET_TASK_ID.status")
+  while IFS=$'\t' read -r key rest; do
+    case "$key" in captain-hold-?*) printf '%s\n' "$key" ;; esac
+  done <<OPEN
+$open
+OPEN
+}
+
+# Feed each answered mate-owned `captain-hold-<task>-<n>` key to the mate home's
+# own keyed-answer intake (see the header). Best-effort by design: the answer is
+# already delivered, so a failure here is a notice, never a nonzero exit.
+fm_send_feed_mate_holds() { # <answer-text>
+  local note=$1 k task lines='' budget out rc=0 mate_home marker
+  [ "$MARK_FROM_FIRSTMATE" = 1 ] || return 0
+  [ -n "$RESOLVE_STATUS_KEYS" ] || return 0
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_STATUS_KEYS; do
+    case "$k" in captain-hold-?*-[0-9]*) ;; *) continue ;; esac
+    case "${k##*-}" in '' | *[!0-9]*) continue ;; esac
+    task=${k#captain-hold-}
+    task=${task%-*}
+    [ -n "$task" ] || continue
+    lines="${lines}${task}"$'\t'"${note}"$'\t'$'\n'
+  done
+  [ -n "$lines" ] || return 0
+  budget=${FM_SEND_REMOTE_BUDGET:-30}
+  case "$budget" in '' | *[!0-9]* | 0) budget=30 ;; esac
+  if [ "$TARGET_BACKEND" = remote ]; then
+    out=$(fm_run_timed "$budget" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+      fm-remote-secondmate-control.sh answers "$TARGET_REMOTE_ID" "$lines" </dev/null 2>&1) || rc=$?
+  else
+    mate_home=$(fm_meta_get "$TARGET_META" home)
+    marker=
+    [ -z "$mate_home" ] || marker=$(cat "$mate_home/.fm-secondmate-home" 2>/dev/null || true)
+    if [ -z "$mate_home" ] || [ ! -d "$mate_home" ] || [ "$marker" != "$TARGET_TASK_ID" ]; then
+      echo "notice: the answer was delivered to $TARGET_TASK_ID, but its home is not recorded as a seeded secondmate home, so its held call(s) were not closed here; the mate closes them when it reads the answer. Do not resend." >&2
+      return 0
+    fi
+    # The keyed lines ride the environment into a tiny wrapper that pipes them
+    # to the intake, because a bounded background runner gives its child no stdin.
+    # shellcheck disable=SC2016  # the inner bash, not this shell, expands the script
+    out=$(fm_run_timed "$budget" env FM_SEND_FEED_LINES="$lines" FM_HOME="$mate_home" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$mate_home/state" \
+      FM_DATA_OVERRIDE="$mate_home/data" FM_CONFIG_OVERRIDE="$mate_home/config" \
+      bash -c 'printf "%s" "$FM_SEND_FEED_LINES" | "$0" answers --source "$1"' \
+      "$SCRIPT_DIR/fm-captain-hold.sh" \
+      "a firstmate answer relayed to $TARGET_TASK_ID by its parent" </dev/null 2>&1) || rc=$?
+  fi
+  out=$(printf '%s' "$out" | tr '\n' ' ')
+  if [ "$rc" -ne 0 ]; then
+    echo "notice: the answer was delivered to $TARGET_TASK_ID, but its own record of the held call(s) was not closed now (rc=$rc: ${out:-no output}); the mate closes them when it reads the answer. Do not resend." >&2
+  fi
+}
+
+# A steer to a secondmate that holds open captain calls in its own backlog, sent
+# without --resolve-key, closes none of them (see the header). Notice only, and
+# only once the steer is delivered, so a failed send keeps its real error first:
+# the send is never blocked and the message text is never read. Recovery resends
+# and fire-and-forget system asks are not captain answers and stay quiet.
+NOTICE_OPEN_MATE_CALLS=0
+if [ -z "$RESOLVE_KEYS" ] && [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -z "$FIRE_AND_FORGET_ID" ] &&
+  [ -z "${FM_PENDING_REPLY_EXISTING_CORR+x}" ] && [ "${1:-}" != "--key" ]; then
+  NOTICE_OPEN_MATE_CALLS=1
+fi
+fm_send_notice_open_mate_calls() {
+  local open_mate_calls
+  [ "$NOTICE_OPEN_MATE_CALLS" = 1 ] || return 0
+  open_mate_calls=$(fm_send_open_mate_calls | tr '\n' ' ')
+  open_mate_calls=${open_mate_calls% }
+  [ -n "$open_mate_calls" ] || return 0
+  echo "notice: $TARGET_TASK_ID has open captain call(s) in this home's ledger ($open_mate_calls) and this send carries no --resolve-key, so it closes none of them; if it answers one, send the answer with --resolve-key <key> so the call closes without waiting for the mate's next turn." >&2
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
@@ -999,7 +1092,9 @@ else
     if [ -n "$RESOLVE_KEYS" ]; then
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
     fi
+    fm_send_notice_open_mate_calls
     exit 0
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
@@ -1076,7 +1171,9 @@ else
     if [ -n "$RESOLVE_KEYS" ]; then
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
     fi
+    fm_send_notice_open_mate_calls
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
@@ -1201,7 +1298,9 @@ else
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_feed_mate_holds "$RESOLVE_ANSWER_TEXT"
   fi
+  fm_send_notice_open_mate_calls
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
