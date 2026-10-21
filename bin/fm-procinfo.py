@@ -174,6 +174,8 @@ def main():
         # hand the two routes different facts about one process.
         return 1
     comm = _ps_visible(argv[0])
+    while argv and not argv[-1]:
+        argv.pop()
     args = _ps_visible(b" ".join(argv))
     sys.stdout.write("%d\t%s\t%s\n" % (ppid, comm, args))
     return 0

@@ -650,42 +650,41 @@ test_helper_identity_matches_ps_route() {
 }
 
 test_procinfo_helper_survives_empty_argv_element() {
-  # The reported blocker: a provider that refuses any argv containing
-  # an empty element cannot name a harness whose argv carries one
-  # (verified on a real Pi primary), so the lock refusal survives even
-  # with the fallback in place. ps reads the same argv and answers, so
-  # route equivalence requires collecting the empty element as the
-  # data it is. This case is that exact shape: bash -c with a trailing
-  # empty argument, checked against live ps.
-  [ "$(uname -s)" = Darwin ] || { pass "empty argv element: macOS-only, skipped"; return; }
   command -v python3 >/dev/null 2>&1 \
     || { pass "empty argv element: python3 absent, skipped"; return; }
-  ps -o comm= -p $$ >/dev/null 2>&1 \
-    || { pass "empty argv element: ps unavailable, skipped"; return; }
-  local child out comm args ps_comm ps_args i
-  python3 -c 'import os; os.execv("/bin/bash", ["/bin/bash", "-c", "sleep 20; :", ""])' &
-  child=$!
-  i=0
-  while [ "$i" -lt 40 ]; do
-    ps_comm=$(ps -o comm= -p "$child" 2>/dev/null | tr -d ' ')
-    [ "$ps_comm" = "/bin/bash" ] && break
-    sleep 0.25; i=$((i + 1))
-  done
-  if [ "$ps_comm" != "/bin/bash" ]; then
+  local shape marker child i got expected args suffix
+  for shape in one two middle space; do
+    marker="$TMP_ROOT/empty-$shape-ready"
+    python3 -c 'import os, sys
+extra = {"one": ["--resume", ""], "two": ["--resume", "", ""], "middle": ["aa", "", "bb"], "space": ["tail "]}[sys.argv[2]]
+os.execv(sys.executable, [sys.executable, "-c", "import sys,time; open(sys.argv[1], chr(119)).close(); time.sleep(40)", sys.argv[1]] + extra)' "$marker" "$shape" &
+    child=$!
+    i=0
+    while [ ! -f "$marker" ] && [ "$i" -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
+    if [ ! -f "$marker" ]; then
+      kill "$child" 2>/dev/null
+      wait "$child" 2>/dev/null || :
+      fail "empty-element child did not become ready"
+    fi
+    expected=$(bash -c '. "$1"; fm_proc_info "$2" || exit; printf "%s\t%s\t%s\n" "$FM_PROC_PPID" "$FM_PROC_COMM" "$FM_PROC_ARGS"' x "$LIB" "$child") \
+      || { kill "$child"; fail "ps refused empty-element child"; }
+    got=$(bash -c '. "$1"; fm_os_proc_triple "$2"' x "$LIB" "$child") \
+      || { kill "$child"; fail "provider refused empty-element child"; }
     kill "$child" 2>/dev/null
-    fail "empty-element child never settled as bash under ps (got '$ps_comm')"
-  fi
-  out=$(python3 "$ROOT/bin/fm-procinfo.py" "$child") \
-    || { kill "$child" 2>/dev/null; fail "provider refused a live argv holding only an empty element"; }
-  ps_args=$(ps -o args= -p "$child" 2>/dev/null)
-  kill "$child" 2>/dev/null
-  comm=$(printf '%s' "$out" | cut -f2)
-  args=$(printf '%s' "$out" | cut -f3-)
-  [ "$comm" = "$ps_comm" ] \
-    || fail "comm: provider '$comm', ps '$ps_comm'"
-  [ "${args%"${args##*[![:space:]]}"}" = "${ps_args%"${ps_args##*[![:space:]]}"}" ] \
-    || fail "args: provider '$args', ps '$ps_args'"
-  pass "empty argv element is collected as data; provider and ps stay one fact"
+    wait "$child" 2>/dev/null || :
+    [ "$got" = "$expected" ] || fail "$shape argv routes disagree: provider '$got', ps '$expected'"
+    args=${got##*$'\t'}
+    case "$shape" in
+      one|two) suffix='--resume' ;;
+      middle) suffix='aa  bb' ;;
+      space) suffix='tail ' ;;
+    esac
+    case "$args" in
+      *"$marker $suffix") ;;
+      *) fail "$shape argv lost element spacing: '$args'" ;;
+    esac
+  done
+  pass "trailing empty argv elements are dropped; interior empties and argument spaces survive"
 }
 
 test_unreadable_owner_refuses_acquisition() {

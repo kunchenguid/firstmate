@@ -331,7 +331,8 @@ fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
 # Called only when the ps binary itself cannot execute. Tests override this
 # whole function to drive a deterministic table.
 fm_os_proc_triple() {  # <pid>
-  local proc_root stat_line args rc=0
+  local proc_root stat_line args element count rc=0
+  local -a argv
   case "$(uname -s 2>/dev/null)" in
     Linux)
       # The repo's other /proc readers (bin/fm-cursor-lib.sh,
@@ -342,9 +343,22 @@ fm_os_proc_triple() {  # <pid>
       [ -r "$proc_root/$1/stat" ] || return 1
       stat_line=$(cat "$proc_root/$1/stat" 2>/dev/null) || return 1
       [ -r "$proc_root/$1/cmdline" ] || return 1
-      args=$(LC_ALL=C tr '\0\n' ' ' < "$proc_root/$1/cmdline" 2>/dev/null) || return 1
-      args=$(printf '%s' "$args" | LC_ALL=C tr -c '\040-\176' '?') || return 1
-      args=${args% }
+      args=$(
+        argv=()
+        count=0
+        while IFS= read -r -d '' element; do
+          argv[$count]=$element
+          count=$((count + 1))
+        done < "$proc_root/$1/cmdline" || exit 1
+        while [ "$count" -gt 0 ] && [ -z "${argv[$((count - 1))]}" ]; do
+          unset 'argv[count - 1]'
+          count=$((count - 1))
+        done
+        if [ "$count" -gt 0 ]; then
+          IFS=' '
+          printf '%s' "${argv[*]}" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176' '?'
+        fi
+      ) || return 1
       fm_linux_stat_triple "$stat_line" "$args"
       ;;
     Darwin)
