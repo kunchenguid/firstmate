@@ -999,9 +999,9 @@ fm_remote_job_process_start() {
 
 # True when <recorded-start> still names the live process at <pid>.
 # New records match fm_remote_job_process_start exactly (proc-starttime on
-# Linux, LC_ALL=C lstart where /proc is absent). Pre-update records lack the
-# proc-starttime= prefix and were written with bare ps lstart and no LC_ALL=C;
-# accept that form so a healthy pre-update worker still verifies and the
+# Linux, LC_ALL=C lstart where /proc is absent). Legacy records lack the
+# proc-starttime= prefix; compare them against both C-locale and ambient-locale
+# ps lstart so a healthy pre-update worker still verifies and the
 # code-identity path can stop and replace it once, instead of piling supervisors.
 fm_remote_job_start_matches() { # <recorded-start> <pid>
   local recorded=$1 pid=$2 actual ps_bin value
