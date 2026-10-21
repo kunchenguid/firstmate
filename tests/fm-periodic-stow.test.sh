@@ -552,29 +552,64 @@ if (first.messages.length !== 1) throw new Error("successful delivery did not an
 now += 1000;
 await first.emit("agent_settled", { type: "agent_settled", aborted: false });
 await settleAsync();
-if (first.messages.length !== 2) throw new Error("unchanged decision was not eligible at the next interval");
+if (first.messages.length !== 1) throw new Error("unchanged inventory repeated the handled reminder");
+if (!first.entries.some((entry) => entry.customType === "fm-idle-reminder-unchanged")) {
+  throw new Error("unchanged inventory did not persist its checked cadence");
+}
+
+branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  message: { role: "user", content: [{ type: "text", text: "\u2063FIRSTMATE_OP: v1 watcher: internal poll" }], timestamp: now } });
+branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  message: { role: "assistant", content: [{ type: "text", text: "internal handling" }], stopReason: "stop", timestamp: now } });
+now += 1_800_000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 1) throw new Error("operational input or its assistant reply re-armed the reminder");
+
+branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  message: { role: "user", content: [{ type: "text", text: "What changed?" }], timestamp: now } });
+now += 1_800_000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 2) throw new Error("genuine user conversation did not re-arm the reminder");
 await finishReminder(first, first.messages[1]);
 
+branch.push({ type: "custom", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  customType: "fm-branch-visible-outcome", data: { version: 1, seq: 7, verdict: "captain" } });
+now += 1_800_000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 3) throw new Error("new structural supervision outcome did not re-arm the reminder");
+await finishReminder(first, first.messages[2]);
+
+now += 1_800_000;
+await first.emit("agent_settled", { type: "agent_settled", aborted: false });
+await settleAsync();
+if (first.messages.length !== 3) throw new Error("unchanged outcome entry re-armed the reminder again");
+
 idle = false;
+branch.push({ type: "message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
+  message: { role: "user", content: [{ type: "text", text: "Continue after idle." }], timestamp: now } });
 now += 7_200_000;
 for (let i = 0; i < 4; i++) {
   await first.emit("agent_settled", { type: "agent_settled", aborted: false });
   await settleAsync();
 }
-if (first.messages.length !== 2) throw new Error("prolonged busy interval emitted a reminder");
+if (first.messages.length !== 3) throw new Error("prolonged busy interval emitted a reminder");
 idle = true;
 await first.emit("agent_settled", { type: "agent_settled", aborted: false });
 await settleAsync();
-if (first.messages.length !== 3) throw new Error("idle recovery did not collapse missed intervals to one reminder");
-await finishReminder(first, first.messages[2]);
+if (first.messages.length !== 4) throw new Error("idle recovery did not collapse missed intervals to one reminder");
+await finishReminder(first, first.messages[3]);
 await first.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 
 const reloaded = runtime();
 const reloadMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?reload=1`);
 reloadMod.default(reloaded.pi);
+now += 1_800_000;
 await reloaded.emit("session_start", { type: "session_start", reason: "reload" });
 await settleAsync();
-if (reloaded.messages.length !== 0) throw new Error("extension reload duplicated a handled reminder");
+if (reloaded.messages.length !== 0) throw new Error("extension reload duplicated a due but unchanged handled reminder");
 now += 1_800_000;
 branch.push({ type: "custom_message", id: `entry-${nextEntry++}`, timestamp: new Date(now).toISOString(),
   customType: "fm-idle-reminder-request", content: "orphaned request", display: false,
@@ -633,9 +668,9 @@ await failedReload.emit("session_shutdown", { type: "session_shutdown", reason: 
 console.log(JSON.stringify({ reminders: first.messages.length, receipts: first.entries.filter((e) => e.customType === "fm-idle-reminder-delivered").length }));
 EOF
   ) || fail "idle reminder lifecycle failed: $out"
-  [ "$(printf '%s' "$out" | tail -1 | jq -r '.reminders')" -eq 3 ] || fail "idle reminder count evidence missing: $out"
-  [ "$(printf '%s' "$out" | tail -1 | jq -r '.receipts')" -eq 3 ] || fail "idle reminder receipt evidence missing: $out"
-  pass "idle reminders defer at busy boundaries, collapse missed intervals, repeat unresolved decisions, and persist successful delivery cadence"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.reminders')" -eq 4 ] || fail "idle reminder count evidence missing: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.receipts')" -eq 4 ] || fail "idle reminder receipt evidence missing: $out"
+  pass "idle reminders deduplicate unchanged inventory, re-arm on real conversation or outcomes, and persist successful cadence"
 }
 
 test_idle_reminder_stays_silent_for_empty_inventory() {

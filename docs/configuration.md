@@ -408,16 +408,18 @@ The requested half-hour configuration is:
 ```
 
 The first interval starts from the configuration file modification time.
-Later intervals start only from a successfully settled reminder response or a successful canonical check that found no eligible work, never from the timer becoming due or from queuing a reminder request.
+Later intervals start from a successfully settled reminder response or a successful canonical check, never from the timer becoming due or from queuing a reminder request.
 Busy model work, tools, queued input, blocking UI, compaction, editor input, an unowned main-session lock, or an existing queued reminder defers the due reminder without consuming it.
 Turn-end recovery and canonical task-continuation readback bracket their owned asynchronous follow-ups; the coordinator admits an idle reminder only after those brackets drain, so optional reminder work cannot enter the queue ahead of existing recovery or continuation work.
 After a prolonged busy or offline span, the next safe idle boundary offers at most one consolidated reminder rather than replaying missed intervals.
-The handling receipt lives as a non-context custom entry in the persisted Pi session, so extension reload or process restart on that same session does not duplicate a handled reminder.
+The handling receipt lives as a non-context custom entry in the persisted Pi session and binds the normalized canonical inventory at that boundary.
+After a handled reminder, an unchanged inventory stays silent until a genuine user message or a new structurally identified supervision outcome appears; operational follow-ups, reminder replies, timer ticks, and unchanged outcome rows do not re-arm it.
+The same receipt and branch evidence survive extension reload or process restart on that session, so an unchanged handled reminder is not duplicated.
 A failed snapshot or model run preserves the due obligation but releases maintenance and continuation scheduling, then retries no sooner than a later timer boundary; a cold restart records the unowned queued request as failed before releasing it, so an intervening ordinary reply cannot become false reminder-delivery evidence.
 
 The reminder reads only `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-queued` and sends the model only its unfinished, gated, and captain-decision projections.
 That canonical projection excludes completed and archived records even when worker metadata or historical decision evidence remains.
-An unchanged unanswered captain decision remains eligible after the next interval, while a snapshot with no unfinished work, gates, or decisions stays silent.
+A changed or newly re-armed unanswered captain decision remains eligible after the next interval, while an unchanged snapshot with no new conversation or outcome stays silent.
 The generated Chinese reminder lists unfinished outcomes and their real blocker or next action before genuine user decisions, gives decision options and a concise recommendation, uses UTC+8 for any displayed time, and never answers or closes a decision itself.
 Standing local-Dorado routing and already-authorized ordinary permission declarations are not re-asked.
 

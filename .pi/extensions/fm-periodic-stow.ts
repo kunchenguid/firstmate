@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ContinuationReadbackOffer } from "./lib/fm-task-continuation.ts";
 import {
+  classifyFirstmateOperationalText,
   encodeFirstmateOperationalInput,
   FIRSTMATE_OWNED_FOLLOWUP_DRAINED_EVENT,
   FIRSTMATE_OWNED_FOLLOWUP_START_EVENT,
@@ -36,6 +37,7 @@ type IdleReminderConfig = {
 type IdleReminderRun = {
   id: string;
   answered: boolean;
+  inventoryFingerprint: string;
 };
 
 type RunState = {
@@ -73,6 +75,8 @@ type CoordinatorGeneration = {
   reminderChecking: boolean;
   reminderPendingId: string | null;
   reminderLastHandledAt: number;
+  reminderLastHandledEntryId: string | null;
+  reminderLastInventoryFingerprint: string | null;
   reminderRetryAfter: number;
   reminderRun: IdleReminderRun | null;
 };
@@ -91,6 +95,7 @@ const tickMs = positiveInteger(process.env.FM_PERIODIC_STOW_TICK_MS, 60_000);
 const reminderMessageType = "fm-idle-reminder-request";
 const reminderReceiptType = "fm-idle-reminder-delivered";
 const reminderEmptyType = "fm-idle-reminder-empty";
+const reminderUnchangedType = "fm-idle-reminder-unchanged";
 const reminderFailedType = "fm-idle-reminder-failed";
 let activeGeneration: CoordinatorGeneration | null = null;
 let activeTools = 0;
@@ -274,24 +279,95 @@ function assistantText(message: unknown): string {
     (part as { type?: unknown }).type === "text" ? String((part as { text?: unknown }).text || "") : "").join("").trim();
 }
 
+function messageText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => part && typeof part === "object" &&
+    (part as { type?: unknown }).type === "text" ? String((part as { text?: unknown }).text || "") : "").join("").trim();
+}
+
+function genuineUserMessage(message: unknown): boolean {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  if (Array.isArray(content) && content.some((part) => part && typeof part === "object" &&
+      (part as { type?: unknown }).type === "image")) return true;
+  const text = messageText(message);
+  return Boolean(text) && classifyFirstmateOperationalText(text) === undefined;
+}
+
+function reminderActivitySince(ctx: ExtensionContext, entryId: string | null): boolean {
+  if (!entryId) return false;
+  const branch = ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>;
+  const anchor = branch.findIndex((entry) => entry.id === entryId);
+  if (anchor < 0) return true;
+  return branch.slice(anchor + 1).some((entry) => {
+    if (entry.type === "message") {
+      const message = entry.message as { role?: unknown } | undefined;
+      if (message?.role !== "user") return false;
+      return genuineUserMessage(message);
+    }
+    if (entry.type === "custom_message") {
+      return entry.customType === "firstmate-feishu-inbound" || entry.customType === "fm-branch-merge" ||
+        entry.customType === "fm-short-agent-error";
+    }
+    return entry.type === "custom" && entry.customType === "fm-branch-visible-outcome";
+  });
+}
+
+function latestBranchEntryId(ctx: ExtensionContext, customType: string): string | null {
+  const entry = [...ctx.sessionManager.getBranch()].reverse().find((candidate) =>
+    candidate.type === "custom" && candidate.customType === customType);
+  return entry?.id ?? null;
+}
+
+function recordReminderCheck(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  generation: CoordinatorGeneration,
+  customType: typeof reminderEmptyType | typeof reminderUnchangedType,
+  inventoryFingerprint: string,
+): void {
+  const handledAt = Date.now();
+  pi.appendEntry(customType, { version: 1, handled_at: new Date(handledAt).toISOString(),
+    inventory_fingerprint: inventoryFingerprint, session_id: generation.sessionId,
+    session_file: generation.sessionFile });
+  generation.reminderLastHandledAt = handledAt;
+  generation.reminderLastHandledEntryId = latestBranchEntryId(ctx, customType);
+  generation.reminderLastInventoryFingerprint = inventoryFingerprint;
+}
+
 function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generation: CoordinatorGeneration): void {
-  let pending: { id: string; at: number } | null = null;
-  let recovered: { id: string; at: number } | null = null;
+  let pending: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
+  let recovered: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
   for (const entry of ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>) {
     if (entry.type === "custom_message" && entry.customType === reminderMessageType) {
-      const details = entry.details as { version?: unknown; reminder_id?: unknown } | undefined;
+      const details = entry.details as { version?: unknown; reminder_id?: unknown;
+        inventory_fingerprint?: unknown } | undefined;
       if (details?.version === 1 && typeof details.reminder_id === "string") {
-        pending = { id: details.reminder_id, at: entryTime(entry.timestamp) };
+        pending = { id: details.reminder_id, at: entryTime(entry.timestamp),
+          inventoryFingerprint: typeof details.inventory_fingerprint === "string"
+            ? details.inventory_fingerprint
+            : null };
         recovered = null;
       }
       continue;
     }
-    if (entry.type === "custom" && (entry.customType === reminderReceiptType || entry.customType === reminderEmptyType)) {
-      const data = entry.data as { version?: unknown; reminder_id?: unknown; handled_at?: unknown } | undefined;
+    if (entry.type === "custom" && (entry.customType === reminderReceiptType ||
+        entry.customType === reminderEmptyType || entry.customType === reminderUnchangedType)) {
+      const data = entry.data as { version?: unknown; reminder_id?: unknown; handled_at?: unknown;
+        inventory_fingerprint?: unknown } | undefined;
       const handledAt = entryTime(data?.handled_at);
       if (data?.version === 1 && handledAt > 0) {
-        generation.reminderLastHandledAt = Math.max(generation.reminderLastHandledAt, handledAt);
-        if (pending && (entry.customType === reminderEmptyType || data?.reminder_id === pending.id)) {
+        if (handledAt >= generation.reminderLastHandledAt) {
+          generation.reminderLastHandledAt = handledAt;
+          generation.reminderLastHandledEntryId = typeof entry.id === "string" ? entry.id : null;
+          generation.reminderLastInventoryFingerprint = typeof data.inventory_fingerprint === "string"
+            ? data.inventory_fingerprint
+            : null;
+        }
+        if (pending && (entry.customType === reminderEmptyType || entry.customType === reminderUnchangedType ||
+            data?.reminder_id === pending.id)) {
           pending = null;
           recovered = null;
         }
@@ -312,7 +388,8 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
     if (pending && entry.type === "message") {
       const message = entry.message as { stopReason?: unknown } | undefined;
       if (assistantText(message) && message?.stopReason !== "error" && message?.stopReason !== "aborted") {
-        recovered = { id: pending.id, at: entryTime(entry.timestamp) || entryTime((message as { timestamp?: unknown }).timestamp) };
+        recovered = { id: pending.id, at: entryTime(entry.timestamp) || entryTime((message as { timestamp?: unknown }).timestamp),
+          inventoryFingerprint: pending.inventoryFingerprint };
         if (message?.stopReason === "toolUse") recovered = null;
       }
     }
@@ -321,7 +398,11 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
     generation.reminderLastHandledAt = recovered.at;
     pi.appendEntry(reminderReceiptType, { version: 1, reminder_id: recovered.id,
       handled_at: new Date(recovered.at).toISOString(), session_id: generation.sessionId,
-      session_file: generation.sessionFile });
+      session_file: generation.sessionFile, ...(recovered.inventoryFingerprint
+        ? { inventory_fingerprint: recovered.inventoryFingerprint }
+        : {}) });
+    generation.reminderLastInventoryFingerprint = recovered.inventoryFingerprint;
+    generation.reminderLastHandledEntryId = latestBranchEntryId(ctx, reminderReceiptType);
     pending = null;
   }
   // A hot reload retains Pi's queued follow-up and can continue observing it.
@@ -371,6 +452,16 @@ function reminderInventory(snapshot: Record<string, unknown>): Record<string, un
   };
 }
 
+function reminderInventoryFingerprint(snapshot: Record<string, unknown>): string {
+  const inventory = reminderInventory(snapshot);
+  return createHash("sha256").update(JSON.stringify({
+    schema: inventory.schema,
+    in_flight: inventory.in_flight,
+    gates: inventory.gates,
+    decisions_open: inventory.decisions_open,
+  })).digest("hex");
+}
+
 function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string): string {
   return encodeFirstmateOperationalInput("watcher", [
     "FIRSTMATE IDLE REMINDER",
@@ -412,11 +503,14 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
     if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") {
       throw new Error("canonical reminder inventory returned the wrong schema");
     }
+    const inventoryFingerprint = reminderInventoryFingerprint(snapshot as Record<string, unknown>);
     if (!reminderHasInventory(snapshot)) {
-      const handledAt = Date.now();
-      generation.reminderLastHandledAt = handledAt;
-      pi.appendEntry(reminderEmptyType, { version: 1, handled_at: new Date(handledAt).toISOString(),
-        session_id: generation.sessionId, session_file: generation.sessionFile });
+      recordReminderCheck(pi, ctx, generation, reminderEmptyType, inventoryFingerprint);
+      return false;
+    }
+    if (generation.reminderLastInventoryFingerprint === inventoryFingerprint &&
+        !reminderActivitySince(ctx, generation.reminderLastHandledEntryId)) {
+      recordReminderCheck(pi, ctx, generation, reminderUnchangedType, inventoryFingerprint);
       return false;
     }
     const reminderId = randomUUID();
@@ -424,7 +518,8 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
     pi.sendMessage({ customType: reminderMessageType, display: false,
       content: reminderPrompt(reminderInventory(snapshot), reminderId),
       details: { version: 1, reminder_id: reminderId, session_id: generation.sessionId,
-        session_file: generation.sessionFile, requested_at: new Date(Date.now()).toISOString() } },
+        session_file: generation.sessionFile, requested_at: new Date(Date.now()).toISOString(),
+        inventory_fingerprint: inventoryFingerprint } },
     { triggerTurn: true, deliverAs: "followUp" });
     lastDispatchError = "";
     return true;
@@ -616,6 +711,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
     live: true, timer: null, due: false, dispatching: false, lastOfferAt: 0,
     submittedEscalations: new Set(),
     reminderChecking: false, reminderPendingId: null, reminderLastHandledAt: 0,
+    reminderLastHandledEntryId: null, reminderLastInventoryFingerprint: null,
     reminderRetryAfter: 0, reminderRun: null,
   };
   activeGeneration = generation;
@@ -693,10 +789,13 @@ export default function periodicStow(pi: ExtensionAPI): void {
   pi.on("session_compact", () => { compacting = false; });
   pi.on("before_agent_start", (event) => {
     if (event.messageType !== "custom" || event.message.customType !== reminderMessageType) return;
-    const details = event.message.details as { version?: unknown; reminder_id?: unknown } | undefined;
+    const details = event.message.details as { version?: unknown; reminder_id?: unknown;
+      inventory_fingerprint?: unknown } | undefined;
     const generation = activeGeneration;
-    if (!generation?.live || details?.version !== 1 || details.reminder_id !== generation.reminderPendingId) return;
-    generation.reminderRun = { id: String(details.reminder_id), answered: false };
+    if (!generation?.live || details?.version !== 1 || details.reminder_id !== generation.reminderPendingId ||
+        typeof details.inventory_fingerprint !== "string") return;
+    generation.reminderRun = { id: String(details.reminder_id), answered: false,
+      inventoryFingerprint: details.inventory_fingerprint };
   });
   pi.on("message_end", (event) => {
     const run = activeGeneration?.reminderRun;
@@ -718,8 +817,10 @@ export default function periodicStow(pi: ExtensionAPI): void {
         const handledAt = Date.now();
         pi.appendEntry(reminderReceiptType, { version: 1, reminder_id: run.id,
           handled_at: new Date(handledAt).toISOString(), session_id: generation.sessionId,
-          session_file: generation.sessionFile });
+          session_file: generation.sessionFile, inventory_fingerprint: run.inventoryFingerprint });
         generation.reminderLastHandledAt = handledAt;
+        generation.reminderLastHandledEntryId = latestBranchEntryId(ctx, reminderReceiptType);
+        generation.reminderLastInventoryFingerprint = run.inventoryFingerprint;
       } else {
         pi.appendEntry(reminderFailedType, { version: 1, reminder_id: run.id,
           failed_at: new Date(Date.now()).toISOString(), session_id: generation.sessionId,
