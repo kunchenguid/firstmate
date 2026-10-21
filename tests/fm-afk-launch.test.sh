@@ -1949,22 +1949,6 @@ unit_launcher_reclaims_proven_stale_owners() {
   done
 }
 
-if [ "${FM_AFK_TEST_OWNERSHIP_ONLY:-0}" = 1 ]; then
-  unit_unverifiable_owners_preserve_lifecycle
-  unit_launcher_reclaims_proven_stale_owners
-  unit_readiness_uncertainty_preserves_started_lifecycle
-  unit_fresh_vs_refresh
-  unit_mode_refresh_preserves_quiet
-  unit_mode_quiet_daemon_to_away
-  unit_stop_ordering
-  unit_stop_rejects_reused_pid
-  unit_lock_initialization_grace
-  unit_stop_confirms_daemon_exit
-  unit_supervision_host_quiet_failed_start
-  [ "$FAILED" -eq 0 ]
-  exit $?
-fi
-
 unit_unverifiable_owners_preserve_lifecycle
 unit_launcher_reclaims_proven_stale_owners
 unit_readiness_uncertainty_preserves_started_lifecycle
