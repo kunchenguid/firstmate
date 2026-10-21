@@ -1118,6 +1118,19 @@ assert_not_contains "$classification" "wrong-built-in-owner" "a later same-name 
 assert_absent "$H_FLOW/state/procevent/flow-source.source" "terminal external source stayed registered"
 FM_HOME="$H_FLOW" "$PROCEVENT" retire flow-source --if-owner "$owner_one" >/dev/null
 pass "one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end"
+flow_tz_index=0
+for flow_tz in America/Argentina/Buenos_Aires Europe/Berlin; do
+  flow_tz_index=$((flow_tz_index + 1))
+  flow_tz_home="$HOMES/flow-timezone-$flow_tz_index"; new_home "$flow_tz_home"
+  bind_package "$flow_tz_home" "$P_FLOW" ext-flow >/dev/null
+  TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" register-extension ext-flow timezone-flow --config-ref good >/dev/null
+  TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" start timezone-flow > "$TMP_ROOT/timezone-flow-$flow_tz_index.out" \
+    || fail "Bash/JavaScript claim authorization failed under $flow_tz"
+  flow_tz_result=$(first_result "$flow_tz_home" timezone-flow) || fail "timezone flow produced no captured result"
+  flow_tz_classification=$(TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" classify "$flow_tz_result")
+  assert_contains "$flow_tz_classification" external-ready "timezone flow lost the exact captured extension owner"
+done
+pass "Bash/JavaScript capture authorization agrees under Buenos Aires and Berlin timezones"
 FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow crash-silent-source --config-ref crash-silent >/dev/null
 FM_HOME="$H_FLOW" "$PROCEVENT" start crash-silent-source > "$TMP_ROOT/crash-silent-start.out" 2>&1 &
 crash_silent_start_pid=$!

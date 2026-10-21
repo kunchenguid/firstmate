@@ -1474,6 +1474,86 @@ write_fake_proc_identity() {
   printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
 }
 
+test_ps_pid_identity_timezone_and_real_mismatches() {
+  local dir
+  dir=$(make_case pid-timezone)
+  python3 - "$LIB" "$dir" <<'PY' || fail "timezone-stable process identity regression"
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+lib, root = sys.argv[1:]
+env = dict(os.environ, FM_HOME=root, FM_STATE_OVERRIDE=root + '/state',
+           FM_PROC_ROOT_OVERRIDE=root + '/no-proc', LC_ALL='C', COLUMNS='10000')
+zones = ['America/Argentina/Buenos_Aires', 'Europe/Berlin']
+owned = []
+
+def ps(pid, field, zone):
+    return subprocess.check_output(['ps', '-p', str(pid), '-o', field + '='],
+                                   env=dict(env, TZ=zone), text=True).strip()
+
+def call(function, *args, zone=zones[0]):
+    return subprocess.run(['bash', '-c', '. "$1"; fn=$2; shift 2; "$fn" "$@"',
+                           '_', lib, function, *map(str, args)], env=dict(env, TZ=zone),
+                          capture_output=True, text=True)
+
+def identity(pid, zone=zones[0]):
+    result = call('fm_pid_identity', pid, zone=zone)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+try:
+    child = subprocess.Popen(['sleep', '60'], env=env)
+    owned.append(child)
+    if subprocess.run(['ps', '-p', str(child.pid), '-o', 'lstart='], env=env,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        # MSYS uses its compatible /proc instead of unsupported ps -o fields.
+        if sys.platform == 'darwin':
+            raise AssertionError('macOS ps lstart public interface unavailable')
+        print('skip - timezone ps fallback: ps -o lstart= unsupported; /proc coverage is separate')
+    else:
+        raw = [ps(child.pid, 'lstart', zone) for zone in zones]
+        assert raw[0] != raw[1], ('timezone counterfactual was vacuous', raw)
+        assert ps(child.pid, 'command', zones[0]) == ps(child.pid, 'command', zones[1])
+        first, second = [identity(child.pid, zone) for zone in zones]
+        assert first.startswith('ps-utc-v1='), first
+        assert first == second, (first, second)
+        assert call('fm_pid_identity_compare', first, second).returncode == 0
+        for unknown in [first[len('ps-utc-v1='):], '', 'unknown', 'ps-utc-v1=malformed']:
+            assert call('fm_pid_identity_compare', first, unknown).returncode == 2, unknown
+        # A later real start with the same command still mismatches.
+        time.sleep(1.1)
+        later = subprocess.Popen(['sleep', '60'], env=env)
+        owned.append(later)
+        assert ps(child.pid, 'command', zones[0]) == ps(later.pid, 'command', zones[0])
+        assert call('fm_pid_identity_compare', identity(later.pid), first).returncode == 1
+        # exec changes the actual command on one PID while keeping its start.
+        trigger = Path(root) / 'exec-trigger'
+        changing = subprocess.Popen(['bash', '-c',
+            'while [ ! -f "$1" ]; do sleep 0.05; done; exec sleep 61', '_', str(trigger)], env=env)
+        owned.append(changing)
+        before = identity(changing.pid)
+        start = ps(changing.pid, 'lstart', zones[0])
+        trigger.touch()
+        for _ in range(100):
+            if ps(changing.pid, 'command', zones[0]).split()[-2:] == ['sleep', '61']:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError('disposable command did not exec')
+        assert ps(changing.pid, 'lstart', zones[0]) == start
+        assert call('fm_pid_identity_compare', identity(changing.pid), before).returncode == 1
+finally:
+    for process in owned:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+PY
+  pass "ps identity is timezone-stable and refuses real start/command changes and legacy identities"
+}
+
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   local dir state proc_root pid identity_key before after_time_jump after_pid_reuse
   dir=$(make_case proc-pid-identity)
@@ -1502,6 +1582,20 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
     || fail "could not read reused fake /proc pid identity"
   [ "$after_pid_reuse" != "$before" ] || fail "/proc process identity missed changed starttime for reused pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity_compare "$2" "$3"
+    [ "$?" -eq 1 ]
+  ' _ "$LIB" "$after_pid_reuse" "$before" || fail "stable /proc start mismatch was not proven"
+  write_fake_proc_identity "$proc_root" "$pid" 987654
+  printf 'different-command\0' > "$proc_root/$pid/cmdline"
+  after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read changed /proc command"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity_compare "$2" "$3"
+    [ "$?" -eq 1 ]
+  ' _ "$LIB" "$after_pid_reuse" "$before" || fail "stable /proc command mismatch was not proven"
   pass "/proc process identity detects pid reuse"
 }
 
@@ -1572,6 +1666,7 @@ test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_pid_identity_is_terminal_width_invariant
+test_ps_pid_identity_timezone_and_real_mismatches
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed

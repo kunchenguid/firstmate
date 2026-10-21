@@ -2442,6 +2442,8 @@ cmd_list() {
         owner="task:$task/round-open"
       elif [ "$owner" = live ]; then
         owner="task:$task/listening"
+      elif [ "$owner" = uncertain ]; then
+        owner="task:$task/uncertain"
       else
         owner="task:$task/dead"
       fi

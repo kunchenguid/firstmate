@@ -235,6 +235,78 @@ assert_contains "$out" "published=0 started=0" "reconcile is a no-op with nothin
 [ -z "$(ls -A "$IDLE/state" 2>/dev/null)" ] || fail "an unconfigured home generated state: $(ls -A "$IDLE/state")"
 pass "no configured source means no generated state and no process"
 
+# Use the real public listing/reconcile/retire paths, with a private claim for
+# a disposable nonleader. A surviving runner group cannot mask an unsafe
+# legacy-to-stale classification in this case. Nothing polls a real source.
+python3 - "$ROOT" "$TMP_ROOT" <<'PY' || fail "timezone claim/reporting regression"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, temporary = sys.argv[1:]
+home = Path(temporary) / 'timezone-home'
+state = home / 'state'
+state.mkdir(parents=True, mode=0o700)
+env = dict(os.environ, FM_HOME=str(home), FM_ROOT_OVERRIDE=root,
+           FM_STATE_OVERRIDE=str(state), FM_PROC_ROOT_OVERRIDE=str(home / 'no-proc'),
+           FM_PROCEVENT_CLAIM_ROOT=str(home / 'claims'), LC_ALL='C')
+source, task = 'timezone-test-source', 'timezone-test-task'
+program = root + '/bin/fm-procevent.sh'
+
+def command(argv, zone='America/Argentina/Buenos_Aires'):
+    return subprocess.run(argv, env=dict(env, TZ=zone), capture_output=True, text=True)
+
+def pe(*args, zone='America/Argentina/Buenos_Aires'):
+    return command(['bash', program, *args], zone)
+
+def shell(body, *args):
+    return command(['bash', '-c', '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-pr-lib.sh"; '
+        '. "$1/bin/fm-procevent-lib.sh"; ' + body, '_', root, *map(str, args)])
+
+child = subprocess.Popen(['sleep', '60'], env=env)
+try:
+    if command(['ps', '-p', str(child.pid), '-o', 'lstart=']).returncode:
+        if sys.platform == 'darwin':
+            raise AssertionError('macOS ps lstart public interface unavailable')
+        print('skip - timezone public listing: ps -o lstart= unsupported')
+    else:
+        (state / (task + '.meta')).write_text('backend=tmux\nwindow=fmtest:fm-timezone-test\n'
+            + 'worktree=' + str(home / 'unused-worktree') + '\nproject=fmtest\n')
+        assert pe('register-task', 'lavish', source, task, '--', '/bin/true').returncode == 0
+        acquired = shell('fm_procevent_source_lock_acquire "$2" || exit; '
+            'fm_procevent_claim_acquire_locked "$2" "$FM_HOME" "$3" "$STATE/procevent/$2.source" "$STATE"; '
+            'rc=$?; fm_procevent_source_lock_release "$2"; exit "$rc"', source, child.pid)
+        assert acquired.returncode == 0, acquired.stderr
+        claim = home / 'claims' / (source + '.claim')
+        original = claim.read_bytes()
+        for zone in ['America/Argentina/Buenos_Aires', 'Europe/Berlin']:
+            listed = pe('list', zone=zone)
+            assert listed.returncode == 0 and '/listening' in listed.stdout, listed
+        assert claim.read_bytes() == original
+        lines = claim.read_text().splitlines()
+        assert lines[3].startswith('ps-utc-v1='), lines[3]
+        lines[3] = lines[3][len('ps-utc-v1='):]
+        claim.write_text('\n'.join(lines) + '\n')
+        legacy = claim.read_bytes()
+        assert shell('fm_procevent_pid_state "$2" "$3"', child.pid, lines[3]).returncode == 2
+        listed = pe('list', zone='Europe/Berlin')
+        assert listed.returncode == 0 and '/uncertain' in listed.stdout, listed
+        reconciled = pe('reconcile', zone='Europe/Berlin')
+        assert reconciled.returncode == 0, reconciled
+        assert 'started=0' in reconciled.stdout and 'uncertain=1' in reconciled.stdout, reconciled
+        retired = pe('retire', source, zone='Europe/Berlin')
+        assert retired.returncode != 0 and 'cannot confirm runner identity' in retired.stderr, retired
+        assert child.poll() is None
+        assert claim.read_bytes() == legacy, 'unknown legacy claim was rewritten'
+finally:
+    child.terminate()
+    child.wait(timeout=5)
+    # Absence of our own process is independent proof allowing fixture cleanup.
+    pe('retire', source)
+PY
+pass "new claims survive timezone changes; unknown legacy claims authorize neither replacement nor stop"
+
 sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
@@ -2123,7 +2195,7 @@ sr4_leader=$(sed -n '2p' "$sr4_claim")
 sr4_identity=$(sed -n '4p' "$sr4_claim")
 kill -0 -"$sr4_leader" 2>/dev/null \
   || fail "fixture invalid: the reused-pid process group is not alive"
-awk 'NR == 4 { print "different-live-process-identity"; next } { print }' \
+awk 'NR == 4 { $0 = $0 "00" } { print }' \
   "$sr4_claim" > "$sr4_claim.tmp" && mv "$sr4_claim.tmp" "$sr4_claim"
 chmod 0600 "$sr4_claim"
 chmod 750 "$HSR4/state" || fail "could not drift the reused-group state root"
@@ -2226,7 +2298,7 @@ wait_for "$FM_PROCEVENT_CLAIM_ROOT/reused-plain-src.claim" \
 wait_for "$SR5_LOG" || fail "undrifted reused-pid fixture source never started"
 sr5_claim="$FM_PROCEVENT_CLAIM_ROOT/reused-plain-src.claim"
 sr5_leader=$(sed -n '2p' "$sr5_claim")
-awk 'NR == 4 { print "different-live-process-identity"; next } { print }' \
+awk 'NR == 4 { $0 = $0 "00" } { print }' \
   "$sr5_claim" > "$sr5_claim.tmp" && mv "$sr5_claim.tmp" "$sr5_claim"
 chmod 0600 "$sr5_claim"
 sr5_out=$(pe "$HSR5" reconcile)
@@ -2608,8 +2680,9 @@ HI="$TMP_ROOT/hi"; new_home "$HI"
 pe_register "$HI" lavish reused-src -- /bin/true >/dev/null
 sleep 60 &
 innocent_pid=$!
-printf '%s\n%s\nreused-token\nnot-the-live-process-identity\n' \
-  "$HI" "$innocent_pid" > "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim"
+innocent_identity=$(fm_test_pid_identity "$innocent_pid") || fail "cannot identify the innocent process"
+printf '%s\n%s\nreused-token\n%s00\n' \
+  "$HI" "$innocent_pid" "$innocent_identity" > "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim"
 chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim"
 pe "$HI" retire reused-src >/dev/null
 kill -0 "$innocent_pid" 2>/dev/null || fail "retirement signaled a PID whose identity did not match the claim"
@@ -2843,7 +2916,7 @@ SH
 if [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
   && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
   if [ "$post_term_case" = mismatch ]; then
-    printf 'reused identity\n'
+    printf 'Sat Jan  1 00:00:00 2000 changed-command\n'
     exit 0
   fi
   [ ! -s "$POST_TERM_SIGNALS" ] || exit 1
@@ -3839,7 +3912,7 @@ cat > "$REUSED_GROUP_BIN/ps" <<SH
 #!/usr/bin/env bash
 if [ -e "$REUSED_GROUP_MARKER" ] && [ "\${1-}" = -p ] \
   && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
-  printf 'reused runner identity\n'
+  printf 'Sat Jan  1 00:00:00 2000 changed-command\n'
   exit 0
 fi
 exec "$REAL_PS" "\$@"
@@ -5113,7 +5186,7 @@ PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
 wait_for_lines "$READY_MARK" 1 || fail "the undisplaceable fixture's listener never ran"
 undisp_claim="$FM_PROCEVENT_CLAIM_ROOT/$undisp_id.claim"
 undisp_identity=$(sed -n '4p' "$undisp_claim")
-awk 'NR == 4 { print "different-live-process-identity"; next } { print }' \
+awk 'NR == 4 { $0 = $0 "00" } { print }' \
   "$undisp_claim" > "$undisp_claim.tmp" && mv "$undisp_claim.tmp" "$undisp_claim"
 chmod 0600 "$undisp_claim"
 [ "$(pe "$UNDISP/home" list | awk -v id="$undisp_id" '$1 == id { print $3 }')" = orphaned ] \

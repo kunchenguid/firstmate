@@ -951,7 +951,7 @@ async function sleep(milliseconds) {
 
 async function capturedProcessOutput(command, args, maxBytes = 8192) {
   const child = spawn(command, args, {
-    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C" },
+    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C", TZ: "UTC0", COLUMNS: "10000" },
     shell: false,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -982,7 +982,8 @@ async function pidIdentity(pid) {
     }
     return `linux-starttime=${fields[19]} cmdline-hex=${cmdline.toString("hex")}`;
   }
-  return capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="]);
+  // Keep the non-Linux claim format aligned with bin/fm-wake-lib.sh.
+  return `ps-utc-v1=${await capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="])}`;
 }
 
 async function selfIdentity() {

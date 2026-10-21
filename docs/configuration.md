@@ -2419,6 +2419,12 @@ Ownership is machine-wide per canonical source, because separate homes can share
 - Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 - A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
 
+New `ps`-based process identities use an explicitly recognizable UTC rendering, independent of the reader's timezone, locale, and terminal width.
+Compatible `/proc` identities retain their existing start-ticks and command-line contract.
+An older untagged `ps` identity has no timezone provenance and remains unverifiable while its PID is live; it cannot authorize replacement or signalling, and no timezone is inferred or record migrated.
+This prevents timezone mismatches for newly written identities but does not automatically restore existing ambiguous records, which require separately authorized recovery.
+`bin/fm-wake-lib.sh` owns the identity format and comparison interface; `bin/fm-extension.mjs` mirrors it for captured-result authorization.
+
 **Prove ownership before stopping a runner**
 
 - Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.

@@ -111,9 +111,43 @@ fm_pid_identity() {
   # narrow-COLUMNS hook, where a truncated command would likewise reject a live
   # watcher (issue #799). This mirrors fm_pending_reply_pid_identity, which pins the
   # same width for the same reason.
-  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  # Version the UTC rendering: an older untagged wall-clock string has no
+  # timezone provenance and cannot prove either identity or PID reuse.
+  # bin/fm-extension.mjs mirrors this format for captured-result authorization.
+  out=$(TZ=UTC0 COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf 'ps-utc-v1=%s\n' "${out#"${out%%[![:space:]]*}"}"
+}
+
+# fm_pid_identity_compare <actual> <recorded>
+# 0 match, 1 proven mismatch in the same stable format, 2 unverifiable.
+# Untagged ps identities have no timezone provenance, even when their text
+# happens to equal a UTC rendering. Never use them as proof of PID reuse.
+# Compatible /proc formats are unchanged. Callers that reclaim on mismatch
+# must preserve the distinction between 1 and 2; positive-only guards can
+# continue to require exact equality with fm_pid_identity's current output.
+fm_pid_identity_compare() {
+  local actual=$1 recorded=$2 value kind first_kind='' pattern
+  for value in "$actual" "$recorded"; do
+    case "$value" in
+      linux-starttime=*|proc-starttime=*)
+        pattern='^(linux|proc)-starttime=[0-9]+ cmdline-hex=([0-9a-f][0-9a-f])+$'
+        kind=${value%%=*}
+        ;;
+      ps-utc-v1=*)
+        pattern='^ps-utc-v1=(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}[[:blank:]]+[^[:space:]].*$'
+        kind=ps-utc-v1
+        ;;
+      *) return 2 ;;
+    esac
+    [[ "$value" =~ $pattern ]] || return 2
+    if [ -z "$first_kind" ]; then
+      first_kind=$kind
+    else
+      [ "$kind" = "$first_kind" ] || return 2
+    fi
+  done
+  [ "$actual" = "$recorded" ]
 }
 
 fm_path_mtime() {
@@ -1889,7 +1923,9 @@ fm_pid_descends_from() {  # <pid> <ancestor>
 # window without producing a first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
 # build's entry gets its deference from its held role-carrying lock through
-# the legacy shim, and anything else must not defer.
+# the legacy shim, and anything else must not defer. Returns 2 for a live
+# identity-bearing claim whose identity cannot be verified; it is not healthy,
+# but fm_autoarm_claim_next must not replace it on that uncertainty.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current lock_pid lock_identity recorded
   epoch="$state/.claude-autoarm-epoch"
@@ -1897,12 +1933,11 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
     ''|*[!0-9]*|0) grace=300 ;;
   esac
   fm_autoarm_ledger_read "$state" || return 1
-  [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
   fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
   [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
-  current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
-  [ -n "$current" ] || return 1
-  [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
+  current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 2
+  fm_pid_identity_compare "$current" "$FM_AUTOARM_IDENTITY" || return $?
+  [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -1959,11 +1994,11 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
 
 # Atomically publish this process as the owner of generation N+1, under one
 # short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
-# when a competing claimant won the race (the ledger holds an open claim), and
+# when an open or unverifiable live claim prevents replacement, and
 # 1 when the micro-mutex is contended, the mandatory identity cannot be
 # computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity session_id lock_pid lock_identity tmp
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity session_id lock_pid lock_identity tmp claim_state=0
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
@@ -1982,7 +2017,8 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null || true)
   [ -n "$lock_identity" ] || session_id=
   fm_lock_try_acquire "$lock" || return 1
-  if fm_autoarm_claim_open "$state" "$grace"; then
+  fm_autoarm_claim_open "$state" "$grace" || claim_state=$?
+  if [ "$claim_state" -eq 0 ] || [ "$claim_state" -eq 2 ]; then
     fm_lock_release "$lock"
     return 2
   fi
@@ -2118,14 +2154,14 @@ fm_autoarm_rekey_session() {  # <state-dir> <old-pid> <new-pid>
 #
 #   1. the owner lock exists and carries the auto-arm role,
 #   2. its recorded pid is numeric,
-#   3. a recorded pid-identity that no longer matches the live pid is
-#      abandonment on its own (pid reuse after a group kill), and otherwise
+#   3. a proven stable-identity mismatch is abandonment on its own (pid reuse
+#      after a group kill); an unverifiable live identity refuses recovery,
 #   4. the ledger's owner_pid is exactly that pid and its outcome is present
 #      and either is not "arming", or is "arming" while both the ledger entry
 #      and the watcher beacon are older than the guard grace (the same stuck
 #      proof as fm_autoarm_claim_open).
 fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current identity_state=0
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
@@ -2139,9 +2175,13 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
     ''|*[!0-9]*) return 1 ;;
   esac
   recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
-  if [ -n "$recorded" ] && current=$(fm_pid_identity "$pid" 2>/dev/null) \
-    && [ -n "$current" ] && [ "$current" != "$recorded" ]; then
-    return 0
+  if [ -n "$recorded" ] && fm_pid_alive "$pid"; then
+    current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    fm_pid_identity_compare "$current" "$recorded" || identity_state=$?
+    case "$identity_state" in
+      1) return 0 ;;
+      2) return 1 ;;
+    esac
   fi
   owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
   [ "$owner" = "$pid" ] || return 1
@@ -2496,7 +2536,8 @@ fm_wake_grant_rows_valid() {  # <rows-file>
 # 0 when <owner-file> holds the supported record, names a live process whose
 # identity still matches what was recorded, and matches any expected pid and
 # generation the caller pins. An unreadable, malformed, or superseded record is
-# not a match, so uncertainty reads as "no live owner".
+# not a match. A live owner with an unverifiable identity returns 2, so a drain
+# cannot turn unknown legacy timezone provenance into permission to reclaim.
 fm_wake_branch_owner_matches() {  # <owner-file> [<pid>] [<generation>]
   local file=$1 expected_pid=${2:-} expected_generation=${3:-}
   local version pid identity generation current extra
@@ -2513,12 +2554,13 @@ fm_wake_branch_owner_matches() {  # <owner-file> [<pid>] [<generation>]
   case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -z "$expected_pid" ] || [ "$pid" = "$expected_pid" ] || return 1
   [ -z "$expected_generation" ] || [ "$generation" = "$expected_generation" ] || return 1
-  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$current" ] && [ "$current" = "$identity" ]
+  fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 2
+  fm_pid_identity_compare "$current" "$identity"
 }
 
 # 0 when a branch grant is currently reserving rows: a valid row snapshot whose
-# recorded owner is still live. Anything else means no row is reserved.
+# recorded owner is still live. Returns 2 when that live identity is unverifiable.
 fm_wake_branch_grant_live() {  # <rows-file> <owner-file>
   fm_wake_grant_rows_valid "$1" && fm_wake_branch_owner_matches "$2"
 }
@@ -2532,10 +2574,15 @@ fm_wake_branch_grant_live() {  # <rows-file> <owner-file>
 # the lock before it presents or mutates anything.
 fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   local actor=${1:-main} rows=${2:-$STATE/.branch-eligible-rows}
-  local owner=${3:-$STATE/.branch-eligible-owner} grant='' count=''
+  local owner=${3:-$STATE/.branch-eligible-owner} grant='' count='' owner_state=0
   [ -f "$FM_WAKE_QUEUE" ] || { printf '0\n'; return 0; }
   if fm_wake_branch_grant_live "$rows" "$owner"; then
     grant=$rows
+  else
+    owner_state=$?
+    # As with an unreadable queue below, uncertainty must still raise an alarm.
+    # The drain refuses to reclaim or consume the unknown owner's grant.
+    [ "$owner_state" -ne 2 ] || { printf '1\n'; return 0; }
   fi
   if [ "$actor" = branch ]; then
     [ -n "$grant" ] || { printf '0\n'; return 0; }
