@@ -87,6 +87,26 @@ The bare `gemini-3.8-flash` id from this home's previous config is not listed; o
 The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`; a non-positive or non-numeric value clamps back to that default, because a non-positive bound is not a bound); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
 
+### agy 1.4.2: model-scoped effort (2026-10-21)
+
+agy 1.4.2 lists third-party models alongside Gemini (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`), and its `--help` now documents `--effort (low|medium|high|xhigh|max)`.
+The help text overstates what any model takes. Print-mode probes (`agy -p "Reply PONG" --model <id> --effort <level> --output-format json </dev/null`) on Linux x64, Google AI Plus, gave:
+
+| `--model` | `--effort` accepted | Rejection |
+|---|---|---|
+| none (default, resolves to `gemini-3.8-flash`) | `low`, `medium`, `high` | `xhigh`: `gemini-3.8-flash has no "xhigh" effort (available: low, medium, high)` |
+| `gemini-3.8-flash` (bare, unlisted) | `low`, `medium`, `high` | same as above |
+| `gemini-3.8-flash-low` | `low` only | `medium`/`high`/`xhigh`/`max`: `--model gemini-3.8-flash-low conflicts with --effort=medium` |
+| `gemini-3.8-flash-high` | `high` only | `low`: `conflicts with --effort=low` |
+| `gpt-oss-120b-medium` | `medium` only | `low`/`max`: `conflicts with --effort=low` |
+| `claude-sonnet-4-6`, `claude-opus-4-6-thinking` | none | every level: `--effort is not supported for model "claude-sonnet-4-6"` |
+
+In print mode every rejection is `status: ERROR` with `num_turns: 0`: the launch exits before a turn runs.
+The interactive TUI that crewmates use does not exit. `agy --prompt-interactive "<brief>" --model claude-sonnet-4-6 --effort medium` opened, ran the brief, and answered on `Gemini 3.8 Flash (High)`, the configured default, with no error shown; the same launch without `--effort` answered on `Claude Sonnet 4.6 (Thinking)`.
+A rejected pair therefore silently runs the task on a different model than the one dispatched and recorded in task metadata.
+Without `--effort`, every listed model succeeds.
+`bin/fm-spawn.sh` therefore emits `--effort` only for a pair agy accepts and records any other pair in task metadata without the flag.
+
 ## Busy state: the pinned status row, unknown on absence
 
 Mid-turn the pane rendered the status row and a spinner line at once:
