@@ -1252,10 +1252,11 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
 # read at the one moment it decides anything: when an escalation is about to
-# fire. Two records answer it, and they are independent: the worker's own status
-# line - a declared `paused:` external wait, or a verified `captain-held`
-# transfer - and, when that line explains nothing, the crew's authoritative
-# current state. Between them sits the backlog record of the same captain hold
+# fire. Two records answer it, and they are independent: the lane's own status
+# line - a declared `paused:` external wait, or a `captain-held` line, whether
+# the hold's own declaration or a verified transfer - and, when that line
+# explains nothing, the crew's authoritative current state. Between them sits
+# the backlog record of the same captain hold
 # (task_captain_call_open), the only record left when the hold's own status-log
 # declaration was never written or a later worker line replaced it; it is read
 # only here, at the threshold. That line predates the hold, so it is no record
