@@ -21,14 +21,18 @@ printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 printf '/dev/fake 999999999 1 %s 1%% /\n' "${FAKE_DF_KB:-104857600}"
 SH
 # journalctl prints $FAKE_JOURNAL_KERNEL for -k and $FAKE_JOURNAL_UNIT for -u,
-# appends $FAKE_JOURNAL_STDERR to stderr, and exits $FAKE_JOURNAL_RC.
+# appends $FAKE_JOURNAL_STDERR to stderr unless -q silences it as the real one
+# does, and exits $FAKE_JOURNAL_RC.
 cat > "$FAKEBIN/journalctl" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *" -k "*) [ -z "${FAKE_JOURNAL_KERNEL:-}" ] || printf '%s\n' "$FAKE_JOURNAL_KERNEL" ;;
   *" -u "*) [ -z "${FAKE_JOURNAL_UNIT:-}" ] || printf '%s\n' "$FAKE_JOURNAL_UNIT" ;;
 esac
-[ -z "${FAKE_JOURNAL_STDERR:-}" ] || printf '%s\n' "$FAKE_JOURNAL_STDERR" >&2
+case " $* " in
+  *" -q "*|*" --quiet "*) ;;
+  *) [ -z "${FAKE_JOURNAL_STDERR:-}" ] || printf '%s\n' "$FAKE_JOURNAL_STDERR" >&2 ;;
+esac
 exit "${FAKE_JOURNAL_RC:-0}"
 SH
 # sleep never sleeps: it logs its argument and runs $FAKE_SLEEP_HOOK so a test
@@ -180,6 +184,13 @@ new_world
 FAKE_JOURNAL_STDERR='Hint: You are currently not seeing messages from other users and the system.' \
   expect_hold "reason=unreadable:journal" "journal without system messages"
 new_world
+FAKE_JOURNAL_STDERR='No journal files were opened due to insufficient permissions.' \
+  expect_hold "reason=unreadable:journal" "journal with no readable files"
+new_world
+FAKE_JOURNAL_STDERR='Warning: journal file corrupted, task blocked for more than 120 seconds' run_admit check
+expect_code 0 "$RC" "a stderr notice is not a journal warning"
+assert_contains "$OUT" "warnings=0" "only journal entries are counted"
+new_world
 NO_JOURNAL_PATH=$(fm_test_base_path_sans "$BASE_PATH" journalctl) || fail "path without journalctl"
 mkdir -p "$TMP_ROOT/no-journal-bin"
 cp "$FAKEBIN/df" "$FAKEBIN/sleep" "$TMP_ROOT/no-journal-bin/"
@@ -192,6 +203,19 @@ expect_hold "reason=config-invalid:unknown-key-line" "unknown config key"
 new_world admit_load1_below=lots
 expect_hold "reason=config-invalid:admit_load1_below" "malformed config value"
 pass "unreadable readings and malformed config hold and say which"
+
+new_world window_secs=08 sample_interval_secs=08 ramp_secs=0120
+ZERO_SLEEPS="$TMP_ROOT/zero-sleeps.log"
+: > "$ZERO_SLEEPS"
+FAKE_SLEEP_LOG="$ZERO_SLEEPS" run_admit check
+expect_code 0 "$RC" "leading-zero window admits"
+assert_contains "$OUT" "decision=admit reason=ok" "leading-zero window prints its evidence line"
+assert_contains "$OUT" "samples=2" "leading-zero window is read in base 10"
+[ "$(tr '\n' ' ' < "$ZERO_SLEEPS")" = "8 " ] || fail "leading-zero interval sleeps in base 10"
+expect_hold "reason=ramp:remaining=" "leading-zero ramp holds"
+REMAINING=$(printf '%s\n' "$OUT" | sed -n 's/.*ramp:remaining=\([0-9]*\)s.*/\1/p')
+[ "${REMAINING:-0}" -gt 80 ] || fail "ramp_secs=0120 is read as 120, not octal 80 (remaining=$REMAINING)"
+pass "leading-zero integer config values are read in base 10"
 
 # --- sampled window ---------------------------------------------------------------
 new_world window_secs=1 sample_interval_secs=1
@@ -229,7 +253,20 @@ new_world; set_load 30.00 30.00
 FAKE_SLEEP_LOG="$SLEEP_LOG" run_admit wait --timeout 0
 expect_code 1 "$RC" "wait times out holding"
 assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait timeout evidence"
-assert_contains "$ERR" "still holding after 0s" "wait timeout note"
+assert_contains "$ERR" "still holding within the 0s timeout" "wait timeout note"
+new_world window_secs=60; set_load 30.00 30.00
+: > "$SLEEP_LOG"
+FAKE_SLEEP_LOG="$SLEEP_LOG" run_admit wait --timeout 70
+expect_code 1 "$RC" "wait holds when no retry window fits"
+assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait holds with the last reason"
+assert_contains "$ERR" "still holding within the 70s timeout" "wait no-retry note"
+[ ! -s "$SLEEP_LOG" ] || fail "wait starts no retry whose window would outlive the timeout"
+new_world window_secs=60; set_load 30.00 30.00
+: > "$SLEEP_LOG"
+FAKE_SLEEP_LOG="$SLEEP_LOG" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \
+  run_admit wait --timeout 300
+expect_code 0 "$RC" "wait retries while a full window fits"
+[ "$(tr '\n' ' ' < "$SLEEP_LOG")" = "10 10 10 10 10 10 10 " ] || fail "wait pauses once, then samples a full window"
 pass "wait retries until admission or its timeout"
 
 # --- root home config ---------------------------------------------------------------

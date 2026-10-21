@@ -82,7 +82,10 @@
 # records an admission, so it consumes no ramp slot and launches nothing.
 # wait repeats check until it admits or --timeout seconds pass (default 540,
 # inside a ten-minute command limit), printing a line only when the reason
-# changes; a hold at the timeout prints a stderr note and exits 1.
+# changes. It starts a retry only while a full window_secs plus a margin for
+# readings and the ramp lock still fits before the timeout, so after its first
+# attempt it never runs past --timeout; when no retry fits it prints a stderr
+# note with the last hold reason and exits 1.
 #
 # Environment: FM_HOME and FM_CONFIG_OVERRIDE resolve this home as the other
 # bin/ scripts do; FM_PROC_ROOT_OVERRIDE replaces /proc, mainly for tests.
@@ -101,6 +104,7 @@ LOCK_TIMEOUT_SECS=10
 LOG_MAX_BYTES=262144
 LOG_KEEP_LINES=2000
 WAIT_TIMEOUT_DEFAULT=540
+WAIT_ATTEMPT_MARGIN_SECS=15
 
 usage() {
   sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'
@@ -185,6 +189,7 @@ load_config() {  # <file>
       CONFIG_ERROR="config-invalid:$key"
       return 1
     fi
+    case "$kind" in int|posint) value=$((10#$value)) ;; esac
     set_cfg "$key" "$value"
   done < "$file"
 }
@@ -256,14 +261,19 @@ psi_avg60() {  # <file> <some|full>
 }
 
 # Prints the matching warning count, or returns 1 when the journal cannot be
-# trusted to have answered.
+# trusted to have answered. journalctl must run without -q, which would also
+# silence its stderr notice that system messages are hidden; only stdout is
+# counted.
 journal_matches() {  # <since-epoch> <pattern> <journalctl selector...>
-  local since=$1 pattern=$2 out rc
+  local since=$1 pattern=$2 out err errf rc
   shift 2
   command -v journalctl >/dev/null 2>&1 || return 1
-  out=$(fm_run_timed "$JOURNAL_TIMEOUT_SECS" journalctl --no-pager -q -o cat --since "@$since" "$@" 2>&1) && rc=0 || rc=$?
+  errf=$(mktemp "${TMPDIR:-/tmp}/fm-heavy-admission.XXXXXX" 2>/dev/null) || return 1
+  out=$(fm_run_timed "$JOURNAL_TIMEOUT_SECS" journalctl --no-pager -o cat --since "@$since" "$@" 2>"$errf") && rc=0 || rc=$?
+  err=$(cat "$errf" 2>/dev/null) || err=
+  rm -f "$errf" 2>/dev/null
   [ "$rc" -eq 0 ] || return 1
-  case "$out" in
+  case "$err" in
     *"insufficient permissions"*|*"not seeing messages from other users and the system"*) return 1 ;;
   esac
   printf '%s\n' "$out" | grep -Ec "$pattern" || true
@@ -468,6 +478,7 @@ fi
 
 # wait
 wait_deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
+latest_start=$(( wait_deadline - $(cfg window_secs) - WAIT_ATTEMPT_MARGIN_SECS ))
 last_reason=
 while :; do
   if decide; then
@@ -479,10 +490,6 @@ while :; do
     last_reason=$REASON
   fi
   now=$(date +%s)
-  if [ "$now" -ge "$wait_deadline" ]; then
-    echo "fm-heavy-admission: still holding after ${WAIT_TIMEOUT}s (reason=$REASON); queue the phase and wait again" >&2
-    exit 1
-  fi
   pause=$(cfg sample_interval_secs)
   case "$REASON" in
     ramp:remaining=*)
@@ -490,7 +497,10 @@ while :; do
       pause=${pause%s}
       ;;
   esac
-  [ $((now + pause)) -le "$wait_deadline" ] || pause=$((wait_deadline - now))
   [ "$pause" -gt 0 ] || pause=1
+  if [ $((now + pause)) -gt "$latest_start" ]; then
+    echo "fm-heavy-admission: still holding within the ${WAIT_TIMEOUT}s timeout (reason=$REASON); queue the phase and wait again" >&2
+    exit 1
+  fi
   sleep "$pause"
 done
