@@ -357,6 +357,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# Optional foreground Pi model observation. Invalid/unset/zero stays off.
+# The generation/request record contract is owned by fm-busy-lib.sh.
+STREAM_SILENT_MAX_SECS=$(fm_busy_stream_seconds "${FM_STREAM_SILENT_MAX_SECS:-}")
+BUSY_STREAM_SNAPSHOT=
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -1674,8 +1678,9 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
 # (wedge_guard_evidence) runs after all three, so a dead or missing endpoint is
 # never deferred by a guard, and a home without config/wedge-evidence-guards
 # never reaches it.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name]
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n reason evidence guard guard_note
+  local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1707,14 +1712,37 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           guard_note="; guard ${guard%%$'\037'*} still reports CRITICAL (${guard#*$'\037'}) after its consecutive-deferral cap, so recheck the lane"
         fi
+        if [ -n "$stream_snapshot" ]; then
+          # Deferral and endpoint reads can outlive a request. Revalidate after
+          # those reads, immediately before this observation authorizes a wake.
+          if ! busy_stream_snapshot_current "$task" "$stream_snapshot"; then
+            rm -f "$since_file" "$escalation_file" "$STATE/.model-stream-episode-$(window_key "$win")"
+            clear_write_tracking "$(window_key "$win")"
+            return 0
+          fi
+          read -r _ _ _ stream_ts <<< "$stream_snapshot"
+          stream_detail=", model stream silent for $(( $(date +%s) - stream_ts ))s (foreground request)"
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
+        if [ -z "$stream_snapshot" ]; then echo "$n" > "$escalation_file"; fi
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
-        fm_wake_append stale "$win" "$reason" || exit 1
+        if [ -n "$stream_snapshot" ]; then
+          append_status=0
+          fm_wake_append_guarded busy_stream_snapshot_current stale "$win" "$reason" "$task" "$stream_snapshot" || append_status=$?
+          if [ "$append_status" -eq 3 ]; then
+            rm -f "$since_file" "$escalation_file" "$STATE/.model-stream-episode-$(window_key "$win")"
+            clear_write_tracking "$(window_key "$win")"
+            return 0
+          fi
+          [ "$append_status" -eq 0 ] || exit 1
+          echo "$n" > "$escalation_file"
+        else
+          fm_wake_append stale "$win" "$reason" || exit 1
+        fi
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         wake "$reason"
@@ -1723,18 +1751,50 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
-# progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
-# or tool activity, never a timer or a busy footer. It does not emit a wake or
-# change semantic busy state. Before either marker exists, age the spawn record.
+# busy_turn_over_age: 0 iff current opted-in stream silence crosses its bound,
+# or the general busy-age bound is crossed. The latter uses completed turns,
+# native-harness progress, and - only when opted in - model progress under the
+# fm-busy-lib.sh contract; without markers it ages the spawn record.
+# Progress is actual observed activity, never a timer or a busy footer.
+# This probe does not emit a wake or change semantic busy state.
 # The caller checks busy state and routes a crossed bound through inspection.
 busy_turn_over_age() {  # <task>
-  local task=$1 f progress
+  local task=$1 f progress harness snapshot gen request rev ts age model_ts model_age
+  BUSY_STREAM_SNAPSHOT=
+  if [ "$STREAM_SILENT_MAX_SECS" -gt 0 ]; then
+    harness=$(grep '^harness=' "$STATE/$task.meta" 2>/dev/null | cut -d= -f2- || true)
+    if snapshot=$(fm_busy_stream_read "$STATE" "$task" "$harness"); then
+      read -r gen request rev ts <<< "$snapshot"
+      age=$(( $(date +%s) - ts ))
+      if [ "$age" -ge "$STREAM_SILENT_MAX_SECS" ]; then
+        BUSY_STREAM_SNAPSHOT=$snapshot
+        return 0
+      fi
+    fi
+  fi
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  age=$(age_of "$f")
+  if [ "$STREAM_SILENT_MAX_SECS" -gt 0 ] &&
+     model_ts=$(fm_busy_model_progress_ts "$STATE" "$task" "$harness"); then
+    model_age=$(( $(date +%s) - model_ts ))
+    if [ "$model_age" -ge 0 ] && [ "$model_age" -lt "$age" ]; then
+      age=$model_age
+    fi
+  fi
+  [ "$age" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+busy_stream_snapshot_current() {  # <task> <observed snapshot>
+  local harness current gen request rev ts
+  [ "$STREAM_SILENT_MAX_SECS" -gt 0 ] || return 1
+  harness=$(grep '^harness=' "$STATE/$1.meta" 2>/dev/null | cut -d= -f2- || true)
+  current=$(fm_busy_stream_read "$STATE" "$1" "$harness") || return 1
+  [ "$current" = "$2" ] || return 1
+  read -r gen request rev ts <<< "$current"
+  [ "$(( $(date +%s) - ts ))" -ge "$STREAM_SILENT_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1822,6 +1882,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # branch rather than after it.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file> [dialog-name]
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 dialog=${6-} key statusf declared
+  local stream_episode stream_snapshot=$BUSY_STREAM_SNAPSHOT label="busy (no completed turn)"
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
     if afk_present; then
@@ -1863,7 +1924,22 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h" "$dialog"
+  stream_episode="$STATE/.model-stream-episode-$(window_key "$win")"
+  if [ -n "$stream_snapshot" ]; then
+    if [ "$(cat "$stream_episode" 2>/dev/null || true)" != "$stream_snapshot" ]; then
+      rm -f "$since_file" "$escalation_file"
+      clear_write_tracking "$(window_key "$win")"
+      printf '%s' "$stream_snapshot" > "$stream_episode"
+    fi
+    label="busy (model stream silent)"
+  else
+    if [ -e "$stream_episode" ]; then
+      rm -f "$since_file" "$escalation_file"
+      clear_write_tracking "$(window_key "$win")"
+    fi
+    rm -f "$stream_episode"
+  fi
+  wedge_timer_check "$win" "$since_file" "$label" "$escalation_file" "$task" "$h" "$dialog" "$stream_snapshot"
   return 1
 }
 
@@ -3472,7 +3548,7 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
         else
-          rm -f "$ssf" "$ewf"
+          rm -f "$ssf" "$ewf" "$STATE/.model-stream-episode-$key"
           clear_write_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
@@ -3490,7 +3566,7 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
       else
-        rm -f "$ssf" "$ewf"
+        rm -f "$ssf" "$ewf" "$STATE/.model-stream-episode-$key"
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
