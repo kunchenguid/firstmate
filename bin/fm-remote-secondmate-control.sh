@@ -290,7 +290,7 @@ cmd_send() {
   # the parent may safely repeat this leg. Exit 0 once the record durably
   # exists; no ring outcome changes it, because the parent transport owns any
   # retry or reply-tracking policy from here.
-  if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
+  if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode" held); then
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
   fi

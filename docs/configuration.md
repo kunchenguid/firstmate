@@ -2229,6 +2229,16 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 - A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
 - That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
 
+**Retire a task with feedback still attached**
+
+Ordinary `bin/fm-teardown.sh` refuses before destructive cleanup when the task owns a registered process-event listener, has an unread `state/<task>.inbox/*.msg`, or has an unhandled captured result whose `state/procevent-inbox/<source>.<sequence>.owner-task` names that task.
+For a secondmate, the inventory covers both the parent route's state and the child home's own `state/` tree before the child home is removed.
+The result must still have its matching `.result` file and no `.handled` marker; a message moved under `handled/` is acknowledged and does not block teardown.
+Sources and results owned by another task do not block this task's teardown.
+The refusal identifies each attached listener, message, or result so the operator can handle it before retiring the task.
+Teardown inventories these attachments before destructive cleanup and rechecks after non-destructive preparation but before the first destructive cleanup action, so feedback arriving during preparation is retained rather than deleted.
+`--force` retains its existing explicit discard behavior and bypasses this ownership inventory.
+
 **Conclude a terminal round**
 
 - A terminal result, including `session_ended`, an empty End, or missing, is delivered to the owner with an explicit stop-and-conclude instruction and is never auto-rearmed.

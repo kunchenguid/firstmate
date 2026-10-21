@@ -121,6 +121,10 @@ fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
+  # Inventory is real: even an attachment-free teardown must execute it.
+  ln -s "$ROOT/bin/fm-procevent.sh" "$fake/bin/fm-procevent.sh"
+  ln -s "$ROOT/bin/fm-procevent-lib.sh" "$fake/bin/fm-procevent-lib.sh"
+  ln -s "$ROOT/bin/fm-task-inbox-lib.sh" "$fake/bin/fm-task-inbox-lib.sh"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -218,6 +222,9 @@ fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
+  ln -s "$ROOT/bin/fm-procevent.sh" "$fake/bin/fm-procevent.sh"
+  ln -s "$ROOT/bin/fm-procevent-lib.sh" "$fake/bin/fm-procevent-lib.sh"
+  ln -s "$ROOT/bin/fm-task-inbox-lib.sh" "$fake/bin/fm-task-inbox-lib.sh"
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id

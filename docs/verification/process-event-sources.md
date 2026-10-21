@@ -128,7 +128,8 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | foreign ownership | sweeping one home removes its registration without signaling or releasing another home's live claim |
 | nested and force cleanup | normal, force, and nested secondmate removal invoke each target home's sweep at its final removal boundary, a failed removal restores and rearms registrations, and failed rearming at any nested level retains and reports its recovery backup with a distinct status |
 | teardown refusal ordering | a later public-followup refusal retains the home and its active process-event registration without invoking its sweep |
-| healthy-home invariance | homes with no registration or owned runner claim retain ordinary registration-only supervision and teardown behavior |
+| task-owned feedback teardown gate | `tests/fm-teardown-endpoint-safety.test.sh` drives the real teardown through unread listener, message, result, child-home, unrelated-owner, `--force`, and feedback-arriving-during-preparation fixtures, proving ordinary teardown identifies and retains attached feedback before destructive cleanup |
+| healthy-home invariance | homes with no registration or owned runner claim retain ordinary registration-only supervision and process-event home-sweep behavior |
 | source-only supervision | a registered source with no task metadata trips the shared predicate and general guard |
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |

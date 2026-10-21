@@ -1414,6 +1414,35 @@ fm_meta_lock_path() {
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+fm_task_feedback_lock_acquire() {  # <state-dir> <task-id> [required]
+  local state=$1 task=$2 required=${3:-} meta lock
+  FM_TASK_FEEDBACK_LOCK_PATH=
+  meta="$state/$task.meta"
+  if [ "$required" = held ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    return 0
+  fi
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    [ "$required" = required ] && return 1
+    return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$lock" || true
+    return 1
+  fi
+  FM_TASK_FEEDBACK_LOCK_PATH=$lock
+}
+
+fm_task_feedback_lock_release() {
+  local lock=${FM_TASK_FEEDBACK_LOCK_PATH:-}
+  FM_TASK_FEEDBACK_LOCK_PATH=
+  [ -n "$lock" ] || return 0
+  fm_lock_release "$lock"
+}
+
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
 # as opposed to fm_meta_lock_path, which guards one task's record.
 #

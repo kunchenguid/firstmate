@@ -3548,6 +3548,17 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+task_feedback_inventory() {
+  [ "$FORCE" = --force ] && return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-procevent.sh" \
+    task-feedback inventory "$ID" || return 1
+  if [ "$KIND" = secondmate ]; then
+    FM_HOME="$HOME_PATH" FM_STATE_OVERRIDE="$HOME_PATH/state" "$SCRIPT_DIR/fm-procevent.sh" \
+      task-feedback inventory "$ID" || return 1
+  fi
+}
+task_feedback_inventory || exit 1
+
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
@@ -3618,7 +3629,6 @@ teardown_legacy_stamp_rollback() {
       exit 1
     fi
   fi
-  BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
@@ -3634,6 +3644,7 @@ teardown_legacy_stamp_rollback() {
     fi
     exit 1
   fi
+  BACKLOG_CLOSED=1
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
@@ -3641,6 +3652,26 @@ else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
 fi
+
+task_feedback_late_inventory() {
+  task_feedback_inventory && return 0
+  if [ "$BACKLOG_CLOSED" = 1 ]; then
+    if fm_backlog_close_marker_clear "$STATE" "$ID"; then
+      BACKLOG_CLOSED=0
+    else
+      echo "error: could not roll back the pending backlog close for $ID after feedback refusal" >&2
+    fi
+  fi
+  if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] \
+     && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
+     && [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null; then
+    teardown_legacy_stamp_rollback \
+      || echo "error: the legacy incarnation stamp on $ID's record could not be rolled back after feedback refusal" >&2
+  fi
+  return 1
+}
+
+task_feedback_late_inventory || exit 1
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
@@ -3893,8 +3924,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
-# retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
+# retired endpoint. Ordinary teardown inventories attached feedback before
+# destructive cleanup and again before endpoint close; --force is unchanged.
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
 # read-only by its installer, and state/<id>.push-guard is a forge=external
 # task's read-only push guard record (bin/fm-git-push-guard.sh).

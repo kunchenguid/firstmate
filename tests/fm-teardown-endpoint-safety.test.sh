@@ -22,6 +22,15 @@ make_case() {  # <name>
 printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "$1" = kill-window ] && [ -f "$FM_HOME/state/.post-feedback-task" ]; then
+  task=$(cat "$FM_HOME/state/.post-feedback-task")
+  (
+    . "$FM_ROOT_OVERRIDE/bin/fm-task-inbox-lib.sh"
+    status=0
+    fm_task_inbox_write "$FM_HOME/state" "$task" 'post-close feedback' >/dev/null || status=$?
+    printf '%s\n' "$status" > "$FM_HOME/state/.post-feedback-status"
+  ) &
+fi
 exit 0
 SH
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
@@ -1426,6 +1435,211 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+make_feedback_case() {  # <name> <task>
+  local dir id=$2
+  dir=$(make_case "$1")
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/missing-worktree" "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys="
+  mkdir -p "$dir/home/data/$id" "$dir/home/state/$id.inbox" \
+    "$dir/home/state/procevent" "$dir/home/state/procevent-inbox"
+  printf 'Report: no outstanding decisions.\n' > "$dir/home/data/$id/report.md"
+  printf '%s\n' "$dir"
+}
+
+run_feedback_case() {  # <case> <task> [flags]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+make_secondmate_feedback_case() {  # <case> <task>
+  local dir id=$2 mate
+  dir=$(make_case "$1")
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects" \
+    "$mate/state/$id.inbox" "$mate/state/procevent" "$mate/state/procevent-inbox" \
+    "$dir/home/state/parent-route/procevent" \
+    "$dir/home/state/parent-route/procevent-inbox" \
+    "$dir/home/state/parent-route/$id.inbox" \
+    "$dir/home/data/.parent-route"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/parent-route/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$mate" "project=$dir/project" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" \
+    "projects=alpha"
+  printf '%s\n' "$dir"
+}
+
+run_secondmate_feedback_case() {  # <case> <task> [flags]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/home/state/parent-route" \
+    FM_DATA_OVERRIDE="$dir/home/data/.parent-route" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+test_secondmate_feedback_inventory_covers_unread_and_handled() {
+  local dir id=secondmate-feedback rc=0
+
+  dir=$(make_secondmate_feedback_case secondmate-unread "$id")
+  printf 'private steer\n' > "$dir/home/state/parent-route/$id.inbox/001.msg"
+  run_secondmate_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "ordinary secondmate teardown discarded unread steer"
+  assert_grep "$dir/home/state/parent-route/$id.inbox/001.msg" "$dir/err" \
+    "unread secondmate steer was not identified"
+  assert_present "$dir/home/state/parent-route/$id.meta" \
+    "unread secondmate refusal removed task metadata"
+  assert_present "$dir/mate/.fm-secondmate-home" \
+    "unread secondmate refusal removed the secondmate home"
+  [ ! -s "$dir/runtime.log" ] || fail "unread secondmate refusal mutated runtime"
+
+  dir=$(make_secondmate_feedback_case secondmate-child-unread "$id")
+  printf 'private child steer\n' > "$dir/mate/state/$id.inbox/001.msg"
+  rc=0
+  run_secondmate_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "ordinary secondmate teardown discarded child-home unread steer"
+  assert_grep "$dir/mate/state/$id.inbox/001.msg" "$dir/err" \
+    "child-home unread secondmate steer was not identified"
+  assert_present "$dir/home/state/parent-route/$id.meta" \
+    "child-home unread refusal removed task metadata"
+  assert_present "$dir/mate/.fm-secondmate-home" \
+    "child-home unread refusal removed the secondmate home"
+  [ ! -s "$dir/runtime.log" ] || fail "child-home unread refusal mutated runtime"
+
+  dir=$(make_secondmate_feedback_case secondmate-handled "$id")
+  mkdir -p "$dir/home/state/parent-route/$id.inbox/handled"
+  printf 'already handled\n' > \
+    "$dir/home/state/parent-route/$id.inbox/handled/001.msg"
+  run_secondmate_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" \
+    || fail "handled secondmate feedback blocked ordinary teardown: $(cat "$dir/err")"
+  assert_absent "$dir/home/state/parent-route/$id.meta" \
+    "handled secondmate feedback retained task metadata"
+  assert_absent "$dir/mate" "handled secondmate feedback retained the secondmate home"
+
+  dir=$(make_secondmate_feedback_case secondmate-none "$id")
+  run_secondmate_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" \
+    || fail "secondmate teardown with no feedback refused: $(cat "$dir/err")"
+  assert_absent "$dir/home/state/parent-route/$id.meta" \
+    "feedback-free secondmate teardown retained task metadata"
+  assert_absent "$dir/mate" "feedback-free secondmate teardown retained the secondmate home"
+  pass "fm-teardown: secondmate inventory blocks unread but ignores handled or absent feedback"
+}
+
+test_task_feedback_refuses_ordinary_teardown() {
+  local kind dir id=feedback-task expected rc
+  for kind in message result listener; do
+    dir=$(make_feedback_case "feedback-$kind" "$id")
+    case "$kind" in
+      message)
+        expected="$dir/home/state/$id.inbox/001.msg"
+        printf 'private answer\n' > "$expected"
+        ;;
+      result)
+        expected="$dir/home/state/procevent-inbox/board.1.result"
+        printf '%s\n' "$id" > "$dir/home/state/procevent-inbox/board.1.owner-task"
+        printf 'private answer\n' > "$expected"
+        ;;
+      listener)
+        expected='source=board'
+        printf 'adapter=lavish\nkind=task-owned\nowner_task=%s\nargc=3\nargv:\npoller\npoll\nboard.html\n' \
+          "$id" > "$dir/home/state/procevent/board.source"
+        ;;
+    esac
+    cp "$dir/home/state/$id.meta" "$dir/original.meta"
+    rc=0
+    run_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "ordinary teardown discarded attached $kind"
+    assert_grep "$expected" "$dir/err" "attached $kind was not identified"
+    assert_no_grep 'private answer' "$dir/err" "feedback body was disclosed"
+    cmp -s "$dir/original.meta" "$dir/home/state/$id.meta" \
+      || fail "$kind refusal changed task metadata"
+    [ ! -s "$dir/runtime.log" ] || fail "$kind refusal mutated runtime"
+    pass "fm-teardown: attached $kind refuses ordinary teardown before mutation"
+    run_feedback_case "$dir" "$id" --force > "$dir/forced.out" 2> "$dir/forced.err" \
+      || fail "feedback inventory changed forced teardown for $kind: $(cat "$dir/forced.err")"
+    assert_absent "$dir/home/state/$id.meta" "forced $kind cleanup retained task"
+    pass "fm-teardown: explicit --force behavior is unchanged for attached $kind"
+  done
+}
+
+test_late_feedback_refuses_before_endpoint_close() {
+  local dir id=late-feedback rc=0
+  dir=$(make_feedback_case late-feedback "$id")
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys=" "spawn_gen=s1.1.fixture"
+  fm_test_tasks_toml "$dir/home/.tasks.toml"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$dir/home/data/backlog.md"
+  tasks-axi add "$id" "late feedback fixture" --kind scout \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start "$id" --file "$dir/home/data/backlog.md" >/dev/null
+  (
+    while [ ! -e "$dir/home/state/$id.backlog-close" ]; do sleep 0.01; done
+    mkdir -p "$dir/home/state/$id.inbox"
+    printf 'late feedback\n' > "$dir/home/state/$id.inbox/002.msg"
+  ) &
+  late_writer=$!
+  run_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" || rc=$?
+  wait "$late_writer" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "feedback arriving during preparation was discarded"
+  assert_grep "$dir/home/state/$id.inbox/002.msg" "$dir/err" "late feedback was not identified"
+  assert_present "$dir/home/state/$id.meta" "late refusal removed task identity"
+  assert_present "$dir/home/state/$id.inbox/002.msg" "late refusal removed feedback"
+  assert_present "$dir/worktree/sentinel" "late refusal retained the worktree before refusing"
+  assert_no_grep '<kill-window>' "$dir/runtime.log" "late refusal closed endpoint"
+  assert_no_grep 'treehouse <return>' "$dir/runtime.log" "late refusal returned the pool slot"
+  pass "fm-teardown: feedback arriving after initial inventory refuses before destructive cleanup"
+}
+
+test_post_check_feedback_writer_cannot_recreate_retired_inbox() {
+  local dir id=post-check-feedback i=0 status
+  dir=$(make_feedback_case post-check-feedback "$id")
+  printf '%s\n' "$id" > "$dir/home/state/.post-feedback-task"
+  run_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" \
+    || fail "post-check feedback fixture teardown failed: $(cat "$dir/err")"
+  while [ ! -f "$dir/home/state/.post-feedback-status" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  assert_present "$dir/home/state/.post-feedback-status" "post-check writer did not complete"
+  status=$(cat "$dir/home/state/.post-feedback-status")
+  [ "$status" -ne 0 ] || fail "post-check feedback writer recreated an inbox after teardown"
+  assert_absent "$dir/home/state/$id.inbox" "post-check feedback recreated the retired inbox"
+  pass "fm-teardown: post-check feedback writer cannot recreate retired inbox"
+}
+
+test_unrelated_task_feedback_does_not_block() {
+  local dir id=unrelated-feedback
+  dir=$(make_feedback_case unrelated-feedback "$id")
+  printf 'adapter=lavish\nkind=task-owned\nowner_task=other-task\nargc=0\nargv:\n' \
+    > "$dir/home/state/procevent/other.source"
+  printf 'other-task\n' > "$dir/home/state/procevent-inbox/other.1.owner-task"
+  printf 'answer\n' > "$dir/home/state/procevent-inbox/other.1.result"
+  run_feedback_case "$dir" "$id" > "$dir/out" 2> "$dir/err" \
+    || fail "unrelated task feedback blocked teardown: $(cat "$dir/err")"
+  assert_absent "$dir/home/state/$id.meta" "unrelated-source cleanup retained task"
+  assert_present "$dir/home/state/procevent/other.source" "unrelated source was removed"
+  assert_present "$dir/home/state/procevent-inbox/other.1.result" "unrelated result was removed"
+  pass "fm-teardown: unrelated task listener and result do not block or get removed"
+}
+
+test_secondmate_feedback_inventory_covers_unread_and_handled
+test_task_feedback_refuses_ordinary_teardown
+test_late_feedback_refuses_before_endpoint_close
+test_post_check_feedback_writer_cannot_recreate_retired_inbox
+test_unrelated_task_feedback_does_not_block
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

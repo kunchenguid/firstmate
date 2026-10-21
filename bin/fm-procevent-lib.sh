@@ -1094,6 +1094,18 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
 # identity beside the legacy adapter sidecar, so later classification cannot
 # silently move to a replacement binding.
 fm_procevent_capture() {
+  if [ "$#" -eq 5 ]; then
+    local task_state=$1 task_owner=$5 capture_status
+    fm_task_feedback_lock_acquire "$task_state" "$task_owner" required || return 1
+    _fm_procevent_capture_locked "$@"
+    capture_status=$?
+    fm_task_feedback_lock_release || capture_status=1
+    return "$capture_status"
+  fi
+  _fm_procevent_capture_locked "$@"
+}
+
+_fm_procevent_capture_locked() {
   local state=$1 id=$2 adapter=$3 src=$4 extension_id=${5-} extension_version=${6-}
   local capability_version=${7-} package_digest=${8-} binding_digest=${9-} task_owner=${5-}
   local inbox seq dest tmp adapter_dest adapter_tmp owner_dest='' owner_tmp='' extension_dest='' extension_tmp=''
