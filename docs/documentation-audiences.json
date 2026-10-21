@@ -31,6 +31,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/paseo-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -133,10 +134,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -150,6 +147,10 @@
     },
     {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-self-repo/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -189,6 +190,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/commandcode.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/cursor.md",
       "audience": "agent-runtime"
     },
@@ -222,6 +227,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/polytoken.md",
       "audience": "agent-runtime"
     },
     {
@@ -365,8 +374,16 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/forgejo-tea-integration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/gerrit-change-watch.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/external-review-forge.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/gerrit-forge-integration.md",
@@ -390,6 +407,10 @@
     },
     {
       "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/paseo-backend.md",
       "audience": "operator-current"
     },
     {
@@ -473,6 +494,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/commandcode.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },
@@ -494,6 +519,10 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/polytoken.md",
       "audience": "maintainer-verification"
     },
     {

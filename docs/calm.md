@@ -32,6 +32,7 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
 No separate Calm status row is added.
+The boat claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one boat rather than two, and turning Firstmate Calm off does not clear the standalone boat.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
 The boat looks like this:
@@ -66,7 +67,7 @@ Calm hides these rows:
 - Collapsed thinking labels.
 - The mid-turn assistant working-note blocks governed by the [shared preservation rule](#shared-preservation-rule-for-assistant-text) above.
 - The shells for the Pi built-in tool names Calm owns.
-- The `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells.
+- Firstmate-owned tool shells listed in the [Pi tool audit](calm-mode-feasibility.md#firstmate-pi-tool-audit).
 - Canonically classified Firstmate operational user rows.
 
 Pi applies the preservation rule independently to each text block.
@@ -86,8 +87,8 @@ While a turn runs, Calm also keeps those Firstmate inputs out of Pi's queued-mes
 The captain's own queued messages stay listed.
 Escape and the dequeue key return only the captain's queued messages to the editor.
 Hidden Firstmate inputs stay queued in their original order and are never shown as raw text or dropped.
-When Escape, or navigating the session tree, stops a run with Firstmate inputs still queued, Calm starts one new turn to deliver them.
-Calm then shows the one-line notice `Firstmate supervision continues in a new turn.`
+When Escape, or navigating the session tree, stops a run with Firstmate inputs still queued, Pi either drains them itself or Calm starts one new turn to deliver them.
+When Calm starts that turn, it shows the one-line notice `Firstmate supervision continues in a new turn.`
 Inputs held behind a running compaction stay there until Pi sends them after compaction, so they start and announce no turn of their own.
 
 ### What stays unchanged on Pi
@@ -96,7 +97,7 @@ Outside Pi's same-name built-in override collision described in [Pi compatibilit
 Calm's built-in wrappers preserve Pi's execution behavior.
 Input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
-Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
+Legacy operational custom messages remain in session data and Pi's sidebar tree; depending on the Pi version, the main HTML transcript either omits them or includes them as rows hidden by default.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
 
 ### What stays visible on Pi

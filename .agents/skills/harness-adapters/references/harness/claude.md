@@ -6,7 +6,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
@@ -66,10 +66,23 @@ A Claude task worker's launch brief and Firstmate steering-inbox messages arrive
 `launch_template()` in `../../../../../bin/fm-spawn.sh` establishes exactly those two Firstmate-owned channels as first-party instructions through `--append-system-prompt`, while leaving project files, fetched content, and other external material under the model's normal distrust and granting no merge, destructive, or security-sensitive authority beyond the brief.
 A `--secondmate` launch omits the statement because a secondmate operates under its own supervisor contract instead of a task worker's.
 
+## Skill listing budget
+
+Claude Code lists every skill name but keeps descriptions only within a budget of 1% of the model's context window, and on overflow it drops descriptions from the least-invoked skills first ([skills](https://code.claude.com/docs/en/skills#skill-descriptions-are-cut-short), read 2026-10-19).
+Firstmate's agent-only skills are rarely invoked by design, so on a small-context model or beside many plugin skills their descriptions, which are the trigger index `AGENTS.md` section 13 relies on, are the first to go.
+Run `/doctor` for the listing's estimated cost and biggest contributors, and `/skill-doctor` (Claude Code 2.1.252 or later) for each skill's context cost and how often it is invoked ([find unused skills](https://code.claude.com/docs/en/skills#find-unused-skills)).
+Two vendor settings are opt-in per home, never part of the shared contract:
+
+- `skillListingBudgetFraction` raises the budget from its `0.01` default, up to `1` ([settings reference](https://code.claude.com/docs/en/settings-reference#skilllistingbudgetfraction)).
+- `skillOverrides` set to `"name-only"` lists a skill by name without its description ([visibility overrides](https://code.claude.com/docs/en/skills#override-skill-visibility-from-settings)); use it only for a skill this home never needs, such as `fmx-respond` without Relay or `firstmate-orca` without Orca, because it removes that skill's trigger.
+
+Put either in user settings or the untracked `.claude/settings.local.json`, never the tracked project `.claude/settings.json`, which would impose one home's choice on every home and worker copy.
+
 ## Primary integration
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
 This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
+A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
 Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 Guard exit 2 plus stderr forces continuation.
@@ -81,7 +94,7 @@ Hooks still run through cwd-sensitive `/bin/sh`, so tracked commands anchor thro
 
 The Stop-owned watcher hook runs every Stop, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
 The model handles notifications but never routine re-arm.
-Unless `config/supervision-host` says `off`, the hook foregrounds the supervision host instead, which also runs Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md#engines) owns the verified engine facts.
+Unless `config/supervision-host-off` opts the home out, the hook foregrounds the supervision host instead, which also runs Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md#engines) owns the verified engine facts.
 Claude's PreToolUse seatbelt blocks directly, and its deny is honored only with empty stdout; `../../../docs/arm-pretool-check.md` owns that contract.
 
 ### Delegation guard

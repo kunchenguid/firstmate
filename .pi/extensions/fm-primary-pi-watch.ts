@@ -19,10 +19,11 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// not consumed. An idle main consumes at a prompt-bearing before_agent_start;
+// a streaming main consumes at the user message_start carrying the exact wake
+// text. A no-prompt custom trigger cannot consume it, even with equal content.
+// Either user boundary finishes the pending record, and a still-unconsumed
+// record rides the replacement handoff.
 //
 // Postures (stated once here; docs/pi-supervision-branch.md "Postures"):
 // the away-posture record state/.afk-contract is read as a file at every
@@ -149,6 +150,8 @@ const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+const extensionLog = `${state}/.watch-extension.log`;
+const extensionLogMaxLines = extensionLogKeepLines();
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -213,6 +216,18 @@ function positiveInteger(name: string, fallback: number): number {
   return Math.floor(value);
 }
 
+// Opt-in bound for the extension diagnostic log: only a positive
+// FM_WATCH_EXTENSION_LOG_KEEP_LINES enables logging, so the default run
+// writes nothing. Unset, empty, non-numeric, zero, and negative values
+// disable the log entirely instead of falling back to a silent default.
+function extensionLogKeepLines(): number {
+  const raw = process.env.FM_WATCH_EXTENSION_LOG_KEEP_LINES;
+  if (raw === undefined || raw.trim() === "") return 0;
+  const value = Math.floor(Number(raw));
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value;
+}
+
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
@@ -226,6 +241,21 @@ function pidAlive(pid: string): boolean {
   } catch {
     return false;
   }
+}
+
+// An arm child whose process is gone but whose close event has not fired yet
+// (stdio pipes still held) must not keep the single-flight slot: neither a
+// repair call nor a scheduled retry would start anything until that close
+// finally fires. Callers that gate on slot occupancy use this instead of
+// owner.child so both paths can always recover.
+
+function liveArmChild(owner: SessionGeneration): ChildProcess | null {
+  const child = owner.child;
+  if (!child) return null;
+  if (child.exitCode !== null || child.signalCode !== null) return null;
+  const pid = child.pid;
+  if (pid === undefined || !pidAlive(String(pid))) return null;
+  return child;
 }
 
 function lockOwnership(): LockOwnership {
@@ -245,8 +275,33 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
+// A Pi command started from inside the live session, such as the `pi --help`
+// capability probe in bin/fm-spawn.sh, auto-loads this extension too and passes
+// lockOwnership() through the same ancestor walk. Its pid dies at once, so the
+// marker must keep naming the live session above it (#5202). Pid equality with
+// the lock is not required because a wrapper such as pi-signed may hold the lock
+// while the extension host runs as its child.
+function markerNamesLiveAncestor(): boolean {
+  let markerPid = "";
+  try {
+    markerPid = readFileSync(marker, "utf8").split(/\r?\n/)[1] ?? "";
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(markerPid) || markerPid === String(process.pid) || !pidAlive(markerPid)) {
+    return false;
+  }
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    pid = parentPid(pid);
+    if (!pid || pid === "1") return false;
+    if (pid === markerPid) return true;
+  }
+  return false;
+}
+
 function publishGenerationOwner(generation: SessionGeneration, phase: "active" | "handoff"): void {
-  if (lockOwnership() === "other") return;
+  if (lockOwnership() === "other" || markerNamesLiveAncestor()) return;
   mkdirSync(state, { recursive: true });
   const temporary = `${marker}.tmp-${process.pid}-${generation.id}`;
   writeFileSync(
@@ -312,6 +367,35 @@ function nodeErrorCode(error: unknown): string {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code ?? "")
     : "";
+}
+
+// Bounded diagnostic record for restore attempts, readiness timeouts, and
+// handling-confirmation targets and results. Opt-in through
+// FM_WATCH_EXTENSION_LOG_KEEP_LINES and off by default: a disabled log
+// returns before touching the filesystem, so it never creates its file.
+// Purely observational: a logging failure never changes supervision
+// behavior. docs/watcher-continuity.md owns what the arm layer already
+// records; this file is the extension side.
+function appendExtensionLog(detail: string): void {
+  if (extensionLogMaxLines <= 0) return;
+  try {
+    mkdirSync(state, { recursive: true });
+    const cleaned = detail.replace(/[\r\n\t]+/g, " ").slice(0, 512);
+    const line = `${new Date().toISOString()} pid=${process.pid} ${cleaned}`;
+    let previous = "";
+    try {
+      previous = readFileSync(extensionLog, "utf8");
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") return;
+    }
+    const joined = `${previous}${previous === "" || previous.endsWith("\n") ? "" : "\n"}${line}\n`;
+    const kept = joined.split("\n").slice(-(extensionLogMaxLines + 1)).join("\n");
+    const temporary = `${extensionLog}.tmp-${process.pid}`;
+    writeFileSync(temporary, kept, { mode: 0o600 });
+    renameSync(temporary, extensionLog);
+  } catch {
+    // Diagnostic only: never fail supervision for observability.
+  }
 }
 
 function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
@@ -611,6 +695,7 @@ export default function (pi: ExtensionAPI) {
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
     ok: boolean;
     detail: string;
+    superseded?: boolean;
   } {
     try {
       const result = spawnSync(
@@ -623,6 +708,11 @@ export default function (pi: ExtensionAPI) {
         },
       );
       if (result.status === 0) return { ok: true, detail: "" };
+      if (result.status === 3) {
+        // The marker advanced past this restoration's generation mid-restore,
+        // so a newer pipeline owns the episode now: superseded, not rejected.
+        return { ok: false, detail: "", superseded: true };
+      }
       const stderr = (result.stderr || "").trim();
       return {
         ok: false,
@@ -638,16 +728,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   function confirmHandlingDeliveryWithRetry(
-    owner: SessionGeneration,
     recovery: { generation: string; watcherPid: string },
-  ): { ok: boolean; detail: string } {
-    const snapshot = (): { generation: string; watcherPid: string } => {
-      const current = owner.child ? armRecovery.get(owner.child) : undefined;
-      return current ?? recovery;
-    };
-    const first = confirmHandlingDelivery(snapshot());
-    if (first.ok) return first;
-    return confirmHandlingDelivery(snapshot());
+  ): { ok: boolean; detail: string; superseded?: boolean } {
+    // Confirm the restoration's own recovery token, never a fresh snapshot of
+    // the current arm child: a successor replaced during the restore window
+    // must not turn this delivery into a false rejection, and a retry must
+    // not retire a newer healthy watcher.
+    const first = confirmHandlingDelivery(recovery);
+    if (first.ok || first.superseded) return first;
+    return confirmHandlingDelivery(recovery);
   }
 
   function offerWakeToBranch(message: string): Promise<void> | null {
@@ -668,11 +757,25 @@ export default function (pi: ExtensionAPI) {
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     if (recovery) {
-      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
-      if (!confirmed.ok) {
-        const watcherPid = recovery.watcherPid;
-        if (!pidAlive(watcherPid)) {
-          await retireArm(owner.child);
+      const confirmed = confirmHandlingDeliveryWithRetry(recovery);
+      appendExtensionLog(
+        `confirm generation=${recovery.generation} watcherPid=${recovery.watcherPid} result=${confirmed.ok ? "confirmed" : confirmed.superseded ? "superseded" : "rejected"}`,
+      );
+      // A superseded result means a newer pipeline owns this episode now: it
+      // routes like a confirmed delivery below, with no failure appended, and
+      // retires nothing.
+      if (!confirmed.ok && !confirmed.superseded) {
+        const failedPid = recovery.watcherPid;
+        const current = owner.child;
+        const currentRecovery = current ? armRecovery.get(current) : undefined;
+        if (
+          current &&
+          currentRecovery?.watcherPid === failedPid &&
+          currentRecovery?.generation === recovery.generation &&
+          !pidAlive(failedPid)
+        ) {
+          appendExtensionLog(`retire pid=${failedPid} reason=confirm-failure`);
+          await retireArm(current);
         }
         return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
@@ -850,7 +953,7 @@ export default function (pi: ExtensionAPI) {
         // been idle.
         const deferred = owner.deferredClose;
         owner.deferredClose = null;
-        if (deferred && !owner.child && !owner.retryTimer) {
+        if (deferred && !liveArmChild(owner) && !owner.retryTimer) {
           scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
         }
       }
@@ -912,10 +1015,14 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
+      appendExtensionLog(
+        `restore attempt=${attempt} predecessor=${predecessorArmPid || "none"} start=${replacement.ok ? `ok pid=${successorChild?.pid ?? "none"}` : "failed"}`,
+      );
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {
+        appendExtensionLog(`restore attempt=${attempt} readiness=timeout pid=${successorChild?.pid ?? "none"}`);
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
           return {
@@ -931,11 +1038,12 @@ export default function (pi: ExtensionAPI) {
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
+    appendExtensionLog(`restore exhausted attempts=${retryLimit + 1} outcome=hand-to-main`);
     return { failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries` };
   }
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
-    if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
+    if (!generationIsLive(owner) || liveArmChild(owner) || owner.retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -969,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     publishGenerationOwner(owner, "active");
-    if (owner.child) {
+    if (liveArmChild(owner)) {
       return {
         ok: true,
         message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
@@ -1118,6 +1226,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
+    // A custom message cannot consume a pending user wake, even with equal text.
+    if (!("prompt" in event)) return;
     consumeWake(generation, event.prompt);
   });
   pi.on?.("message_start", (event) => {

@@ -319,10 +319,12 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  # Both sides are physical paths (git resolves --show-toplevel through symlinks),
-  # so a symlinked clone dir still compares equal to its own root.
+  # Compare filesystem identity, not spelling: the question is whether git's root
+  # and $PROJ are the same directory, and a string compare of the two paths also
+  # fails when they merely differ in case (case-insensitive volume) or in how a
+  # symlink is spelled.
   proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
-  if [ "$proj_top" != "$proj_abs" ]; then
+  if [ -z "$proj_abs" ] || ! [ "$proj_top" -ef "$proj_abs" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi

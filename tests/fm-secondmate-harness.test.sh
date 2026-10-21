@@ -15,7 +15,8 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/startup-memory-budget, config/trace-context, and
+#      config/supervision-host-off -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -41,6 +42,12 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Per-mate override. A "mate <secondmate-id>: <harness> [<model>] [<effort>]"
+#      line in config/secondmate-harness replaces the default line for exactly
+#      that id, so a mate with its own pin cannot be migrated by a later change
+#      to the default pin. A file without mate lines resolves byte-for-byte as
+#      before, and a malformed line is refused with its line number rather than
+#      skipped.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -173,6 +180,131 @@ ROWS
 }
 
 # ===========================================================================
+# D) Per-mate override lines in config/secondmate-harness
+# ===========================================================================
+# A "mate <secondmate-id>: <harness> [<model>] [<effort>]" line replaces the
+# default line for exactly that id, so one mate cannot silently inherit another
+# mate's runtime when the default pin moves. A file with no mate lines must
+# resolve exactly as it always did, both for a caller that passes an id and for
+# one that does not.
+#   <label>^<file-lines, \n for a newline, ABSENT for no file>^<id>^<exp-harness>^<exp-model>^<exp-effort>
+test_secondmate_per_mate_override_lines() {
+  local label file id exp_harness exp_model exp_effort case_dir cfg got_h got_m got_e n
+  n=0
+  while IFS='^' read -r label file id exp_harness exp_model exp_effort; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/permate-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    [ "$file" = ABSENT ] || printf '%b\n' "$file" > "$cfg/secondmate-harness"
+    got_h=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate "$id")
+    got_m=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model "$id")
+    got_e=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort "$id")
+    [ "$got_h" = "$exp_harness" ] || fail "$label: harness resolved '$got_h', expected '$exp_harness'"
+    [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
+    [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
+  done <<'ROWS'
+default-only file with an id resolves the default (backward-compat)^pi model-a xhigh^alpha^pi^model-a^xhigh
+default-only file with no id resolves the default (backward-compat)^pi model-a xhigh^^pi^model-a^xhigh
+legacy file ignores a second default line^pi model-a xhigh\ngrok model-b low^alpha^pi^model-a^xhigh
+legacy file ignores extra tokens^pi model-a xhigh extra^alpha^pi^model-a^xhigh
+legacy file ignores trailing malformed text without an override^pi model-a xhigh\nmate: grok model-b low^alpha^pi^model-a^xhigh
+legacy default fallback ignores later lines and extra tokens^default ignored high extra\ngrok model-b low^alpha^claude^^
+mate line wins for that exact id^pi def-m xhigh\nmate alpha: claude opus max^alpha^claude^opus^max
+mate line leaves every other id on the default^pi def-m xhigh\nmate alpha: claude opus max^beta^pi^def-m^xhigh
+mate line is ignored when no id is passed^pi def-m xhigh\nmate alpha: claude opus max^^pi^def-m^xhigh
+harness-only mate line yields empty model and effort^pi def-m xhigh\nmate alpha: grok^alpha^grok^^
+mate line listed above the default line is honored^mate alpha: muse m1 low\npi def-m xhigh^alpha^muse^m1^low
+mate line whose harness is default defers to the crew chain^claude opus high\nmate alpha: default^alpha^claude^^
+comments and blank lines stay legal between the lines^# pinned by the captain\n\n  \npi def-m xhigh\n\n# exception\nmate alpha: grok g1 max^alpha^grok^g1^max
+override with no default line governs its own id^mate alpha: grok g1 max^alpha^grok^g1^max
+id with no override and no default line falls through to own^mate alpha: grok g1 max^beta^claude^^
+ROWS
+  pass "D1 fm-harness.sh honors a mate override line for its id and changes nothing else"
+}
+
+# Malformed pin config is an actionable error, never a fallback: every read verb
+# must refuse with the line number and print no token on stdout, so a mistyped
+# override cannot land a mate on the default runtime in silence.
+test_secondmate_malformed_pin_refuses_with_line_number() {
+  local label file case_dir cfg out got_stdout rc verb id n
+  n=0
+  while IFS='^' read -r label file; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/badpin-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    printf '%b\n' "$file" > "$cfg/secondmate-harness"
+    for id in alpha beta ''; do
+    for verb in secondmate secondmate-model secondmate-effort; do
+      out=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" \
+        "$ROOT/bin/fm-harness.sh" "$verb" "$id" 2>&1); rc=$?
+      [ "$rc" -ne 0 ] || fail "$label: fm-harness.sh $verb accepted the malformed pin: $out"
+      assert_contains "$out" "config/secondmate-harness line " \
+        "$label: fm-harness.sh $verb refused without naming the offending line"
+      got_stdout=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" \
+        "$ROOT/bin/fm-harness.sh" "$verb" "$id" 2>/dev/null)
+      [ -z "$got_stdout" ] \
+        || fail "$label: a refused pin must print no token on stdout, got '$got_stdout'"
+    done
+    done
+  done <<'ROWS'
+duplicate override for the same mate^pi def-m xhigh\nmate alpha: grok g1 max\nmate alpha: muse m2 low
+unknown line that is not the default and not an override^pi def-m xhigh\nmate alpha: grok\npi def-m low
+mate keyword with no id^pi def-m xhigh\nmate alpha: grok\nmate: grok g1 max
+mate id containing a space^pi def-m xhigh\nmate alpha: grok\nmate an alpha: grok
+override with no tokens after the colon^pi def-m xhigh\nmate alpha:
+override with too many tokens^pi def-m xhigh\nmate alpha: grok g1 max extra
+default line with too many tokens^pi def-m xhigh extra\nmate alpha: grok
+malformed mate with no default line^mate alpha: claude opus high\nmate : grok
+malformed mate keyword with no default line^mate alpha: claude opus high\nmate: grok
+invalid mate id with no default line^mate alpha: claude opus high\nmate bad/id: grok
+ROWS
+  pass "D2 malformed config/secondmate-harness refuses with its line number on every read verb"
+}
+
+# The opt-in scope is the whole compatibility promise of this grammar: a file
+# that declares no "mate <id>:" line keeps the documented legacy rule - the
+# first non-empty, non-comment line is parsed and the rest is ignored. Nothing
+# in such a file may refuse, including content that the strict, declaring-file
+# rules would reject if it sat next to a mate line.
+test_secondmate_legacy_pin_file_is_never_refused() {
+  local label file case_dir cfg out err rc verb id n
+  n=0
+  while IFS='^' read -r label file; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/legacypin-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    printf '%b\n' "$file" > "$cfg/secondmate-harness"
+    for id in alpha ''; do
+      for verb in secondmate secondmate-model secondmate-effort; do
+        out=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" \
+          "$ROOT/bin/fm-harness.sh" "$verb" "$id" 2>"$case_dir/err"); rc=$?
+        err=$(cat "$case_dir/err")
+        [ "$rc" -eq 0 ] \
+          || fail "$label: fm-harness.sh $verb refused a file that declares no mate line: $err"
+        [ -z "$err" ] \
+          || fail "$label: fm-harness.sh $verb complained about a legacy file: $err"
+      done
+    done
+  done <<'ROWS'
+legacy file with a second default line^pi model-a xhigh\ngrok model-b low
+legacy file with a fourth token^pi model-a xhigh extra
+legacy file with a second default line and a fourth token^pi model-a xhigh extra\ngrok model-b low
+legacy file with a mate keyword and no id^pi model-a xhigh\nmate: grok g1 max
+legacy file with a mate id containing a space^pi model-a xhigh\nmate an alpha: grok
+legacy file with a mate line that names no id^pi model-a xhigh\nmate : grok
+legacy file with comments and blank lines^# captain note\n\npi model-a xhigh\n\ngrok model-b low
+legacy file whose default line is the word default^default\npi model-a xhigh
+ROWS
+  pass "D3 a config/secondmate-harness that declares no mate line is never refused"
+}
+
+# ===========================================================================
 # A/C) pi-signed process identity and shared Pi marker behavior
 # ===========================================================================
 test_pi_signed_detection_and_session_lock_identity() {
@@ -252,16 +384,17 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+[ -n "${FM_TEST_PS_LOG:-}" ] && printf '%s:%s\n' "$pid" "$field" >> "$FM_TEST_PS_LOG"
 case "$pid:$field" in
   4242:comm=) printf '%s\n' '/opt/test/bin/codex' ;;
   4242:args=) printf '%s\n' 'codex' ;;
   4242:ppid=) printf '%s\n' 1 ;;
-  5252:comm=) printf '%s\n' '-codex' ;;
-  5252:args=) printf '%s\n' '-codex' ;;
-  5252:ppid=) printf '%s\n' 1 ;;
+  5252:comm=) if [ -n "${FM_TEST_PS_LIVENESS_PROBE:-}" ]; then printf '%s\n' '-codex'; else printf '%s\n' '-zsh'; fi ;;
+  5252:args=) if [ -n "${FM_TEST_PS_LIVENESS_PROBE:-}" ]; then printf '%s\n' '-codex'; else printf '%s\n' '-zsh'; fi ;;
+  5252:ppid=) printf '%s\n' 4242 ;;
   *:comm=) printf '%s\n' '-zsh' ;;
   *:args=) printf '%s\n' '-zsh' ;;
-  *:ppid=) printf '%s\n' 4242 ;;
+  *:ppid=) printf '%s\n' "${FM_TEST_PS_PARENT:-4242}" ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -278,8 +411,20 @@ SH
   [ "$got" = 4242 ] || fail "session-lock dash-leading ancestry selected '$got', expected pid 4242"
   [ ! -s "$err" ] || fail "session-lock ancestry wrote basename option noise for literal -zsh: $(cat "$err")"
 
+  # Force the collision: pid 5252 is a real ancestor of the caller. Its
+  # -codex label belongs to the liveness probe only, so the walk must pass
+  # through it as an ordinary shell and still select 4242.
+  err="$dir/fm-session-lock-ancestry-collision.err"
+  collision_log="$dir/fm-session-lock-ancestry-collision.log"
+  got=$(FM_TEST_PS_PARENT=5252 FM_TEST_PS_LOG="$collision_log" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err")
+  [ "$got" = 4242 ] || fail "session-lock ancestry with pid 5252 as a real ancestor selected '$got', expected pid 4242"
+  assert_contains "$(cat "$collision_log")" "5252:" \
+    "session-lock collision ancestry did not query pid 5252"
+  [ ! -s "$err" ] || fail "session-lock collision ancestry wrote noise: $(cat "$err")"
+
   err="$dir/fm-session-lock-alive.err"
-  PATH="$fakebin:$BASE_PATH" bash -c \
+  FM_TEST_PS_LIVENESS_PROBE=1 PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 5252' \
     "$ROOT" 2>"$err"; status=$?
   expect_code 0 "$status" "session-lock liveness should accept literal -codex as a harness process name"
@@ -395,17 +540,26 @@ test_propagate_lib() {
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
 
-  # 5b. supervision-host is each home's own posture: a primary's off opt-out
-  # never reaches a secondmate, and a secondmate's own file survives a
-  # convergence where the primary has none
-  printf 'off\n' > "$src/supervision-host"
-  propagate_inheritable_config "$src" "$d/home2/config"
-  [ -e "$d/home2/config/supervision-host" ] && fail "a primary's off supervision-host was inherited (must not be)"
+  # 5b. the supervision-host opt-out is inherited and primary-authoritative,
+  # while each home's engine line stays its own: the primary's off reaches the
+  # secondmate and the real gate reads that home as off on a Claude primary
+  # despite its own engine line; clearing the primary's off converges it back on.
+  printf 'claude sonnet\n' > "$src/supervision-host"
   printf 'default haiku\n' > "$d/home2/config/supervision-host"
-  rm -f "$src/supervision-host"
+  : > "$src/supervision-host-off"
   propagate_inheritable_config "$src" "$d/home2/config"
+  [ -f "$d/home2/config/supervision-host-off" ] || fail "a primary's supervision-host-off was not inherited"
+  if bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$d/home2/config" claude; then
+    fail "a secondmate that inherited the primary's opt-out still runs the supervision host"
+  fi
+  rm -f "$src/supervision-host-off"
+  propagate_inheritable_config "$src" "$d/home2/config"
+  [ -e "$d/home2/config/supervision-host-off" ] && fail "clearing the primary's supervision-host-off was not mirrored downstream"
+  bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$d/home2/config" claude \
+    || fail "a secondmate did not converge back on once the primary cleared its opt-out"
   [ "$(cat "$d/home2/config/supervision-host" 2>/dev/null)" = 'default haiku' ] \
-    || fail "a secondmate's own supervision-host was changed by convergence"
+    || fail "a secondmate's own supervision-host engine line was changed by convergence"
+  rm -f "$src/supervision-host"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
   rm -rf "$d/src3" "$d/dest3"
@@ -448,6 +602,21 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
+case "${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file" ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    ;;
+  kill-window) : > "$window_file" ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -508,6 +677,7 @@ test_spawn_split_and_inherit() {
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  : > "$w/home/config/supervision-host-off"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -526,6 +696,11 @@ test_spawn_split_and_inherit() {
     || fail "split: home backend not inherited as zellij"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
+  [ -f "$sm/config/supervision-host-off" ] \
+    || fail "split: home supervision-host-off not inherited"
+  if bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$sm/config" claude; then
+    fail "split: a secondmate spawned under an opted-out primary still runs the supervision host"
+  fi
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
 }
 
@@ -671,10 +846,21 @@ set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
+window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    exit 0 ;;
+  kill-window) : > "$window_file"; exit 0 ;;
+  has-session|new-session) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -711,6 +897,13 @@ sm_claude_add_dir() {  # <world> <id>
   local real
   real=$(cd "$1/home/state" && pwd -P)
   printf "%s " "--add-dir '$real/$2.inbox'"
+}
+
+# The parent-state settings file a Claude secondmate launch passes to --settings.
+sm_claude_settings() {  # <world> <id>
+  local real
+  real=$(cd "$1/home/state" && pwd -P)
+  printf '%s' "$real/$2.claude-settings.json"
 }
 
 # spawn_secondmate_capture <world> <id> <home> <launchlog> [extra fm-spawn.sh args...]
@@ -818,8 +1011,11 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '$(sm_claude_settings "$w" sm)' --model 'opus'" \
     "model-token: launch did not carry --model opus"
+  jq -e '.feedbackDrafts == "off" and .attribution.commit == "" and .attribution.pr == "" and .attribution.sessionUrl == false and .hooks.UserPromptSubmit' \
+    "$(sm_claude_settings "$w" sm)" >/dev/null \
+    || fail "model-token: the --settings file did not carry the session keys and busy hooks"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
 }
@@ -840,9 +1036,59 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '$(sm_claude_settings "$w" sm)' --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
+}
+
+# A pin file the captain wrote before the override grammar existed - a second
+# default line, a fourth token, anything else after the first line - must still
+# launch a secondmate exactly as it did then: the first non-empty, non-comment
+# line supplies the runtime and the rest of the file is ignored, never a
+# refusal. This is the spawn half of the opt-in scope.
+test_spawn_secondmate_with_a_legacy_pin_file_uses_the_first_line() {
+  local w sm meta launchlog launch out status
+  w="$TMP_ROOT/spawn-legacy-pin"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high extra\ngrok other-model low\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a legacy pin file must not refuse a secondmate spawn"$'\n'"$out"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "legacy-pin: meta harness not claude"
+  [ "$(meta_field "$meta" model)" = opus ] || fail "legacy-pin: meta model not opus (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" effort)" = high ] || fail "legacy-pin: meta effort not high (got '$(meta_field "$meta" effort)')"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--model 'opus' --effort 'high'" \
+    "legacy-pin: the launch did not carry the first line's tokens"
+  assert_not_contains "$launch" "extra" \
+    "legacy-pin: the fourth token of the first line must not reach the launch"
+  pass "C10 spawn: a legacy secondmate-harness file still launches on its first line (opt-in scope)"
+}
+
+# The other half of the same scope: a file that DOES declare an override is
+# validated as a whole, so a malformed one refuses the spawn loudly instead of
+# quietly launching the mate onto the default runtime.
+test_spawn_secondmate_with_a_malformed_declared_pin_refuses() {
+  local w sm out status
+  w="$TMP_ROOT/spawn-bad-declared-pin"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\nmate sm: claude opus max\nmate sm: grok other-model low\n' \
+    > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$w/launch.log" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a malformed declared pin must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "config/secondmate-harness line 3" \
+    "the refusal must name the offending line of the pin file"
+  [ ! -f "$w/home/state/sm.meta" ] \
+    || fail "a refused spawn must not publish a mate record"
+  pass "C11 spawn: a declared pin file that is malformed refuses the spawn with its line number"
 }
 
 # Precedence: an explicit per-spawn --model overrides the file's model token.
@@ -1097,7 +1343,7 @@ make_fake_toolchain() {
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1459,7 +1705,7 @@ test_spawn_secondmate_claude_permission_mode_auto() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = claude ] || fail "permmode: meta harness not claude"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --permission-mode auto $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
+  assert_contains "$launch" "claude --permission-mode auto $(sm_claude_add_dir "$w" sm)--settings '$(sm_claude_settings "$w" sm)' --model 'opus'" \
     "permmode: secondmate launch did not swap the permission flag while keeping --model"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "permmode: secondmate launch must not request bypass mode"
   pass "C2b spawn: config/claude-permission-mode=auto reaches a Claude secondmate launch"
@@ -2705,6 +2951,9 @@ SH
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
+test_secondmate_per_mate_override_lines
+test_secondmate_malformed_pin_refuses_with_line_number
+test_secondmate_legacy_pin_file_is_never_refused
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
@@ -2719,6 +2968,8 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
+test_spawn_secondmate_with_a_legacy_pin_file_uses_the_first_line
+test_spawn_secondmate_with_a_malformed_declared_pin_refuses
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens

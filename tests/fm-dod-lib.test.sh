@@ -253,6 +253,30 @@ test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
   pass "a direct-PR recorded head does not cover a later unpushed commit"
 }
 
+test_ci_ready_requires_pr_reference() {
+  local note
+  for note in \
+    'paused: PROD deploy watch, checks green on TEST' \
+    'paused: checks green on TEST, PROPERTIES watch' \
+    'PR checks green' \
+    'PR #12 checks pending'; do
+    if fm_dod_note_reports_ci_ready "$note"; then
+      fail "non-CI-ready note accepted: $note"
+    fi
+  done
+  for note in \
+    'PR https://github.com/o/r/pull/5 checks green' \
+    'checks green: https://github.com/o/r/pull/5' \
+    'PR #12 checks green' \
+    'checks green: PR#12' \
+    'https://gitlab.com/o/r/-/merge_requests/5 checks green' \
+    'https://git.example.org/team/repo/pulls/12 checks green'; do
+    fm_dod_note_reports_ci_ready "$note" \
+      || fail "CI-ready PR reference rejected: $note"
+  done
+  pass "CI-ready notes require checks green and an actual PR reference"
+}
+
 test_ci_ready_variants_are_gated() {
   local repo wt line rc
   repo="$TMP_ROOT/variant-repo"
@@ -382,6 +406,48 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A scout spawned on a named base keeps that base through promotion: the ship
+# instructions start from it and the PR targets it; local-only cannot carry it.
+test_promotion_keeps_the_recorded_base_branch() {
+  local home id meta out status mode
+  home="$TMP_ROOT/promote-base-home"
+  for mode in direct-PR local-only; do
+    id="promote-base-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+
+# Setup
+You are in a disposable git worktree of proj, at a detached HEAD on a clean copy of its base branch.
+Base branch: feature/hub
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    if [ "$mode" = direct-PR ]; then
+      expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
+      # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not start the ship from the recorded base"
+      # shellcheck disable=SC2016
+      assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not target the PR at the recorded base"
+      assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+    else
+      [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
+      assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
+      assert_grep 'kind=scout' "$meta" "a refused promotion changed the task record"
+    fi
+  done
+  pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -392,6 +458,7 @@ test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
+test_ci_ready_requires_pr_reference
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated
 test_local_only_linked_branch_is_accepted
@@ -400,5 +467,136 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_promotion_keeps_the_recorded_base_branch
+
+# The launch role is the generated text a worker receives. It must keep the
+# skill name, so a session that registers the skill loads it by name, and must
+# name the skill file as the fallback for a session where the name does not
+# resolve.
+test_worker_role_names_skill_and_fallback_file() {
+  local role_file path
+  role_file="$TMP_ROOT/worker-role.txt"
+  path="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
+  [ -f "$path" ] || fail "Firstmate skill file is missing at $path"
+  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" >"$role_file"
+  assert_grep "\`CONTRIBUTING.md\` and \`firstmate-coding-guidelines\` for Firstmate changes" "$role_file" \
+    "worker role did not name the skill"
+  assert_grep "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`$path\` instead." "$role_file" \
+    "worker role did not name the skill file as the fallback"
+  assert_no_grep "Skill tool cannot resolve" "$role_file" \
+    "worker role claims the Skill tool never resolves the skill"
+  pass "worker role names the skill and its fallback skill file"
+}
+
+# forge=external: a review tool uploads its own snapshot, so nothing is pushed.
+# The fixtures name an invented tool and an RFC 6761 reserved host only.
+EXT_CFG="$TMP_ROOT/external-config"
+mkdir -p "$EXT_CFG"
+# shellcheck disable=SC2016 # Backticks are literal adapter text.
+printf '%s\n' 'Run `review-tool upload --draft` and stop at a draft with checks green.' > "$EXT_CFG/external-review.md"
+
+test_external_forge_is_direct_pr_only() {
+  local out
+  fm_forge_valid_for_mode external direct-PR test 2>/dev/null || fail "forge=external direct-PR was refused"
+  out=$(fm_forge_valid_for_mode external no-mistakes test 2>&1) && fail "forge=external no-mistakes was accepted"
+  assert_contains "$out" "ships direct-PR only for now" "the no-mistakes refusal did not say why"
+  out=$(fm_forge_valid_for_mode external local-only test 2>&1) && fail "forge=external local-only was accepted"
+  assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not say why"
+  out=$(fm_base_branch_valid release direct-PR external test 2>&1) && fail "a base branch was accepted on forge=external"
+  pass "forge=external composes with direct-PR only and refuses a base branch"
+}
+
+test_external_rule_one_forbids_every_task_push() {
+  local rule
+  rule=$(CONFIG=$EXT_CFG fm_ship_rule_one direct-PR t1 fm/t1 external) || fail "external rule one did not render"
+  assert_contains "$rule" "Never push to \`origin\`" "external rule one does not forbid the origin push"
+  assert_contains "$rule" "never push your \`fm/t1\` branch or any \`fm/\`-prefixed branch to any remote" \
+    "external rule one does not forbid the task-prefixed push"
+  assert_not_contains "$rule" "push only your" "external rule one still invites a branch push"
+  assert_not_contains "$rule" "personal backup remote" "external rule one offers a backup nobody configured"
+  printf 'backup\n' > "$EXT_CFG/external-review-backup"
+  rule=$(CONFIG=$EXT_CFG fm_ship_rule_one direct-PR t1 fm/t1 external) || fail "external rule one with a backup did not render"
+  rm -f "$EXT_CFG/external-review-backup"
+  assert_contains "$rule" "\`git push backup HEAD:refs/heads/backup/t1\`" "external rule one does not name the backup copy"
+  pass "external rule one forbids origin and task-prefixed pushes and names only the backup copy"
+}
+
+test_external_dod_renders_the_adapter() {
+  local dod out
+  dod=$(CONFIG=$EXT_CFG fm_dod_block direct-PR t1 fm/t1 external) || fail "external DoD did not render"
+  assert_contains "$dod" "Delivery contract: mode=direct-PR forge=external" "external DoD lacks its contract line"
+  assert_contains "$dod" "done [at=<epoch>]: review {url} uploaded for review" "external DoD lacks the ready grammar"
+  assert_contains "$dod" "## Review tool instructions (home configuration)" "external DoD lacks the adapter section"
+  assert_contains "$dod" "review-tool upload --draft" "external DoD lacks the adapter body"
+  assert_not_contains "$dod" "push your branch and open a PR" "external DoD still asks for a pushed PR"
+  out=$(CONFIG="$TMP_ROOT/no-such-config" fm_dod_block direct-PR t1 fm/t1 external 2>&1) \
+    && fail "external DoD rendered with no adapter"
+  assert_contains "$out" "external-review.md" "the missing-adapter refusal did not name the file"
+  pass "external DoD renders the contract, the review grammar, and the adapter, and refuses without one"
+}
+
+# A review-tool fixture: a worker copy, its meta recording forge=external, and
+# optionally a backup remote. Sets EXT_WT, EXT_REPO, EXT_META.
+external_fixture() {  # <name> [backup]
+  local name=$1 backup=${2:-}
+  EXT_REPO="$TMP_ROOT/$name-repo"
+  EXT_WT="$TMP_ROOT/$name-wt"
+  fm_git_worktree "$EXT_REPO" "$EXT_WT" "fm/$name"
+  git -C "$EXT_WT" commit -q --allow-empty -m 'change only in the copy'
+  EXT_META="$TMP_ROOT/$name.meta"
+  if [ -n "$backup" ]; then
+    fm_write_meta "$EXT_META" kind=ship mode=direct-PR forge=external backup_remote=backup backup_prefix=backup/
+  else
+    fm_write_meta "$EXT_META" kind=ship mode=direct-PR forge=external
+  fi
+}
+
+ext_accept() {  # <line>
+  CONFIG=$EXT_CFG fm_dod_accept_ship_done ship direct-PR "$EXT_WT" "$EXT_REPO" "$1" "$TMP_ROOT" ext "$EXT_META"
+}
+
+test_external_review_done_without_backup_is_accepted_on_the_url() {
+  local reason
+  external_fixture ext-nobackup
+  ext_accept 'done [at=1]: review https://review.example.test/r/123 uploaded for review' \
+    || fail "an external review done with HEAD only in the copy was refused with no backup recorded"
+  reason=$(ext_accept 'done [at=1]: PR https://github.com/o/r/pull/1') && fail "a PR done on an external project was accepted"
+  assert_contains "$reason" "never a PR" "the PR refusal did not point at the review grammar"
+  for bad in 'http://review.example.test/r/1' 'https://review.example.test/r/1?x=1' \
+    'https://review.example.test/r/1#c' 'https://github.com/o/r/pull/1'; do
+    reason=$(ext_accept "done [at=1]: review $bad uploaded for review") && fail "review URL $bad was accepted"
+  done
+  printf '%s\n' '^https://review\.example\.test/r/[1-9][0-9]*$' > "$EXT_CFG/external-review-url"
+  reason=$(ext_accept 'done [at=1]: review https://other.example.test/r/1 uploaded for review') \
+    && fail "a review URL outside config/external-review-url was accepted"
+  ext_accept 'done [at=1]: review https://review.example.test/r/7 uploaded for review' \
+    || fail "a review URL matching config/external-review-url was refused"
+  rm -f "$EXT_CFG/external-review-url"
+  pass "external review done: accepted on a canonical URL alone without a backup; PR, non-https, query, fragment, forge, and pattern mismatches refused"
+}
+
+test_external_review_done_with_backup_needs_the_copy() {
+  local reason sha
+  external_fixture ext-backup backup
+  sha=$(git -C "$EXT_WT" rev-parse HEAD)
+  reason=$(ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review') \
+    && fail "a backed-up external done was accepted before the copy existed"
+  assert_contains "$reason" "not on the backup remote backup" "the backup refusal did not name the remote"
+  git -C "$EXT_WT" update-ref refs/remotes/backup/fm/ext-backup "$sha"
+  reason=$(ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review') \
+    && fail "a copy outside the backup prefix satisfied the backup gate"
+  git -C "$EXT_WT" update-ref refs/remotes/backup/backup/ext-backup "$sha"
+  ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review' \
+    || fail "a backed-up external done was refused once HEAD was on the backup namespace"
+  pass "external review done with a backup: refused until HEAD is under refs/remotes/backup/backup/, then accepted"
+}
+
+test_external_forge_is_direct_pr_only
+test_external_rule_one_forbids_every_task_push
+test_external_dod_renders_the_adapter
+test_external_review_done_without_backup_is_accepted_on_the_url
+test_external_review_done_with_backup_needs_the_copy
+
+test_worker_role_names_skill_and_fallback_file
 
 echo "all fm-dod-lib tests passed"

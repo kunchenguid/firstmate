@@ -1,10 +1,8 @@
 ---
 name: project-management
 description: >-
-  Agent-only procedure for Firstmate project management.
-  Use before adding, creating, removing, or initializing a project.
+  Load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -53,12 +51,14 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
-The optional `forge=` token records which forge the project's remote actually is; its one value is `forge=gerrit`.
+The optional `forge=` token records which forge the project's remote actually is; its values are `forge=gerrit`, `forge=forgejo`, and `forge=external`.
 It is orthogonal to the mode and to `+yolo`, so it is never derived from either, and it is never inferred at use time from a remote name, host, port, or push target.
 At add or create intake, run `bin/fm-forge-detect.sh projects/<name>` once the clone exists and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
 Never register the binding from detection alone, and never re-derive it later from the clone.
-A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
+`bin/fm-forge-detect.sh` never proposes `forge=forgejo`, so for a remote that may be Forgejo or Gitea ask the captain and register `forge=forgejo` only on that confirmation.
+A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only` (`forge=external` with `direct-PR` only), and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
 `yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
+`forge=external` marks a project whose review tool uploads its own snapshot, so workers never push a task branch to its shared origin: it is never detected, so register it only on the captain's confirmation, as `[direct-PR forge=external]` with no `+yolo`, and only once the home has `config/external-review.md` (`docs/configuration.md` "External review tool").
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
 ## Add or clone an existing project
@@ -68,6 +68,7 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
+Confirm the matching CLI is authenticated for a non-GitHub host: `glab auth login` for a GitLab project, whose merge watch and merge use glab, or a `tea login add` for a `forge=forgejo` project, whose merge watch, merge, and generated ship brief use tea.
 
 ## Create a project
 
@@ -77,6 +78,8 @@ Use `gh-axi` for the approved GitHub operation and consult its current help rath
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+A new repository has no commit, and spawn refuses to dispatch work into a project with an unborn `HEAD`.
+Tell the captain that the project needs a first commit.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize
@@ -84,7 +87,7 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+(cd projects/<name> && no-mistakes init && no-mistakes doctor)
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.

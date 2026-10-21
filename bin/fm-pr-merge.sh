@@ -4,12 +4,16 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded. A Gerrit change
-# is refused outright: that adapter is read-only, and the refusal at the parse
-# below owns why.
+# host and path, so any instance works and no host is hardcoded; a Forgejo
+# pull request is addressed through tea by the derived owner and repository
+# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
+# change is refused outright: that adapter is read-only, and the refusal at the
+# parse below owns why.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# On Forgejo the merge style defaults to the repository's own
+# default_merge_style, read live, and a merge is refused when it cannot be read.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
@@ -53,7 +57,9 @@
 # required source or producer read. Both are
 # refused while the away-posture record exists, and neither
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# succeeded, or on Forgejo, where a merge already requires the head's combined
+# commit status to have succeeded. After gh returns success, GitHub's live
+# state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -89,12 +95,45 @@
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
 # exact current head commit. Every failing condition is reported, not just the
-# first. The verified head is then passed to glab as --sha, so a push that lands
-# between that read and the merge fails the merge instead of landing commits
-# nothing verified. A recorded pr_head that disagrees with the live head is
+# first. An attended --allow-no-pipeline, for a repository that deliberately
+# runs no merge request pipeline, waives only the pipeline condition and only
+# when GitLab reports head_pipeline as present and null: a failed, running,
+# canceled, or stale pipeline still refuses, every other condition still
+# holds, and a project that requires a pipeline to succeed still refuses
+# through detailed_merge_status. It is refused while the away-posture record
+# exists and on any forge other than GitLab. The verified head is then passed
+# to glab as --sha, so a push that lands between that read and the merge fails
+# the merge instead of landing commits nothing verified. A recorded pr_head that disagrees with the live head is
 # reported rather than trusted, because a rebase moves the head and leaves the
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
+#
+# A Forgejo merge is refused unless every pre-merge condition holds, each read
+# live at merge time: the pull request is open, not a draft, mergeable is
+# true, and the combined commit status at the exact current head, read across
+# every status page, is success (an unconfigured status, reported as "none",
+# refuses rather than being treated as nothing to check, the same reading
+# GitLab's null head_pipeline gets above). Every
+# failing condition is reported, not just the first. tea exposes no head-
+# binding flag on its own merge subcommand, so the verified head is instead
+# passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
+# (through "tea api"), which rejects a mismatched value with "head out of
+# date" - verified against a real instance, along with every claim below about
+# tea's and the API's exact behavior. Also unlike gh and glab, that API call
+# reports an HTTP-level failure with exit status 0, so the merge is never
+# judged by its own exit status: only a follow-up read confirming merged=true
+# counts as landed. tea addresses a repository by owner/repository slug only;
+# the host comes from a named "tea login" rather than the URL the way gh and
+# glab take one, so the login registered for the parsed host is re-resolved
+# fresh at merge time (bin/fm-pr-check.sh already required one at arm time,
+# but a login can be renamed or removed afterwards). Reading and merging both
+# need tea and jq, and either one absent stops the merge before any state is
+# recorded. Forgejo has no merge-queue or scheduled-merge concept, so unlike
+# GitHub and GitLab there is no away-mode async/queued case to detect: every
+# accepted Forgejo merge here is immediate, and any caller-passed extra
+# argument beyond a merge method is refused rather than silently dropped,
+# because there is no established translation from a gh/glab-style flag into
+# a Forgejo API field yet.
 #
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
@@ -135,7 +174,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -194,6 +233,7 @@ if [ "$PROVIDER" = gerrit ]; then
 fi
 shift 2
 ATTENDED_OVERRIDE=false
+ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
 while [ "$#" -gt 0 ]; do
@@ -226,17 +266,55 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-missing requires a separate check name argument" >&2
       exit 2
       ;;
+    --allow-no-pipeline)
+      ALLOW_NO_PIPELINE=true
+      shift
+      ;;
+    --allow-no-pipeline=*)
+      echo "error: --allow-no-pipeline takes no value" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
-if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+# --allow-red names one check run to waive, which only GitHub's per-check
+# reading can match. GitLab and Forgejo each collapse their checks into a
+# single head verdict - a head pipeline status and a combined commit status -
+# so there is no per-check name to waive there; GitLab's only waiver is the
+# whole-pipeline absence --allow-no-pipeline covers. Refuse the combination
+# rather than accept a flag that would be silently dropped into a refusal the
+# caller cannot explain.
+if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+  case "$PROVIDER" in
+    gitlab)
+      echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded; --allow-no-pipeline waives only a merge request with no head pipeline at all" >&2
+      exit 2
+      ;;
+    forgejo)
+      echo "error: --allow-red does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+  esac
+fi
+# --allow-no-pipeline waives only GitLab's own reading of a merge request that
+# has no head pipeline at all. GitHub's per-check waivers and Forgejo's
+# combined status have no such state to waive, so it is refused there too.
+if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$PROVIDER" != gitlab ]; then
+  echo "error: --allow-no-pipeline applies only to GitLab, where it waives a merge request that has no head pipeline at all" >&2
   exit 2
 fi
-if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
-  exit 2
+if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
+  case "$PROVIDER" in
+    gitlab)
+      echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded; --allow-no-pipeline waives only a merge request with no head pipeline at all" >&2
+      exit 2
+      ;;
+    forgejo)
+      echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 caller_has_merge_method() {
@@ -439,11 +517,32 @@ if [ "$PROVIDER" = github ]; then
     exit 1
   fi
 fi
+# tea addresses a repo by slug only; the host comes from a named "tea login"
+# rather than the URL, so the login registered for this exact host is
+# resolved here too (bin/fm-pr-check.sh already refused arming without one,
+# but a login can be removed or renamed after arming, so this is re-derived
+# fresh rather than trusted from that earlier check).
+FORGEJO_MISSING=
+FORGEJO_LOGIN=
+if [ "$PROVIDER" = forgejo ]; then
+  command -v tea >/dev/null 2>&1 || FORGEJO_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    FORGEJO_MISSING="${FORGEJO_MISSING:+$FORGEJO_MISSING and }jq"
+  fi
+  if [ -n "$FORGEJO_MISSING" ]; then
+    echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
+    exit 1
+  fi
+  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST") || {
+    echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -453,10 +552,10 @@ fi
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
-  local json fields line
+  local json fields line pipeline_waived
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -479,6 +578,7 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
+        "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
       else
         error("merge request payload is not an object")
@@ -496,6 +596,7 @@ gitlab_verify_mergeable() {
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
+      pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
       *) continue ;;
     esac
@@ -506,7 +607,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
+  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -534,11 +635,153 @@ FIELDS
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
 "
-  [ "$pipeline_status" = success ] \
-    || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
+  # The waiver covers only a head_pipeline GitLab reports as null; a failed,
+  # running, canceled, or stale pipeline is a verdict, not an absence of one.
+  pipeline_waived=false
+  if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$pipeline_absent" = true ]; then
+    pipeline_waived=true
+  else
+    [ "$pipeline_status" = success ] \
+      || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+    [ "$pipeline_sha" = "$live_head" ] \
+      || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+"
+  fi
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  if [ "$pipeline_waived" = true ]; then
+    printf 'verified: %s is open and mergeable at head %s, with no head pipeline, waived by --allow-no-pipeline\n' \
+      "$URL" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
+      "$URL" "$live_head" >&2
+  fi
+  FM_PR_MERGE_HEAD=$live_head
+  FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
+}
+
+# Pre-merge conditions for a Forgejo pull request, read from one live view of
+# it. tea's single-PR view ignores field selection entirely (verified against
+# a real instance), so the raw API is read directly through "tea api" instead
+# of any tea subcommand, exactly like glab's JSON view above but through
+# Forgejo/Gitea's REST API. Sets FM_PR_MERGE_HEAD to the verified head on
+# success and returns non-zero after reporting every condition that failed.
+#
+# Forgejo has no merge-queue or scheduled-merge concept to detect, so unlike
+# GitHub and GitLab this never sets an async/queued signal: every accepted
+# Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
+forgejo_verify_mergeable() {
+  local pr_json status_json fields line
+  local total=0 named=0 refusals=''
+  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+
+  if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$pr_json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "mergeable=" + (.mergeable | tostring),
+        "draft=" + (.draft | tostring),
+        "head=" + ((.head.sha // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      draft=*) draft=${line#draft=} ;;
+      head=*) live_head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Forgejo pull request head commit before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  # An absent combined status (no statuses on any page, as a repo with no
+  # configured Actions reports) is a real "none" here rather than nothing to
+  # check, the same reading GitLab's null head_pipeline gets above. The
+  # endpoint computes its combined state from one page of the latest status
+  # per context, so every page is read until an empty one and the head is
+  # green only when each non-empty page is; the first page that is not
+  # success, or that cannot be read, decides the refusal.
+  ci_state=none
+  while :; do
+    if ! status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+        "/repos/{owner}/{repo}/commits/$live_head/status?limit=50&page=$page" 2>/dev/null) \
+      || ! fields=$(printf '%s' "$status_json" | jq -r '
+          if type == "object" and ((.statuses // []) | type) == "array" then
+            "count=" + ((.statuses // []) | length | tostring),
+            "state=" + ((.state // "") | tostring)
+          else
+            error("status payload is not a combined status")
+          end' 2>/dev/null); then
+      ci_state=unreadable
+      break
+    fi
+    page_count='' page_state=''
+    while IFS= read -r line; do
+      case "$line" in
+        count=*) page_count=${line#count=} ;;
+        state=*) page_state=${line#state=} ;;
+      esac
+    done <<FIELDS
+$fields
+FIELDS
+    [ "$page_count" != 0 ] || break
+    if [ "$page_state" != success ]; then
+      ci_state=${page_state:-unreadable}
+      break
+    fi
+    ci_state=success
+    page=$((page + 1))
+    # A server that ignores the page parameter would repeat a non-empty page
+    # forever, so an implausible page count is unreadable rather than green.
+    if [ "$page" -gt 100 ]; then
+      ci_state=unreadable
+      break
+    fi
+  done
+
+  [ "$state" = open ] \
+    || refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+  [ "$mergeable" = true ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  # Only a positive draft reading refuses: an instance too old to report the
+  # field still refuses a work-in-progress merge server side.
+  [ "$draft" != true ] \
+    || refusals="$refusals  - the pull request is a draft
+"
+  [ "$ci_state" = success ] \
+    || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
 
   if [ -n "$refusals" ]; then
@@ -546,10 +789,54 @@ FIELDS
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
+  printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
-  FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
+}
+
+# The caller's own extra arguments may only name a merge method, in the same
+# forms caller_merge_method reads. There is no translation from a gh/glab-style
+# flag such as --auto, --admin, or --delete-branch into a Forgejo API field
+# yet (reject_protected_forge_args above already forbids those exact spellings
+# outright), so anything else is refused rather than silently dropped.
+forgejo_reject_unsupported_args() {
+  local arg pending=false
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      pending=false
+      continue
+    fi
+    case "$arg" in
+      --squash|--merge|--rebase) ;;
+      --method) pending=true ;;
+      --method=*) ;;
+      *)
+        echo "error: extra merge arguments are not yet supported for Forgejo merges" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+# The merge style a Forgejo merge uses when the caller names none: the
+# repository's own default_merge_style, read live through the same tea login,
+# so a repository that allows only squash or rebase merges is not sent a merge
+# commit it refuses. An unreadable or unrecognized value is refused rather than
+# replaced by a style chosen here.
+forgejo_default_merge_style() {
+  local repo_json style
+  repo_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}" 2>/dev/null) || repo_json=
+  style=$(printf '%s' "$repo_json" | jq -r '
+    if type == "object" and (.default_merge_style | type) == "string"
+    then .default_merge_style else "" end' 2>/dev/null) || style=
+  case "$style" in
+    merge|rebase|rebase-merge|squash|fast-forward-only) printf '%s' "$style" ;;
+    *)
+      echo "error: refusing to merge $URL: the repository's default merge style could not be read; name one with --merge, --rebase, --squash, or --method <style>" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -1141,6 +1428,10 @@ require_current_away_authority() {
     echo "error: --allow-missing is attended-only; while the away-posture record exists every required check must report" >&2
     return 2
   fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_PIPELINE" = true ]; then
+    echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline" >&2
+    return 2
+  fi
 }
 
 persist_accepted_merge_authority() {
@@ -1326,6 +1617,26 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# Unlike gh and glab, "tea api" reports an HTTP-level failure (a rejected or
+# malformed merge request included) with exit status 0 and the error only in
+# the response body, verified empirically against a real Forgejo instance. So
+# this confirmation is not a bonus corroboration of an already-trusted exit
+# code the way gitlab_confirm_merged's is: it is the only reliable signal that
+# a Forgejo merge landed at all.
+forgejo_confirm_merged() {
+  local json merged
+  if ! json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$json" ]; then
+    return 2
+  fi
+  if ! merged=$(printf '%s' "$json" | jq -r \
+    'if type == "object" and (.merged | type == "boolean") then .merged else error("invalid merged field") end' \
+    2>/dev/null); then
+    return 2
+  fi
+  [ "$merged" = true ]
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -1458,6 +1769,53 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  forgejo)
+    forgejo_reject_unsupported_args "$@" || exit 1
+    forgejo_method=$(caller_merge_method "$@")
+    [ -n "$forgejo_method" ] || forgejo_method=$(forgejo_default_merge_style) || exit 1
+    forgejo_verify_mergeable || exit 1
+    # The away record is locked first, so this last presence and authority
+    # read and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    # head_commit_id binds the merge to the head this run verified: Forgejo's
+    # REST API rejects a mismatched value with "head out of date" (verified
+    # against a real instance), matching --match-head-commit/--sha above. tea
+    # exposes no such flag on its own merge subcommand, so the API is called
+    # directly through "tea api" instead.
+    merge_output=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      -X POST "/repos/{owner}/{repo}/pulls/$PR_NUMBER/merge" \
+      -f "Do=$forgejo_method" -f "head_commit_id=$FM_PR_MERGE_HEAD" 2>&1) || true
+    # "tea api" reports an HTTP-level failure with exit status 0 (also
+    # verified against a real instance), so that output is kept only for the
+    # failure report below; the merge is judged solely by reading the pull
+    # request back through forgejo_confirm_merged. Only an unreadable read-back
+    # (status 2) is retried, a bounded number of times, so a transient read
+    # failure after a landed merge is not reported as unmerged; a definite
+    # merged=false stops at once.
+    forgejo_confirm_attempt=1
+    while :; do
+      forgejo_confirm_rc=0
+      forgejo_confirm_merged || forgejo_confirm_rc=$?
+      [ "$forgejo_confirm_rc" -eq 2 ] && [ "$forgejo_confirm_attempt" -lt 5 ] || break
+      sleep 1
+      forgejo_confirm_attempt=$((forgejo_confirm_attempt + 1))
+    done
+    if [ "$forgejo_confirm_rc" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      [ -z "$merge_output" ] || printf 'error: > %s\n' "$merge_output" >&2
+      echo "error: Forgejo did not confirm $URL as merged" >&2
+      exit 1
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
     ;;
   *)
     echo "error: invalid PR merge request" >&2

@@ -60,9 +60,9 @@
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          essential build below its floor reports MISSING like no-mistakes.
-#          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE:
-#          nonvisual dispatch continues with plain-text decisions and reports,
-#          but Lavish use still requires a compatible build at or above its floor.
+#          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE;
+#          a compatible older build keeps legacy boards and reports a BOOTSTRAP_INFO
+#          upgrade recommendation for synchronous reply acceptance.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
@@ -138,7 +138,9 @@
 #          remote convergence workers run concurrently, because convergence
 #          consumes respawned ids. Worker output is captured separately and
 #          replayed in spawn order; failure to create that private capture
-#          directory selects the sequential fallback.
+#          directory selects the sequential fallback. Remote tracked-file sync
+#          and inheritance share a per-mate FM_SECONDMATE_CONVERGENCE_TIMEOUT
+#          budget (secondmate_sync_remote_one owns it).
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
@@ -152,8 +154,14 @@
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 #        fm-bootstrap.sh lavish-compatible
-#          Exit 0 when lavish-axi meets LAVISH_AXI_MIN, 1 otherwise, printing
-#          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
+#          Exit 0 when lavish-axi meets LAVISH_AXI_BOARD_MIN, 1 otherwise,
+#          printing nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
+#        fm-bootstrap.sh lavish-reply-compatible
+#          Exit 0 when lavish-axi meets LAVISH_AXI_MIN and supports synchronous
+#          reply acceptance, 1 when one version probe confirms an older release
+#          meeting LAVISH_AXI_BOARD_MIN, and 2 when lavish-axi is absent, its
+#          version cannot be read, or it is below LAVISH_AXI_BOARD_MIN, printing
+#          nothing.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -195,6 +203,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -229,7 +239,7 @@ network_sweep_authorized() {
   if network_mutation_authorized; then
     return 0
   fi
-  echo "NETWORK_CHECKS: fleet lock ownership changed before $label, so this stale worker skipped that sweep"
+  echo "NETWORK_CHECKS: the recorded fleet lock holder changed before $label, so this stale worker skipped that sweep"
   return 1
 }
 
@@ -404,8 +414,8 @@ secondmate_sync() {
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
-    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0} owed=${7:-1}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote" "$owed"
   }
 
   secondmate_send_nudge() {
@@ -591,9 +601,27 @@ secondmate_sync() {
   # One remote secondmate's convergence, split out of the loop so each host is
   # individually timed; every `return` here was a `continue` and still means
   # "move on to the next secondmate".
+  # Each mate has its own budget, FM_SECONDMATE_CONVERGENCE_TIMEOUT seconds
+  # (default 75), measured from entry to secondmate_sync_remote_one. Only the
+  # tracked-file sync and inheritance push are timed against that deadline;
+  # lock acquisition, reply-source arming, and nudge delivery are not wrapped
+  # by this budget. The deferred network stage retains its aggregate bound. A
+  # step that hits it, or finds nothing left, fails like any other failed step,
+  # which leaves the mate unconverged with its retry marker kept. A step cut off
+  # by the budget may already have changed the home without reporting it, so it
+  # also keeps the re-read owed under bin/fm-secondmate-nudge-lib.sh's contract.
+  remote_convergence_budget() {
+    local budget=${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-75}
+    case "$budget" in ''|*[!0-9]*|0) budget=75 ;; esac
+    printf '%s' "$budget"
+  }
+
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out='' sync_rc inherit_out='' inherit_rc nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local budget deadline left
+    budget=$(remote_convergence_budget)
+    deadline=$(( $(date +%s) + budget ))
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -609,32 +637,59 @@ secondmate_sync() {
       return 0
     fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    # Only a reread a previous attempt left owed carries over. The record is
+    # written owed before any step can change the home (write-ahead), so a kill
+    # at any point leaves it owed; an attempt whose outcome proves nothing
+    # changed writes it back below (bin/fm-secondmate-nudge-lib.sh).
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if fm_secondmate_remote_nudge_owed "$STATE" "$id"; then remote_pending=1; fi
     if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
       fm_lock_release "$remote_lock" || true
       return 0
     fi
-    nudge_needed=0
+    nudge_needed=$remote_pending
     converged=1
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
+    sync_rc=0
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -lt 1 ]; then
+      sync_rc=124
+    elif sync_out=$(fm_run_timed "$left" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$primary_head" < /dev/null 2>&1); then
-      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+      :
     else
       sync_rc=$?
+    fi
+    if fm_secondmate_remote_sync_changed "$sync_out" || [ "$sync_rc" -eq 255 ]; then nudge_needed=1; fi
+    if fm_timed_out "$sync_rc"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      converged=0
+      nudge_needed=1
+    elif [ "$sync_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
     fi
-    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    inherit_rc=0
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -lt 1 ]; then
+      inherit_rc=124
+    elif inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      fm_run_timed "$left" "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+      :
     else
+      inherit_rc=$?
+    fi
+    # Items a failed push applied before it stopped changed the home too.
+    if [ "$inherit_rc" -eq 255 ] || printf '%s\n' "${inherit_out:-}" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    if fm_timed_out "$inherit_rc"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      converged=0
+      nudge_needed=1
+    elif [ "$inherit_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0
     fi
-    [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
@@ -645,6 +700,9 @@ secondmate_sync() {
       fi
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
+    elif [ "$nudge_needed" -eq 0 ] && ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 0; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
     fi
     fm_lock_release "$remote_lock" || true
     return 0
@@ -806,6 +864,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    paseo) echo "https://paseo.sh" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
     *) return 1 ;;
   esac
@@ -842,7 +901,8 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.77
+LAVISH_AXI_MIN=0.1.80
+LAVISH_AXI_BOARD_MIN=0.1.77
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -852,14 +912,19 @@ treehouse_supports_lease() {
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
 # it was never checked against.
-tool_version_at_least() {  # <tool> <min-version>
-  local tool=$1 min=$2 output parts major minor patch extra
-  local min_major min_minor min_patch min_extra
+tool_version_parts() {  # <tool>
+  local tool=$1 output parts major minor patch extra
   command -v "$tool" >/dev/null 2>&1 || return 1
   output=$("$tool" --version 2>/dev/null) || return 1
   parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  printf '%s %s %s\n' "$major" "$minor" "$patch"
+}
+
+version_parts_at_least() {  # <major minor patch> <min-version>
+  local major minor patch min=$2 min_major min_minor min_patch min_extra
+  IFS=' ' read -r major minor patch <<< "$1"
   IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
   [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
   [ "$major" -gt "$min_major" ] && return 0
@@ -867,6 +932,12 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+tool_version_at_least() {  # <tool> <min-version>
+  local parts
+  parts=$(tool_version_parts "$1") || return 1
+  version_parts_at_least "$parts" "$2"
 }
 
 x_mode_write_if_changed() {
@@ -1046,7 +1117,7 @@ crew_dispatch_validate() {
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin","commandcode","polytoken"]'
   fi
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
@@ -1302,8 +1373,15 @@ startup_memory_budget_setup() {
 }
 
 if [ "${1:-}" = "lavish-compatible" ]; then
-  tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
+  tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"
   exit
+fi
+
+if [ "${1:-}" = "lavish-reply-compatible" ]; then
+  lavish_parts=$(tool_version_parts lavish-axi) || exit 2
+  version_parts_at_least "$lavish_parts" "$LAVISH_AXI_MIN" && exit 0
+  version_parts_at_least "$lavish_parts" "$LAVISH_AXI_BOARD_MIN" && exit 1
+  exit 2
 fi
 
 if [ "${1:-}" = "install" ]; then
@@ -1402,8 +1480,10 @@ detect_local_tools() {
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
-  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
+  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"; then
+    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_BOARD_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
+  elif ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
+    echo "BOOTSTRAP_INFO: lavish-axi >=$LAVISH_AXI_MIN enables confirmed board replies; this older compatible version retains the legacy reply path, but upgrade to prevent handing back a board before its reply is accepted"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"

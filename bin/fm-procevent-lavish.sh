@@ -12,6 +12,7 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
@@ -20,8 +21,10 @@
 #            It is read-only over the capture: it does not arm, poll, or change
 #            what Lavish delivered. The freeform message (tag=message) is its
 #            own labeled field, printed first and distinct from per-element
-#            annotations; it is labeled SESSION-ENDING MESSAGE only when the
-#            session ended. Declared and presented item counts,
+#            annotations; it is labeled SESSION-ENDING MESSAGE, and counted as
+#            session_ending_message_count, only when the session ended, and is
+#            otherwise CAPTAIN MESSAGE and captain_message_count. Declared and
+#            presented item counts,
 #            plus a completeness verdict, follow before all annotations so a
 #            partial read is obvious. Each annotation retains its element uid,
 #            selector, tag, and text. A non-choice freeform comment (`prompt`)
@@ -31,15 +34,26 @@
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
+#            Both table-form and list-form captures are supported; nested
+#            targets and attachments are skipped while the item's own scalar
+#            fields are retained. The shared parser below owns the wire format.
+#            Malformed content or a declared/presented count mismatch yields
+#            complete: no; inspect that verdict, not just the command's exit
+#            status. A declared nonempty block parsed as empty is incomplete.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
-#            its staged reply file once - reading and removing it before the
-#            poll - and hands the contents to the published `--agent-reply`
-#            argument; later retries poll without that reply. That post is best
-#            effort: a crash while consuming drops that one round's reply
-#            instead of posting it twice. See the note at the consume site.
+#            transient interruption described below. A staged reply still
+#            present when it starts is posted before the long-poll: through
+#            `lavish-axi reply` when supported, otherwise through the legacy
+#            best-effort `poll --agent-reply` path.
+# deliver-reply
+#            Run by `fm-procevent.sh register-task` under the source lock, only
+#            after the task is eligible to own the board, with the listener argv
+#            it is about to publish. Exit 0 once Lavish accepts the staged reply,
+#            3 when the installed Lavish is a confirmed older release without
+#            synchronous reply so the listener keeps the legacy path, and any
+#            other status when the reply failed or the version is unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -96,16 +110,18 @@
 #
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
+# `answers` and `reconciles` use the same parser as `read` for either emission
+# form. Malformed content or a declared/parsed count mismatch prints a diagnostic
+# to stderr and exits 3, even if valid choices were already printed to stdout;
+# callers must not treat that output as a complete extraction.
 #
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
-#   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-# and that command "long-polls indefinitely" server-side. The adapter therefore
-# runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# It wraps the published `lavish-axi poll` and `lavish-axi reply` interfaces,
+# verified against 0.1.80. `poll` long-polls indefinitely; `reply` exits only
+# after the server confirms acceptance. Older compatible versions retain the
+# legacy poll-with-reply path, without the synchronous handoff guarantee.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -178,6 +194,23 @@ apply_session_host() {  # <artifact>
   LAVISH_AXI_HOST=${endpoint%$'\n'*}
   LAVISH_AXI_PORT=${endpoint##*$'\n'}
   export LAVISH_AXI_HOST LAVISH_AXI_PORT
+}
+
+lavish_reply_compatible() {
+  local status=0
+  "$FM_ROOT/bin/fm-bootstrap.sh" lavish-reply-compatible >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+  esac
+  die "cannot confirm a supported lavish-axi version, so the staged reply was not posted; retry once \`lavish-axi --version\` reports a supported release"
+}
+
+post_lavish_reply() {  # <artifact> <reply-file>
+  local output
+  if ! output=$(lavish-axi reply "$1" --agent-reply-file "$2" 2>&1); then
+    [ -n "$output" ] || output="lavish-axi reply exited nonzero"
+    die "Lavish did not accept the staged reply: $output"
+  fi
 }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
@@ -263,6 +296,13 @@ cmd_arm() {
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
   [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+}
+
+cmd_deliver_reply() {
+  [ "$#" -eq 4 ] && [ "$1" = poll ] && [ "$3" = --agent-reply-file ] || usage
+  lavish_reply_compatible || exit 3
+  apply_session_host "$2"
+  post_lavish_reply "$2" "$4"
 }
 
 cmd_retire() {
@@ -392,19 +432,20 @@ cmd_poll() {
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
     apply_session_host "$artifact"
-    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
-    # machinery. The staged file is the only record that a reply is owed, so it is
-    # consumed HERE - after every non-posting step that could abort this poll has
-    # already succeeded - leaving one narrow window: a crash between consuming the
-    # file and the call below drops this one round's reply rather than posting it
-    # twice. A listener that starts with no staged file simply polls without one.
-    # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
-    # receipt, retry, or idempotency marker here.
+    # Newer Lavish builds expose a one-shot reply command whose success is the
+    # server's acceptance receipt. Consume the staged file only after that
+    # confirmation; older compatible builds retain the published poll reply
+    # behavior and its best-effort delivery boundary.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
-      reply_text=$(cat -- "$reply_file") \
-        || die "cannot read agent reply file: $reply_file"
-      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
-      reply_pending=1
+      if lavish_reply_compatible; then
+        post_lavish_reply "$artifact" "$reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      else
+        reply_text=$(cat -- "$reply_file") \
+          || die "cannot read agent reply file: $reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+        reply_pending=1
+      fi
     fi
     if [ "$reply_pending" -eq 1 ]; then
       lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
@@ -493,10 +534,185 @@ cmd_terminal() {
   return 1
 }
 
+# Print the shared result parser described in its own leading comment, for
+# prepending to a command's perl program.
+lavish_result_parser() {
+  cat <<'PERL'
+use strict; use warnings;
+# The one reader of a captured result's queued-content block, shared by `read`,
+# `answers`, and `reconciles` so the two emission forms are parsed in exactly one
+# place. lavish-axi encodes its response as TOON and picks the form itself:
+#
+#   table form, when every item carries the same scalar fields:
+#     prompts[N]{uid,prompt,selector,tag,text}:
+#       "1","a comment",div#a,div,"Element text"
+#   list form, when items differ, for example when some carry a nested
+#   `target` object or an `attachments` table:
+#     prompts[N]:
+#       - uid: "1"
+#         prompt: "a comment"
+#         target:
+#           type: table-cell
+#
+# Only a column-zero header opens a block, and the block is the indented lines
+# that follow it. Every captain-supplied value is a single encoded line, so an
+# item or field boundary is only ever an indentation the encoder wrote: in list
+# form an item starts at the first item's hyphen indent, its own fields sit one
+# indent deeper, and anything deeper still is skipped only beneath a field that
+# opened a nested object or array. Only an item's own scalar fields are
+# returned. A line or item the parser cannot fully account for is counted as
+# malformed rather than dropped, and a column-zero line that names the block
+# but is not a recognized header makes the whole result malformed, so a form
+# this reader does not know can never look like a complete, empty result.
+#
+# lavish_result(<path>, <block-name-regex>) returns
+# (form, declared, [item hashes], malformed), with form one of none, table,
+# list, or unrecognized.
+sub lavish_unescape {
+  my ($v) = @_;
+  $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+  return $v;
+}
+sub lavish_table_rows {
+  my ($fields, $rows) = @_;
+  my (@items, $malformed);
+  $malformed = 0;
+  for my $row (@$rows) {
+    $row =~ s/^\s+//;
+    my @vals;
+    while (length $row) {
+      if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+        push @vals, $1;
+      } else {
+        $row =~ s/^([^,]*)//;
+        push @vals, $1;
+      }
+      last unless $row =~ s/^,//;
+    }
+    # An unquoted prompt or text value may carry commas; rejoin the surplus
+    # into that one field rather than shifting every later column.
+    if (@vals > @$fields) {
+      my ($preserve) = grep { $fields->[$_] eq "prompt" } 0 .. $#$fields;
+      ($preserve) = grep { $fields->[$_] eq "text" } 0 .. $#$fields unless defined $preserve;
+      if (defined $preserve) {
+        my $count = @vals - @$fields + 1;
+        my @parts = splice @vals, $preserve, $count;
+        splice @vals, $preserve, 0, join(",", @parts);
+      }
+    }
+    if (@vals != @$fields) {
+      $malformed++;
+      next;
+    }
+    my %f;
+    $f{$fields->[$_]} = lavish_unescape($vals[$_]) for 0 .. $#$fields;
+    push @items, \%f;
+  }
+  return (\@items, $malformed);
+}
+sub lavish_list_items {
+  my ($lines) = @_;
+  my (@items, $unit, $cur, $bad, $nested, %keys);
+  my ($malformed, $stray) = (0, 0);
+  my $finish = sub {
+    return unless $cur;
+    if ($bad || !%$cur) { $malformed++ } else { push @items, $cur }
+    ($cur, $bad, $nested) = (undef, 0, 0);
+  };
+  my $field = sub {
+    my ($s) = @_;
+    my $key;
+    if ($s =~ s/^"((?:[^"\\]|\\.)*)"//) {
+      $key = lavish_unescape($1);
+    } elsif ($s =~ s/^([A-Za-z_][A-Za-z0-9_.]*)//) {
+      $key = $1;
+    } else {
+      $bad = 1;
+      return;
+    }
+    $bad = 1 if $keys{$key}++;
+    $nested = 0;
+    if ($s =~ /^(?::|\[\d+\](?:\{[^}]*\})?:)\s*$/) {
+      $nested = 1;
+    } elsif ($s =~ /^\[\d+\]: /) {
+      # An inline primitive array is not an item field this adapter reads.
+    } elsif ($s =~ /^: (.*)$/) {
+      my $v = $1;
+      if ($v =~ /^"/) {
+        if ($v =~ /^"((?:[^"\\]|\\.)*)"\s*$/) {
+          $cur->{$key} = lavish_unescape($1);
+        } else {
+          $bad = 1;
+        }
+      } else {
+        $v =~ s/\s+$//;
+        $cur->{$key} = $v;
+      }
+    } else {
+      $bad = 1;
+    }
+  };
+  for my $line (@$lines) {
+    $line =~ /^( *)(.*)$/s;
+    my ($ind, $rest) = (length $1, $2);
+    $unit = $ind if !defined($unit) && $ind > 0 && $rest =~ /^-(?: |$)/;
+    if (defined($unit) && $ind == $unit && $rest =~ /^-(?: (.*))?$/s) {
+      my $first = $1;
+      $finish->();
+      ($cur, $bad, $nested) = ({}, 0, 0);
+      %keys = ();
+      if (defined $first) { $field->($first) } else { $bad = 1 }
+    } elsif ($cur && $ind == 2 * $unit) {
+      $field->($rest);
+    } elsif ($cur && $nested && $ind > 2 * $unit) {
+      next;
+    } elsif ($cur) {
+      $bad = 1;
+    } else {
+      $stray = 1;
+    }
+  }
+  $finish->();
+  return (\@items, $malformed + $stray);
+}
+sub lavish_result {
+  my ($path, $names) = @_;
+  open my $fh, "<", $path or return;
+  my ($form, $want, @fields, @body) = ("none", 0);
+  while (my $line = <$fh>) {
+    chomp $line;
+    if ($form eq "none") {
+      next unless $line =~ /^(?:$names)/;
+      if ($line =~ /^(?:$names)\[(\d+)\]\{([^}]*)\}:\s*$/) {
+        ($form, $want, @fields) = ("table", $1, split /,/, $2);
+      } elsif ($line =~ /^(?:$names)\[(\d+)\]:\s*$/) {
+        ($form, $want) = ("list", $1);
+      } else {
+        $form = "unrecognized";
+        $want = $1 if $line =~ /^(?:$names)\[(\d+)\]/;
+        last;
+      }
+      next;
+    }
+    last unless $line =~ /^\s/;
+    last if $form eq "table" && @body >= $want;
+    push @body, $line;
+  }
+  close $fh;
+  return ($form, $want, [], 1) if $form eq "unrecognized";
+  return ($form, $want, [], 0) if $form eq "none";
+  my ($items, $malformed) = $form eq "table"
+    ? lavish_table_rows(\@fields, \@body)
+    : lavish_list_items(\@body);
+  return ($form, $want, $items, $malformed);
+}
+PERL
+}
+
 # Whether a completed result carries any queued content block at all. The
 # published response frames content as a top-level `prompts[N]{...}:` or
-# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
-# zero: an indented payload line is captain-supplied text and must never be able
+# `feedback[N]{...}:` table header, or a `prompts[N]:` list header, whose items
+# are INDENTED, so this anchors on column zero: an indented payload line is captain-supplied text and must never be able
 # to forge - or, here, to hide behind - a content header. Any recognized block
 # is content regardless of its declared count, while a malformed top-level
 # prompts or feedback header makes the result indeterminate.
@@ -506,7 +722,7 @@ cmd_terminal() {
 # failed" is never proof that nothing was said.
 result_has_queued_content() {  # <result-file>
   awk '
-    /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+    /^(prompts|feedback)\[[0-9]+\](\{[^}]*\})?:[[:space:]]*$/ {
       verdict = "present"
       exit
     }
@@ -544,11 +760,11 @@ cmd_silent() {
 
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
 # captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
-# a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
-# quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
-# `choice`. A freeform `message` row is captain prose and is deliberately never a
+# card's declared close mode (`done` or `release`) to the keyed-answer intake.
+# Items come from the shared result parser above, in either emission form, and
+# only items whose `tag` field is `choice` are read.
+# The header owns the partial-output and failure contract.
+# A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
 # is skipped. A time-limited rollout branch accepts the old question/answer
@@ -561,41 +777,15 @@ cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -e "$(lavish_result_parser)"'
     use strict; use warnings;
     my ($selection, $path) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
+    my ($form, $want, $items, $malformed) = lavish_result($path, "prompts");
+    defined $form or exit 1;
     my %seen;
     my @choices;
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
-      my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+    for my $item (@$items) {
+      my %f = %$item;
       next unless defined $f{tag} && $f{tag} eq "choice";
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
@@ -662,6 +852,11 @@ cmd_choice_rows() {
         ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
         : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
     }
+    if ($malformed || @$items != $want) {
+      print STDERR "error: the result is not fully accounted for: declared $want, parsed ",
+        scalar(@$items), ", malformed $malformed\n";
+      exit 3;
+    }
   ' "$selection" "$file"
 }
 
@@ -682,56 +877,12 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
+  perl -e "$(lavish_result_parser)"'
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if defined($want) && @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
-    $want = 0 unless defined $want;
-    my @parsed;
-    my $malformed = 0;
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          push @vals, $1;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
-      if (@vals > @fields) {
-        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
-        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
-        if (defined $preserve) {
-          my $count = @vals - @fields + 1;
-          my @parts = splice @vals, $preserve, $count;
-          splice @vals, $preserve, 0, join(",", @parts);
-        }
-      }
-      if (@vals != @fields) {
-        $malformed++;
-        next;
-      }
-      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
-      my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      push @parsed, \%f;
-    }
+    my ($form, $want, $items, $malformed) = lavish_result($path, "prompts|feedback");
+    defined $form or exit 1;
+    my @parsed = @$items;
     my $presented = scalar @parsed;
     my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
     my @messages;
@@ -754,9 +905,9 @@ cmd_read() {
       return if !@lines || (@lines == 1 && $lines[0] eq "");
       print "| $_\n" for @lines;
     }
+    my $ended = $session_ended =~ /^(?:true|True|TRUE)$/;
     if (@messages) {
-      my $message_label = $session_ended =~ /^(?:true|True|TRUE)$/
-        ? "SESSION-ENDING MESSAGE" : "CAPTAIN MESSAGE";
+      my $message_label = $ended ? "SESSION-ENDING MESSAGE" : "CAPTAIN MESSAGE";
       print "$message_label\n";
       for my $i (0 .. $#messages) {
         print "$message_label PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
@@ -777,7 +928,8 @@ cmd_read() {
     print "lifecycle: $lifecycle\n";
     print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";
     print "annotation_count: ", scalar(@annotations), "\n";
-    print "session_ending_message_count: ", scalar(@messages), "\n";
+    my $message_count_key = $ended ? "session_ending_message_count" : "captain_message_count";
+    print "$message_count_key: ", scalar(@messages), "\n";
     print "\n";
     if (@annotations) {
       print "ANNOTATIONS\n";
@@ -813,6 +965,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

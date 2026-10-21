@@ -515,12 +515,12 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
   dir=$(make_primary_dir "$TMP_ROOT/park-host-opted-out")
   : > "$dir/state/task1.meta"
   mkdir -p "$dir/config"
-  printf 'off\n' > "$dir/config/supervision-host"
+  : > "$dir/config/supervision-host-off"
   write_arm_fixture "$dir" actionable
   write_host_fixture "$dir" handback
   out=$(run_park "$dir")
-  [ -e "$dir/state/arm-ran" ] || fail "a home whose config/supervision-host says off must park on the arm"
-  [ ! -e "$dir/state/host-ran" ] || fail "a home whose config/supervision-host says off ran the supervision host"
+  [ -e "$dir/state/arm-ran" ] || fail "a home opted out by config/supervision-host-off must park on the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home opted out by config/supervision-host-off ran the supervision host"
 
   dir=$(make_primary_dir "$TMP_ROOT/park-host-on")
   : > "$dir/state/task1.meta"

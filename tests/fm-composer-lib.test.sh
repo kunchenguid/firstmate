@@ -676,6 +676,9 @@ test_matrix_opencode_leftbar_signals() {
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen captured_idle captured_pending out
+  local footer_119 cwd_119 captured_119_idle captured_119_pending
+  local mode_cell separator_cell model_cell provider_cell effort_cell branch_cell reset_cell
+  reset_cell="${ESC}[38;2;255;255;255m"
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -686,6 +689,9 @@ test_matrix_opencode_leftbar_signals() {
   # RGB 128 styling. RGB 128 is deliberately outside the ghost threshold, so
   # the placeholder spelling is the independent empty signal. The completed-
   # turn row above the active composer also pins the incident's idle layout.
+  # The capture omits the directory footer this task recognises: no cwd:branch
+  # rail is drawn in it (the capture predates an active session or the
+  # sanitisation removed the rail).
   captured_idle=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;128;128;128mAsk anything… \"Fix a TODO in the codebase\"${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
   assert_screen "opencode 1.18.30 completed-turn idle hint on tmux" empty "$CAPS_TMUX" "$captured_idle" 3
   captured_pending=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
@@ -702,7 +708,275 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode placeholder-like input on plain backends" unknown "$CAPS_PLAIN" "$typed"
   typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
   assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
+  # The opencode 1.19.0 regression, carried over from an idle live pane
+  # captured through tmux -e on 2026-10-14 with an installed opencode 1.19.0.
+  # The footer row's mode word is RGB 67;133;190 and its separators are
+  # 111;110;105 - luminances 119.8 and 109.7, both under the 128 ghost
+  # threshold - so fm_composer_strip_ghost deleted them and left the row
+  # opening at the BRIGHT model cell instead of at `Build`. The
+  # `^(Build|Plan)·` exemption was therefore unreachable on every styled
+  # backend, this idle composer read `pending`, and `pending` is the verdict
+  # that refuses every fm-send, refuses every interrupt/exit/relaunch, and
+  # skips every fm-task-inbox-lib doorbell - the cost measured was three
+  # manual interventions into worker panes in one day. Only the foreground
+  # truecolor triples and the drawn glyphs are carried over; the background
+  # runs and pane padding are dropped, so this is not a byte-for-byte copy of
+  # the capture, matching captured_idle above. The cwd
+  # row opencode 1.19.0 also draws inside the box is de-emphasised too, so it
+  # is empty under the ghost strip and never reaches this verdict.
+  mode_cell="${ESC}[38;2;67;133;190mBuild${reset_cell}"
+  separator_cell="${ESC}[38;2;111;110;105m·${reset_cell} "
+  provider_cell="${ESC}[38;2;111;110;105mOpenCode Go${reset_cell} "
+  model_cell="${ESC}[38;2;206;205;195mSpace Bunny${reset_cell} "
+  effort_cell="${ESC}[1m${ESC}[38;2;218;112;44mmax${ESC}[0m${reset_cell}"
+  branch_cell="${ESC}[38;2;206;205;195mfm-composer-footer${reset_cell}"
+  footer_119="  ┃  ${mode_cell} ${separator_cell}${model_cell}${provider_cell}${separator_cell}${effort_cell}  ${branch_cell}"$'\n'
+  cwd_119="  ┃  ${ESC}[38;2;111;110;105m~/.treehouse/fm001-b8697d/1/fm001:fm/${reset_cell}"$'\n'
+  captured_119_idle=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[2m"$'\n  ┃\n'
+  captured_119_idle+="$cwd_119"
+  captured_119_idle+="$footer_119"
+  captured_119_idle+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 de-emphasised footer row" empty "$CAPS_TMUX" "$captured_119_idle" 3
+  # The half that matters: the same de-emphasised footer must not buy a false
+  # `empty` over a composer holding unsent work. A bright input row above it
+  # stays pending on every styled backend.
+  captured_119_pending=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mfix the doorbell skip${ESC}[38;2;255;255;255m"$'\n  ┃\n'
+  captured_119_pending+="$cwd_119"
+  captured_119_pending+="$footer_119"
+  captured_119_pending+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 typed composer above the de-emphasised footer" \
+    pending "$CAPS_TMUX" "$captured_119_pending" 3
+  assert_screen "opencode 1.19.0 typed composer on herdr" \
+    pending "$CAPS_STYLED" "$captured_119_pending"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on herdr" \
+    empty "$CAPS_STYLED" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on zellij" \
+    empty "$CAPS_STYLED_NOID" "$captured_119_idle"
+  # Plain backends keep the strict posture on the SAME bytes: opencode's cwd
+  # row survives an unstyled capture, and an unrecognized shape must defer
+  # rather than read empty, because firstmate types into an `empty` verdict.
+  assert_screen "opencode 1.19.0 idle on plain backends" unknown "$CAPS_PLAIN" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 typed on plain backends" unknown "$CAPS_PLAIN" "$captured_119_pending"
+  # Signal separation for the fix itself: the exemption is proved from the row
+  # ghost stripping cannot reach, so an override that removes that proof must
+  # put the false `pending` straight back.
+  out=$(FM_COMPOSER_LEFTBAR_FOOTER_RE='^NEVER-MATCHES$' \
+    fm_composer_classify_screen "$CAPS_TMUX" "$captured_119_idle" 3)
+  [ "$out" = pending ] \
+    || fail "the 1.19.0 footer exemption must be the only reason this idle pane reads empty, got '$out'"
+  # The extractor reads the same run with the same rule, so a classified-empty
+  # pane must not hand back the footer as composer text: zellij's append proof
+  # requires the typed text and nothing else.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_idle")
+  [ -z "$out" ] \
+    || fail "the de-emphasised 1.19.0 footer must not be extracted as composer text, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_pending")
+  [ "$out" = 'fix the doorbell skip' ] \
+    || fail "extracting above the de-emphasised 1.19.0 footer must yield only the typed row, got '$out'"
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
+}
+
+test_matrix_opencode_leftbar_cwd_furniture() {
+  # Real idle OpenCode 1.18.31, captured live on 2026-09-18 from a firstmate
+  # tmux worker pane (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi,
+  # the styled 20-row tail exactly as fm_tmux_composer_capture feeds it, real
+  # cursor_y shifted by the 50 rows above the tail). The left-bar composer holds
+  # NO typed text: the pane's working directory and branch are drawn
+  # RIGHT-ALIGNED inside the composer rows above the Build footer, wrapped over
+  # three rail-width fragments ("~/.treehouse/harness-engineering-",
+  # "presentation-a32ea0/7/harness-", "engineering-presentation:fm/deck-07-")
+  # whose final fragment ("failure-modes") is drawn at the right end of the
+  # footer row itself. The fragments are RGB 128 grey - luminance exactly 128,
+  # ON the ghost-luma ceiling - so they survive ghost stripping and the
+  # classifier used to read them as unsent typed text: every idle 1.18.31 pane
+  # answered `pending`, which skipped the steering doorbell, the watcher's
+  # re-ring ladder, and fm-control.sh's typed /exit.
+  local screen composer fixture typed typed_row strip start expected_fragment diverge out typed_composer
+  fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi"
+  screen=$(<"$fixture")
+  # Cursor 14 = the real #{cursor_y} (64) minus the 50 rows above the tail:
+  # the cursor sits inside the composer's furniture rows, so the cursor-anchored
+  # left-bar read is the verdict the tmux adapter supplies.
+  assert_screen "opencode 1.18.31 idle cwd:branch furniture on tmux" empty "$CAPS_TMUX" "$screen" 14
+  # Cursorless profiles see the same furniture through the plain, style-free
+  # recognition, until the version's separate status rail below the floor row
+  # (which the classifier does not own here) invalidates the shape on a full
+  # capture; the cropped composer tail pins the furniture verdict itself.
+  composer=$(printf '%s\n' "$screen" | tail -n 9 | head -n 6)
+  assert_screen "opencode 1.18.31 cwd furniture on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode 1.18.31 cwd furniture on zellij" empty "$CAPS_STYLED_NOID" "$composer"
+  assert_screen "opencode 1.18.31 cwd furniture on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  # Non-vacuousness: the fragments really survive ghost stripping (RGB 128 has
+  # luminance exactly 128, not below the ceiling) and the run really reaches the
+  # top furniture row, so the verdict above cannot come from blank rows alone.
+  expected_fragment="$(printf '~')/.treehouse/harness-engineering-"
+  strip=$(printf '%s\n' "$(_fm_composer_screen_row 2 "$composer")" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var strip
+  case "$strip" in
+    '┃'*) strip=${strip#┃} ;;
+  esac
+  fm_composer_normalize_trim_var strip
+  [ "$strip" = "$expected_fragment" ] \
+    || fail "the top furniture fragment must survive ghost stripping intact, got '$strip'"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 5)
+  [ "$start" = 2 ] || fail "the fixture's furniture run must be recognised from its top row, got '$start'"
+
+  # Position decides, never shape alone: the same furniture with a LEFT-EDGE
+  # typed line directly above it keeps the composer pending, and a path-shaped
+  # string typed at the left edge is typed text even when the footer keeps its
+  # right-hand tail.
+  typed_row="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238mReply with OK.${ESC}[0m"
+  typed="${typed_row}"$'\n'"$(tail -n 4 <<< "$composer")"
+  assert_screen "opencode 1.18.31 typed above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
+  typed="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/usr/local/bin/some/tool${ESC}[0m"$'\n'"$(tail -n 4 <<< "$composer")"
+  assert_screen "opencode left-edge typed path above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
+  # The extraction change is asserted on the cropped composer too: the same
+  # selector that classifies the cwd furniture must scope extracted user
+  # content to the typed row above the rail, excluding the furniture run and
+  # the footer.
+  typed_composer="${typed_row}"$'\n'"$(tail -n 4 <<< "$composer")"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed_composer")
+  [ "$out" = 'Reply with OK.' ] \
+    || fail "cropped-composer extraction must scope user content to the typed row above the rail, got '$out'"
+
+  # A composer holding only "/" - the first keystroke of a slash command -
+  # must never read empty. Its single character trivially clears the position
+  # gate, so only the path-start check keeps it typed text: a lone "/" with no
+  # name after it is not accepted as the cwd rail, on the row directly above
+  # the footer and on top of the short-cwd rail alike.
+  # Styled profiles prove it real (pending); the unstyled profile keeps the
+  # leftbar's existing unknown deferral - never empty either way.
+  typed_row="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/${ESC}[0m"
+  typed=$'transcript line\n'"${typed_row}"$'\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode lone slash above the footer stays pending on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "opencode lone slash above the footer stays pending on herdr" pending "$CAPS_STYLED" "$typed"
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a lone '/' above the footer must not be recognised as cwd furniture"
+  typed=$'transcript line\n  ┃  /\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode lone slash above the footer defers unstyled on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+
+  # The path-prefix check is load-bearing: a right-aligned single token that
+  # is not part of such a path, and a fragment run whose start is not a path
+  # prefix, stay typed content.
+  diverge=$'transcript line\n  ┃                                                              50.8K\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-aligned non-path token stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  diverge=$'transcript line\n  ┃                                                                                                                     deck-07-\n  ┃  Build · gpt-oss-120b Internal OVHcloud                                                                          failure-modes'
+  assert_screen "opencode bare branch fragment without a path start stays typed" pending "$CAPS_TMUX" "$diverge" 1
+  # The topmost fragment's OWN bytes decide the path start: a typed lone "~"
+  # directly above a rail whose top fragment is absolute (an outside-$HOME
+  # cwd) is not absorbed into the run, so the rail is furniture and the typed
+  # "~" row keeps the composer pending.
+  diverge=$'transcript line\n  ┃  ~\n  ┃                                                            /Volumes/Data/worktree:fm/branch\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
+  start=$(_fm_composer_leftbar_cwd_start "$diverge" 1 3)
+  [ "$start" = 2 ] \
+    || fail "a typed lone '~' must stay outside the absolute rail run, got '$start'"
+
+  # The position gate measures the gap against the REGION's width (the widest
+  # trimmed plain row across first..last), never against the gated row's own
+  # length: a short, space-prefixed home path typed into an otherwise empty
+  # composer must not clear a position gate its own short row sets.
+  diverge=$'transcript line\n  ┃    ~/a\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode space-prefixed short home path stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode space-prefixed short home path stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
+  assert_screen "opencode space-prefixed short home path defers unstyled" unknown "$CAPS_PLAIN" "$diverge"
+
+  # Accepted residual, pinned so it cannot drift silently: a lone whitespace-free
+  # "~/..." token whose text starts beyond the region's midpoint still clears the
+  # region-width gate and reads empty. Every misfire except this right-half
+  # residual defers; tightening the gate further is a deliberate classifier
+  # change, not a drift.
+  long_gap=$(printf '%0.s ' $(seq 1 200))
+  diverge=$'transcript line\n  ┃'"$long_gap"$'~/notes.md\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-half lone tilde-slash token is the accepted residual on tmux" empty "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode right-half lone tilde-slash token is the accepted residual on herdr" empty "$CAPS_STYLED" "$diverge"
+  # A left-edge typed row above such a token rescues the verdict: the walk
+  # breaks on the left-edge row and the token's rows keep their ordinary
+  # content verdict.
+  diverge=$'transcript line\n  ┃  reply to the captain\n  ┃'"$long_gap"$'~/notes.md\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-half token under a left-edge row stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+
+  # A second live pane, same day and version, whose cwd:branch is SHORTER than
+  # the rail (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi,
+  # tmux window 0:fm-anvil-backlog-docs-hygiene, 272x70, captured read-only with
+  # the adapter's own capture-pane call; real #{cursor_y} 64 = 14 in the 20-row
+  # tail). The string wraps BOTTOM-aligned: the two upper composer rows are
+  # blank rail and the single fragment "~/.treehouse/anvil-99d6f9/2/anvil:fm/"
+  # sits directly above the footer row, whose right end carries
+  # "anvil-backlog-docs-hygiene". A different path shape classifies by
+  # structure, and the contiguous-above-footer walk needs no blank-row
+  # tolerance.
+  fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi"
+  screen=$(<"$fixture")
+  assert_screen "opencode 1.18.31 idle short cwd:branch furniture on tmux" empty "$CAPS_TMUX" "$screen" 14
+  composer=$(printf '%s\n' "$screen" | tail -n 9 | head -n 6)
+  assert_screen "opencode 1.18.31 short cwd furniture on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode 1.18.31 short cwd furniture on zellij" empty "$CAPS_STYLED_NOID" "$composer"
+  assert_screen "opencode 1.18.31 short cwd furniture on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  expected_fragment="$(printf '~')/.treehouse/anvil-99d6f9/2/anvil:fm/"
+  strip=$(printf '%s\n' "$(_fm_composer_screen_row 4 "$composer")" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var strip
+  case "$strip" in
+    '┃'*) strip=${strip#┃} ;;
+  esac
+  fm_composer_normalize_trim_var strip
+  [ "$strip" = "$expected_fragment" ] \
+    || fail "the short fixture's one fragment must survive ghost stripping intact, got '$strip'"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 5)
+  [ "$start" = 4 ] || fail "the short fixture's run must start on the row directly above the footer, got '$start'"
+  typed="$(head -n 2 <<< "$composer")"$'\n'"${typed_row}"$'\n'"$(tail -n 3 <<< "$composer")"
+  assert_screen "opencode lone slash typed above the short cwd rail stays pending on tmux" pending "$CAPS_TMUX" "$typed" 2
+  pass "matrix: opencode 1.18.31's right-aligned cwd:branch furniture reads empty; left-edge text stays pending"
+}
+
+test_matrix_opencode_leftbar_abs_cwd_furniture() {
+  # Real OpenCode 1.18.31 worker pane captured read-only on 2026-10-14 through
+  # the tmux adapter's capture (308 columns, #{cursor_y} 62 = 14 in the 20-row
+  # tail), sanitized: transcript rows, model name, and path were rewritten
+  # with equal visible widths. The worker's cwd lies OUTSIDE $HOME, so the
+  # rail is absolute: "/srv/pool/.workspace/project-0a1b2c/" sits directly
+  # above the footer row and its tail continues at the footer row's right
+  # end. The busy fixture carries the "esc interrupt" status line below the
+  # composer floor; the idle twin blanks that and the spinner. The left-bar
+  # region ends at the floor row, so busy and idle read alike.
+  local busy idle composer start typed typed_row long_gap out rail_row footer_row
+  busy=$(<"$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-busy-wide-abs-cwd.ansi")
+  idle=$(<"$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-wide-abs-cwd.ansi")
+  assert_screen "opencode 1.18.31 busy wide absolute cwd rail on tmux" empty "$CAPS_TMUX" "$busy" 14
+  assert_screen "opencode 1.18.31 idle wide absolute cwd rail on tmux" empty "$CAPS_TMUX" "$idle" 14
+  composer=$(printf '%s\n' "$busy" | sed -n '14,17p')
+  assert_screen "opencode wide absolute cwd rail on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode wide absolute cwd rail on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 3)
+  [ "$start" = 2 ] || fail "the absolute rail must be recognised on the row above the footer, got '$start'"
+  rail_row=$(_fm_composer_screen_row 2 "$composer")
+  footer_row=$(_fm_composer_screen_row 3 "$composer")
+
+  # Negatives on the same wide geometry: each stays pending.
+  long_gap=$(printf '%0.s ' $(seq 1 260))
+  typed=$'transcript line\n  ┃'"$long_gap"$'/\n  ┃  Build · Example Model 1 Pro'
+  assert_screen "opencode right-aligned lone slash stays pending on tmux" pending "$CAPS_TMUX" "$typed" 1
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a right-aligned lone '/' must not be recognised as cwd furniture"
+  typed=$'transcript line\n  ┃'"$long_gap"$'///\n  ┃  Build · Example Model 1 Pro'
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a right-aligned slash-only token must not be recognised as cwd furniture"
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255m/exit${ESC}[0m"
+  typed=$(printf '%s\n' "$composer" | sed -n 1p)$'\n'"$typed_row"$'\n'"$footer_row"
+  assert_screen "opencode /exit at the left edge of a wide pane stays pending" pending "$CAPS_TMUX" "$typed" 1
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255m/srv/pool/notes.md${ESC}[0m"
+  typed=$(printf '%s\n' "$composer" | sed -n 1p)$'\n'"$typed_row"$'\n'"$footer_row"
+  assert_screen "opencode absolute path typed at the left edge stays pending" pending "$CAPS_TMUX" "$typed" 1
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255mReply with OK.${ESC}[0m"
+  typed="${typed_row}"$'\n'"$rail_row"$'\n'"$footer_row"
+  assert_screen "opencode typed text above the absolute rail stays pending on tmux" pending "$CAPS_TMUX" "$typed" 0
+  assert_screen "opencode typed text above the absolute rail stays pending on herdr" pending "$CAPS_STYLED" "$typed"
+  # Extraction scopes user content to the typed row, never the rail fragment.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed")
+  [ "$out" = 'Reply with OK.' ] \
+    || fail "extraction must exclude the absolute rail fragment, got '$out'"
+  pass "matrix: opencode's absolute cwd rail on a wide pane reads empty busy and idle; typed text stays pending"
 }
 
 test_matrix_grok_titled_bottom_border() {
@@ -729,6 +1003,140 @@ test_matrix_grok_titled_bottom_border() {
   malformed=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── unknown surface ─╯'
   assert_screen "oversized unknown title on herdr" unknown "$CAPS_STYLED" "$malformed"
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
+}
+
+test_matrix_claude_titled_top_rule() {
+  # A named Claude Code session draws its title into the composer's TOP rule
+  # (issues #5601 and #5558; observed on herdr as
+  # `─── Firstmate operational input 1790546042 ─`). The strict separator
+  # predicate rejects that row, so the pair never opened, the closing rule
+  # read as a lower unmatched separator, and a visibly empty composer read
+  # `unknown` on every cursorless backend, refusing steers, exit, and relaunch.
+  local rule title top bottom footer screen ansi typed claude_idle
+  local scrollback short nonascii flush blank
+  claude_idle=$(printf 'claude\tidle')
+  rule='────────────────────────────────────────────────────────────'
+  title=' Firstmate operational input 1790546042 '
+  top="${rule}───${title}─"
+  bottom="${rule}────────────────────────────────────────────"
+  footer='  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  screen="recap: earlier work"$'\n'"$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\n'"$footer"
+  ansi="${ESC}[38;2;128;130;131mrecap: earlier work${ESC}[0m"$'\n'
+  ansi+="${ESC}[0m${ESC}[38;2;121;129;134m${rule}─── ${ESC}[38;2;177;185;249m${title# }${ESC}[38;2;121;129;134m─${ESC}[0m"$'\n'
+  ansi+="${ESC}[0m${ESC}[38;2;128;130;131m❯${NBSP}${ESC}[0m"$'\n'
+  ansi+="${ESC}[0m${ESC}[38;2;121;129;134m${bottom}${ESC}[0m"$'\n'"$footer"
+  assert_screen "titled claude idle on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "titled claude idle on herdr (ansi)" empty "$CAPS_STYLED" "$ansi" '' "$claude_idle"
+  assert_screen "titled claude idle on zellij (ansi)" empty "$CAPS_STYLED_NOID" "$ansi"
+  assert_screen "titled claude idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  assert_screen "titled claude idle on tmux" empty "$CAPS_TMUX" "$ansi" 2 probe-absent
+  typed="$top"$'\n❯ fix the login bug\n'"$bottom"$'\n'"$footer"
+  assert_screen "titled claude typed on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "titled claude typed on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "titled claude typed on tmux" pending "$CAPS_TMUX" "$typed" 1 probe-absent
+  assert_screen "titled claude typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
+  # The staleness rule still holds: a titled sandwich stranded in scrollback,
+  # with transcript rows between it and a lower unmatched rule, stays unknown.
+  scrollback="$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\nlater transcript output\n'"$bottom"$'\nmore output'
+  assert_screen "titled sandwich in scrollback" unknown "$CAPS_STYLED_NOID" "$scrollback"
+  # Width is proven, not assumed: a titled rule narrower than its closing rule
+  # is not that composer's top edge.
+  short="${rule}${title}─"$'\n❯'"$NBSP"$'\n'"$bottom"
+  assert_screen "mismatched titled rule width" unknown "$CAPS_STYLED_NOID" "$short"
+  # A non-ASCII title leaves residue and refuses rather than guessing width.
+  nonascii="${rule}─── ✳ Firstmate operational input 179054604 ─"$'\n❯'"$NBSP"$'\n'"$bottom"
+  assert_screen "non-ASCII titled rule" unknown "$CAPS_STYLED_NOID" "$nonascii"
+  # The rule must open with the strict separator's dash run.
+  flush=" Firstmate operational input 1790546042 ${rule}────"$'\n❯'"$NBSP"$'\n'"$bottom"
+  assert_screen "title flush at the rule's start" unknown "$CAPS_STYLED_NOID" "$flush"
+  # The strict blank-row posture is untouched: no glyph row, no proof.
+  blank="$top"$'\n\n'"$bottom"
+  assert_screen "titled rule over a blank row" unknown "$CAPS_STYLED_NOID" "$blank"
+  # The untitled pair keeps its verdict alongside the new shape.
+  assert_screen "untitled claude idle on herdr" empty "$CAPS_STYLED" \
+    "$bottom"$'\n❯'"$NBSP"$'\n'"$bottom"$'\n'"$footer" '' "$claude_idle"
+  pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
+}
+
+test_matrix_grok_144_approval_titled_bottom_border() {
+  # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
+  # top border and appends its approval mode (` · always-approve`). The mid-dot
+  # used to survive the geometry residue test, so an idle pane read unknown and
+  # the guarded exit/relaunch refused to type /exit.
+  local top empty_row typed_row bottom idle typed
+  top='  ╭'$(_grok_rule 74)'╮'
+  empty_row='  │ ❯'"$(printf '%*s' 72 '')"'│'
+  typed_row='  │ ❯ deploy the fix'"$(printf '%*s' 57 '')"'│'
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve')
+  idle="$top"$'\n'"$empty_row"$'\n'"$bottom"
+  typed="$top"$'\n'"$typed_row"$'\n'"$bottom"
+  assert_screen "grok 1.0.44 idle on tmux content row" empty "$CAPS_TMUX" "$idle" 1
+  assert_screen "grok 1.0.44 idle on tmux bottom border" empty "$CAPS_TMUX" "$idle" 2
+  assert_screen "grok 1.0.44 idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok 1.0.44 idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "grok 1.0.44 typed on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "grok 1.0.44 typed on herdr" pending "$CAPS_STYLED" "$typed"
+  # The approval title is proven only on Grok's rounded box. An otherwise
+  # aligned box from another family must not grant permission to type.
+  local family tl tr bl br edge dash unobserved
+  for family in light heavy double ascii; do
+    case "$family" in
+      light) tl=┌; tr=┐; bl=└; br=┘; edge=│; dash=─ ;;
+      heavy) tl=┏; tr=┓; bl=┗; br=┛; edge=┃; dash=━ ;;
+      double) tl=╔; tr=╗; bl=╚; br=╝; edge=║; dash=═ ;;
+      ascii) tl=+; tr=+; bl=+; br=+; edge='|'; dash=- ;;
+    esac
+    unobserved=${idle//╭/$tl}; unobserved=${unobserved//╮/$tr}
+    unobserved=${unobserved//╰/$bl}; unobserved=${unobserved//╯/$br}
+    unobserved=${unobserved//│/$edge}; unobserved=${unobserved//─/$dash}
+    assert_screen "grok approval title rejects $family on tmux" unknown "$CAPS_TMUX" "$unobserved" 1
+    assert_screen "grok approval title rejects $family on herdr" unknown "$CAPS_STYLED" "$unobserved"
+    assert_screen "grok approval title rejects $family on cmux/orca" unknown "$CAPS_PLAIN" "$unobserved"
+  done
+  for effort in low medium high xhigh; do
+    bottom=$(_grok_titled_bottom 74 "Grok 4.6 ($effort) · always-approve")
+    assert_screen "grok 1.0.44 $effort effort" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  done
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · auto-approve')
+  assert_screen "grok unknown approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve now')
+  assert_screen "grok approval suffix with trailing text" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Other 4.7 (high) · always-approve')
+  assert_screen "unknown surface title with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (turbo) · always-approve')
+  assert_screen "unknown effort with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'unknown surface · mode')
+  assert_screen "mid-dot title outside the known shape" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve · extra')
+  assert_screen "second mid-dot after the known suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The approval title is only known at the aligned width.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.7 (high) · always-approve')
+  assert_screen "approval title with 1.0.5 overhang" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The 1.0.5 overhang shape keeps proving empty beside the new equal-width one.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.6 (xhigh)')
+  assert_screen "grok 1.0.5 overhang still empty" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.6 (xhigh)')
+  assert_screen "grok typed title at equal width" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  pass "matrix: grok 1.0.44's approval-titled equal-width bottom is empty while typed and unknown titles stay safe"
+}
+
+# <count> box-drawing rule glyphs, one glyph per iteration so the emitted width
+# never depends on whether ${#} counts bytes or characters in the ambient locale.
+_grok_rule() {  # <count>
+  local n=$1 i=0 out=
+  while [ "$i" -lt "$n" ]; do out+='─'; i=$((i + 1)); done
+  printf '%s' "$out"
+}
+
+# Bottom border of total inner width <width> carrying <title> before a trailing rule.
+# Every non-ASCII glyph these fixtures use is one column wide, so the width is
+# measured on an ASCII twin: the rule stays byte-exact and ${#} equals the column
+# count under any locale, including LC_ALL=C.
+_grok_titled_bottom() {  # <width> <title>
+  local width=$1 title=" $2 " cols lead
+  cols=${title//·/.}
+  lead=$((width - ${#cols} - 1))
+  printf '  ╰%s%s─╯' "$(_grok_rule "$lead")" "$title"
 }
 
 test_matrix_kimi_bordered_shell_glyph_box() {
@@ -981,7 +1389,11 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
+test_matrix_opencode_leftbar_cwd_furniture
+test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
+test_matrix_claude_titled_top_rule
+test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
@@ -1026,3 +1438,158 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# The selected row sits on cursor row 1 so a tmux read whose cursor is that
+# row, and a cursorless read, both still see unsubmitted text.
+exit_picker_screen() {
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel'
+}
+
+fm_test_picker_send() {
+  printf 'Enter\n' >> "$FM_TEST_PICKER_ENTERS"
+}
+
+fm_test_picker_state() {
+  fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN" 1
+}
+
+test_background_exit_picker_stays_pending_and_blocks_retry() {
+  local screen out rc sink enters
+  screen=$(exit_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded picker should match"
+  [ "$out" = 'Claude background-task exit picker' ] || fail "dialog name was '$out'"
+  out=$(fm_composer_blocking_dialog 'Background work is running'); rc=$?
+  [ "$rc" -eq 1 ] || fail "a heading alone must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' 'Background work is running' 'Exit and stop tasks')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "two of the three strings must not match"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' "$screen" '' '')"); rc=$?
+  [ "$rc" -eq 0 ] || fail "blank rows below the footer should still match"
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" 1)
+  [ "$out" = pending ] || fail "cursor on the selected row should stay pending, got '$out'"
+  [ "$(cat "$sink")" = 'Claude background-task exit picker' ] || fail "classify should note the dialog, got '$(cat "$sink")'"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = pending ] || fail "a styled cursorless picker should stay pending, got '$out'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  FM_TEST_PICKER_SCREEN=$screen
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  sink=$FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  fm_composer_dialog_sink_release
+  [ ! -e "$sink" ] || fail "the release should remove a sink that prepare created"
+  [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ] || fail "the release should unset a sink that prepare created"
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = unknown ] || fail "a picker must stop the retry as unknown, got '$out'"
+  [ "$enters" -eq 1 ] || fail "a picker must receive one Enter, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "the Claude background-task exit picker stays pending and receives no confirming Enter"
+}
+
+# The picker's own text, shown the way a worker pane shows it when it prints
+# this repository's diff, verification note, or a test fixture: quoted above a
+# normal composer. No picker is open, so the next Enter confirms nothing.
+quoted_exit_picker_screen() {
+  printf '%s\n' \
+    '● Here is the fixture the test uses:' \
+    "+    'Background work is running' \\" \
+    "+    '❯ 1. Exit and stop tasks' \\" \
+    "+    'Enter to confirm · Esc to cancel'" \
+    '  The selected row is "❯ 1. Exit and stop tasks" and the footer is "Enter to confirm · Esc to cancel".' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm · Esc to cancel' \
+    '' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯'
+}
+
+test_dialog_heading_and_footer_must_be_the_recorded_lines() {
+  local screen out rc
+  screen=$(printf '%s\n' \
+    'The fixture mentions Background work is running in a sentence' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm · Esc to cancel')
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a heading buried in a sentence must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  screen=$(printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm the deployment')
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a last line that only starts with the confirm words must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  pass "a buried heading or a different last line is not the exit picker"
+}
+
+test_dialog_note_skips_the_match_when_no_sink_is_set() {
+  local screen out rc before after
+  screen=$(exit_picker_screen)
+  unset FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_note_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a note without a sink should return 1, got $rc"
+  [ -z "$out" ] || fail "a note without a sink should print nothing, got '$out'"
+  [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ] || fail "a note without a sink must not create one"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" 1)
+  [ "$out" = pending ] || fail "classify without a sink should stay pending, got '$out'"
+  trap 'true' RETURN
+  before=$(trap -p RETURN)
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  fm_composer_dialog_sink_release
+  after=$(trap -p RETURN)
+  trap - RETURN
+  [ "$before" = "$after" ] || fail "release replaced the caller RETURN trap: $after"
+  pass "a dialog note without a sink skips the match, and release leaves a caller RETURN trap"
+}
+
+test_quoted_exit_picker_text_is_not_a_dialog() {
+  local screen out rc sink enters
+  screen=$(quoted_exit_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "picker text quoted above a normal composer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    'Background work is running' \
+    "+    '❯ 1. Exit and stop tasks' \\" \
+    'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a selected row that is not alone on its row must not match"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '❯ 1. Exit and stop tasks' \
+    'Background work is running' \
+    'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a selected row above the heading must not match"
+  FM_TEST_PICKER_SCREEN=$screen
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  sink=$FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  [ ! -s "$sink" ] || fail "quoted picker text must not be noted as a dialog, got '$(cat "$sink")'"
+  fm_composer_dialog_sink_release
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = pending ] || fail "quoted picker text must keep the ordinary pending verdict, got '$out'"
+  [ "$enters" -eq 3 ] || fail "quoted picker text must keep the ordinary Enter retries, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "picker text quoted above a normal composer is not read as a live picker"
+}
+
+test_background_exit_picker_stays_pending_and_blocks_retry
+test_dialog_heading_and_footer_must_be_the_recorded_lines
+test_dialog_note_skips_the_match_when_no_sink_is_set
+test_quoted_exit_picker_text_is_not_a_dialog

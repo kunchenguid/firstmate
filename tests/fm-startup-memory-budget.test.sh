@@ -16,7 +16,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -280,7 +280,7 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
     "budget propagation did not enqueue the pointer to its exact reread generation"
   assert_contains "$(<"$log")" "Firstmate instruction waiting: list " \
     "budget propagation did not ring the durable inbox doorbell"
-  assert_contains "$(<"$log")" "/state/sm.inbox'/*.msg" \
+  assert_contains "$(<"$log")" "'sm.inbox' steering inbox" \
     "budget propagation doorbell did not identify the durable inbox"
 
   outside="$world/unsafe-budget"

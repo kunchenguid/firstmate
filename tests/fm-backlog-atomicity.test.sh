@@ -36,6 +36,10 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-backlog-atomicity)
+# The fixture helpers below call tasks-axi directly, and tasks-axi reads a
+# .tasks.toml from its working directory. Run from the scratch root so an
+# operator override in the checkout cannot redirect those calls.
+cd "$TMP_ROOT" || exit 1
 
 command -v tasks-axi >/dev/null 2>&1 || {
   printf 'ok - skipped (tasks-axi is not installed; the fused transitions are inert without it)\n'
@@ -92,8 +96,33 @@ EOF
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    grep -Fqx -- "$name" "$window_file" 2>/dev/null || printf '%s\n' "$name" >> "$window_file"
+    exit 0 ;;
+  kill-window)
+    target=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -t ] && target=$arg
+      previous=$arg
+    done
+    target=${target##*:}
+    target=${target#=}
+    grep -Fvx -- "$target" "$window_file" 2>/dev/null > "$window_file.tmp" || true
+    mv "$window_file.tmp" "$window_file"
+    exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -777,7 +806,7 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   id=atomic-dispatch-b1
   case_dir=$(make_home dispatch-ok "$id")
   add_item "$case_dir" "$id"
-  cp "$ROOT/.tasks.toml" "$(home_of "$case_dir")/.tasks.toml"
+  fm_test_tasks_toml "$(home_of "$case_dir")/.tasks.toml"
   record_tasks_axi_calls "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
@@ -2030,6 +2059,45 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
+  local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  id=atomic-heal-gerrit-b9
+  case_dir=$(make_home heal-pending-gerrit-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The record a pre-fix teardown left: the Gerrit change URL as a --pr link.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gerrit\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$gerrit_url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # GitHub pull request, so this case keeps reproducing whatever the installed
+  # release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded Gerrit close at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"Gerrit change $gerrit_url\"" >/dev/null \
+    || fail "the replayed Gerrit close did not record its change URL as a note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed Gerrit close left its record behind"
+  pass "session start replays a recorded Gerrit close with its change URL as a note"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3056,6 +3124,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

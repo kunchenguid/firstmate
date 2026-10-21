@@ -189,8 +189,19 @@ ID=${1:-}
 
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
-META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
-LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+# An override is honoured only when its basename is this task's own file name.
+# An override inherited from another task's environment, for example through a
+# long-lived server started inside that task's snapshot child, names a different
+# task and must fall through to $STATE/$ID.* instead of reading another task's
+# captured generation.
+case ${FM_CREW_STATE_META_OVERRIDE:-} in
+  "$ID.meta"|*/"$ID.meta") META=$FM_CREW_STATE_META_OVERRIDE ;;
+  *) META=$STATE/$ID.meta ;;
+esac
+case ${FM_CREW_STATE_STATUS_OVERRIDE:-} in
+  "$ID.status"|*/"$ID.status") LOG=$FM_CREW_STATE_STATUS_OVERRIDE ;;
+  *) LOG=$STATE/$ID.status ;;
+esac
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read
@@ -312,13 +323,14 @@ fi
 # shell - so a finished crew whose endpoint has closed still reports its run-step
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+# herdr task is read through fm_backend_capture while tmux uses the shared
+# endpoint-existence predicate.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    tmux) fm_backend_target_exists tmux "$1" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
@@ -381,6 +393,24 @@ mr_read_record_bounded() {  # <host> <path> <number>
   if ! record=$(fm_run_timed 5 bash -c '
     . "$1"
     fm_pr_gitlab_read_record "$2" "$3" "$4" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+    return 1
+  fi
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  [ -n "$state" ] || return 1
+  [ "$merged" = true ] || [ "$merged" = false ] || return 1
+  FM_PR_RECORD_STATE=$state
+  FM_PR_RECORD_MERGED=$merged
+}
+
+forgejo_read_record_bounded() {  # <host> <path> <number>
+  local record state merged
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  if ! record=$(fm_run_timed 5 bash -c '
+    . "$1"
+    fm_pr_forgejo_read_record "$2" "$3" "$4" || exit 1
     printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
   ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
     return 1
@@ -477,6 +507,24 @@ passed_pr_detail() {
         open|opened) printf 'run passed: PR open' ;;
         closed)      printf 'run passed: PR closed' ;;
         *)           printf 'run passed: PR state %s' "$state_lc" ;;
+      esac
+      ;;
+    forgejo)
+      if ! forgejo_read_record_bounded "$host" "$path" "$number"; then
+        printf 'run passed: PR state unknown (unreadable)'
+        return
+      fi
+      if [ "$FM_PR_RECORD_MERGED" = true ]; then
+        printf 'run passed: PR merged'
+        return
+      fi
+      # Forgejo reports a merged pull request as closed with merged true, so
+      # an unmerged one is its own open or closed state.
+      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+      case "$state_lc" in
+        open)   printf 'run passed: PR open' ;;
+        closed) printf 'run passed: PR closed' ;;
+        *)      printf 'run passed: PR state %s' "$state_lc" ;;
       esac
       ;;
     gerrit)
@@ -804,11 +852,17 @@ nm_daemon_answered_down() {
 # daemon each probe burns the full timeout inside the supervisor's per-crew
 # polling loop.
 nm_daemon_probe() {
-  local rc=0
+  local rc=0 daemon_status
   [ -n "$NM_DAEMON_ANSWER" ] && return 0
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+  daemon_status=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status) || rc=$?
   case "$rc" in
-    0)   NM_DAEMON_ANSWER=up ;;
+    0)
+      # A clean stop also exits 0, with "○ daemon not running".
+      if printf '%s\n' "$daemon_status" | grep -Eq '(^|[[:space:]])daemon running([[:space:]]|$)'; then
+        NM_DAEMON_ANSWER=up
+      else
+        NM_DAEMON_ANSWER=down
+      fi ;;
     124) NM_DAEMON_ANSWER=unanswered ;;
     *)   NM_DAEMON_ANSWER=down ;;
   esac
@@ -937,11 +991,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # CLI is not retried. Older CLI surfaces without the table retain the
     # coarse fallback below, but cannot turn a replacement into a vague live
     # verdict when its identity and gate cannot be read.
-    overview_ok=1
-    run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
-    [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
-    run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
-    [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+    # `axi status` answers a no-run worktree with an explicit
+    # `runs_on_current_branch: 0`: the CLI's authoritative absent verdict,
+    # which needs no inventory read (the bare `axi` table may be capped).
+    if [ "$(strip_quotes "$(nm_field current_branch)")" = "$CREW_BRANCH" ] \
+      && [ "$(strip_quotes "$(nm_field runs_on_current_branch)")" = 0 ]; then
+      run_choice="status-absent"
+    else
+      overview_ok=1
+      run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
+      [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
+      run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
+      [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+    fi
     case "$run_choice" in
       unknown\|*)
         known_run_id=""
@@ -986,7 +1048,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
+    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       # Head equality, the pipeline-owned parked-run exemption, or executing
       # regardless of head: a live run on this branch is current even after a

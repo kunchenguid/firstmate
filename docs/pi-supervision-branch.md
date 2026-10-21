@@ -127,11 +127,14 @@ It excludes the row when any `needs-decision` remains open or the current meanin
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
 
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.
+If a task key or endpoint alias names more than one task, including a record with a missing or empty project, the metadata scan is corrupt and the entire wake stays on main rather than selecting an owner by record order.
+Exact keys take precedence over the `fm-` prefix fallback, and project context comes only from the resolved task's own metadata.
+A projectless owner cannot borrow another alias's project or grant routing authority.
 The cross-reference then applies two rules:
 
 - Any signal or stale trigger containing a decision-owned task goes wholly to main, including a batch that also contains routine rows.
 - An unread decision for one task keeps every later signal or stale trigger for that same task on main until the decision row is read.
-  This holds regardless of whether the rows use its status-file key or window alias.
+  This holds regardless of which key a row carries for that task: its status-file key, its `window=` alias, or its `terminal=` handle, which is what `bin/fm-watch.sh` keys an Orca task's stale rows by.
 
 Other tasks remain independently eligible.
 The wake message itself retains its existing shape, so other harness-arm scripts remain unchanged.
@@ -359,8 +362,9 @@ The mirror never carries tool calls, tool results, operational injections, or th
 Mirroring happens at two points:
 
 - The idle path mirrors at main's turn end.
-- At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry.
-  The complete current captain message therefore precedes any branch wake accepted after that boundary.
+- At a prompt-bearing `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry.
+  Pi 1.1's prompt-only event and Pi 1.2's user event both take this path; no-prompt custom events are never staged as captain dialog.
+  The complete current captain message therefore precedes any branch wake accepted after the prompt-bearing boundary.
   The later persisted copy is suppressed, and older dialog entries remain bounded.
 
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so within one main session only not-yet-mirrored dialog is replayed.
@@ -428,6 +432,14 @@ A lower listed captain sequence is accepted only as a partial acknowledgement an
 Nothing else advances that marker.
 An unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed.
 The extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
+
+The first presentation of a sequence set is an ordinary turn whose response stays visible, including prose alongside `fm_branch_processed`.
+From the second triggered presentation of that same set on, until its listed outcomes are acknowledged, an assistant final is removed before persistence only when its text is empty after trimming or exactly matches a final already visible for that sequence set after trimming.
+Differing replies stay visible, including the first real handling after an empty or unrelated reply.
+Messages carrying tool calls always retain their prose, signed reasoning, and usage accounting.
+Pi's Markdown transformer API buffers retry prose while streaming on versions that expose it, so the complete reply can be compared before rendering.
+A retained reply renders when the message ends.
+Successful acknowledgement releases subsequent assistant output, and a real user message restores ordinary output immediately, including when a processing request rides that prompt.
 
 ### Re-presentation pacing
 
@@ -558,7 +570,7 @@ A leftover `state/.afk` flag declines nothing.
 - Every actionable row is branch-eligible.
   Check rows, decision-owned signal and stale rows, and heartbeat rows are claimed by the branch on whatever wake finds them unread.
   The trigger class no longer forces a batch to main.
-  The two vetoes that describe a broken queue, an unresolvable task-local row and a structurally invalid row, stay vetoes in both postures.
+  The fail-closed scope checks in [Decision-owned rows](#decision-owned-rows), including ambiguous metadata ownership, still apply, as does structural queue validation.
   A prompt that claims a check row is not scoped by task, so the branch may report it as `fleet`.
 - Main is parked, and reachable only for the classes only main can act on:
   - A watcher-failure alarm is delivered to main as always, because `fm_watch_arm_pi` lives there.
@@ -571,6 +583,8 @@ A leftover `state/.afk` flag declines nothing.
 - Captain-verdict outcomes accumulate unprocessed in the outcome store.
   Their visible entries still persist, but no processing turn opens on the parked main.
   The request is re-checked against the record immediately before it would open and at every run boundary, so a request pending when the record appears is cancelled rather than delivered.
+  If the record appears after a dedicated processing run opens, the request-local context check aborts that run; a processing request joining a user or unrelated custom run does not authorize aborting it.
+  While the record exists, processing messages are filtered from request-local context, including earlier stored copies, without deleting session history or acknowledging outcomes.
   The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
 - Main's standing authority relocates to the branch, and nothing more.
@@ -598,7 +612,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 
 | Script | Gate while away |
 | --- | --- |
-| `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
+| `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
 | `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
@@ -617,11 +631,10 @@ It sets these limits:
 - A red merge is refused in this posture whatever the words say.
 - No relocation survives the return, because an archived record validates as absent and the words die with it.
 
-### Cleanup after a landed pull request
+### Cleanup after task completion
 
-The ordinary cleanup of a task whose pull request has landed needs no relocation, because it is the branch's own job in both postures.
-`bin/fm-branch-prompt.sh` names the `check: merge landed:` wake, and any later stale or inactive-outcome row on that task, as the moment to attempt `bin/fm-teardown.sh` without `--force`.
-At that moment the branch reports any refusal instead of concluding there is "nothing to recover".
+Ordinary cleanup of landed ships and completed scouts needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [captain-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
 
@@ -633,7 +646,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
-- Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
+- Suppression of empty or exact-repeat retry finals with differing replies preserved, preserved tool calls and user responses, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
@@ -642,10 +655,12 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 - In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
+- The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
 - Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
@@ -694,9 +709,13 @@ Other tests remain where they were:
 ### Live guards
 
 `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK's immediate active-transcript appendEntry rendering, persistence, custom-entry model exclusion, branch-session surfaces, and watcher-owned fallback after rejected branch settlement.
+The unusable-pin probe observes fallback through a real main AgentSession, extension input and user-message events, stored history, settlement, and intercepted provider requests; only the arm process is a fixture, not a production watcher-continuity proof.
+The startup-context probe checks the actual branch provider request while a later startup handler awaits, before the current prompt enters main's stored history.
+On Pi 1.2, the guard also exercises the vendor's prompt-bearing user and no-prompt custom event boundaries, dedicated processing-run cancellation, and filtering of retained processing history from a subsequent provider request while preserving user and unrelated custom runs.
+Pi 1.1 predates the custom-opening boundary, so those custom-event subprobes explicitly skip there; its applicable user-run control still runs.
 
 `FM_PI_BRANCH_RESPONSIVENESS_E2E=1 tests/fm-pi-branch-responsiveness-live-e2e.test.sh` answers the question only a real TUI can.
 It types into an isolated Pi pane while outcomes are delivered and fails if keystroke echo leaves the class of the same machine's extension-free floor.
 
 Record dated current results in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
-The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
+The [strict production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) owns its pinned SDK/compiler matrix and temporary dependencies independently of the installed Pi runtime.

@@ -33,6 +33,13 @@ run_node() {  # <script-file>
   node --input-type=module <"$1"
 }
 
+# js_string <value>: a JavaScript string literal for a shell value, for the
+# generated scripts below. ${value@Q} would need Bash 4.4 and yields shell
+# quoting; stock macOS Bash 3.2 reports a bad substitution.
+js_string() {  # <value>
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' -- "$1"
+}
+
 test_plugin_shape() {
   local link resolved autoload
   link="$ROOT/.agents/skills/firstmate-calm"
@@ -49,7 +56,7 @@ test_plugin_shape() {
   [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
   cat >"$TMP_ROOT/shape.mjs" <<JS
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-const mod = ${MOD@Q};
+const mod = $(js_string "$MOD");
 const manifest = JSON.parse(readFileSync(\`\${mod}/.claude-plugin/plugin.json\`, "utf8"));
 if (manifest.name !== "fm") throw new Error(\`manifest name \${manifest.name}\`);
 for (const key of ["commands", "agents", "skills", "hooks", "mcpServers", "lspServers", "outputStyles"]) {
@@ -77,8 +84,8 @@ test_shared_sprite_and_pi_rendering() {
   local out
   cat >"$TMP_ROOT/sprite.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const pi = await import(pathToFileURL(${PI_SHIP@Q}).href);
-const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const pi = await import(pathToFileURL($(js_string "$PI_SHIP")).href);
+const core = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
 const ANSI = { water: ESC + "[34m", boat: ESC + "[33m" };
 const RESET = ESC + "[39m";
@@ -152,8 +159,8 @@ test_raster_packing() {
   cat >"$TMP_ROOT/raster.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
-const raster = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-ship-raster.ts").href);
-const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const raster = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-calm-ship-raster.ts").href);
+const core = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 for (let length = 0; length <= 80; length += 1) {
   const bytes = new Uint8Array(randomBytes(length));
@@ -235,8 +242,8 @@ test_presentation_policy() {
   local out
   cat >"$TMP_ROOT/policy.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const policy = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-presentation.ts").href);
-const piPreservation = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
+const policy = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-calm-presentation.ts").href);
+const piPreservation = await import(pathToFileURL($(js_string "$ROOT") + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const plugin = "/repo/.claude/mods/firstmate-calm";
 check(policy.calmPreferencePath({}, plugin) === "/repo/config/calm", "plugin-root fallback");
@@ -473,8 +480,8 @@ test_classifier_parity_with_shell_owner() {
   cat >"$TMP_ROOT/classify.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL(${MOD@Q} + "/lib/fm-operational-input.ts").href);
-const corpus = ${corpus@Q};
+const port = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-operational-input.ts").href);
+const corpus = $(js_string "$corpus");
 const count = ${count};
 const lines = [];
 for (let index = 1; index <= count; index += 1) {
@@ -554,8 +561,8 @@ test_doorbell_parity_with_shell_owner() {
   cat >"$TMP_ROOT/doorbells.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL(${MOD@Q} + "/lib/fm-operational-input.ts").href);
-const dir = ${dir@Q};
+const port = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-operational-input.ts").href);
+const dir = $(js_string "$dir");
 const lines = [];
 for (let index = 1; index <= ${count}; index += 1) {
   const record = port.firstmateOperationalDoorbellPath(readFileSync(\`\${dir}/case-\${index}.txt\`, "utf8"));

@@ -17,7 +17,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-drain-outcome-backstop-tests)
 # explicit off file pins that posture on every primary instead of reading the
 # code root's config (bin/fm-supervision-engine-lib.sh owns the gate).
 mkdir -p "$TMP_ROOT/config"
-printf 'off\n' > "$TMP_ROOT/config/supervision-host"
+: > "$TMP_ROOT/config/supervision-host-off"
 export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
 
 set_mtime() {  # <epoch> <file>

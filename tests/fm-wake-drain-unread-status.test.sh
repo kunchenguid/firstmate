@@ -21,7 +21,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-drain-unread-status-tests)
 # the explicit off file pins that posture on every primary instead of reading
 # the code root's config (bin/fm-supervision-engine-lib.sh owns the gate).
 mkdir -p "$TMP_ROOT/config"
-printf 'off\n' > "$TMP_ROOT/config/supervision-host"
+: > "$TMP_ROOT/config/supervision-host-off"
 export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
 
 # Establish the durable last-presentation cursor by draining once over a

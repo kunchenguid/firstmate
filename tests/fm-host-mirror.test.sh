@@ -31,12 +31,12 @@ git init -q "$PRIMARY_ROOT"
 : > "$PRIMARY_ROOT/AGENTS.md"
 ln -s "$ROOT/bin" "$PRIMARY_ROOT/bin"
 
-make_home() {  # <name> [config/supervision-host: 1 (empty file) | 0 (none) | off]
+make_home() {  # <name> [1 (empty config/supervision-host) | 0 (none) | off (config/supervision-host-off)]
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/config"
   case "${2:-1}" in
     1) : > "$home/config/supervision-host" ;;
-    off) printf 'off\n' > "$home/config/supervision-host" ;;
+    off) : > "$home/config/supervision-host-off" ;;
   esac
   printf '%s\n' "$home"
 }
@@ -90,7 +90,7 @@ main|cursor main" "$out" "every tracked registration must write its captain prom
   pass "mirror: the Claude and Cursor registrations each write the captain's prompt and main's reply"
 }
 
-# Non-host invariance: on a home whose config/supervision-host says off, every
+# Non-host invariance: on a home opted out by config/supervision-host-off, every
 # tracked mirror registration prints nothing and leaves the home's state
 # byte-for-byte as it was, even for the lock-owning primary session in a
 # primary checkout.
@@ -114,7 +114,7 @@ test_home_that_opted_out_is_untouched() {
   [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home that opted out: $(cat "$home/writers.out")"
   after=$(snapshot "$home")
   assert_equals "$before" "$after" "a mirror writer changed the state of a home that opted out"
-  pass "mirror: a home whose config/supervision-host says off is untouched by every tracked mirror registration"
+  pass "mirror: a home opted out by config/supervision-host-off is untouched by every tracked mirror registration"
 }
 
 # Default-on for Claude: with no config/supervision-host, the Claude
@@ -145,7 +145,7 @@ test_writers_are_inert_on_a_home_that_opted_out() {
   as_session "$home" '
     printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}" | "$MIRROR" hook claude
   ' || fail "an inert writer failed"
-  assert_absent "$home/state/.host-mirror.jsonl" "a home whose config/supervision-host says off must mirror nothing"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home opted out by config/supervision-host-off must mirror nothing"
   crew="$TMP_ROOT/crew-worktree"
   mkdir -p "$crew"
   out=$(printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}' | FM_HOME="$crew" "$MIRROR" hook claude 2>&1)
