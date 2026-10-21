@@ -129,8 +129,10 @@
 # records-only, touching nothing under the slot, so the scan is skipped rather
 # than stranding the stale record and, with it, the claimant's own teardown. A
 # claim naming this task and written by this home proves this record took the
-# slot last, so each other record naming it is reported as stale and left in
-# place rather than refusing both teardowns forever.
+# slot last, so each other record naming it whose own recorded endpoint is
+# proven not live is reported as stale and left in place rather than refusing
+# both teardowns forever; another record with a live or unprovable endpoint
+# still refuses.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2581,6 +2583,18 @@ slot_claim_home_owns_state() {  # <claim-home> <record-state>
   [ "$record_state" -ef "$STATE" ] && [ "$claim_home" -ef "$FM_HOME" ]
 }
 
+# Whether another task record's own recorded endpoint is proven not live: its
+# endpoint metadata validates and the recovery-grade classifier reads it dead
+# or missing. Every other answer, including a validation failure, is not proof.
+other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
+  local FM_BACKEND_VALIDATED_BACKEND FM_BACKEND_VALIDATED_TARGET
+  fm_backend_validate_task_endpoint "$1" "$2" 2>/dev/null || return 1
+  case "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" in
+    dead|missing) return 0 ;;
+  esac
+  return 1
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot claimed=0
@@ -2595,8 +2609,11 @@ require_exclusive_worktree_slot_record() {
   # record took the slot last: the claim is written under the project lock that
   # allocates the slot, so every other record naming it predates that
   # allocation and is stale. Refusing would strand both records, since the
-  # stale one is records-only and never clears this one. A matching task id
-  # from any other home proves nothing, so the scan still refuses there.
+  # stale one is records-only and never clears this one. That holds only if the
+  # other task's allocator wrote a claim, so another record is treated as stale
+  # only when its own recorded endpoint is also proven not live; a live or
+  # unprovable endpoint still refuses. A matching task id from any other home
+  # proves nothing, so the scan still refuses there.
   if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] \
      && slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$record_state"; then
     claimed=1
@@ -2616,8 +2633,8 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        if [ "$claimed" = 1 ]; then
-          echo "warning: task $other_id's recorded $field also names $slot, but that slot's owner claim names $record_id, which took the slot after $other_id's record was written; $other_id's record is stale and is left in place for its own teardown." >&2
+        if [ "$claimed" = 1 ] && other_record_endpoint_proven_gone "$other" "$other_id"; then
+          echo "warning: task $other_id's recorded $field also names $slot, but that slot's owner claim names $record_id, which took the slot after $other_id's record was written, and $other_id's recorded endpoint is not live; $other_id's record is stale and is left in place for its own teardown." >&2
           continue
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
@@ -2639,8 +2656,9 @@ require_exclusive_task_worktree_slot() {
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
 # The record scan above proves that no OTHER task record names the slot, unless
-# a claim from this home names this task, in which case any such record is
-# stale. The scan alone cannot prove that THIS record is
+# a claim from this home names this task, in which case any such record whose
+# own recorded endpoint is proven not live is stale. The scan alone cannot prove
+# that THIS record is
 # not the stale one, because the task that took the slot next may leave no record
 # this scan can reach: its own worker may have exited and its record been cleaned
 # up, or it may belong to a home this machine does not register. The claim closes that gap from the other side - it names the
