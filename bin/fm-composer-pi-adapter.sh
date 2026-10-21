@@ -10,7 +10,7 @@
 # and docs/verification/runtime-backends.md "Pi Codex usage-limit banner"):
 #   - pi 0.85.1: banner alone above the separator pair
 #   - pi 0.87.1: banner plus one fixed "/bug sends a report" hint row
-#   - pi 0.99.2, 1.0.0: same banner plus hint-row shape as 0.87.1
+#   - pi 0.99.2, 1.0.0, 1.3.0: same banner plus hint-row shape as 0.87.1
 #
 # The adapter reads the installed release from the first line of `--version`,
 # once per process per executable. A caller that knows the task names the Pi
@@ -33,7 +33,7 @@
 
 # Pinned releases whose rendered banner shape has a live guard record.
 # Space-separated exact `pi --version` first-line values (no "pi " prefix).
-FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1 0.99.2 1.0.0'}
+FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1 0.99.2 1.0.0 1.3.0'}
 
 # The terminal provider-error banner pi draws directly above its composer once
 # a turn has ended on Codex's usage limit. Why it may relax the separated
