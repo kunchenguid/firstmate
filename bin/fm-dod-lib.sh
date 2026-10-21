@@ -622,9 +622,17 @@ fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
 # path on this same test, so every CI-ready line it acts on is gated.
 fm_dod_note_reports_ci_ready() {  # <note>
   case "$1" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *"checks green"*) ;;
+    *) return 1 ;;
   esac
-  return 1
+  fm_dod_note_has_pr_reference "$1"
+}
+
+# 0 when a note contains a PR/MR URL or a PR #<n> / PR#<n> token,
+# not the bare letters PR inside words such as PROD or PROPERTIES.
+fm_dod_note_has_pr_reference() {  # <note>
+  printf '%s' "$1" \
+    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
 }
 
 # 0 when a done: note reports a change published to a Gerrit review server

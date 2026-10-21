@@ -1387,6 +1387,21 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+# Remove only Polytoken's firstmate-generated worktree wiring, as named by
+# fm_control_harness_wiring_paths. Its tracked hook and facet layers belong to
+# the project. Other harnesses retain their existing worktree-return cleanup.
+remove_harness_worktree_wiring() {  # <worktree>
+  local wt=$1 path
+  [ "$(meta_value "$META" harness)" = polytoken ] || return 0
+  while IFS= read -r path; do
+    case "$path" in "$wt"/*) ;; *) continue ;; esac
+    git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue
+    rm -f "$path"
+  done <<EOF
+$(fm_control_harness_wiring_paths "$(meta_value "$META" harness)" "$wt" "$STATE" "$ID")
+EOF
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -3133,7 +3148,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fi
   done
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
+    # shellcheck source=/dev/null
     . "$SCRIPT_DIR/fm-wake-lib.sh"
   fi
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
@@ -3383,9 +3398,13 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/$child_id.claude-settings.json" "$sub_state/$child_id.devin-config.json" \
+      "$sub_state/$child_id.polytoken-busy.sh" \
       "$sub_state/.$child_id.branch-outcome-index"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
-    rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard"
+    rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
+      "$sub_state/$child_id.polytoken-config" \
+      "$sub_state/$child_id.polytoken-sessions" \
+      "$sub_state/$child_id.polytoken-sessions-v1"
   done
 }
 
@@ -3662,6 +3681,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
@@ -3680,6 +3700,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  remove_harness_worktree_wiring "$WT"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3868,6 +3889,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
+  "$STATE/$ID.polytoken-busy.sh" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
@@ -3877,7 +3899,13 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer, and state/<id>.push-guard is a forge=external
 # task's read-only push guard record (bin/fm-git-push-guard.sh).
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
-rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard"
+# A task's polytoken config dir and sessions roots are directory trees (the
+# mirrored worker config and the versioned session tree the launch wrote
+# beside its sessions root), so they are removed recursively with the inbox
+# and the git-hooks dir rather than the flat file list above.
+rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
+  "$STATE/$ID.polytoken-config" \
+  "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the
 # recorded pane is proven gone (the Herdr gate above) unless it still names a
 # live projected workspace - a version 2 binding of some other pane, or a

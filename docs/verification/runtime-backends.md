@@ -6,6 +6,12 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Polytoken worker lifecycle
+
+Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
+[Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
+This does not verify a Polytoken primary, secondmate, or native Herdr pane.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
@@ -324,7 +330,7 @@ Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Paseo records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -332,7 +338,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and Paseo before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -788,12 +794,60 @@ Kimi was not installed on the verification machine; its bordered shape is pinned
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
-The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
-Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owes a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width is not live-verified and may need adjustment if Grok's title rendering changes or scales with title length.
+For that Grok 1.0.5 capture, the classifier accepts only the exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
+Grok was not installed on the verification machine for this 2026-09-14 change; the three-column width remains capture-only evidence, is not live-verified, and may need adjustment if Grok's title rendering changes or scales with title length.
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
+Grok has since changed that title again, and the newer accepted shape - the same title at the ALIGNED width carrying an approval mode - is recorded in [Grok approval-titled bottom border](#grok-approval-titled-bottom-border) so the two widths are never conflated.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
+
+### 2026-10-14 opencode 1.19.0 de-emphasised mode/footer row in the left-bar composer
+
+Verified on 2026-10-14 on macOS arm64 against an installed opencode 1.19.0 running as a Firstmate worker in a tmux 3.6a pane, read through `fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`) with the tmux capability descriptor (`styled=1`, `cursor=1`, `identity=1`, `rows=0`).
+Every message the fleet tried to send and every worker restart or shutdown was refused, because the composer verdict authorizing typing was `pending` on a composer that was empty.
+
+Opencode's left-bar composer draws its mode/model/branch line INSIDE the box as its last row, and that row's identifying cells are DE-EMPHASISED: the mode word is `ESC[38;2;67;133;190m` (luminance 119.8) and the middle-dot separators are `ESC[38;2;111;110;105m` (luminance 109.7), both under `FM_COMPOSER_GHOST_LUMA_MAX`'s 128, while the model, effort, and branch cells beside them are bright.
+`fm_composer_strip_ghost` exists to answer "what did the human type?", so it deleted precisely the cells that identify the footer, and the row reached `_fm_composer_classify_leftbar` opening at the bright model cell (`Space Bunny max fm-composer-footer` on the pane above, `Grok 4.7 ... tt-record-refresh` on the pane the incident was recorded from) instead of at `Build`.
+`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT`'s `^(Build|Plan)` anchor therefore could not match on ANY styled backend - tmux, Herdr, and Zellij all pass `styled=1`, which is every backend except cmux, orca, and Paseo - so the exemption was unreachable and a real idle composer read `pending`.
+`pending` is the one verdict that blocks a steer: `fm_task_inbox_ring` defers on it and `bin/fm-watch.sh`'s re-ring calls the same function, and `bin/fm-send.sh` and `bin/fm-control.sh` refuse it, so the measured cost was three manual interventions into worker panes in one day.
+The geometry was never at fault: the pane's floor row is still `╹` + `▀` and `_fm_composer_leftbar_floor_row` still recognizes it, and the run's LAST row was correctly the footer row.
+
+`_fm_composer_row_is_leftbar_footer` now proves the footer from BOTH forms of that row, the ghost-stripped content and the ANSI-stripped plain row, because the second is the only form that still carries opencode's own de-emphasised mode cell.
+The plain form can only newly exempt a row the ghost-stripped row still fails, which means its stripped content is non-empty while its own leading `Build`/`Plan` cell was stripped as ghost, and opencode de-emphasises its own furniture rather than a typed row's leading cells - so the only rows it admits are de-emphasised furniture, and the mode footer is the only furniture opencode draws that opens with a mode word. That is what makes the exemption self-confirming, and it is the argument to recheck when a new opencode release moves a colour.
+
+The live half is `tests/fm-composer-matrix-live-e2e.test.sh`, run against the same branch before and after the change; only the opencode arm is claimed here, and its `pending`-to-`empty` transition is the whole result:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+before: not ok - opencode (1.19.0): idle composer never classified empty (last verdict: pending)
+after:  ok - opencode (1.19.0): real idle composer classifies empty
+        ok - opencode (1.19.0): the same idle pane read cursorless is not pending (verdict: unknown)
+```
+
+The same two guard failures appear in BOTH runs and are the documented environmental ones, not this change's: `claude` 2.1.287 parks on its first-run theme picker, and `pi` 1.2.0 parks on an untrusted-folder dialog for this disposable worktree's parent path, which the guard's header states it correctly refuses to confirm.
+Codex, Grok, Kimi, Muse, and zellij were not installed, so they were reported absent rather than verified.
+The cursorless arm is the one that matters for the doorbell, because it is the arm that refuses the skipping verdict: on the recorded live pane it read `unknown`, which defers, and not `pending`. That verdict is not the footer exemption doing the work - a cursorless read selects the bottom-most shape on the screen instead of the cursor-anchored run, so whatever opencode draws below the composer's floor row decides it, and on this record's capture, which keeps only the composer, the same pane read cursorless reaches the same run and reads `empty`.
+
+The portable half lives in `test_matrix_opencode_leftbar_signals` in `tests/fm-composer-lib.test.sh`, carrying the live row's foreground truecolor triples byte for byte in both states: the idle pane reads `empty` on tmux, on Herdr, and on Zellij, while a bright `fix the doorbell skip` input row above the same footer reads `pending` on tmux and on Herdr; every one of those assertions is re-run under `LC_ALL=C`.
+The same bytes on a plain backend read `unknown` in both states, because opencode 1.19.0 also draws a de-emphasised `~/.treehouse/fm001-b8697d/1/fm001:fm/` row inside the box that survives an unstyled capture, so the strict posture keeps deferring rather than reading `empty` there.
+Overriding `FM_COMPOSER_LEFTBAR_FOOTER_RE` to a pattern that cannot match puts the false `pending` straight back on the captured idle pane, which pins the exemption as the load-bearing signal rather than an incidental pass.
+`fm_composer_extract_selected_content` applies the same rule to the same run, so the classified-empty pane hands back no composer text and the typed pane hands back only `fix the doorbell skip`; zellij's append proof (`fm_backend_zellij_composer_observed_append` in `bin/backends/zellij.sh`) requires the extracted text to equal the prior content plus the typed text, so a footer leaking into that read fails the send instead of confirming one.
+### Grok approval-titled bottom border
+
+Recorded 2026-10-01; the shape was first observed on Grok 1.0.44 on 2026-09-29, on an idle composer the classifier then read as `unknown`. The classifier update was exercised again on 2026-10-15 against Grok 1.0.62; see the live-validation evidence below.
+This is the second title shape the bordered family tolerates, and its geometry is the opposite of the Grok 1.0.5 case above: Grok 1.0.44 draws the title INSIDE the rounded bottom border at exactly the width of that box's own top border, and appends its approval mode after the model/effort title joined by a mid-dot - `╰── … ── Grok 4.7 (high) · always-approve ─╯`.
+That mid-dot is neither the family's rule glyph nor printable ASCII, so under the rule as it stood the title left geometry residue, the idle pane classified `unknown`, the injection guard deferred, and `bin/fm-control.sh`'s guarded exit and relaunch refused to type `/exit` on a composer holding nothing.
+The accepted delta is the suffix on the observed rounded family alone: `_fm_composer_titled_bottom_ok` requires exactly one trailing ` · always-approve` on a typed `Grok <model> (<effort>)` title, replaces that single mid-dot column with an ASCII `.` so nothing survives the residue test, and then accepts the rounded bottom border only at the aligned width.
+Everything around it stays `unknown` by construction - a second mid-dot, a mid-dot outside this shape, another approval mode, another brand, an unlisted effort, or this suffix at any other width including Grok 1.0.5's overhang - so a release that renames the approval mode or moves the title back to an overhang falls back to the fail-safe verdict instead of fabricating an injectable composer.
+Live validation ran 2026-10-01 on Grok 1.0.46 (2765805b9442) [stable], with follow-up validation on 2026-10-15 against Grok 1.0.62. The current-release run captured idle, draft, and cleared states at 120x40, plus idle panes at 80x30 and 220x50; the real tmux adapter, pending-input guard, and backend adapter reported empty/allow, pending/defer, then empty/allow, and styled Herdr and cursorless cmux/orca profiles agreed on those same captures. See run evidence for exact artifacts and commands; no prompt was submitted.
+The same run's `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` proved the real idle grok 1.0.46 composer `empty` through tmux and checked that the cursorless re-read was not `pending`.
+The portable owner of the shape is `test_matrix_grok_144_approval_titled_bottom_border` in `tests/fm-composer-lib.test.sh`, which pins the `Grok 4.7 (high)` approval title's idle `empty` on tmux (with the cursor on either the content row or bottom border), herdr, and cmux/orca capability profiles, and typed `pending` on tmux and herdr only.
+It also pins idle `empty` for `Grok 4.6` at all four efforts (`low`, `medium`, `high`, `xhigh`) on tmux only, `unknown` for the tested malformed titles on tmux, rejection of light, heavy, double, and ASCII approval-title boxes on tmux, herdr, and cmux/orca profiles, and Grok 1.0.5's three-column overhang still proving `empty` for a title without the suffix on tmux.
+After a Grok upgrade, rerun that live guard and refresh both this record and the 1.0.5 note above: each accepted width is pinned to an observed release, the 1.0.5 overhang has never been live-verified, and neither the approval wording nor either width carries a guarantee across a release.
 
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
@@ -956,7 +1010,7 @@ ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker,
 ```
 
 All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
-Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which motivated the ring's advisory pre-check not to skip on ambiguity - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
+Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classified `empty` in that run (the [Composer classification matrix](#composer-classification-matrix) owns the subsequent fix, its capture-only overhang evidence, and later live results), which motivated the ring's advisory pre-check not to skip on ambiguity - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 The current pending-composer ring contract is owned by `bin/fm-task-inbox-lib.sh`.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
@@ -2116,6 +2170,42 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Paseo
+
+The current compatibility floor is Paseo 0.8, and the active live evidence uses Paseo 0.8.0 on macOS.
+The bundled CLI was found at `/Applications/Paseo.app/Contents/Resources/bin/paseo`, and the daemon was already healthy on `127.0.0.1:6767` (`paseo status`).
+
+Real live checks used a throwaway project directory, its shared `firstmate` workspace, and `fm-test-` scoped probe terminals, torn down (project included) at the end of the pass.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Workspace create | `workspace create --path <dir> --isolation local --title firstmate --json` | Created the shared workspace under the project registered for `<dir>`; a second call for the same path reused that project and did not add another. |
+| Project registration | `project ls --json`, `project delete <id>` | Paseo registers the project by path on workspace create and keeps it after its workspaces are archived; `project delete` removes it from the sidebar and leaves the folder on disk (verified on 0.9.2). The adapter deletes only a project for one of the home's own clones. |
+| Workspace adoption | `workspace ls --json` | Reports the title in `name` and the cwd normalized (no doubled slash) but not symlink-resolved, so adoption matches the raw, logical, and physical path. Duplicate titles are allowed; the adapter adopts the first match. |
+| Terminal create | `terminal create --workspace <id> --cwd <dir> --name <name> --json` | Created one terminal tab bound to that workspace, unfocused; a second create in the same workspace added a sibling tab. |
+| Literal send | `terminal send-keys <id> -l -- <text>` | Left text unsubmitted. |
+| Submit | `terminal send-keys <id> Enter` | Submitted the pending literal. |
+| Escape | `terminal send-keys <id> Escape` | Accepted; in zsh's emacs keymap the bare Escape stays pending and fuses with the next key whatever the gap, so the smoke test never sends text right after it. |
+| Key tokens (source) | `terminal send-keys <id> <key>` versus `-l` | The 0.8.0 bundle's `@getpaseo/client` `resolveKeyToken` maps only Enter, Tab, Escape, Space, BSpace, C-c, C-d, C-z, C-l, C-a, and C-e and returns any other name unchanged, so it is typed as text; `-l` writes its argument as raw input, which is how the adapter delivers Ctrl-U as `0x15`. |
+| Capture | `terminal capture <id> -S --json` (also `--ansi` for styled reads) | Returned `{terminalId, lines[], totalLines}`; the probe round-trip echoed `hello-paseo-probe` back in `lines`. |
+| Kill | `terminal kill <id>` | Removed only that tab; the sibling tab and the workspace stayed live. |
+| Workspace retire | `workspace archive <id>` after the last `terminal kill` | On Paseo 0.9.2, closing the last task tab of a per-project `firstmate` workspace for a clone under the home's `projects/` archived it and deleted that project, under the home-wide `state/.paseo-workspace.lock` shared with spawn; a tab placed in Firstmate's own workspace (found by home cwd from a Paseo agent) closed without archiving that workspace. |
+| Stderr noise | any call from inside a Paseo agent | The CLI prints an Electron warning on stderr before its JSON, so parsed calls never merge stderr into stdout. |
+| Worktree create | `worktree create` | Available; Treehouse remains the worktree provider, so this adapter never calls it. |
+
+Running inside a Paseo agent exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI`; a terminal tab created with `terminal create` exposes `PASEO_TERMINAL_ID`, `PASEO_WORKSPACE_ID`, `PASEO_CLI`, and no `PASEO_AGENT_ID`; both carry `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices (verified live 2026-09-18).
+None of them selects the backend: `fm_backend_detect` ignores every Paseo marker, because they reach every descendant process including a tmux server started from a Paseo tab.
+`PASEO_WORKSPACE_ID` and `PASEO_AGENT_ID` are consulted only after an explicit selection, to find Firstmate's own workspace for task tabs.
+
+```sh
+tests/fm-backend-paseo.test.sh
+tests/fm-backend-paseo-smoke.test.sh
+```
+
+The real smoke proves daemon reachability, shared-workspace creation and adoption, sibling tabs without a second project, current-path probing, send and keys, bounded capture, tab-only kill, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
@@ -2288,8 +2378,8 @@ Other harnesses on Herdr are unaffected by the edge-detector change.
 All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
 
 **Typed-submit confirmation is verified on tmux and Herdr only.**
-Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
-Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
+Zellij, cmux, Orca, and Paseo share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
+Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those four backends and needs its own live validation on each.
 
 The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.
 Refresh this harness-dependent proof before accepting a cursor upgrade:
@@ -2334,7 +2424,7 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 - Picker primitives: on 2026-08-26, after the final portable-shell and sentinel fixes, `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` again printed `ok - the installed Pi still bounds the picker's list and ranks its search` against the same installed 0.81.1 package.
   That case imports the real `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder`, renders a 42-row catalog through the real `SelectList` at the visible bound the extension asks for, and fails naming the installed version if Pi stops exporting a primitive or stops bounding what it renders; it skips when no npm package is installed, and the portable stubbed cases in the same file hold the ordering, search, and branch-only-pin behavior everywhere.
 - Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1` with the branch extension and its imported libraries included.
-  This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Firstmate catalog.
+  [The extension's effort-vocabulary assertion](../../.pi/extensions/fm-branch-supervision.ts) owns that invariant; the [typecheck](../../tests/fm-pi-primary-types.test.sh) owns the checked SDK matrix.
 - Historical custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
   This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
@@ -2431,8 +2521,9 @@ The current portable regression proves that only consecutive provider errors cou
 [`pi-supervision-branch.md`](../pi-supervision-branch.md) owns the current cooldown, recovery, and re-latch contract and points to the regression that now covers it.
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
-The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
-The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
+The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the npm surface; refresh the SDK construction, picker, and renderer evidence after every Pi upgrade by rerunning the applicable live guard probes and picker regression with `FM_PI_PACKAGE_DIR` pointing at a matching npm install when one exists.
+The [strict production-consumer typecheck](../../tests/fm-pi-primary-types.test.sh) owns its dependency contract; historical typecheck commands and outputs here do not describe its current SDK selection.
+The [live-guard contract](../pi-supervision-branch.md#live-guards) owns the current fallback observations and fixture limits; rerun it against the matching importable Pi package to refresh SDK fallback evidence.
 
 ### 2026-09-02 streaming-time watcher delivery
 
@@ -2515,7 +2606,7 @@ ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
 ```
 
 Every record read in those regressions ultimately goes through the real `bin/fm-afk-contract.sh`, with fixture wrappers used only to archive at deterministic call boundaries; an absent record, an archived record, and an invalid record are proven to restore attended guarded-action behavior rather than being assumed to.
-Against the installed 0.81.1 package the typecheck reports a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that this change does not touch; the option exists from the 0.84 line on, which is why the typecheck evidence uses the newer package as the earlier entries do.
+At that verification, checking against the installed 0.81.1 package reported a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that the away-posture change did not touch; the option exists from the 0.84 line on, which is why that typecheck evidence used the newer package as the earlier entries did.
 The real Pi/Herdr return guard (`FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh`) remains the owner of the live return-brief proof; it loads no supervision extension into its synthetic primary and does not yet exercise the parked-main scenario, which is a follow-up for a Herdr-lab-guarded task.
 
 ### 2026-09-20 the away words execute

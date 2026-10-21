@@ -1110,6 +1110,40 @@ test_lease_liveness_binds_to_the_session_lock() {
   pass "lease liveness requires an exact valid session-lock pid"
 }
 
+test_claim_with_a_holder_pinned_before_a_reanchor_records_the_lock_holder() {
+  local home out status
+  local -x PI_CODING_AGENT=true
+  home="$TMP_ROOT/pinned-reanchor-home"
+  mkdir -p "$home/state"
+
+  # The branch turn pinned $PPID, then a same-session re-anchor moved line 1 to
+  # $$ while $PPID stayed alive: a new claim and a refresh record line 1.
+  printf '%s\n' "$$" > "$home/state/.lock"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$PPID "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch \
+    || fail "branch claim with the pinned pre-re-anchor holder failed"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$PPID "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch \
+    || fail "branch refresh with the pinned pre-re-anchor holder failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-1)
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "a claim pinned before the re-anchor did not record the live lock holder: $out" ;;
+  esac
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim task-1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "main claimed the branch's task after the re-anchor: $status: $out"
+
+  # A dead pinned holder means another session took the lock: the claim keeps
+  # the dead pid, so the lease stays stale.
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=999999 "$ROOT/bin/fm-lease.sh" claim task-2 --actor branch \
+    || fail "branch claim with a dead pinned holder failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-2)
+  case "$out" in
+    "branch 999999 "*" stale") ;;
+    *) fail "a dead pinned holder was replaced by the lock holder: $out" ;;
+  esac
+  pass "a claim pinned before a re-anchor records the live lock holder; a dead pin stays stale"
+}
+
 test_concurrent_stale_lease_claims_have_one_winner() {
   local home fakebin real_mv branch_pid main_pid branch_status main_status
   local -x PI_CODING_AGENT=true
@@ -1602,6 +1636,7 @@ test_unmarked_main_honors_a_live_branch_lease
 test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation
 test_host_home_unmarked_guard_excludes_the_first_claim
 test_lease_liveness_binds_to_the_session_lock
+test_claim_with_a_holder_pinned_before_a_reanchor_records_the_lock_holder
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation

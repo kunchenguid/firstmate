@@ -21,6 +21,7 @@ The explicit native `ultra` value follows the model-scoped refusal contract in `
 For other values, if requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
 This preserves launch success instead of passing a known-bad value.
 A harness with no verified interactive effort flag follows the same record-and-omit contract.
+Polytoken uses its [model-scoped selectable-reference contract](../harness/polytoken.md) instead of record-and-omit.
 
 ## Harness and provider identity
 

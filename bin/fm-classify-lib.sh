@@ -977,6 +977,32 @@ EOF
   return 1
 }
 
+# 0, printing `blocked` or `needs-decision`, when the task's newest status event
+# is a line of that verb that the worker wrote and that is still open: its key
+# must hold that verb in status_own_open_decisions, so a supervisor-reserved key
+# never counts. Only the newest event is read, so any later line ends it - a
+# resolved line for any key included - and so does a steering-inbox record the
+# worker acknowledged that was written after it (bin/fm-task-inbox-lib.sh owns
+# that handled/ layout), which is an answer that arrived without a closing
+# resolved line.
+status_worker_wait_verb() {  # <status-file>
+  local f=$1 last verb key own rec
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  status_line_verb "$last" verb
+  case "$verb" in blocked|needs-decision) ;; *) return 1 ;; esac
+  key=$(_fm_decision_key "$last") || return 1
+  own=$(status_own_open_decisions "$f")
+  case "$own" in
+    "$key"$'\t'"$verb"$'\t'*|*$'\n'"$key"$'\t'"$verb"$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  for rec in "${f%.status}.inbox/handled"/*.msg; do
+    [ "$rec" -nt "$f" ] && return 1
+  done
+  printf '%s' "$verb"
+}
+
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
 _fm_open_set_has() {  # <open-set> <key>
   case "$1" in
