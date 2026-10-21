@@ -8,7 +8,7 @@
 # config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
 # since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
-# either a paused: external wait or a verified captain-held transfer, is the
+# either a paused: external wait or a captain-held declaration, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
@@ -26,7 +26,7 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause or verified captain-held transfer is
+#                          external-wait pause or captain-held declaration is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
@@ -49,8 +49,8 @@
 #                          reasons below keep their wording.
 #                          Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
-#                          wait or a verified `captain-held` transfer its worker
-#                          declared, a backlog captain hold on its task, or,
+#                          wait its worker declared or a `captain-held`
+#                          declaration on its log, a backlog captain hold on its task, or,
 #                          where config/wedge-defer-worker-wait arms it, its own
 #                          still-open newest `blocked:` or `needs-decision:`
 #                          line, or, where config/wedge-defer-parked-gate
@@ -79,7 +79,7 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
+#                          wait or captain-held declaration uses the long
 #                          pause recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
@@ -428,8 +428,8 @@ afk_present() { [ -e "$STATE/.afk" ]; }
 # their condition-aware cadence in both postures.
 away_record_present() { fm_afk_contract_away_present "$STATE"; }
 
-# captain_held_silenced <status-line>: 0 when the line declares a captain-held
-# transfer and an away record exists, so every stale path absorbs the pane
+# captain_held_silenced <status-line>: 0 when the line is a captain-held
+# declaration and an away record exists, so every stale path absorbs the pane
 # silently instead of rechecking it.
 captain_held_silenced() {  # <status-line>
   status_is_captain_held "$1" && away_record_present
@@ -1738,7 +1738,7 @@ busy_turn_over_age() {  # <task>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
+# dead-agent captain-held declaration, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -1805,7 +1805,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
 # foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
+# captain-held declaration instead identifies that live foreground call as
 # the expected external wait. The caller has already confirmed liveness through
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
@@ -1969,7 +1969,7 @@ pause_state_class() {  # <window> <task>
   # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
   # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
   # read and so cannot supply that confirmation. Without the mate case a mate's
-  # status-declared `captain-held` transfer - which has no current-state mapping
+  # status-declared `captain-held` line - which has no current-state mapping
   # and so arrives as `none` - would be silenced by every caller rather than taking
   # the bounded re-surface cadence, and a forgotten declaration would rot invisibly.
   [ "$class" = none ] && class=paused

@@ -555,7 +555,7 @@ The display status comes from the task's status log through the shared classifie
 
 | Rank | `fm_state` | Status log |
 | --- | --- | --- |
-| 1 | `needs-captain` | An open decision, or a captain-held transfer. |
+| 1 | `needs-captain` | An open decision, or a `captain-held` line - a transfer, or the hold's own declaration - that the hold-aware read leaves as the current line. |
 | 2 | `problem` | `blocked` or `failed`. |
 | 3 | `running` | Anything else, including `working`, `paused`, and no status yet. |
 | 4 | `done` | `done`. |
@@ -879,8 +879,8 @@ The watcher maps the pane back to the task and skips these:
 - Secondmate endpoints.
 - Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
   It is left to the watcher's own bounded pause cadence.
-- Verified `captain-held` transfers.
-  A captain-held transfer remains silent without rechecks while the away-posture record exists.
+- `captain-held` declarations, the hold's own or a verified `complete` transfer.
+  A captain-held declaration remains silent without rechecks while the away-posture record exists.
 
 ### Polling fallback
 
