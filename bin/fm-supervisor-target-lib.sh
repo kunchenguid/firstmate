@@ -22,7 +22,8 @@ FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
-#   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
+#   1. FM_SUPERVISOR_TARGET env (explicit override) - uses the exact tmux target
+#      forms owned by bin/fm-backend.sh's fm_backend_target_exists header, or a
 #      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend
 #      to know which).
 #   2. $TMUX_PANE - tmux sets this in every pane's environment; inherited by a

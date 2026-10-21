@@ -3048,16 +3048,29 @@ case "${1:-}" in
     done
     exit 0 ;;
   list-windows)
-    if [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || { [ -f "$probe.killed" ] && [ ! -f "$probe.spawned" ]; }; then
+    if { [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || [ -f "$probe.killed" ]; } \
+      && [ ! -f "$probe.spawned" ]; then
       printf 'main\n'
     else
-      printf 'main\nfm-sm1\n'
+      printf 'main\n'
+      if [ -s "$probe.windows" ]; then
+        cat "$probe.windows"
+      else
+        printf 'fm-sm1\n'
+      fi
     fi
     exit 0 ;;
   capture-pane) [ -z "${FM_FAKE_TMUX_CAPTURE:-}" ] || cat "$FM_FAKE_TMUX_CAPTURE"; exit 0 ;;
   new-window)
     printf '%s\n' "$*" >> "$log"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && exit 1
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    grep -Fqx -- "$name" "$probe.windows" 2>/dev/null || printf '%s\n' "$name" >> "$probe.windows"
     : > "$probe.spawned"
     printf '@1\n'
     exit 0 ;;

@@ -972,8 +972,9 @@ fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lo
 # which is immune to the wall-clock and boot-time steps that re-render ps lstart
 # for one live process (observed on WSL2); the prefix keeps it from ever equaling
 # a legacy lstart date string. Capability-detect the file rather than keying on
-# uname, matching fm_pid_identity, and fall back to ps lstart where /proc is
-# absent (macOS). FM_PROC_ROOT_OVERRIDE points tests at a fake /proc.
+# uname, matching fm_pid_identity, and fall back to LC_ALL=C ps lstart where
+# /proc is absent (macOS), so a lock recorded under one locale still verifies
+# under another. FM_PROC_ROOT_OVERRIDE points tests at a fake /proc.
 fm_remote_job_process_start() {
   local pid=$1 proc_root stat_line starttime ps_bin value
   local -a stat_fields

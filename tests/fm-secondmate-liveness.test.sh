@@ -273,7 +273,18 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
+windows="${FM_TMUX_CALL_LOG:?}.windows"
 case "${1:-}" in
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          ". '"*"'") staged=${arg#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || cat "$staged" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *'encode launch-brief'*|*'Firstmate operational input waiting: read'*) printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
+      done
+    fi
+    exit 0 ;;
   display-message)
     for a in "$@"; do
       case "$a" in
@@ -290,15 +301,30 @@ case "${1:-}" in
     ;;
   list-windows)
     case "$mode" in
-      missing) printf '%s\n' main; exit 0 ;;
+      missing)
+        printf '%s\n' main
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
       unreadable) exit 1 ;;
-      *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
+      *)
+        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
     esac
     ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     if [ "${1:-}" = new-window ] && [ -n "${FM_TEST_NEW_WINDOW_PAUSE:-}" ]; then
       sleep "$FM_TEST_NEW_WINDOW_PAUSE"
+    fi
+    if [ "${1:-}" = new-window ]; then
+      name=
+      previous=
+      for arg in "$@"; do
+        [ "$previous" = -n ] && name=$arg
+        previous=$arg
+      done
+      grep -Fqx -- "$name" "$windows" 2>/dev/null || printf '%s\n' "$name" >> "$windows"
     fi
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
@@ -377,6 +403,32 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
     "the shared library did not leave the durable per-mate relaunch record"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_recovers_the_durable_secondmate_account() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-account)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  mkdir -p "$w/home/config/secondmate-accounts/sm1" "$w/mate-account" "$w/primary-account" "$w/user-home"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  printf '%s\n' "$w/primary-account" > "$w/home/config/claude-account"
+  printf '%s\n' "$w/mate-account" > "$w/home/config/secondmate-accounts/sm1/claude-account"
+  : > "$w/mate-account/.credentials.json"
+  cat > "$fb/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0
+[ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" ]
+SH
+  chmod +x "$fb/claude"
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    HOME="$w/user-home" CLAUDE_CONFIG_DIR="$w/ambient-account" FM_FAKE_LAUNCH_LOG="$w/launch.log")
+  assert_not_contains "$out" 'SECONDMATE_LIVENESS: secondmate sm1:' "account recovery should succeed: $out"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" "recovery must finish"
+  assert_grep "account=$w/mate-account" "$w/home/state/sm1.meta" "recovery must record the configured mate account"
+  assert_grep "CLAUDE_CONFIG_DIR='$w/mate-account'" "$w/launch.log" "recovery must launch on the durable mate pin, not the ambient account"
+  pass "sweep: secondmate recovery resolves its durable account despite a different ambient login"
 }
 
 test_sweep_serializes_distinct_secondmate_relaunches() {
@@ -773,6 +825,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_recovers_the_durable_secondmate_account
 test_sweep_serializes_distinct_secondmate_relaunches
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate

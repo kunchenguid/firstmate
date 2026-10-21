@@ -9,7 +9,12 @@
 # enumerated here. Empty output therefore means that no reported required check
 # is failing or pending; it does not mean the pull request is ready to merge.
 # When nothing has reported, or nothing required has, that is printed rather
-# than read as ready. Advisory checks do not block and are omitted.
+# than read as ready. When nothing required has reported, every reported check
+# that is failing or pending is printed as well, labelled REPORTED rather than
+# REQUIRED: the base branch of a stacked pull request can be an unprotected
+# branch, so the required view alone would hide a failure there.
+# Where a required check has reported, advisory checks do not block and are
+# omitted.
 # A pull request that only awaits an approval (reviewDecision REVIEW_REQUIRED)
 # is not reported as blocked. GitHub's reviewDecision owns whether reviews
 # block; review history is printed only to explain CHANGES_REQUESTED, naming
@@ -106,25 +111,38 @@ esac
 GH_STDERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-state.XXXXXX") \
   || die "could not create temporary file"
 trap 'rm -f "$GH_STDERR"' EXIT INT TERM
-if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket --jq '
-  .[]
-  | select(.bucket != "pass" and .bucket != "skipping")
-  | "REQUIRED CHECK: \(.name) (\(.state))"' 2>"$GH_STDERR"); then
+
+unsettled_checks() {
+  local label=$1
+  shift
+  gh pr checks "$URL" "$@" --json name,state,bucket --jq '
+    .[]
+    | select(.bucket != "pass" and .bucket != "skipping")
+    | "'"$label"': \(.name) (\(.state))"' 2>"$GH_STDERR"
+}
+
+if ! CHECKS=$(unsettled_checks 'REQUIRED CHECK' --required); then
   # These two sentences are gh's own human-readable error text, verified against
   # gh 2.100.0 on 2026-09-12. gh reports "nothing reported" as an error rather
   # than as structured data, so matching its text is the only way to tell that
   # apart from a real lookup failure. An unrecognised message falls through to
   # the refusal below, so a reword degrades loudly rather than silently.
   if grep -q "^no checks reported on the '" "$GH_STDERR"; then
-    REQUIRED="CHECKS: none reported yet"
+    CHECKS="CHECKS: none reported yet"
   elif grep -q "^no required checks reported on the '" "$GH_STDERR"; then
-    REQUIRED="CHECKS: no required check has reported; readiness unconfirmed"
+    CHECKS="CHECKS: no required check has reported; readiness unconfirmed"
+    # The required view can hide failures on an unprotected stacked base.
+    REPORTED=$(unsettled_checks 'REPORTED CHECK') || {
+      cat "$GH_STDERR" >&2
+      die "could not read reported checks for $URL"
+    }
+    [ -z "$REPORTED" ] || CHECKS="$CHECKS"$'\n'"$REPORTED"
   else
     cat "$GH_STDERR" >&2
     die "could not read required checks for $URL"
   fi
 fi
-[ -z "$REQUIRED" ] || printf '%s\n' "$REQUIRED"
+[ -z "$CHECKS" ] || printf '%s\n' "$CHECKS"
 
 if [ "$REVIEW_DECISION" = CHANGES_REQUESTED ]; then
   printf 'REVIEW DECISION: CHANGES_REQUESTED\n'

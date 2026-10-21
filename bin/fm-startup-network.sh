@@ -328,10 +328,12 @@ EOF
 #
 # The question is deliberately "does the lock still name the session that asked
 # for this work?", not "is that session still alive". The hazard being closed is
-# a SECOND session sweeping concurrently. A different session can take the lock
-# only after the recorded holder is dead, when bin/fm-lock.sh rewrites that pid
-# with its own anchor. An unchanged value therefore proves no one else owns the sweeps, which is
-# the whole guarantee. Requiring liveness instead would refuse to finish work
+# a SECOND session sweeping concurrently. bin/fm-lock.sh rewrites that pid with
+# its own anchor whenever the recorded holder is no longer a live harness, or
+# when the same session re-anchors a live recorded pid outside its ancestry.
+# An unchanged value therefore proves no one else owns the sweeps, which is the
+# whole guarantee; a re-anchor also fails closed, which only defers idempotent
+# work. Requiring liveness instead would refuse to finish work
 # nobody else has claimed, and the sweeps are idempotent, so finishing it is
 # strictly better than abandoning it. A missing, unreadable, or replaced lock all
 # fail closed to the read-only probe.
@@ -590,7 +592,7 @@ EOF
   fm_timing_record stage network-checks "$stage_started" "$phases"
 
   if [ "$downgraded" -eq 1 ]; then
-    printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
+    printf 'NETWORK_CHECKS: the recorded fleet lock holder changed after these were requested, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;

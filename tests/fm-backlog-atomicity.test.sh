@@ -96,8 +96,33 @@ EOF
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    grep -Fqx -- "$name" "$window_file" 2>/dev/null || printf '%s\n' "$name" >> "$window_file"
+    exit 0 ;;
+  kill-window)
+    target=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -t ] && target=$arg
+      previous=$arg
+    done
+    target=${target##*:}
+    target=${target#=}
+    grep -Fvx -- "$target" "$window_file" 2>/dev/null > "$window_file.tmp" || true
+    mv "$window_file.tmp" "$window_file"
+    exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
