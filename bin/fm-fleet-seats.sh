@@ -1203,7 +1203,10 @@ apply_remote_disposition() {
   old_stopped=$(jq -r .old_stopped "$resp")
   actual_model=$(jq -r '.actual_model // empty' "$resp")
   requested_model=$(inc_get "$GEN" '.model // ""')
-  route=$(jq -c --arg op "$op" '.route // null | if . == null then . else . + {operation: $op} end' "$resp")
+  route=$(jq -c --arg op "$op" --argjson parent "$(inc_get "$GEN" .route)" '
+    .route // null | if . == null then . else
+      . + {operation: $op, host: $parent.host, remote_root: $parent.remote_root}
+    end' "$resp")
   if [ "$old_stopped" = true ]; then
     [ -n "$prev" ] && [ "$prev_resp" = "$prev" ] \
       || uncertain "the host reports a stopped predecessor for $TASK that does not match generation ${prev:-none}"

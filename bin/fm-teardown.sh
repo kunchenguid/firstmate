@@ -1231,13 +1231,14 @@ remote_secondmate_teardown() {
   route_home=$SECONDMATE_REGISTRY_HOME
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
     || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
-  generation=$(fm_meta_get "$META" remote_spawn_gen)
-  [ -n "$generation" ] || generation=$(fm_meta_get "$META" spawn_gen)
-  target=$(fm_meta_get "$META" remote_target)
-  [ -n "$target" ] || target=$(fm_meta_get "$META" window)
+  # shellcheck source=bin/fm-remote-generation-lib.sh
+  . "$SCRIPT_DIR/fm-remote-generation-lib.sh"
+  fm_remote_generation_resolve retire || return 1
+  generation=$FM_REMOTE_GENERATION
+  target=$FM_REMOTE_TARGET
   retire_args=("$ID")
   [ "$FORCE" != --force ] || retire_args+=(--force)
-  [ -z "$generation" ] || retire_args+=(--expect-generation "$generation")
+  retire_args+=(--expect-generation "$generation")
   TEARDOWN_REMOTE_RETIREMENT="$STATE/.seat-retirement-$ID.json"
   if [ -e "$TEARDOWN_REMOTE_RETIREMENT" ] || [ -L "$TEARDOWN_REMOTE_RETIREMENT" ]; then
     [ -f "$TEARDOWN_REMOTE_RETIREMENT" ] && [ ! -L "$TEARDOWN_REMOTE_RETIREMENT" ] \
