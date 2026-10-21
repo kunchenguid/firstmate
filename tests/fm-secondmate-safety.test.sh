@@ -178,7 +178,7 @@ SH
 }
 
 test_durable_home_git_lock_rollback() {
-  local fmroot home sub fakebin log gitdir reason
+  local fmroot home sub fakebin log gitdir reason real_git sweep_log rearm_log
   fmroot="$TMP_ROOT/git-lock-rollback-code"
   home="$TMP_ROOT/git-lock-rollback-parent"
   sub="$TMP_ROOT/git-lock-rollback-subhome"
@@ -221,8 +221,38 @@ test_durable_home_git_lock_rollback() {
   [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "reissued seed released preexisting protection"
   rm "$sub/projects/retained"
   fm_write_secondmate_meta "$home/state/retry.meta" "$sub"
+  sweep_log="$TMP_ROOT/git-lock-unpooled-sweep.log"
+  rearm_log="$TMP_ROOT/git-lock-unpooled-rearm.log"
+  mkdir -p "$sub/state/procevent"
+  printf 'adapter=lavish\n' > "$sub/state/procevent/source.source"
+  cp "$sub/state/procevent/source.source" "$TMP_ROOT/git-lock-unpooled-source"
+  install_fake_process_event_sweep "$sub" "$sweep_log"
+  : > "$rearm_log"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *' worktree unlock '*) echo 'synthetic unlock failure' >&2; exit 19 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  if PATH="$fakebin:$PATH" FM_REAL_GIT="$real_git" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
+    bash "$ROOT/bin/fm-teardown.sh" retry >/dev/null 2>"$TMP_ROOT/git-lock-unpooled-unlock.err"; then
+    fail "unpooled retirement hid an unlock failure"
+  fi
+  assert_grep 'synthetic unlock failure' "$TMP_ROOT/git-lock-unpooled-unlock.err" "retirement did not reach unlock"
+  assert_grep "$sub" "$sweep_log" "unlock failure did not follow a process-event sweep"
+  cmp -s "$TMP_ROOT/git-lock-unpooled-source" "$sub/state/procevent/source.source" \
+    || fail "failed unlock lost the process-event registration"
+  assert_grep "$sub" "$rearm_log" "failed unlock did not rearm process events"
+  assert_present "$home/state/retry.meta" "failed unlock removed parent metadata"
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "failed unlock changed protection"
+  rm "$fakebin/git"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/git-lock-rollback-fake/pane.txt" \
+    FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
     bash "$ROOT/bin/fm-teardown.sh" retry >/dev/null 2>"$TMP_ROOT/git-lock-unpooled.err" \
     || { cat "$TMP_ROOT/git-lock-unpooled.err" >&2; fail "unpooled linked-home retirement failed"; }
   assert_absent "$sub" "unpooled retirement retained the home"
