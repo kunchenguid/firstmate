@@ -846,6 +846,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_BOX_BOTTOM=-1
   FM_COMPOSER_SCAN_BOX_AMBIG=0
   FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=-1
+  FM_COMPOSER_SCAN_INCOMPLETE_BOX_LAST=-1
+  FM_COMPOSER_SCAN_OPEN_BOX_TOP=-1
   FM_COMPOSER_SCAN_UNSAFE=0
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
@@ -982,6 +984,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       fi
       top=$row
       FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
+      FM_COMPOSER_SCAN_INCOMPLETE_BOX_LAST=$row
       current_family=$family
       current_indent=$indent
       valid=1
@@ -1040,10 +1043,12 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           FM_COMPOSER_SCAN_BOX_GLYPH=$box_glyph
         fi
         FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=-1
+        FM_COMPOSER_SCAN_INCOMPLETE_BOX_LAST=-1
       else
         if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -lt 0 ]; then
           FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
         fi
+        FM_COMPOSER_SCAN_INCOMPLETE_BOX_LAST=$row
         if [ -n "$cy" ]; then
           if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
              || [ "$row" -eq "$cy" ]; then
@@ -1094,9 +1099,36 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
+  # A box top that no bottom row ever ended: rows below it were read as its
+  # content, so shell-prompt detection under it never ran.
+  FM_COMPOSER_SCAN_OPEN_BOX_TOP=$top
   if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
     FM_COMPOSER_SCAN_UNSAFE=1
   fi
+}
+
+# 0 when <title> is Grok's model/effort title followed by ` · <mode>`, the mode
+# being lowercase words joined by hyphens.
+_fm_composer_grok_mode_title() {  # <title>
+  local title=$1 head mode model
+  case "$title" in
+    'Grok '*' · '*) ;;
+    *) return 1 ;;
+  esac
+  head=${title%% · *}
+  mode=${title#* · }
+  case "$mode" in
+    ''|-*|*-|*--*|*[!a-z-]*) return 1 ;;
+  esac
+  case "$head" in
+    *\ \(low\)|*\ \(medium\)|*\ \(high\)|*\ \(xhigh\)) ;;
+    *) return 1 ;;
+  esac
+  model=${head#Grok }
+  model=${model% (*)}
+  [ -n "$model" ] || return 1
+  case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
 }
 
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
@@ -1116,6 +1148,15 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     "$dash"*"$dash") ;;
     *) return 1 ;;
   esac
+  # Grok 4.7 appends its approval mode after a single-column middle dot
+  # (`Grok 4.7 (medium) · always-approve`, captured live through Herdr). Only
+  # that typed title may carry the dot; any other non-ASCII title stays
+  # ambiguous.
+  title=${inner//"$dash"/}
+  fm_composer_normalize_trim_var title
+  if _fm_composer_grok_mode_title "$title"; then
+    inner=${inner/ · / - }
+  fi
   spaces=${inner//"$dash"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
@@ -1748,7 +1789,16 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+  # An unclosed box edge below the candidate may be a clipped live box. Only
+  # a Pi pair whose opening rule lies below EVERY such edge outranks it, and
+  # only when a bottom row ended every box: a transcript table whose `├┼┤`
+  # rows invalidate it still ends on its `└┴┘` row, while a top left open at
+  # the screen's end may be a live box that hid the rows below it.
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ] \
+     && ! { [ "$FM_COMPOSER_SCAN_OPEN_BOX_TOP" -lt 0 ] \
+            && [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+            && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
+            && [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_LAST" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; }; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi

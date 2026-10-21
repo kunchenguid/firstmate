@@ -979,6 +979,14 @@ test_matrix_opencode_leftbar_abs_cwd_furniture() {
   pass "matrix: opencode's absolute cwd rail on a wide pane reads empty busy and idle; typed text stays pending"
 }
 
+test_matrix_grok_mode_title_bottom_border() {
+  local titled
+  titled=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰───────────────────────────────────── Grok 4.7 (medium) · always-approve ─╯'
+  assert_screen "grok mode-title idle on tmux" empty "$CAPS_TMUX" "$titled" 1
+  assert_screen "grok mode-title idle on herdr" empty "$CAPS_STYLED" "$titled"
+  pass "grok model/effort title with a middle-dot approval mode still proves the box"
+}
+
 test_matrix_grok_titled_bottom_border() {
   # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
   # content rows. This is the idle capture from issue #3436; Herdr has no
@@ -1311,6 +1319,7 @@ test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_mode_title_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
