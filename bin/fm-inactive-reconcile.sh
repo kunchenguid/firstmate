@@ -13,9 +13,12 @@
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
-#   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
+#   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md] [artifacts=data/<child>/artifacts.json artifacts_sha256=<hex>]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh. A ship `done:` is
+# report pointer, without consulting fm-crew-state.sh. The artifact-lineage
+# pair is appended only for a local route and only while the child's manifest
+# verifies, so the parent is pointed at refs and hashes rather than at a
+# transcript (docs/artifact-lineage.md). A ship `done:` is
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
@@ -106,6 +109,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-artifact-lib.sh
+. "$SCRIPT_DIR/fm-artifact-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -413,7 +418,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line artifact_ref
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -450,6 +455,14 @@ report_child_ledger_locked() { # <id> <meta>
   [ -z "$yolo" ] || line="$line yolo=$yolo"
   if [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ]; then
     line="$line report=data/$id/report.md"
+  fi
+  artifact_ref=$(fm_artifact_manifest_ref "$data" "$id" 2>/dev/null) || artifact_ref=''
+  if [ -n "$artifact_ref" ]; then
+    # Only the local route can read this home's data/ directory. The remote
+    # adapter transfers report=.md pointers today and not yet a JSON manifest,
+    # so a remote line carries no pointer it cannot honour.
+    fm_parent_channel_destination "$FM_HOME" "$STATE" >/dev/null 2>&1 || true
+    [ "$FM_PARENT_CHANNEL_ROUTE" = local ] && line="$line $artifact_ref"
   fi
   if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
     mark_reported "$RECORD_PENDING" || return 1

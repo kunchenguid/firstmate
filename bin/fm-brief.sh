@@ -702,7 +702,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, the artifact manifest, and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
@@ -728,6 +728,10 @@ $WAIT_BLOCK$INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Return artifacts, not a transcript: write the lineage manifest with
+\`$FM_ROOT/bin/fm-artifact-manifest.sh write --task $ID --artifact report=$DATA/$ID/report.md\`,
+and add one \`--artifact <kind>=<path>\` for each other artifact you produced under \`$DATA/$ID/\` (kinds: patch, test-log, review-report, report, trace).
+The manifest pins every artifact with its full SHA-256; a chat log, transcript, or session dump is not an artifact and the contract refuses it.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.

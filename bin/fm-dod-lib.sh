@@ -451,6 +451,12 @@ EOF
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  # The lineage block renders a path the worker can invoke. Real callers
+  # (fm-brief.sh, fm-promote.sh) export FM_ROOT and DATA; a library-only caller
+  # still gets a usable repo path and a home-relative data path.
+  local artifact_root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+  local artifact_data=${DATA:-${FM_HOME:+$FM_HOME/data}}
+  artifact_data=${artifact_data:-data}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -604,6 +610,15 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  cat <<EOF
+
+## Artifact lineage
+Return artifact references and hashes, not a conversational summary: the parent consumes your manifest, never your transcript.
+Before your done line, write the lineage manifest with
+\`$artifact_root/bin/fm-artifact-manifest.sh write --task $id --artifact <kind>=<path> ...\`,
+listing every artifact you produced under \`$artifact_data/$id/\` (kinds: patch, test-log, review-report, report, trace; for example \`patch\` for the diff you shipped, \`test-log\` for the run you cite, \`review-report\` for a review).
+The manifest pins each file with its full SHA-256; a chat log, transcript, or session dump is not an artifact and the contract refuses it.
+EOF
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
