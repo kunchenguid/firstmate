@@ -48,6 +48,8 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+export FM_TEST_REAL_SLEEP="$(command -v sleep)"
+export FM_TEST_REAL_MV="$(command -v mv)"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-remote-delivery)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
@@ -113,10 +115,7 @@ printf '%s\n' "$*" >> "$FM_SSH_LOG"
 stdin_file="$FM_SSH_LOG.stdin.$count"
 cat > "$stdin_file"
 if [ -n "${FM_FAKE_SSH_HANG:-}" ]; then
-  # A busy remote lane: the transport attempt never returns on its own. The
-  # real sleep, because the stubbed one on PATH returns immediately.
-  sleep "$FM_FAKE_SSH_HANG"
-  exit 255
+  exec "$FM_TEST_REAL_SLEEP" "$FM_FAKE_SSH_HANG"
 fi
 if [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -gt 1 ]; then
   exit "$FM_FAKE_SSH_AFTER_AMBIGUOUS_RC"
@@ -914,10 +913,7 @@ if [ "${FM_FAIL_DELIVERY_CONFIRM:-0}" = 1 ] \
   rm -f "$target_arg"
   exit 1
 fi
-# Resolve the real mv from PATH: a hardcoded /bin/mv is absent on hosts
-# whose coreutils live outside /bin, and the stub would then fail every
-# call for a reason that has nothing to do with this test.
-exec mv "$@"
+exec "$FM_TEST_REAL_MV" "$@"
 SH
   chmod +x "$fb/mv"
 
