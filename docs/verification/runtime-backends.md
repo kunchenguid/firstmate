@@ -988,6 +988,47 @@ not ok - mid-turn absolute cwd rail read 'pending', want empty
 
 The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a full-pane capture of this version answers `unknown` because the status rail below the composer floor row is contiguous non-blank content the selector refuses to outrank, which is the strict posture and not this defect; and very narrow panes where the cwd rail starts in the left half of the row defer the same way.
 
+### 2026-10-14 Kimi Code 2.1.1 status and context footer through Herdr
+
+Verified on 2026-10-14 on macOS arm64 (Darwin 25.6.0) against Kimi Code CLI 2.1.1 (`kimi --model kimi-code/k3 --auto`) on Herdr 0.9.3, in a guarded lab session from `bin/fm-herdr-lab.sh`.
+Kimi draws a `Never Ask  K3 thinking: high  <cwd>` status row, sometimes trailed by a rotating tip, and a right-aligned `context: 0% (0/256k)` row directly under its bordered `│ > │` composer.
+Herdr's `agent get` reported `agent: kimi` with `agent_status: idle` at every capture, including mid-turn, so the Herdr submit core falls through to the composer verdict for every Kimi delivery.
+On the unmodified library the cursorless staleness rule read the status row as activity under the box, so every Kimi screen classified `unknown`: readiness could only pass on the banner, and a pointer left in the composer by a swallowed early Enter was never retried (issue 4306).
+
+The five captures in `tests/fixtures/kimi-code-v2.1.1/` are `herdr pane read <pane> --source visible --format ansi` output (their README records the one redaction), classified with Herdr's descriptor:
+
+```sh
+bash -c '. bin/fm-composer-lib.sh
+  for f in idle typed working settled exited; do
+    fm_composer_classify_screen "$(printf "styled=1\ncursor=0\nidentity=1")" \
+      "$(cat tests/fixtures/kimi-code-v2.1.1/$f.ansi)"; echo
+  done | paste -sd" " -'
+```
+
+Observed output before the fix (`bin/fm-composer-lib.sh` at 0397cb2b) and after it:
+
+```text
+unknown unknown unknown unknown unknown
+empty pending empty empty unknown
+```
+
+The fix makes the bordered `>` box an envelope for exactly that ordered status and context pair, and only when every row beneath the pair is blank.
+That last bound is load-bearing: after `/exit`, Kimi's last box and complete footer stay on screen above a blank row, `Bye!`, and a login-shell prompt, and that `exited` capture must keep reading `unknown` rather than authorize typing into the shell.
+`test_matrix_kimi_footer_zone` in `tests/fm-composer-lib.test.sh` replays the captures under the Herdr, Zellij, cmux and orca, and tmux-cursor profiles, derives the bare-`thinking` and thinking-off status rows from the idle capture and requires them to read `empty` too, shows that cutting the `exited` capture at its footer reads `empty`, and pins the negatives: a lone status or context row, the pair out of order, another permission tier, activity below the pair, and an unboxed shell prompt.
+`test_kimi_herdr_footer_readiness_and_delivery` in `tests/fm-kimi-harness.test.sh` replays them through `fm_backend_herdr_send_text_submit` with native status held idle and the first Enter swallowed, and requires one retried Enter and a confirmed delivery.
+
+The live guard that refreshes this entry launches the installed Kimi in a fresh scratch directory inside a Herdr lab, answers its trust dialog, and requires an `empty` idle composer, a confirmed submission that Kimi echoes and answers with a nonzero context meter, and `unknown` after `/exit`; it submits one prompt, so it is opt-in:
+
+```sh
+FM_KIMI_HERDR_DELIVERY_LIVE=1 FM_KIMI_LIVE_MODEL=kimi-code/k3 tests/fm-kimi-herdr-delivery-live-e2e.test.sh
+```
+
+```text
+ok - Kimi Code 2.1.1 on herdr 0.9.3: the idle composer under Kimi's status and context rows classifies empty
+ok - Kimi Code 2.1.1 on herdr 0.9.3: the submit path delivers a prompt that Kimi echoes and answers
+ok - Kimi Code 2.1.1 on herdr 0.9.3: after /exit the leftover composer and footer above a shell classify unknown
+```
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).

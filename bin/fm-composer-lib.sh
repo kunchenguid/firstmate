@@ -110,6 +110,17 @@
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
 # nothing.
 #
+# KIMI'S FOOTER is the one zone under a SHELL-glyph envelope, and the one that
+# lifts a refusal instead of demoting a candidate. Kimi Code draws its
+# `Never Ask <model> ...` status row and right-aligned `context: N% (...)`
+# row directly under its bordered `│ > │` composer, which made every
+# cursorless read of an idle Kimi pane `unknown` (issue 4306). Because this
+# zone moves a verdict toward `empty`, it is bounded tighter than the rule
+# above: the bordered `>` box counts as an envelope only for that exact
+# ordered pair, and only when every row beneath the pair is blank to the
+# bottom of the screen. After Kimi exits, its last box and footer stay on
+# screen above `Bye!` and a login shell, and that pane must keep refusing.
+#
 # COVERAGE: this is exercised for the bordered box and the pi separator pair,
 # the two shapes claude 2.x renders. The opencode left bar is wired in for the
 # same treatment but is UNEXERCISED - every left-bar row this repo records
@@ -521,6 +532,20 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
+# Kimi Code's two footer rows under its bordered `>` composer (see KIMI'S
+# FOOTER above), verified live through Herdr on Kimi Code CLI 2.1.1:
+# `Never Ask  K3 thinking: high  …/<cwd>     /init: generate AGENTS.md` and a
+# right-aligned `context: 9% (22.6k/256k)` (also `(0/1M)` for 1M-context
+# models). `Never Ask` is the `--auto` tier every Firstmate spawn launches
+# with. The model may be several words (`K2.8 Preview`), its thinking cell is
+# `thinking: <effort>` for a model with effort levels, a bare `thinking` for
+# one without, and absent when thinking is off, and a rotating tip may trail
+# the status row, so only the leading tier and the context cell's shape are
+# matched; the box, the pair's order, and the blank rows beneath it carry the
+# rest of the proof. Both are matched against trimmed rows, ASCII-only, so the
+# same bytes match under LC_ALL=C.
+FM_COMPOSER_KIMI_STATUS_RE_DEFAULT='^Never Ask[[:space:]]+[^[:space:]]'
+FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT='^context:[[:space:]]+[0-9]+(\.[0-9]+)?%[[:space:]]+\([0-9]+(\.[0-9]+)?[kKmM]?/[0-9]+(\.[0-9]+)?[kKmM]?\)$'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -862,7 +887,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   # content leads with an agent prompt glyph once its side borders are
   # stripped, and that glyph. This is what tells a composer container from a
   # decorative banner; it is recorded here, on the one pass that already walks
-  # and trims every row, so the footer zone never re-reads the screen.
+  # and trims every row, so the footer zone never re-reads the screen. A
+  # single-bordered box with no agent-glyph row records Kimi's `>` instead,
+  # which opens only KIMI'S FOOTER (see the file header).
   FM_COMPOSER_SCAN_BOX_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_BOX_GLYPH=
   FM_COMPOSER_SCAN_PI_GLYPH_ROW=-1
@@ -1068,9 +1095,17 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       case "$current_family:$side_family" in
         rounded:single|light:single|heavy:heavy|double:double|ascii:ascii)
           content_rows=$((content_rows + 1))
-          if [ "$box_glyph_row" -lt 0 ] && [ "$row_glyph_row" -ge 0 ]; then
-            box_glyph_row=$row_glyph_row
-            box_glyph=$row_glyph
+          if [ "$row_glyph_row" -ge 0 ]; then
+            # An agent glyph outranks a `>` recorded on an earlier row.
+            if [ "$box_glyph_row" -lt 0 ] || [ "$box_glyph" = '>' ]; then
+              box_glyph_row=$row_glyph_row
+              box_glyph=$row_glyph
+            fi
+          elif [ "$box_glyph_row" -lt 0 ] && [ "$side_family" = single ] \
+             && fm_composer_leading_shell_glyph_var glyph "$probe" \
+             && [ "$glyph" = '>' ]; then
+            box_glyph_row=$row
+            box_glyph=$glyph
           fi
           [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
           if [ "$geometry_check" = 1 ]; then
@@ -1657,7 +1692,8 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
 # ever move a verdict toward refusing, never toward `empty`, because `empty` is
 # the one verdict that authorizes fm-send to type into the pane. Returns 1 too
 # when no envelope is glyph-proven, when a blank row sits directly beneath it,
-# or when the run holds no bare candidate at all (nothing to demote).
+# or when the run holds no bare candidate at all (nothing to demote). A box
+# proven only by Kimi's `>` is judged by _fm_composer_kimi_footer_zone instead.
 _fm_composer_locate_footer_zone() {  # <plain>
   local plain=$1 close next trimmed proof=''
   FM_COMPOSER_FOOTER_AFTER=-1
@@ -1690,6 +1726,10 @@ _fm_composer_locate_footer_zone() {  # <plain>
     proof=$FM_COMPOSER_SCAN_PI_GLYPH
   fi
   [ "$FM_COMPOSER_FOOTER_AFTER" -ge 0 ] || return 1
+  if [ "$proof" = '>' ]; then
+    _fm_composer_kimi_footer_zone "$plain"
+    return
+  fi
   # Nothing below the envelope can be demoted unless a bare candidate sits
   # there, so settle that from the scan's own record before walking any rows.
   [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
@@ -1705,6 +1745,27 @@ _fm_composer_locate_footer_zone() {  # <plain>
   done
   [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] \
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
+}
+
+# _fm_composer_kimi_footer_zone: KIMI'S FOOTER (see the file header) under the
+# `>`-proven box whose closing row is FM_COMPOSER_FOOTER_AFTER. 0, with
+# FM_COMPOSER_FOOTER_LAST on the context row, only when the status row and the
+# context row follow the box in that order and every row beneath them is
+# blank; any other shape returns 1 and leaves the box to the staleness rule.
+_fm_composer_kimi_footer_zone() {  # <plain>
+  local plain=$1 row rest
+  row=$(_fm_composer_screen_row "$((FM_COMPOSER_FOOTER_AFTER + 1))" "$plain")
+  fm_composer_normalize_trim_var row
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_KIMI_STATUS_RE:-$FM_COMPOSER_KIMI_STATUS_RE_DEFAULT}" sensitive || return 1
+  row=$(_fm_composer_screen_row "$((FM_COMPOSER_FOOTER_AFTER + 2))" "$plain")
+  fm_composer_normalize_trim_var row
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_KIMI_CONTEXT_RE:-$FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT}" sensitive || return 1
+  rest=$(printf '%s\n' "$plain" | sed -n "$((FM_COMPOSER_FOOTER_AFTER + 4)),\$p")
+  fm_composer_normalize_trim_var rest
+  [ -z "$rest" ] || return 1
+  FM_COMPOSER_FOOTER_LAST=$((FM_COMPOSER_FOOTER_AFTER + 2))
 }
 
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its

@@ -1,2 +1,4 @@
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
+# Recorded terminal captures are replayed byte for byte, carriage returns included.
+tests/fixtures/**/*.ansi -text

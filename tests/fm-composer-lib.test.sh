@@ -1152,6 +1152,79 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_footer_zone() {
+  # Real Kimi Code 2.1.1 Herdr viewport reads (tests/fixtures/kimi-code-v2.1.1):
+  # the `Never Ask ... thinking:` status row and the `context:` row sit
+  # directly under the bordered `│ > │` composer, where the cursorless
+  # staleness rule used to read them as activity (issue 4306).
+  local dir="$ROOT/tests/fixtures/kimi-code-v2.1.1" idle typed working settled exited
+  local plain cursor status context lead captain truncated
+  idle=$(cat "$dir/idle.ansi")
+  typed=$(cat "$dir/typed.ansi")
+  working=$(cat "$dir/working.ansi")
+  settled=$(cat "$dir/settled.ansi")
+  exited=$(cat "$dir/exited.ansi")
+  plain=$(printf '%s\n' "$idle" | fm_composer_strip_ansi)
+  # tmux reads the same viewport with its cursor on the composer's `>` row.
+  cursor=$(printf '%s\n' "$plain" | grep -n '│ >' | tail -1 | cut -d: -f1)
+  cursor=$((cursor - 1))
+
+  assert_screen "kimi 2.1.1 idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "kimi 2.1.1 idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "kimi 2.1.1 idle on tmux" empty "$CAPS_TMUX" "$idle" "$cursor"
+  assert_screen "kimi 2.1.1 idle on cmux/orca" empty "$CAPS_PLAIN" "$plain"
+  assert_screen "kimi 2.1.1 typed pointer on herdr" pending "$CAPS_STYLED" "$typed"
+  assert_screen "kimi 2.1.1 typed pointer on tmux" pending "$CAPS_TMUX" "$typed" "$cursor"
+  assert_screen "kimi 2.1.1 typed pointer on cmux/orca" pending "$CAPS_PLAIN" \
+    "$(printf '%s\n' "$typed" | fm_composer_strip_ansi)"
+  assert_screen "kimi 2.1.1 working after submit on herdr" empty "$CAPS_STYLED" "$working"
+  assert_screen "kimi 2.1.1 settled reply on herdr" empty "$CAPS_STYLED" "$settled"
+
+  # Kimi 2.1.1 labels a model without effort levels with a bare `thinking`
+  # and drops the cell when thinking is off; both are the same furniture.
+  assert_screen "kimi 2.1.1 idle, bare thinking cell, on herdr" empty "$CAPS_STYLED" \
+    "${idle/K3 thinking: high/K2.7 Code Highspeed thinking}"
+  assert_screen "kimi 2.1.1 idle, bare thinking cell, on cmux/orca" empty "$CAPS_PLAIN" \
+    "${plain/K3 thinking: high/K2.7 Code Highspeed thinking}"
+  assert_screen "kimi 2.1.1 idle, thinking off, on herdr" empty "$CAPS_STYLED" \
+    "${idle/K3 thinking: high/K3}"
+  assert_screen "kimi 2.1.1 idle, thinking off, on cmux/orca" empty "$CAPS_PLAIN" \
+    "${plain/K3 thinking: high/K3}"
+
+  # The early-Enter shape from the reported failure: the pointer on the first
+  # content row, the cursor on an empty second row, the same footer below.
+  captain=$' ╭──────────────────────────────────────────────────────────────────────╮\n │ > Read the brief at /h/data/t/launch-brief.md and follow it exactly. │\n │                                                                      │\n ╰──────────────────────────────────────────────────────────────────────╯\n Never Ask  K3 thinking: high  …/project-a1b2c3/1/project           ! to run a shell command | /compact compresses context when it gets long\n                                                                     context: 0% (0/1M)'
+  assert_screen "kimi 2.1.1 unsubmitted two-row pointer on herdr" pending "$CAPS_PLAIN" "$captain"
+
+  # After /exit the last box and its complete footer stay on screen above
+  # `Bye!` and a login shell; that pane must refuse. The same rows cut at the
+  # footer read empty, which proves the rows beneath are what refuse here.
+  assert_screen "kimi 2.1.1 exited to a shell on herdr" unknown "$CAPS_STYLED" "$exited"
+  assert_screen "kimi 2.1.1 exited to a shell on cmux/orca" unknown "$CAPS_PLAIN" \
+    "$(printf '%s\n' "$exited" | fm_composer_strip_ansi)"
+  truncated=$(printf '%s\n' "$exited" | fm_composer_strip_ansi | sed '/Bye!/,$d')
+  assert_screen "kimi 2.1.1 exited capture cut at its footer" empty "$CAPS_PLAIN" "$truncated"
+
+  # Only the complete ordered pair is furniture, and only directly under the
+  # box. Each variant below is the real idle read with one property broken.
+  status=$(printf '%s\n' "$plain" | grep 'Never Ask')
+  context=$(printf '%s\n' "$plain" | grep 'context:')
+  lead=$(printf '%s\n' "$plain" | sed '/Never Ask/,$d')
+  assert_screen "kimi status row without its context row" unknown "$CAPS_PLAIN" "$lead"$'\n'"$status"
+  assert_screen "kimi context row without its status row" unknown "$CAPS_PLAIN" "$lead"$'\n'"$context"
+  assert_screen "kimi footer rows out of order" unknown "$CAPS_PLAIN" \
+    "$lead"$'\n'"$context"$'\n'"$status"
+  assert_screen "kimi footer under another permission tier" unknown "$CAPS_PLAIN" \
+    "$lead"$'\n'"${status/Never Ask/Ask When Needed}"$'\n'"$context"
+  assert_screen "kimi footer followed by activity" unknown "$CAPS_PLAIN" \
+    "$plain"$'\n Working on request...'
+  assert_screen "kimi footer, blank row, then text" unknown "$CAPS_PLAIN" \
+    "$plain"$'\n\n Bye!'
+  assert_screen "kimi footer under an unboxed shell prompt" unknown "$CAPS_PLAIN" \
+    $' >\n'"$status"$'\n'"$context"
+  pass "matrix: Kimi 2.1.1's status and context rows are furniture only as a complete pair with nothing beneath"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -1395,6 +1468,7 @@ test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_footer_zone
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
