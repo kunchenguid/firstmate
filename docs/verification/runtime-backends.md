@@ -1153,6 +1153,14 @@ An earlier `sleep 60` chained ahead of a status check was refused before executi
 The blocking foreground `until` loop is therefore the wait a Claude Code worker may use, and it is what the brief names, because the refusal's own `run_in_background` suggestion is the one shape a waiting worker must not take: a backgrounded call returns at once and so does not wait at all.
 The brief's portable regression is `tests/fm-brief.test.sh`; rerun these commands after upgrading any of the three harnesses and update the numbers in the brief when they move.
 
+## Backgrounded no-mistakes drive detach
+
+When `config/wait-no-turns` is absent, `bin/fm-dod-lib.sh` still allows a backgrounded `no-mistakes axi run`, but only through a harness mechanism that returns the command output to the same worker.
+`nohup` and a trailing `&` are not that path: they return a pid while the drive is still running, so a worker that then ends the turn never sees the parked gate as a tool result.
+The live guard is `bin/fm-test-run.sh tests/fm-nm-drive-detach-live-e2e.test.sh`.
+It spends no model tokens, does not touch the shared no-mistakes daemon, and fails naming the installed Pi version when either detach shape writes `GATE` before the parent returns, or when the generated brief still permits that detach.
+Refreshed 2026-10-21 on macOS arm64 with Pi 1.3.0.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.

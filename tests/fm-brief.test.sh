@@ -1243,8 +1243,9 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
-# Without config/wait-no-turns the scaffold matches the pre-flag brief and drive text.
-test_wait_no_turns_absent_keeps_the_previous_brief() {
+# Without config/wait-no-turns the scaffold still omits the waiting section, but a
+# backgrounded no-mistakes drive is only legal on a tracked harness return path.
+test_wait_no_turns_absent_requires_tracked_drive_return() {
   local home brief
   home="$TMP_ROOT/wait-off"
   mkdir -p "$home/data"
@@ -1255,10 +1256,17 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   assert_no_grep "end your turn at once" "$brief" "an absent flag still added the waiting section"
   assert_grep "natural checkpoint" "$brief" "an absent flag dropped the unprompted inbox check"
   assert_no_grep "Do not poll or list the inbox while waiting" "$brief" "an absent flag still added the no-poll inbox line"
-  assert_grep "background the drive call" "$brief" "an absent flag replaced the backgrounded drive text"
+  assert_grep "background it only through the harness mechanism" "$brief" \
+    "an absent flag dropped the tracked-background drive path"
+  assert_grep "Do not \`nohup\`" "$brief" "an absent flag still allows fire-and-forget nohup"
+  assert_grep "trailing \`&\`" "$brief" "an absent flag still allows a trailing ampersand detach"
+  assert_grep "not permission to end the turn" "$brief" \
+    "an absent flag still treats paused: as permission to end the turn"
+  assert_no_grep "background the drive call" "$brief" \
+    "an absent flag kept the fire-and-forget background drive sentence"
   assert_no_grep "issue the same foreground call again" "$brief" \
     "an absent flag still asked for the foreground reattach"
-  pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
+  pass "fm-brief: without config/wait-no-turns a background drive still needs a tracked return"
 }
 
 test_inbox_guidance_explains_marked_body_terminator() {
@@ -1697,7 +1705,7 @@ test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
-test_wait_no_turns_absent_keeps_the_previous_brief
+test_wait_no_turns_absent_requires_tracked_drive_return
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
