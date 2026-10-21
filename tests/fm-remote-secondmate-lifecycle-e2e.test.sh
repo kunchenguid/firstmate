@@ -941,6 +941,7 @@ if [ "$WATCHER_ONLY" = 1 ]; then
   if [ "$SPAWN_RECOVERY_ONLY" = 1 ]; then
     printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$PARENT/config/fleet-seats"
     remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null || fail "recovery policy could not be confirmed"
+    # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     remote_env bash -c '
       "$1/bin/fm-fleet-seats.sh" reserve ios --generation prepared-recovery --kind secondmate \
         --harness codex --model pool-model-a --holder-pid "$$" >/dev/null
