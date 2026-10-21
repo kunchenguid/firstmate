@@ -215,8 +215,8 @@ fm_pending_reply_char_cut() {  # <text> <max> <keep>
     END { print (chars > max ? cut : -1) }'
 }
 
-# Sanitize a short request summary: single line, bounded, no control chars.
-# Printable non-ASCII letters (accents) are kept; the cap counts characters.
+# Sanitize a short request summary: single line, bounded, no ASCII control chars.
+# Preserve UTF-8 characters, including accents; cap at 120 characters in any locale.
 fm_pending_reply_summarize() {  # <text>
   local text=$1 cleaned cut
   cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
