@@ -48,8 +48,10 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
-export FM_TEST_REAL_SLEEP="$(command -v sleep)"
-export FM_TEST_REAL_MV="$(command -v mv)"
+FM_TEST_REAL_SLEEP=$(command -v sleep)
+export FM_TEST_REAL_SLEEP
+FM_TEST_REAL_MV=$(command -v mv)
+export FM_TEST_REAL_MV
 
 TMP_ROOT=$(fm_test_tmproot fm-send-remote-delivery)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
