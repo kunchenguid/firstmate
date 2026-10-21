@@ -298,11 +298,24 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+# The *.check.sh sweep covers authenticated merge/CI polls, the Relay x-watch
+# shim (which overrides this to 30s via config/x-mode.env when armed - see
+# docs/configuration.md "Relay (.env)"), and custom check shims including
+# bin/fm-seat.sh auto and bin/fm-usage-warner.sh check. None of those need a
+# 5-minute floor on their own: merge/CI detection already lags the real event
+# by however long CI took, the seat auto-trigger is a graceful rotation ahead
+# of the hard quota-refusal backstop (bin/fm-spawn.sh), and usage warnings are
+# advisory. 600s halves this sweep's daily run count with no consumer missing
+# a freshness bound it actually needs.
+CHECK_INTERVAL=${FM_CHECK_INTERVAL:-600}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
-HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
+# The home-summary ledger only feeds secondmate fleet-state reads and the
+# session-start digest, neither of which needs sub-15-minute freshness; the
+# same 900s cadence already governs bin/fm-tool-update-check.sh's probe sweep
+# (FM_TOOL_UPDATE_INTERVAL).
+HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-900}
 case "$HOME_SUMMARY_INTERVAL" in
-  ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
+  ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=900 ;;
 esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
