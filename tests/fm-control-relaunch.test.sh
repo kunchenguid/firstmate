@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -488,6 +490,47 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_the_pr_identity_block_last() {
+  local dir out rc tracing traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01
+  for tracing in off on; do
+    dir=$(new_case "pr-identity-$tracing" rl35)
+    add_ship_task "$dir" rl35 claude
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    printf '%s %s\n' "$$" "$tracing" > "$dir/home/state/.trace-context-effective"
+    {
+      printf 'traceparent=%s\n' "$traceparent"
+      printf '%s\n' 'pr=https://github.com/example/repo/pull/35'
+      printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+      printf '%s\n' 'x_request=request-35'
+    } >> "$dir/home/state/rl35.meta"
+    fm_pr_metadata_identity_parse "$dir/home/state/rl35.meta" \
+      || fail "the fixture record should start out acceptable to the PR poll"
+
+    out=$(run_control "$dir" rl35 relaunch --note "continuing after the PR opened"); rc=$?
+    expect_code 0 "$rc" "relaunch of a task with an open PR should succeed with tracing $tracing"$'\n'"$out"
+    [ -n "$(meta_field "$dir" rl35 control_relaunch_tx)" ] \
+      || fail "the relaunched record should identify its relaunch transaction"
+    fm_pr_metadata_identity_parse "$dir/home/state/rl35.meta" \
+      || fail "a relaunch must keep the PR identity block last with tracing $tracing so merge polling still accepts the record:"$'\n'"$(cat "$dir/home/state/rl35.meta")"
+    [ "$FM_PR_META_URL" = "https://github.com/example/repo/pull/35" ] \
+      || fail "the PR poll should still read the task PR after relaunch"
+    [ "$(meta_field "$dir" rl35 pr_head)" = 0123456789abcdef0123456789abcdef01234567 ] \
+      || fail "the PR head must survive relaunch"
+    [ "$(meta_field "$dir" rl35 x_request)" = request-35 ] \
+      || fail "the X request must survive relaunch"
+    if [ "$tracing" = on ]; then
+      [ "$(meta_field "$dir" rl35 traceparent)" = "$traceparent" ] \
+        || fail "trace-enabled relaunch must retain the recorded carrier"
+      grep -Fqx "export TRACEPARENT=$traceparent" "$dir/fake/keys" \
+        || fail "trace-enabled relaunch must deliver the recorded carrier"
+    else
+      [ -z "$(meta_field "$dir" rl35 traceparent)" ] \
+        || fail "trace-disabled relaunch must remove the recorded carrier"
+    fi
+    pass "fm-control relaunch: the PR identity block stays last with tracing $tracing"
+  done
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2974,6 +3017,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_pr_identity_block_last
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
