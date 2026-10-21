@@ -878,13 +878,27 @@ if (!messages[0].content.includes("choose-path") || messages[0].content.includes
 if (!messages[0].content.includes("concrete options") || !messages[0].content.includes("recommendation")) {
   throw new Error("decisions-only prompt lost its options and recommendation contract");
 }
+await emit("before_agent_start", { type: "before_agent_start", messageType: "custom", message: messages[0],
+  systemPrompt: "", systemPromptOptions: {} });
+const silentAssistant = { role: "assistant", content: [], stopReason: "stop", timestamp: now };
+branch.push({ type: "message", id: `entry-${branch.length + 1}`, timestamp: new Date(now).toISOString(),
+  message: silentAssistant });
+await emit("message_end", { type: "message_end", message: silentAssistant });
+await emit("agent_settled", { type: "agent_settled", aborted: false });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (entries.filter((entry) => entry.customType === "fm-idle-reminder-delivered").length !== 1 ||
+    entries.some((entry) => entry.customType === "fm-idle-reminder-failed") || messages.length !== 1) {
+  throw new Error("a permitted silent decision reminder did not settle successfully at the ordinary cadence");
+}
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-console.log(JSON.stringify({ reminders: messages.length, empty: entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length }));
+console.log(JSON.stringify({ reminders: messages.length, empty: entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length,
+  delivered: entries.filter((entry) => entry.customType === "fm-idle-reminder-delivered").length }));
 EOF
   ) || fail "decisions-only idle reminder lifecycle failed: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.reminders')" -eq 1 ] || fail "decision reminder evidence missing: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.empty')" -eq 1 ] || fail "unfinished-filter evidence missing: $out"
-  pass "decisions-only idle reminders suppress unfinished work and preserve concrete decision prompts"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.delivered')" -eq 1 ] || fail "silent settlement evidence missing: $out"
+  pass "decisions-only idle reminders suppress unfinished work, preserve concrete decisions, and settle permitted silence"
 }
 
 test_idle_reminder_is_not_suppressed_by_old_maintenance() {

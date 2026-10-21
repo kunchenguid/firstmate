@@ -31,6 +31,7 @@ type PeriodicConfig = {
 type IdleReminderRun = {
   id: string;
   answered: boolean;
+  allowSilentResponse: boolean;
   inventoryFingerprint: string;
 };
 
@@ -556,7 +557,7 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
       content: reminderPrompt(reminderInventory(snapshot, config), reminderId, config),
       details: { version: 1, reminder_id: reminderId, session_id: generation.sessionId,
         session_file: generation.sessionFile, requested_at: new Date(Date.now()).toISOString(),
-        inventory_fingerprint: inventoryFingerprint } },
+        inventory_fingerprint: inventoryFingerprint, reporting_scope: config.reporting_scope } },
     { triggerTurn: true, deliverAs: "followUp" });
     lastDispatchError = "";
     return true;
@@ -827,19 +828,21 @@ export default function periodicStow(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event) => {
     if (event.messageType !== "custom" || event.message.customType !== reminderMessageType) return;
     const details = event.message.details as { version?: unknown; reminder_id?: unknown;
-      inventory_fingerprint?: unknown } | undefined;
+      inventory_fingerprint?: unknown; reporting_scope?: unknown } | undefined;
     const generation = activeGeneration;
     if (!generation?.live || details?.version !== 1 || details.reminder_id !== generation.reminderPendingId ||
         typeof details.inventory_fingerprint !== "string") return;
     generation.reminderRun = { id: String(details.reminder_id), answered: false,
+      allowSilentResponse: details.reporting_scope === "decisions-only",
       inventoryFingerprint: details.inventory_fingerprint };
   });
   pi.on("message_end", (event) => {
     const run = activeGeneration?.reminderRun;
     if (!run || (event.message as { role?: unknown }).role !== "assistant") return;
     const message = event.message as { stopReason?: unknown };
-    run.answered = Boolean(assistantText(event.message)) && message.stopReason !== "error" &&
-      message.stopReason !== "aborted" && message.stopReason !== "toolUse";
+    const settledSuccessfully = message.stopReason !== "error" && message.stopReason !== "aborted" &&
+      message.stopReason !== "toolUse";
+    run.answered = settledSuccessfully && (run.allowSilentResponse || Boolean(assistantText(event.message)));
   });
   pi.on("agent_settled", (event, ctx) => {
     compacting = false;
