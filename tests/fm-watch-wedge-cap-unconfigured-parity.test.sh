@@ -233,18 +233,23 @@ test_unconfigured_ladder_matches_upstream_main
 # unset case - including through the keep-count routes, since the cap-gated
 # reset reads the normalized value. Each shape runs the same scenario against
 # this branch's watcher and must produce the unset case's trace, which is the
-# branch trace the differential test already drove.
+# branch trace the differential test already drove. The out-of-range shape is
+# the one a shell cannot compare: bash's test ERRORS on such a value and an
+# errored comparison reads as false, so a value left unnormalized would count
+# as CONFIGURED (its "is it 0" test errors false) and would reset the counter
+# the unset case keeps - and its "at least the cap" test would never fire.
 test_unconfigured_value_shapes_match_the_unset_case() {
   local canonical shape env_assignment shape_trace
   canonical=$PARITY_BRANCH_TRACE
   [ -n "$canonical" ] && [ -f "$canonical" ] \
     || fail "the unset-case trace from the differential test is missing: $canonical"
-  for shape in zero empty negative garbage; do
+  for shape in zero empty negative garbage out-of-range; do
     case "$shape" in
       zero)     env_assignment='FM_WEDGE_MAX_ESCALATIONS=0' ;;
       empty)    env_assignment='FM_WEDGE_MAX_ESCALATIONS=' ;;
       negative) env_assignment='FM_WEDGE_MAX_ESCALATIONS=-3' ;;
       garbage)  env_assignment='FM_WEDGE_MAX_ESCALATIONS=garbage' ;;
+      out-of-range) env_assignment='FM_WEDGE_MAX_ESCALATIONS=99999999999999999999' ;;
     esac
     shape_trace=$(run_scenario "$ROOT/bin/fm-watch.sh" "shape-$shape" "$env_assignment")
     if ! diff -u "$canonical" "$shape_trace" > "$TMP_ROOT/shape-$shape.diff"; then
@@ -259,7 +264,7 @@ $(cat "$TMP_ROOT/shape-$shape.diff")"
     grep -F 'final counter=4 marker=0' "$shape_trace" >/dev/null \
       || fail "shape $shape did not end at counter 4 with no cap marker: $(cat "$shape_trace")"
   done
-  pass "FM_WEDGE_MAX_ESCALATIONS at 0, empty, negative, and non-numeric all keep the unchanged ladder through the keep-count routes: 1 2 3 4 with demand-deep-inspection at 3, no PERMANENTLY-WEDGED, no cap marker, no crash"
+  pass "FM_WEDGE_MAX_ESCALATIONS at 0, empty, negative, non-numeric, and out-of-range all keep the unchanged ladder through the keep-count routes: 1 2 3 4 with demand-deep-inspection at 3, no PERMANENTLY-WEDGED, no cap marker, no crash"
 }
 
 test_unconfigured_value_shapes_match_the_unset_case

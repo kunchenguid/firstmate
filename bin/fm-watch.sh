@@ -1182,6 +1182,40 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 FM_WEDGE_GUARD_TIMEOUT_SECS=${FM_WEDGE_GUARD_TIMEOUT_SECS:-5}
 FM_WEDGE_GUARD_DEFER_MAX=${FM_WEDGE_GUARD_DEFER_MAX:-3}
 
+# _wedge_cap_int: normalize a numeric value that is about to reach a bash
+# comparison or an arithmetic expansion into one bash handles correctly.
+#
+# bash's `test` cannot compare a decimal integer outside its own range: the
+# comparison ERRORS and is read as false, so an operator value such as
+# 99999999999999999999 would silently disable the very ceiling it is meant to
+# bound, and would make the cap marker and the rollback sentinel expire at
+# once. The same value inside an arithmetic expansion wraps around silently
+# instead of erroring, so a count read back from the state dir would come out
+# negative. The accepted range is therefore bounded HERE, at the one place
+# each value is read, and everything outside it - a non-digit, a value bash
+# cannot compare, or a value below the setting's minimum - takes the caller's
+# documented default. Values are accepted below 10^18, so the arithmetic the
+# watcher does on them (a difference of two timestamps, a count plus one)
+# cannot overflow either.
+# _wedge_cap_int <out-var> <raw> <default> <min>
+_wedge_cap_int() {
+  local out=$1 raw=$2 default=$3 min=$4 stripped
+  case "$raw" in
+    ''|*[!0-9]*)
+      printf -v "$out" '%s' "$default"
+      return 0
+      ;;
+  esac
+  # Leading zeros carry no value and would make the digit count below a lie.
+  stripped=${raw#"${raw%%[!0]*}"}
+  [ -n "$stripped" ] || stripped=0
+  if [ "${#stripped}" -gt 18 ] || [ "$stripped" -lt "$min" ]; then
+    printf -v "$out" '%s' "$default"
+    return 0
+  fi
+  printf -v "$out" '%s' "$stripped"
+}
+
 # Upper bound on consecutive wedge escalations for a single (window) before a
 # PERMANENTLY-WEDGED wake is emitted and the window-scoped cap marker is written.
 # Disabled by default (0): the unconfigured path keeps the existing
@@ -1191,19 +1225,17 @@ FM_WEDGE_GUARD_DEFER_MAX=${FM_WEDGE_GUARD_DEFER_MAX:-3}
 # elapses, the crew resumes (the marker is per-window wedge bookkeeping and is
 # cleared with the rest of it), or the operator manually removes it.
 FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-0}
-case "$FM_WEDGE_MAX_ESCALATIONS" in
-  ''|*[!0-9]*) FM_WEDGE_MAX_ESCALATIONS=0 ;;
-esac
+_wedge_cap_int FM_WEDGE_MAX_ESCALATIONS "$FM_WEDGE_MAX_ESCALATIONS" 0 0
 # Cap marker lifetime: how long the window-scoped cap marker silences the wedge
 # path after a cap fire. Re-fires after this horizon elapses.
 FM_CAP_HORIZON_SECS=${FM_CAP_HORIZON_SECS:-86400}
-case "$FM_CAP_HORIZON_SECS" in ''|*[!0-9]*|0) FM_CAP_HORIZON_SECS=86400 ;; esac
+_wedge_cap_int FM_CAP_HORIZON_SECS "$FM_CAP_HORIZON_SECS" 86400 1
 # How long a rollback-failure sentinel silences the wedge path before the
 # sentinel expires and a normal re-escalation is allowed again. A value of 0
 # would let the wedge re-fire immediately under persistent fs failure, which
 # is the queue-flood behavior this setting exists to bound.
 FM_ROLLBACK_SENTINEL_TTL_SECS=${FM_ROLLBACK_SENTINEL_TTL_SECS:-3600}
-case "$FM_ROLLBACK_SENTINEL_TTL_SECS" in ''|*[!0-9]*|0) FM_ROLLBACK_SENTINEL_TTL_SECS=3600 ;; esac
+_wedge_cap_int FM_ROLLBACK_SENTINEL_TTL_SECS "$FM_ROLLBACK_SENTINEL_TTL_SECS" 3600 1
 
 # _wedge_cap_markers_clear: drop every cap marker a fired cap wrote for one
 # window - the window-scoped cap marker, the terminal-row episode marker, and the
@@ -1299,7 +1331,7 @@ _wedge_cap_marker_stands() {
   [ -e "$STATE/.wedge-permanent-$_wkey" ] || return 1
   fm_epoch_seconds_to _now
   _ts=$(cat "$STATE/.wedge-permanent-$_wkey" 2>/dev/null || true)
-  case "$_ts" in ''|*[!0-9]*) _ts=0 ;; esac
+  _wedge_cap_int _ts "$_ts" 0 0
   [ $(( _now - _ts )) -lt "$FM_CAP_HORIZON_SECS" ]
 }
 
@@ -1372,7 +1404,7 @@ _wedge_cap_terminal_append() {
 _wedge_cap_rollback() {
   local _key=$1 _esc=$2 _since=$3 _silence=${4:-0} _failed=0 _sentinel _sentinel_rc=0 _now
   fm_epoch_seconds_to _now
-  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+  _wedge_cap_int _now "$_now" 0 0
   { : > "$_esc"; } 2>/dev/null || _failed=1
   { printf '%s\n' "$_now" > "$_since"; } 2>/dev/null || _failed=1
   clear_write_tracking "$_key" 2>/dev/null || true
@@ -1916,9 +1948,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   _wrollback_sentinel="$STATE/.wedge-rollback-failed-$_wkey"
   if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ -e "$_wrollback_sentinel" ]; then
     _wrb_ts=$(head -1 "$_wrollback_sentinel" 2>/dev/null | awk '{print $1}')
-    case "$_wrb_ts" in
-      ''|*[!0-9]*) _wrb_ts=0 ;;
-    esac
+    _wedge_cap_int _wrb_ts "$_wrb_ts" 0 0
     fm_epoch_seconds_to _wrb_now
     if [ "$_wrb_ts" -ne 0 ] && [ $(( _wrb_now - _wrb_ts )) -lt "$FM_ROLLBACK_SENTINEL_TTL_SECS" ]; then
       # A ceiling on escalations is not a ceiling on detecting a dead worker, so
@@ -2018,7 +2048,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # like every other marker this ladder reads, rather than reaching the
         # arithmetic as whatever bytes a partial write left in it.
         prev=$(cat "$escalation_file" 2>/dev/null || true)
-        case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+        _wedge_cap_int prev "$prev" 0 0
         n=$(( prev + 1 ))
         # Brace-wrapped so a failed redirect's own diagnostic is captured by the
         # wrapper's stderr rather than leaking past it. With the cap OFF there

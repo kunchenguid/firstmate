@@ -550,6 +550,30 @@ test_wedge_cap_expires_after_horizon() {
   [ ! -s "$state/.wedge-escalations-$key" ] \
     || fail "fresh-hash poll within horizon advanced the escalation counter ($(cat "$state/.wedge-escalations-$key")); the window-scoped marker did not silence the wedge path"
 
+  # The same silence must hold when the horizon is a value the shell cannot
+  # compare: bash's test ERRORS on such a value, and an errored comparison
+  # reads as false, so the marker would expire at once and the cap would
+  # re-fire on every poll - the unbounded train this cap exists to bound. An
+  # unusable horizon is an invalid one, so the documented default applies and
+  # the window stays silent. The idle timer is replanted so this poll reaches
+  # the marker consult instead of waiting out the threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_CAP_HORIZON_SECS=99999999999999999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" 200; then
+    reap "$pid"; fail "fresh-hash poll with an unusable horizon: watcher did not stay alive: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "fresh-hash poll with an unusable horizon fired PERMANENTLY-WEDGED - the unusable horizon was not read as the documented default"
+  [ ! -s "$state/.wedge-escalations-$key" ] \
+    || fail "fresh-hash poll with an unusable horizon advanced the escalation counter ($(cat "$state/.wedge-escalations-$key")); the unusable horizon did not silence the wedge path"
+
   # Now age the cap marker past the horizon (cap=2s) and leave the pane
   # exactly as it was, so the only thing that changed is the marker age. The
   # escalation counter is pre-seeded one below the cap, so the very next poll
@@ -683,6 +707,42 @@ test_wedge_cap_validates_invalid_overrides() {
   pass "non-integer FM_WEDGE_MAX_ESCALATIONS falls back to 0 and the cap stays inert"
 }
 
+# 7b. The escalation count is a count of consecutive escalations, so the
+# counter file the ladder reads it from must never yield a number the shell
+# cannot handle: a value beyond the shell's integer range ERRORS in a
+# comparison and wraps around silently in the count's arithmetic, which would
+# report a count of billions for a window that has escalated once - and, past
+# any ceiling, a count that no longer describes the ladder. A counter the
+# watcher cannot read as a count is a fresh count.
+test_wedge_cap_reads_an_unreadable_counter_as_a_fresh_one() {
+  local dir state out capture_file window key pane_hash sig
+  dir=$(make_case wedge-cap-counter-unreadable); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"
+  fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-counter-unreadable"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-counter-unreadable.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-counter-unreadable.status"
+  sig=$(seen_sig "$state/wedge-cap-counter-unreadable.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-counter-unreadable_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 0 || fail "prime-and-ack failed"
+
+  # A counter file holding a value beyond the shell's integer range. The next
+  # poll must read it as a fresh count of 1.
+  printf '99999999999999999999\n' > "$state/.wedge-escalations-$key"
+  poll_wedge_round "$dir" 0 ""
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "an escalation counter the shell cannot compare was not read as a fresh count: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = "1" ] \
+    || fail "an escalation counter the shell cannot compare was not replaced by the fresh count: $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+  unset FM_FAKE_CREW_STATE
+  pass "an escalation counter the shell cannot compare is read as a fresh count of 1, never as a count the arithmetic wrapped around"
+}
+
 # 8. The cap-fire path is durable: rolling back on a marker-write failure
 # restores the escalation counter and stale timer, and a rollback failure
 # itself writes a transient sentinel that silences the wedge for
@@ -755,6 +815,29 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "expected the sentinel short-circuit triage line; got triage: $(cat "$state/.watch-triage.log" 2>/dev/null) and watch.out: $(cat "$out")"
   [ -e "$sentinel" ] || fail "the sentinel was removed by the short-circuit poll; it must hold until TTL expiry or an operator rm"
+
+  # The sentinel must hold just as long when the TTL is a value the shell
+  # cannot compare: bash's test ERRORS on such a value and an errored
+  # comparison reads as false, so the sentinel would be dropped on the very
+  # next poll and the failed-write route would be back on every poll - the
+  # wake-queue flood this sentinel exists to bound. An unusable TTL is an
+  # invalid one, so the documented default applies and the sentinel holds.
+  : > "$state/.watch-triage.log"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_ROLLBACK_SENTINEL_TTL_SECS=99999999999999999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || true
+  grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
+    || fail "a rollback-failed sentinel with an unusable TTL did not hold the wedge path: $(cat "$state/.watch-triage.log" 2>/dev/null) and watch.out: $(cat "$out")"
+  [ -e "$sentinel" ] || fail "a rollback-failed sentinel with an unusable TTL was dropped instead of holding for the documented default"
+  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] \
+    || fail "a rollback-failed sentinel with an unusable TTL queued another wake: $(cat "$state/.wake-queue" 2>/dev/null)"
 
   # The sentinel silences ESCALATIONS, not detection: the agent exits while its
   # pane keeps rendering the identical frame, so the session inventory no longer
@@ -1623,6 +1706,7 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane
 test_wedge_cap_expires_after_horizon
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_overrides
+test_wedge_cap_reads_an_unreadable_counter_as_a_fresh_one
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
 test_wedge_cap_unwritable_escalation_count_fails_safe
 test_wedge_cap_sentinel_probe_keeps_its_cadence
