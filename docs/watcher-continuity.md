@@ -86,6 +86,8 @@ Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-au
 Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
 The hook fires on every Stop.
 On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+If a session exits mid-cycle and leaves an orphaned Stop hook, the replacement session's first eligible Stop supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
+[`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 ### Claude session-lock ownership
@@ -490,6 +492,8 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Stale and live session owners.
 - Unchanged AFK and need boundaries.
 - Single-flight.
+- Supersession of a dead session's orphaned claim by the replacement session's first Stop, including a resumed session that carries the dead one's conversation id, and a claim with no readable session lock.
+- A recycled background bridge keeping its live claim on the trusted session id pinned to the lock holder's recorded pid-identity.
 - Bounded failure retries.
 - Benign live-watcher cycle ends.
 - One-notice failure episodes.

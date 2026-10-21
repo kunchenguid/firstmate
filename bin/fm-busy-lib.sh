@@ -38,6 +38,9 @@
 #                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   polytoken-hook   Polytoken pre_user_prompt / pre_model_turn open and stop
+#                    closes; a REST turn cancel emits no stop (verified live),
+#                    so the control plane writes the close itself
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -235,6 +238,7 @@ fm_busy_sources_for_harness() {  # <harness>
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
     commandcode) adapter=commandcode-mod ;;
+    polytoken) adapter=polytoken-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
