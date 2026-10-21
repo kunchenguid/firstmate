@@ -33,7 +33,7 @@ chmod +x "$DRIVE"
 
 repro_detach() {
   local label=$1
-  local start elapsed
+  local start elapsed pid
   rm -f "$OUT" "$PIDFILE"
   start=$(date +%s)
   case "$label" in
@@ -50,14 +50,20 @@ repro_detach() {
       ;;
   esac
   elapsed=$(( $(date +%s) - start ))
+  pid=$(cat "$PIDFILE")
+  kill -0 "$pid" 2>/dev/null \
+    || fail "$label child was not running when its PID returned"
   [ "$elapsed" -le 2 ] \
     || fail "$label detach took ${elapsed}s; expected a pid return in under 2s"
   if grep -q '^GATE$' "$OUT" 2>/dev/null; then
     fail "$label detach already contained GATE when the parent returned"
   fi
-  wait "$(cat "$PIDFILE")" 2>/dev/null || true
+  printf '%s: pid=%s returned after %ss; child running; GATE absent\n' "$label" "$pid" "$elapsed"
+  wait "$pid" || fail "$label child exited unsuccessfully"
   grep -q '^GATE$' "$OUT" \
     || fail "$label child never wrote GATE after wait"
+  printf '%s: child completed after %ss; GATE present\n' "$label" "$(( $(date +%s) - start ))"
+  rm -f "$PIDFILE"
 }
 
 repro_detach nohup
