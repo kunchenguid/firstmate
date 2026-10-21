@@ -21,6 +21,20 @@ file_mode() {
   fi
 }
 
+# Clone the exact reviewed commit into a disposable directory.
+#
+# The commit is named explicitly rather than through a branch: a checkout
+# can be detached, and `git branch --show-current` is then empty, so
+# `git clone --branch ""` fails before the fixture exists. The gate
+# worktree is a detached checkout, so a fixture that needs a branch name
+# fails there and never exercises the behaviour it is written for.
+clone_reviewed_head() {  # <source> <destination>
+  local src=$1 dst=$2 head
+  head=$(git -C "$src" rev-parse HEAD) || return 1
+  git clone --quiet --no-checkout "$src" "$dst" || return 1
+  git -C "$dst" checkout --quiet "$head" || return 1
+}
+
 install_fake_process_event_sweep() {
   local home=$1 log=$2
   mkdir -p "$home/bin"
@@ -45,6 +59,205 @@ esac
 SH
   chmod +x "$home/bin/fm-procevent.sh"
   : > "$log"
+}
+
+test_durable_home_git_lock_lifecycle() {
+  local fmroot home sub fakebin log out gitdir reason real_git
+  fmroot="$TMP_ROOT/git-lock-code"
+  home="$TMP_ROOT/git-lock-parent"
+  sub="$TMP_ROOT/git-lock-subhome"
+  clone_reviewed_head "$ROOT" "$fmroot" || fail "cannot create disposable code root"
+  git -C "$fmroot" worktree add --quiet --detach "$sub" HEAD || fail "cannot create disposable home worktree"
+  mkdir -p "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/git-lock-fake")
+  log="$TMP_ROOT/git-lock-fake/tmux.log"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TREEHOUSE_HOME="$sub" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='durable lock domain' \
+    bash "$ROOT/bin/fm-home-seed.sh" domain - --no-projects) || fail "disposable worktree seed failed"
+  assert_contains "$out" "home=$sub" "seed did not publish the disposable home"
+  if git -C "$fmroot" worktree remove "$sub" 2>"$TMP_ROOT/git-lock-remove.err"; then
+    fail "ordinary git worktree remove deleted a seeded durable home"
+  fi
+  assert_grep 'locked' "$TMP_ROOT/git-lock-remove.err" "Git refused removal for a reason other than the durable lock"
+  gitdir=$(git -C "$sub" rev-parse --absolute-git-dir)
+  reason=$(cat "$gitdir/locked")
+  assert_contains "$reason" 'Firstmate durable home' "Git lock reason does not identify the durable home"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-home-seed.sh" domain "$sub" --no-projects >/dev/null \
+    || fail "repeated seed refused the owned lock"
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "repeated seed changed the owned lock"
+
+  cp "$gitdir/firstmate-home-lock" "$TMP_ROOT/git-lock-receipt"
+  printf 'corrupt\n' >> "$gitdir/firstmate-home-lock"
+  if FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-home-seed.sh" domain "$sub" --no-projects >/dev/null 2>&1; then
+    fail "seed accepted a stale ownership receipt"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "stale receipt refusal removed the lock"
+  cp "$TMP_ROOT/git-lock-receipt" "$gitdir/firstmate-home-lock"
+
+  fm_write_secondmate_meta "$home/state/domain.meta" "$sub"
+  git -C "$sub" worktree unlock "$sub"
+  git -C "$sub" worktree lock --reason 'foreign owner' "$sub"
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TREEHOUSE_HOME="$sub" \
+    bash "$ROOT/bin/fm-home-seed.sh" domain - --no-projects >/dev/null 2>&1; then
+    fail "seed accepted a foreign lock"
+  fi
+  assert_no_grep 'treehouse return' "$log" "failed seed returned a foreign-locked home"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" bash "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>&1; then
+    fail "forced retirement bypassed a foreign lock"
+  fi
+  [ "$(cat "$gitdir/locked")" = 'foreign owner' ] || fail "refusal changed the foreign lock"
+  assert_present "$home/state/domain.meta" "foreign lock refusal cleared the route"
+  git -C "$sub" worktree unlock "$sub"
+  git -C "$sub" worktree lock --reason "$reason" "$sub"
+
+  # A missing receipt never licenses a familiar-looking lock reason.
+  rm "$gitdir/firstmate-home-lock"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" bash "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
+    fail "retirement trusted a reason without an ownership receipt"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "unknown-owner refusal changed the lock"
+  cp "$TMP_ROOT/git-lock-receipt" "$gitdir/firstmate-home-lock"
+
+  printf 'kind=ship\n' > "$sub/state/pending.meta"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" bash "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
+    fail "retirement discarded in-flight child work"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "in-flight refusal released durable protection"
+  rm "$sub/state/pending.meta"
+
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    bash "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$TMP_ROOT/git-lock-return.err"; then
+    fail "retirement hid a failed pool return"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "failed retirement did not restore the exact lock"
+  assert_present "$home/state/domain.meta" "failed return cleared route metadata"
+
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *' worktree unlock '*) echo 'synthetic unlock failure' >&2; exit 19 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_REAL_GIT="$real_git" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" bash "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
+    fail "retirement hid an unlock error"
+  fi
+  assert_no_grep 'treehouse return' "$log" "retirement returned a home after failed unlock"
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "unlock failure changed protection"
+  rm "$fakebin/git"
+
+  # The return test double invokes real Git removal, so it cannot bypass a lock.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = return ] && [ "$2" = --force ] || exit 2
+printf 'treehouse return --force %s\n' "$3" >> "$FM_FAKE_TMUX_LOG"
+git worktree remove --force "$3"
+SH
+  chmod +x "$fakebin/treehouse"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" bash "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$TMP_ROOT/git-lock-retire.err" \
+    || { cat "$TMP_ROOT/git-lock-retire.err" >&2; fail "owned retirement failed"; }
+  assert_absent "$sub" "authorized retirement retained the home"
+  assert_absent "$gitdir" "authorized retirement retained Git administrative state"
+  assert_absent "$home/state/domain.meta" "authorized retirement retained metadata"
+  pass "durable lock seed/reseed, stale/foreign/unknown refusal, retained work and retirement retry"
+}
+
+test_durable_home_git_lock_rollback() {
+  local fmroot home sub fakebin log gitdir reason real_git sweep_log rearm_log
+  fmroot="$TMP_ROOT/git-lock-rollback-code"
+  home="$TMP_ROOT/git-lock-rollback-parent"
+  sub="$TMP_ROOT/git-lock-rollback-subhome"
+  clone_reviewed_head "$ROOT" "$fmroot" || fail "cannot create rollback code root"
+  git -C "$fmroot" worktree add --quiet --detach "$sub" HEAD || fail "cannot create rollback worktree"
+  mkdir -p "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/git-lock-rollback-fake")
+  log="$TMP_ROOT/git-lock-rollback-fake/tmux.log"
+  gitdir=$(git -C "$sub" rev-parse --absolute-git-dir)
+  # Missing filled charter fails after protection is acquired on an existing home.
+  if FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_SECONDMATE_CHARTER='' \
+    bash "$ROOT/bin/fm-home-seed.sh" retry "$sub" --no-projects >/dev/null 2>&1; then
+    fail "seed accepted an absent charter"
+  fi
+  assert_absent "$gitdir/locked" "failed seed kept its attempt-owned lock"
+  assert_absent "$gitdir/firstmate-home-lock" "failed seed kept its ownership receipt"
+  FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_SECONDMATE_CHARTER='retry scope' \
+    bash "$ROOT/bin/fm-home-seed.sh" retry "$sub" --no-projects >/dev/null || fail "seed retry failed"
+  reason=$(cat "$gitdir/locked")
+  mkdir -p "$TMP_ROOT/git-lock-other-parent"
+  if bash -c '. "$1"; fm_home_worktree_lock_release "$2" retry "$3"' _ \
+    "$ROOT/bin/fm-home-worktree-lock-lib.sh" "$sub" "$TMP_ROOT/git-lock-other-parent" 2>/dev/null; then
+    fail "another parent released the durable home lock"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "parent mismatch changed protection"
+  printf 'retained\n' > "$sub/projects/retained"
+  if FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-home-seed.sh" retry "$sub" --no-projects >/dev/null 2>&1; then
+    fail "repeat seed accepted populated projectless home"
+  fi
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "failed repeat seed released preexisting protection"
+  # Reissued pool state must not turn the same failure into permission to return it.
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TREEHOUSE_HOME="$sub" FM_FAKE_TMUX_LOG="$log" \
+    bash "$ROOT/bin/fm-home-seed.sh" retry - --no-projects >/dev/null 2>&1; then
+    fail "reissued seed accepted populated home"
+  fi
+  assert_no_grep 'treehouse return' "$log" "failed repeat acquired seed returned a protected home"
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "reissued seed released preexisting protection"
+  rm "$sub/projects/retained"
+  fm_write_secondmate_meta "$home/state/retry.meta" "$sub"
+  sweep_log="$TMP_ROOT/git-lock-unpooled-sweep.log"
+  rearm_log="$TMP_ROOT/git-lock-unpooled-rearm.log"
+  mkdir -p "$sub/state/procevent"
+  printf 'adapter=lavish\n' > "$sub/state/procevent/source.source"
+  cp "$sub/state/procevent/source.source" "$TMP_ROOT/git-lock-unpooled-source"
+  install_fake_process_event_sweep "$sub" "$sweep_log"
+  : > "$rearm_log"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *' worktree unlock '*) echo 'synthetic unlock failure' >&2; exit 19 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  if PATH="$fakebin:$PATH" FM_REAL_GIT="$real_git" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
+    bash "$ROOT/bin/fm-teardown.sh" retry >/dev/null 2>"$TMP_ROOT/git-lock-unpooled-unlock.err"; then
+    fail "unpooled retirement hid an unlock failure"
+  fi
+  assert_grep 'synthetic unlock failure' "$TMP_ROOT/git-lock-unpooled-unlock.err" "retirement did not reach unlock"
+  assert_grep "$sub" "$sweep_log" "unlock failure did not follow a process-event sweep"
+  cmp -s "$TMP_ROOT/git-lock-unpooled-source" "$sub/state/procevent/source.source" \
+    || fail "failed unlock lost the process-event registration"
+  assert_grep "$sub" "$rearm_log" "failed unlock did not rearm process events"
+  assert_present "$home/state/retry.meta" "failed unlock removed parent metadata"
+  [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "failed unlock changed protection"
+  rm "$fakebin/git"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/git-lock-rollback-fake/pane.txt" \
+    FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
+    bash "$ROOT/bin/fm-teardown.sh" retry >/dev/null 2>"$TMP_ROOT/git-lock-unpooled.err" \
+    || { cat "$TMP_ROOT/git-lock-unpooled.err" >&2; fail "unpooled linked-home retirement failed"; }
+  assert_absent "$sub" "unpooled retirement retained the home"
+  assert_absent "$gitdir" "unpooled retirement leaked Git administrative state"
+  pass "failed seed releases attempt protection and preserves earlier owned protection"
 }
 
 test_fm_home_parameterization() {
@@ -303,7 +516,7 @@ test_home_seed_uses_treehouse_acquired_home() {
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
-test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
+test_home_seed_preserves_foreign_acquired_home() {
   local home acquired acquired_abs fakebin log err
   home="$TMP_ROOT/dash-fail-home"
   acquired="$TMP_ROOT/dash-fail-acquired-home"
@@ -324,12 +537,12 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
     fail "seed reused an acquired home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
-  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
-    || fail "failed acquired seed did not return the home through treehouse"
+  assert_no_grep "treehouse return --force $acquired_abs" "$log" "seed rollback returned another mate's home"
+  assert_present "$acquired/.fm-secondmate-home" "seed rollback removed another mate's home"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
   fi
-  pass "home seeding returns rejected acquired homes through treehouse"
+  pass "home seeding preserves an acquired home owned by another mate"
 }
 
 test_home_seed_warns_when_acquired_home_return_fails() {
@@ -343,18 +556,17 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   git clone --quiet "$ROOT" "$acquired"
   acquired_abs=$(cd "$acquired" && pwd -P)
-  printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-return-fail-fake")
   log="$TMP_ROOT/dash-return-fail-fake/tmux.log"
   lease="$TMP_ROOT/dash-return-fail-fake/lease"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
-    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
+    FM_SECONDMATE_CHARTER='' FM_SECONDMATE_SCOPE='' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed reused an acquired home after return failure setup"
   fi
-  grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not report original acquired-home rejection"
+  grep -F 'no filled secondmate charter' "$err" >/dev/null || fail "seed did not report original acquired-home rejection"
   grep -F "warning: failed to return treehouse-acquired home $acquired_abs during seed rollback" "$err" >/dev/null \
     || fail "seed rollback did not warn when treehouse return failed"
   [ -f "$lease" ] || fail "failed rollback return did not preserve lease evidence"
@@ -3114,6 +3326,9 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+test_durable_home_git_lock_lifecycle
+test_durable_home_git_lock_rollback
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -3124,7 +3339,7 @@ test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
-test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
+test_home_seed_preserves_foreign_acquired_home
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone

@@ -59,6 +59,8 @@ fm_backend_tmux_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  # fm-home-worktree-lock-lib.sh: teardown sources it for the durable-home lock.
+  ln -s "$ROOT/bin/fm-home-worktree-lock-lib.sh" "$fake/bin/fm-home-worktree-lock-lib.sh"
   ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
@@ -167,6 +169,8 @@ fm_backend_tmux_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  # fm-home-worktree-lock-lib.sh: teardown sources it for the durable-home lock.
+  ln -s "$ROOT/bin/fm-home-worktree-lock-lib.sh" "$fake/bin/fm-home-worktree-lock-lib.sh"
   ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"

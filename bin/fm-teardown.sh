@@ -197,6 +197,9 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Before returning a protected home, the home-lock library verifies and releases
+# only this mate and parent's Git lock; foreign or unknown locks refuse even
+# with --force. A failed return restores owned protection for retry.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -321,6 +324,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-home-worktree-lock-lib.sh
+. "$SCRIPT_DIR/fm-home-worktree-lock-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -2676,7 +2681,7 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_firstmate_home_for_removal() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
+  local home=$1 label=$2 expected_id=${3:-} lock_parent=${4:-$FM_HOME} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -2702,6 +2707,7 @@ validate_firstmate_home_for_removal() {
       fi
     fi
   fi
+  fm_home_worktree_lock_check "$abs_home_path" "$expected_id" "$lock_parent" || return 1
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   conflict=
   if conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path"); then
@@ -2729,10 +2735,10 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} lock_parent=${4:-$FM_HOME} abs_home_path process_event_backup removal_rc=0
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
-  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
+  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$lock_parent") || return 1
   [ -n "$abs_home_path" ] || return 0
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
@@ -2748,18 +2754,34 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    if ! fm_home_worktree_lock_release "$abs_home_path" "$expected_id" "$lock_parent"; then
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    fi
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      fm_home_worktree_lock_acquire "$abs_home_path" "$expected_id" "$lock_parent" || echo "error: cannot restore durable-home protection after failed return: $abs_home_path" >&2
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    fm_home_worktree_lock_forget "$abs_home_path" "$expected_id" "$lock_parent" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  if safe_rm_rf "$abs_home_path" "$label"; then
+  if ! fm_home_worktree_lock_release "$abs_home_path" "$expected_id" "$lock_parent"; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+    return 1
+  fi
+  if [ "$FM_HOME_LOCK_LINKED" = 1 ]; then
+    git --git-dir="$FM_HOME_LOCK_DIR" worktree remove --force "$abs_home_path" || removal_rc=$?
+  else
+    safe_rm_rf "$abs_home_path" "$label" || removal_rc=$?
+  fi
+  if [ "$removal_rc" = 0 ]; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
+  fm_home_worktree_lock_acquire "$abs_home_path" "$expected_id" "$lock_parent" || echo "error: cannot restore durable-home protection after failed removal: $abs_home_path" >&2
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
   return 1
 }
@@ -3092,7 +3114,7 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
@@ -3334,7 +3356,7 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
