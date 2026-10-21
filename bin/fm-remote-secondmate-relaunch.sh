@@ -121,8 +121,7 @@ case "$CAP_SCOPE_RC" in
   0) CAP_CAPPED=0 ;;
   2) die "the Sol ceiling declaration could not be read, so $ID's replacement model could not be published" ;;
 esac
-if [ "$CAP_CAPPED" = 1 ] &&
-  fm_sol_cap_has_owned_occupancy "$ID" "$STATE"; then
+if fm_sol_cap_has_owned_occupancy "$ID" "$STATE"; then
   CAP_ROOT=$(fm_firstmate_root_home "$(fm_sol_cap_home "$STATE")") || die "cannot resolve the Sol admission home"
   CAP_PATH=$CAP_ROOT/state/$FM_SOL_LOCK_NAME
   fm_sol_cap_lock_acquire "$CAP_PATH" "the model publication of $ID" || die "$FM_SOL_CAP_REFUSAL"
@@ -134,6 +133,18 @@ if [ "$CAP_CAPPED" = 1 ]; then
     fm_sol_cap_registry_promote "$ID" remove "$STATE" || die "cannot release $ID's stopped Sol incarnation"
   else
     fm_sol_cap_promote "$ID" remove "$STATE" || die "cannot release $ID's stopped Sol incarnation"
+  fi
+else
+  # The replacement still runs a covered model, so the row must name the
+  # model that holds the slot: a row left naming the model the session ran
+  # before is skipped by the count and by adoption, and the running session
+  # goes uncounted. The claim keeps the row's own pid and start epoch.
+  CAP_REGISTRY="$STATE/$FM_SOL_REGISTRY_NAME"
+  CAP_START=$(awk -F'\t' -v id="$ID" '$1 == id {print $3; exit}' "$CAP_REGISTRY" 2>/dev/null || true)
+  CAP_PID=$(awk -F'\t' -v id="$ID" '$1 == id {print $4; exit}' "$CAP_REGISTRY" 2>/dev/null || true)
+  if [ -n "$CAP_START" ]; then
+    fm_sol_cap_registry_claim "$CAP_REGISTRY" "$ID" "$NEW_MODEL" "$CAP_START" "$CAP_PID" ||
+      die "cannot record $ID's replacement model in its registry row"
   fi
 fi
 
