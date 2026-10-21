@@ -491,13 +491,16 @@ If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=
 That command preserves the request body and lets the remote enqueue deduplicate onto the same record.
 A plain rerun mints a different correlation and is not idempotent.
 When deduplication finds that the worker already moved the matching record into `handled/`, the resend exits successfully without ringing the doorbell again.
+Once the mate is reachable again, the parent's reply tracker checks the remote inbox for an unconfirmed request itself: a record that landed is marked delivered, and a recent one that never landed is resent once under the same correlation.
+The [`fm-pending-reply-lib.sh` header](../bin/fm-pending-reply-lib.sh) owns that reconciliation and its age bound.
 
 ### Swallowed doorbells
 
 The remote host runs no doorbell re-ring ladder of its own.
-A swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation.
-Its recovery request rings the doorbell again when it is enqueued.
-A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane, and only when `config/wait-no-turns` is present: the remote steer leg owes no re-ring, so a swallowed remote doorbell for one waits for the next ring into that inbox, and a remote-side retry is known follow-up scope.
+Instead the mate's own watcher wakes its session for any record that sits unhandled in its parent-route inbox past the inbox grace, so a parked mate reads the instruction even when its doorbell's Enter never landed.
+A still-unread ordinary reply-bearing request also surfaces at the parent: its reply tracker reads the remote inbox through `fm-remote-secondmate-control.sh inbox-status`, never counts a quiet mate as having taken a turn while the request is unread, and escalates it once as unread with the composer verdict and the `fm-peek` then `--key Enter` remedy.
+Each ring decision, on every leg, is appended to the inbox's `.ring-log`, so a skipped or unconfirmed doorbell can be diagnosed afterwards.
+A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane, and only when `config/wait-no-turns` is present; on the remote host the mate's own watcher wake covers it.
 
 ### Remote reads
 
