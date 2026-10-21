@@ -146,7 +146,18 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
     verdict=$(fm_composer_classify_screen "$caps" "$pane" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  if [ "$verdict" = pending ]; then
+  # A fleet Grok worker runs with --always-approve, which puts ` · always-approve`
+  # in its composer title; on every cursorless backend that title once made the
+  # idle composer read unknown, which refused fm-control's typed exit
+  # (Grok 1.0.52). Grok's box is fully readable without identity, so empty is
+  # the only acceptable verdict for it.
+  if [ "$name" = grok ] && [ "$verdict" != empty ]; then
+    printf '# %s cursorless pane tail:\n' "$name" >&2
+    printf '%s\n' "$pane" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - %s (%s): the idle worker composer read cursorless as %s, not empty; fm-control would refuse to type its exit command\n' \
+      "$name" "$version" "${verdict:-unreadable}" >&2
+  elif [ "$verdict" = pending ]; then
     printf '# %s cursorless pane tail:\n' "$name" >&2
     tmux -L "$SOCKET" capture-pane -p -t "$target" 2>/dev/null \
       | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
@@ -162,7 +173,10 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 # --- 1. Every installed verified harness must reach a proven-empty composer --
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    case "$h" in
+      grok) check_harness_idle_empty "$h" "$h" --always-approve ;; # the worker launch shape
+      *) check_harness_idle_empty "$h" "$h" ;;
+    esac
   else
     note "harness absent, not verified here: $h"
   fi

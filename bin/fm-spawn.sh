@@ -510,6 +510,11 @@
 # that count. A viewport read that fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# After launch, grok's folder-trust dialog (Grok 1.0.52 and later) is surfaced, never
+# answered: the spawn polls the pane (FM_GROK_TRUST_POLLS reads, FM_GROK_POLL_INTERVAL
+# apart), and a named dialog records an open `blocked [key=grok-trust-dialog]` status
+# line and a `waiting:` notice while the spawn still succeeds. Typed text answers that
+# dialog, so the caller sends Enter with bin/fm-send.sh --key.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse, gemini, agy, devin, and commandcode are crewmate/scout only and are refused for --secondmate.
@@ -4877,6 +4882,44 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# grok carries its brief on the launch command too, but a folder it has not
+# trusted parks it on a folder-trust dialog before anything runs (Grok 1.0.52:
+# "Do you trust the contents of this directory?", where Enter accepts and a
+# typed y or n answers). Answering it trusts the folder in grok's own store, so
+# the spawn never answers: it surfaces the dialog as an open blocker and leaves
+# the answer to the caller, who sends it with `fm-send.sh <id> --key Enter`.
+# The poll ends as soon as the dialog is named, or the pane is past it (a known
+# composer or a busy verdict), or the budget is spent; only a named dialog
+# produces anything, so a spawn on a trusted folder is unchanged.
+grok_capture() {
+  fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null || true
+}
+
+grok_wait_for_trust_dialog() {
+  local pane i=0 max=${FM_GROK_TRUST_POLLS:-20} interval=${FM_GROK_POLL_INTERVAL:-0.5} dialog
+  while [ "$i" -lt "$max" ]; do
+    pane=$(grok_capture)
+    if dialog=$(fm_composer_blocking_dialog "$pane"); then
+      GROK_TRUST_DIALOG=$dialog
+      return 0
+    fi
+    case "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" in
+      empty | pending) return 1 ;;
+    esac
+    case "$(fm_busy_classify "$BACKEND" "$T" grok "$ID" "$STATE" "$pane")" in
+      busy*) return 1 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+grok_surface_trust_dialog() {
+  printf '%s\n' "$(status_stamp_line "blocked [key=grok-trust-dialog]: the worker is parked on the $GROK_TRUST_DIALOG in window $T; the brief runs once it is answered, and Enter accepts it and trusts the folder in grok's own store (bin/fm-send.sh $ID --key Enter)")" >>"$STATE/$ID.status"
+  echo "waiting: $ID's $GROK_TRUST_DIALOG is open in window $T and nothing has been typed into it; answer with bin/fm-send.sh $ID --key Enter, then close the open blocker with a resolved [key=grok-trust-dialog] status line" >&2
+}
+
 # polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
 # rides the launch command (--prompt submits it after the TUI attaches), so
 # readiness is positive proof the brief is being processed rather than proof a
@@ -6473,6 +6516,9 @@ if [ "$HARNESS" = agy ]; then
     fi
     exit 1
   fi
+fi
+if [ "$HARNESS" = grok ] && grok_wait_for_trust_dialog; then
+  grok_surface_trust_dialog
 fi
 # polytoken's gate is semantic and scoped to the canonical template: a raw
 # launch command never carries the generated wiring's flags, so it is gated

@@ -797,6 +797,22 @@ Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
 Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owes a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width is not live-verified and may need adjustment if Grok's title rendering changes or scales with title length.
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
+
+Verified 2026-10-19 on this host with Grok 1.0.52 (`0920c8169e27`) and 1.0.62 (`1474f9cbdd91`), tmux, and Herdr 0.9.0-preview in a guarded lab session.
+Both versions render the title as `Grok 4.7 (high) · always-approve` with the bottom border aligned to the top one, and the `· always-approve` suffix made the idle composer read `pending-unproven` (tmux) or `unknown` (cursorless) until `_fm_composer_titled_bottom_ok` learned the typed Grok title with a mode suffix.
+The refresh command, run with only Grok on PATH and `GROK_DISABLE_AUTOUPDATER=1` holding each binary in turn, launches Grok as a worker does (`--always-approve`):
+
+```text
+$ FM_COMPOSER_MATRIX_LIVE=1 bash tests/fm-composer-matrix-live-e2e.test.sh
+ok - grok (grok 1.0.52 (0920c8169e27) [stable]): real idle composer classifies empty
+ok - grok (grok 1.0.52 (0920c8169e27) [stable]): the same idle pane read cursorless is not pending (verdict: empty)
+ok - grok (grok 1.0.62 (1474f9cbdd91) [stable]): real idle composer classifies empty
+ok - grok (grok 1.0.62 (1474f9cbdd91) [stable]): the same idle pane read cursorless is not pending (verdict: empty)
+```
+
+With the pre-fix classifier the same guard reported `not ok - grok (grok 1.0.52 ...): idle composer never classified empty (last verdict: pending-unproven)` and, for 1.0.62, `(last verdict: unknown)`.
+In the Herdr lab, `bin/fm-spawn.sh` surfaced the folder-trust dialog of an untrusted project as an open blocker without typing into it, `bin/fm-send.sh <id> --key Enter` accepted it, and `bin/fm-control.sh <id> exit` then `relaunch` then `exit` stopped and restarted the worker on both versions from an idle composer and from a busy turn.
+The 1.0.52 lab runs launched `grok` through a symlink to the versioned binary, as the installer does; an earlier run through a shell wrapper that exec'd the 1.0.52 binary under its own file name made Herdr's native agent detection miss the process, and `exit` reported `already-stopped` on a busy worker, so the launch name matters when reproducing this.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.

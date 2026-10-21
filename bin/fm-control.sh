@@ -735,6 +735,7 @@ do_exit() {
     || composer_state=unknown
   # The classify that filled the sink ran in a subshell, so read the file
   # rather than a function that subshell sourced.
+  [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ] || fm_backend_note_wide_dialog "$BACKEND" "$T" "$LABEL" || true
   if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
     refuse_blocking_prompt "$dialog"

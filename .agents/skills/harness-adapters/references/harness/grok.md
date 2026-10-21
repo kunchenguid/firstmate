@@ -2,6 +2,7 @@
 
 The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
+The idle composer, the training opt-in banner, the folder-trust dialog, and typed exit and relaunch through `../../../bin/fm-control.sh` were verified on 2026-10-19 with both 1.0.52 and 1.0.62, because the installed Grok auto-updated from the first to the second that day.
 Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
@@ -51,12 +52,23 @@ In a linked worktree the trust therefore lands on the primary checkout, not the 
 This silently enables Grok project hooks for that checkout.
 Answering the gate is nonetheless the sanctioned route, because `../../../bin/fm-send.sh` has no other way to clear it.
 It is a knowing exception to the store-avoidance stance, not an oversight, so expect the new entry to appear in that file.
+On 2026-10-19 Grok 1.0.52 and 1.0.62 rendered the same dialog, "Do you trust the contents of this directory?", with `Yes, proceed` on `y`, `No, quit` on `n`, no composer, and `Grok Build <version> [stable]` as the last row.
+A bare scratch repository launched straight to the composer in the lab, and the dialog appeared once the folder held `AGENTS.md` and `.grok/settings.json`, so which project file triggers it is unverified.
+Typed text answers it, because `y` and `n` are hotkeys: on 2026-10-13 a steer's doorbell reached the dialog seconds after the spawn and the worker quit 8 seconds after start.
+`fm_composer_blocking_dialog` in `../../../bin/fm-composer-lib.sh` now names this dialog, so a typed steer or doorbell is refused with `blocked on a prompt: Grok folder-trust dialog` before anything is typed, and `../../../bin/fm-control.sh` refuses its exit command the same way.
+The dialog is 39 rows tall with its heading 24 rows above the footer, beyond the 20-row tail that the Orca, cmux, and zellij composer reads take, so `fm_backend_note_wide_dialog` in `../../../bin/fm-backend.sh` makes one extra `FM_COMPOSER_DIALOG_CAPTURE_LINES` (default 60) read for the dialog check alone before a typed submit or `/exit`; `../../../tests/fm-backend-orca.test.sh` pins it.
+After launching Grok, `../../../bin/fm-spawn.sh` polls the pane for up to `FM_GROK_TRUST_POLLS` reads (default 20, `FM_GROK_POLL_INTERVAL` apart).
+A named dialog ends the poll with an open `blocked [key=grok-trust-dialog]` status line and a `waiting:` notice on stderr, and the spawn still succeeds.
+The spawn never answers the dialog itself.
+Answer it with `../../../bin/fm-send.sh <id> --key Enter`, then append `resolved [key=grok-trust-dialog]` to the task's status file, since the brief only runs once the dialog is accepted.
+Coverage is `../../../tests/fm-composer-lib.test.sh`, `../../../tests/fm-tmux-submit-busy.test.sh`, and `../../../tests/fm-grok-harness.test.sh` against the real panes in `../../../tests/fixtures/grok-1.0.52` and `../../../tests/fixtures/grok-1.0.62`.
 
 ## Training opt-in
 
 On 2026-09-24, on the first dispatches after Grok was added to this fleet, Grok 1.0.41 offered "Help improve Grok".
 That opt-in retains prompts, traces, and metrics for training.
 It is off by default and must be left off.
+Grok 1.0.52 and 1.0.62 keep a non-blocking `Help improve Grok` banner with `[Opt out] [Opt in]` above the idle composer for as long as the choice is unmade, and workers run correctly with it left at its default Off.
 This fleet writes customer-facing privacy statements saying customer data and audio are not used for training, and sending our own prompts and traces to a provider for training while publishing that is not a trade to make silently.
 
 ## Composer
@@ -66,6 +78,13 @@ Fresh placeholder `Type a message...` uses dark 24-bit TRUECOLOR, not SGR-2.
 On Grok 0.2.93, real input `38;2;224;222;244` measured about 225 luminance, while borders and placeholder ranged from `38;2;50;47;70` through `38;2;110;106;134`, about 51-110, and were dropped.
 The truecolor rule assumes the fleet's dark theme; SGR-2 is theme-independent.
 Coverage is `../../../tests/fm-composer-ghost.test.sh` and `../../../tests/fm-backend-herdr.test.sh`.
+
+Grok 1.0.52 and 1.0.62 end the composer title with the active mode, as in `Grok 4.7 (high) · always-approve`, and align the bottom border with the top one.
+The classifier reads the middle dot as one column only when the whole title is the typed `Grok <model> (<effort>)` shape, so both versions' idle composers classify `empty` on every backend profile while typed text stays `pending`.
+Before that, the mode suffix kept the idle composer from reading `empty` (the Herdr profile read `unknown`, the tmux profile `pending-unproven`), which is why `../../../bin/fm-control.sh` refused to type `/exit` into it.
+Grok 1.0.5's three-column overhang is still accepted for its own title.
+`../../../tests/fm-composer-matrix-live-e2e.test.sh` launches Grok with `--always-approve`, as a worker runs, and fails on both versions with the pre-fix classifier.
+Grok auto-updates when it launches, and `GROK_DISABLE_AUTOUPDATER=1` holds an installed binary; the previous binary stays in `~/.grok/downloads`, which is how 1.0.52 stayed available for comparison.
 
 Tmux `#{cursor_y}` may point at the pristine composer's bottom border.
 The shared classifier locates the full box and all content rows, so border cursor and multi-row composers require no adapter offsets.

@@ -849,6 +849,24 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+# fm_backend_note_wide_dialog: record a blocking dialog the composer read could
+# not see. Composer reads on the tail-capture backends (orca, cmux, zellij) look
+# at FM_COMPOSER_CAPTURE_LINES rows, which can end below a tall dialog's heading,
+# so this one extra read takes FM_COMPOSER_DIALOG_CAPTURE_LINES rows and writes
+# the dialog's name to FM_COMPOSER_DIALOG_SINK on a match. tmux and Herdr composer
+# reads already take the whole viewport, so they need no second read. A miss, an
+# unreadable pane, or an unset sink leaves the sink exactly as the composer read
+# left it.
+fm_backend_note_wide_dialog() {  # <backend> <target> [expected-label]
+  local cap dialog
+  [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ] || return 1
+  case "$1" in orca | cmux | zellij) ;; *) return 1 ;; esac
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_DIALOG_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
+  dialog=$(fm_composer_blocking_dialog "$cap") || return 1
+  printf '%s' "$dialog" > "$FM_COMPOSER_DIALOG_SINK"
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
@@ -874,6 +892,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   else
     fm_backend_composer_state "$backend" "$target" >/dev/null || true
   fi
+  fm_composer_blocking_dialog_noted >/dev/null || fm_backend_note_wide_dialog "$backend" "$target" "$label" || true
   if dialog=$(fm_composer_blocking_dialog_noted); then
     fm_composer_dialog_sink_release
     echo "error: blocked on a prompt: $dialog" >&2

@@ -106,6 +106,65 @@ test_capture_reads_terminal_tail_json() {
   pass "fm_backend_orca_capture: parses result.terminal.tail and calls terminal read"
 }
 
+# A stateless Orca fake whose `terminal read --limit N` returns the last N rows
+# of $FM_ORCA_SCREEN, like the real tail read, and which logs every call.
+make_orca_screen_fakebin() {  # <dir> -> echoes fakebin dir
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'orca'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "${FM_ORCA_LOG:?}"
+if [ "${1:-}:${2:-}" = terminal:read ]; then
+  limit=40
+  while [ $# -gt 0 ]; do
+    [ "$1" != --limit ] || limit=$2
+    shift
+  done
+  tail -n "$limit" "${FM_ORCA_SCREEN:?}" | python3 -c '
+import json, sys
+print(json.dumps({"ok": True, "result": {"terminal": {"tail": sys.stdin.read().split("\n")}}}))'
+  exit 0
+fi
+printf '{"ok":true,"result":{}}\n'
+SH
+  chmod +x "$fb/orca"
+  printf '%s\n' "$fb"
+}
+
+test_submit_refuses_a_dialog_taller_than_the_composer_tail() {
+  local dir fb log v rc err sent
+  dir="$TMP_ROOT/tall-dialog"
+  fb=$(make_orca_screen_fakebin "$dir")
+  log="$dir/log"
+  for v in 1.0.52 1.0.62; do
+    cp "$ROOT/tests/fixtures/grok-$v/trust-dialog.plain" "$dir/screen"
+    : > "$log"
+    rc=0
+    # The dialog's heading and warning rows sit above the 20-row composer tail
+    # that an Orca composer read sees, so only the dedicated wider read can
+    # name it before anything is typed or Enter accepts it.
+    err=$(PATH="$fb:$PATH" FM_ORCA_LOG="$log" FM_ORCA_SCREEN="$dir/screen" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit orca term-1 "please continue" 3 0 0' "$ROOT" 2>&1 >/dev/null) || rc=$?
+    [ "$rc" -ne 0 ] || fail "a typed submit onto the tall Grok $v dialog should refuse on orca"
+    assert_contains "$err" "blocked on a prompt: Grok folder-trust dialog" "the $v refusal did not name the dialog: $err"
+    sent=$(grep -c $'terminal\x1fsend' "$log" || true)
+    [ "$sent" -eq 0 ] || fail "orca was sent input for the tall $v dialog: $(cat "$log")"
+  done
+  # The same guard must not refuse an idle composer.
+  cp "$ROOT/tests/fixtures/grok-1.0.62/idle-composer-banner.plain" "$dir/screen"
+  : > "$log"
+  PATH="$fb:$PATH" FM_ORCA_LOG="$log" FM_ORCA_SCREEN="$dir/screen" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit orca term-1 "please continue" 1 0 0' "$ROOT" >/dev/null 2>&1 || true
+  sent=$(grep -c $'terminal\x1fsend' "$log" || true)
+  [ "$sent" -ge 1 ] || fail "an idle Grok composer should still receive the steer on orca"
+  pass "fm_backend_send_text_submit: a Grok trust dialog taller than the 20-row composer tail is refused on orca before anything is typed"
+}
+
 test_capture_falls_back_to_text_fields() {
   local out
   orca_case capture-text
@@ -1401,3 +1460,4 @@ test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
+test_submit_refuses_a_dialog_taller_than_the_composer_tail
