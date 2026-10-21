@@ -228,8 +228,40 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
     "the refusal did not name the path the pane kept reporting"
   assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
+  assert_not_contains "$out" "dirty pool slots" \
+    "the refusal blamed dirty slots when treehouse reported none"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
+}
+
+# Treehouse skips a dirty slot, so a full pool of dirty idle slots leaves the
+# pane in the project. The deadline refusal must name those slots.
+test_dirty_pool_slots_are_named_at_the_deadline() {
+  local rec id out status
+  id=settle-dirty-slots-z6
+  rec=$(make_settle_case settle-dirty-slots "$id" 0)
+  read_settle_record "$rec"
+  WT_DIR=$PROJ_DIR
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  printf '[{"name":"1","path":"/pool/1/repo","status":"dirty"},{"name":"2","path":"/pool/2/repo","status":"in-use"},{"name":"3","path":"/pool/3/repo","status":"dirty"}]\n'
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the project"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree" \
+    "spawn did not explain that the pane never reached an isolated worktree"
+  assert_contains "$out" "dirty pool slots, and these hold uncommitted or untracked files: /pool/1/repo, /pool/3/repo" \
+    "the refusal did not name the dirty pool slots"
+  assert_not_contains "$out" "/pool/2/repo" "the refusal named a slot that is in use, not dirty"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a spawn that times out names the dirty pool slots treehouse skipped"
 }
 
 test_unborn_head_project_is_refused_at_once() {
@@ -257,6 +289,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_dirty_pool_slots_are_named_at_the_deadline
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
