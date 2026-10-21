@@ -3601,16 +3601,20 @@ cleanup_firstmate_home_children() {
           endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0
           return 1
         fi
-        child_socket=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || return 1
-        case "$child_socket" in /*) ;; *) return 1 ;; esac
         child_ledger=$(FM_HOME=$home FM_STATE_OVERRIDE=$sub_state FM_CONFIG_OVERRIDE=$home/config \
           FM_DATA_OVERRIDE=$home/data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$child_id") || return 1
         if [ -n "$child_ledger" ]; then
+          # A pooled child carries a generation-bound seat, so the close is
+          # authorized only on the server that generation's recorded route
+          # names. Without that proof the endpoint may live on another server
+          # and the parent's cleanup must not close a same-named window here.
+          child_socket=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || child_socket=''
+          case "$child_socket" in /*) ;; *) child_socket='' ;; esac
           child_gen=$(meta_value "$child_meta" fleet_seat_generation)
           [ -n "$child_gen" ] || child_gen=$(meta_value "$child_meta" spawn_gen)
           child_route=$(printf '%s\n' "$child_ledger" | jq -c --arg g "$child_gen" '
             .incarnations | map(select(.generation == $g)) | last | .route') || return 1
-          if ! printf '%s\n' "$child_route" | jq -e --arg s "$child_socket" --arg t "$child_t" \
+          if [ -z "$child_socket" ] || ! printf '%s\n' "$child_route" | jq -e --arg s "$child_socket" --arg t "$child_t" \
             '.placement == "local" and .backend == "tmux" and .target == $t and .socket_path == $s' >/dev/null; then
             echo "error: child $child_id has no verified ownership on this tmux socket; retaining its endpoint and records" >&2
             return 1
@@ -3624,9 +3628,6 @@ cleanup_firstmate_home_children() {
         if [ -n "$child_ledger" ]; then
           # A verified route also permits retry after the previous close won.
           [ "$child_inventory_rc" -eq 2 ] || { [ "$child_inventory_rc" -eq 0 ] && [ -n "$child_windows" ]; } || return 1
-        else
-          [ "$child_inventory_rc" -eq 0 ] || return 1
-          printf '%s\n' "$child_windows" | grep -qxF -- "${child_t#*:}" || return 1
         fi
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
