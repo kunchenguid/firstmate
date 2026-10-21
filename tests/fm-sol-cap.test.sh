@@ -359,9 +359,30 @@ test_a_replacement_on_an_excluded_model_invalidates_the_prior_row() {
   printf 'max=4\nmodels=gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
   assert_equals "$out" "not-capped" "an excluded model claimed a slot"
-  [ ! "$(registry_row_field "$case_dir" task-c 1)" ] ||
-    fail "a replacement on an excluded model left the prior incarnation's row behind"
-  pass "a replacement on an excluded model invalidates the prior incarnation's row"
+  assert_equals "$(registry_row_field "$case_dir" task-c 4)" "-3" \
+    "a replacement on an excluded model did not mark the prior incarnation's row superseded"
+  pass "a replacement on an excluded model marks the prior incarnation's row superseded"
+}
+
+# A row marked superseded by a replacement is resolved by the next adoption:
+# the row is the prior incarnation's, and the metadata names the worker that
+# holds the slot now.
+test_the_adoption_resolves_a_superseded_row() {
+  local case_dir state
+  case_dir=$(make_case superseded)
+  state=$case_dir/home/state
+  FM_HOME=$case_dir/home
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+  . "$ROOT/bin/fm-sol-cap-lib.sh"
+  fm_backend_of_meta() { printf tmux; }
+  fm_backend_target_of_meta() { printf '%s' "${1##*/}"; }
+  fm_backend_agent_state() { printf alive; }
+  fm_write_meta "$state/one.meta" "model=gpt-6.1-sol" "kind=ship"
+  printf 'one\tgpt-6.1-sol\t1\t-3\n' > "$state/sol-sessions.tsv"
+  fm_sol_cap_active_count "$state" || fail "the adoption failed"
+  [ "$(registry_row_field "$case_dir" one 4)" = "-2" ] || fail "the superseded row was not resolved"
+  pass "the adoption resolves a superseded row into the live incarnation it names"
 }
 
 # A replacement dispatched while the guard is off must not leave the prior
@@ -376,9 +397,9 @@ test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row() {
   rm -f -- "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
   assert_equals "$out" "not-capped" "an undeclared home claimed a slot"
-  [ ! "$(registry_row_field "$case_dir" task-c 1)" ] ||
-    fail "a replacement while the guard is off left the prior incarnation's row behind"
-  pass "a replacement while the guard is off invalidates the prior incarnation's row"
+  assert_equals "$(registry_row_field "$case_dir" task-c 4)" "-3" \
+    "a replacement while the guard is off did not mark the prior incarnation's row superseded"
+  pass "a replacement while the guard is off marks the prior incarnation's row superseded"
 }
 
 # A reused row follows the current declaration: a session admitted on a model
@@ -1061,6 +1082,7 @@ test_a_reused_row_follows_the_current_declaration
 test_a_row_whose_model_was_dropped_holds_no_occupancy
 test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row
 test_a_replacement_on_an_excluded_model_invalidates_the_prior_row
+test_the_adoption_resolves_a_superseded_row
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

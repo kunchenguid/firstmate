@@ -301,7 +301,10 @@ fm_sol_cap_entry_shape() {  # <start> <pid>
 fm_sol_cap_entry_live() {  # <start> <pid>
   local start=$1 pid=$2
   case "$start" in '' | *[!0-9]*) return 1 ;; esac
-  case "$pid" in -2) return 0 ;; '' | *[!0-9]*) return 1 ;; esac
+  # A superseded row (-3) still counts: the incarnation it names is being
+  # replaced, and the replacement must not take a second slot before the
+  # next adoption resolves the marker.
+  case "$pid" in -2 | -3) return 0 ;; '' | *[!0-9]*) return 1 ;; esac
   [ "$pid" = 0 ] || fm_pid_alive "$pid"
 }
 
@@ -348,7 +351,23 @@ fm_sol_cap_adopt_workers() (
     fm_sol_cap_model_capped "$model" || continue
     if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$file"; then
       pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$file") || return 1
-      [ "$pid" = -2 ] || continue
+      case "$pid" in
+        -2 | -3) ;;
+        *) continue ;;
+      esac
+      # The lifecycle boundary: a replacement in flight owns this task's
+      # spawn lock, and the metadata it is replacing must not be read as a
+      # stopped worker until that replacement has finished.
+      owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
+      fm_current_pid current || return 1
+      [ "$owner" != "$current" ] || continue
+      fm_lock_try_acquire "$state/.spawn-$id.lock" || continue
+      lifecycle_lock=$state/.spawn-$id.lock
+    else
+      # An initial adoption reads the metadata of a task with no row. A
+      # replacement in flight owns this task's spawn lock, so the stop
+      # evidence of the incarnation it is replacing must not be recreated
+      # here.
       owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
       fm_current_pid current || return 1
       [ "$owner" != "$current" ] || continue
@@ -500,15 +519,17 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
   return 0
 }
 
-# fm_sol_cap_registry_drop <registry-file> <id>
-# Remove this task id's row, keeping every other row, so a row that names a
-# session which has exited cannot stand in for a newer incarnation of the
-# same task id. A no-op when the id has no row.
-fm_sol_cap_registry_drop() {  # <registry-file> <id>
+# fm_sol_cap_registry_supersede <registry-file> <id>
+# Mark this task id's row as superseded: the row names an incarnation that
+# is being replaced, so it must not be read as this task's current claim. The
+# row keeps its model and start epoch and still counts, so a replacement
+# never hands the same capacity to two sessions before the next adoption
+# resolves the marker. A no-op when the id has no row.
+fm_sol_cap_registry_supersede() {  # <registry-file> <id>
   local file=$1 id=$2 tmp rc
   [ -f "$file" ] || return 0
-  tmp=$file.tmp.drop.$$
-  awk -F'\t' -v id="$id" '$1 != id' "$file" > "$tmp" 2>/dev/null
+  tmp=$file.tmp.supersede.$$
+  awk -F'\t' -v OFS='\t' -v id="$id" '$1 == id { $4 = -3 } {print}' "$file" > "$tmp" 2>/dev/null
   rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || {
     rm -f -- "$tmp"
@@ -558,18 +579,20 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # A genuine endpoint reuse keeps its row: the same session continues, and
     # the release that ends it is decided at its own publication.
     [ "$reuse" = reuse ] && return 0
-    # Any other replacement invalidates the prior incarnation's row: a row
-    # an earlier incarnation left behind names this task's id while
-    # describing a session that has exited, and adoption skips it, so a
-    # later declaration would leave this worker uncounted. A first dispatch
-    # has no prior incarnation to invalidate. The invalidation runs under the
-    # same admission boundary as every other registry rewrite, so it cannot
-    # lose an update to a concurrent one.
+    # Any other replacement marks the prior incarnation's row superseded: a
+    # row an earlier incarnation left behind names this task's id while
+    # describing a session that is being replaced, and adoption skips it, so
+    # a later declaration would leave this worker uncounted. The row still
+    # counts until the next adoption resolves the marker, so a replacement
+    # never hands the same capacity to two sessions. A first dispatch has no
+    # prior incarnation to mark, and a home with no row to mark never waits
+    # on the admission boundary at all.
     [ -e "$state/$id.meta" ] || return 0
+    grep -Fq "$(printf '%s\t' "$id")" "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || return 0
     if ! fm_sol_cap_lock_acquire "$lock" "task $id"; then
       return 1
     fi
-    if ! fm_sol_cap_registry_drop "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
+    if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
       return 1
     fi
