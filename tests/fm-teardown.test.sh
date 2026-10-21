@@ -5572,7 +5572,7 @@ test_accounting_failure_preserves_the_containing_home() {
     FM_DATA_OVERRIDE="$orphan/data" "$ROOT/bin/fm-fleet-seats.sh" reserve orphan-child \
     --generation orphan-child --kind ship --harness claude --model child-model --holder-pid "$$" \
     > "$case_dir/orphan.stdout" 2> "$case_dir/orphan.stderr" || rc=$?
-  expect_code 5 "$rc" "an orphan fixture must refuse before accounting"
+  expect_code 0 "$rc" "an orphan fixture with no provable authority must succeed silently"
   assert_absent "$orphan/state/fleet-seats" "orphan authority created an independent ledger"
   printf '{"pools":[{"name":"unrelated","capacity":1,"models":["other-model"]}]}\n' > "$case_dir/config/fleet-seats"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
