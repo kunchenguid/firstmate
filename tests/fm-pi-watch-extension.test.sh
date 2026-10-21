@@ -4267,6 +4267,142 @@ EOF
   pass "Pi restores successors during held branch delivery with serialized settlement ($mode)"
 }
 
+# A close whose delivery waits behind an earlier held delivery must not be
+# confirmed against a successor that a later close already replaced. The
+# handoff is confirmed inside the continuity operation, while that successor is
+# still the live arm, and the delivery reads the cached outcome. Without that,
+# the queued close is confirmed against a dead watcher pid and the healthy
+# newer successor is reported to main as a restoration failure.
+test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff() {
+  local repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-repeated-close-root"
+  home="$TMP_ROOT/pi-repeated-close-home"
+  log="$TMP_ROOT/pi-repeated-close.log"
+  trigger="$TMP_ROOT/pi-repeated-close.close"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  gen=${2:-} pid=${4:-}
+  # The real script checks the named watcher pid before the episode
+  # generation, so a successor that a later close already replaced is
+  # rejected rather than reported as superseded.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    printf 'rejected-dead generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
+    exit 1
+  fi
+  printf 'confirmed generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+live="$FM_CLOSE_PREFIX.live.$$"
+touch "$live"
+trap 'rm -f "$live"' EXIT
+trap 'exit 0' TERM INT
+# The first arm is the initial cycle and carries no recovery generation, the
+# way the real arm reads one only for a successor of an open episode.
+if [ "$count" -ge 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+else
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+fi
+printf 'ready=%s\n' "$count" >> "$FM_ARM_LOG"
+while [ "$count" -ne 1 ] && [ ! -e "$FM_CLOSE_PREFIX.$count" ]; do sleep 0.02; done
+printf 'signal: repeated close %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLOSE_PREFIX="$trigger" FM_WATCH_EXTENSION_LOG_KEEP_LINES=200 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const offers = [];
+const releases = [];
+const prompts = [];
+let tool;
+let activeDeliveries = 0;
+let maxDeliveries = 0;
+const rows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+const arms = () => rows().filter((row) => row.startsWith("arm="));
+const confirmations = () => rows().filter((row) => row.startsWith("confirmed generation="));
+const rejections = () => rows().filter((row) => row.startsWith("rejected-dead"));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 1000; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}; rows=${rows().join(" | ")}; extlog=${existsSync(`${process.env.FM_HOME}/state/.watch-extension.log`) ? readFileSync(`${process.env.FM_HOME}/state/.watch-extension.log`, "utf8").replace(/\n/g, " | ") : "none"}`);
+}
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+  events: {
+    on() {},
+    emit(event, offer) {
+      if (event !== "fm-branch-supervision:dispatch") return;
+      offers.push(offer.message);
+      activeDeliveries += 1;
+      maxDeliveries = Math.max(maxDeliveries, activeDeliveries);
+      const index = offers.length;
+      const held = new Promise((resolve) => releases.push(resolve));
+      offer.accept(held.then(() => { activeDeliveries -= 1; }));
+    },
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/held.meta`, "project=/projects/held\nwindow=fm-held\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\theld.status\tsignal: repeated close 1\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+try {
+  await tool.execute("repeated-initial", {}, undefined, undefined, {});
+  await waitFor(() => offers.length === 1 && confirmations().length === 1, "first handoff confirmed");
+  // The successor closes while the first delivery is still held, and so does
+  // its own successor: each queued close replaces the arm the previous one
+  // confirmed.
+  writeFileSync(`${process.env.FM_CLOSE_PREFIX}.2`, "close\n");
+  await waitFor(() => arms().length === 3 && confirmations().length === 2, "second handoff confirmed");
+  writeFileSync(`${process.env.FM_CLOSE_PREFIX}.3`, "close\n");
+  await waitFor(() => arms().length === 4 && confirmations().length === 3, "third handoff confirmed");
+  // Let the held first delivery settle: the queued closes deliver in order,
+  // and each of them releases the next one.
+  for (let index = 0; index < 3; index += 1) {
+    await waitFor(() => offers.length === index + 1, `serialized delivery ${index + 1}`);
+    releases[index]();
+  }
+  await waitFor(() => offers.length === 3, "every queued close delivered");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  if (prompts.length !== 0) {
+    throw new Error(`a queued close reached main instead of the branch: ${prompts.join(" | ")}`);
+  }
+  if (maxDeliveries !== 1) throw new Error(`delivery escaped its serialization: ${maxDeliveries}`);
+  if (rejections().length !== 0) {
+    throw new Error(`a live handoff was rejected: ${rows().join(" | ")}`);
+  }
+  const order = offers.map((message) => message.trim());
+  const expected = ["signal: repeated close 1", "signal: repeated close 2", "signal: repeated close 3"];
+  if (order.join("|") !== expected.join("|")) {
+    throw new Error(`queued closes lost or changed their order: ${order.join(" | ")}`);
+  }
+} finally {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+  for (const release of releases) release();
+  await waitFor(() => arms().every((row) => !alive(Number(row.slice(4)))), "all owned arm PIDs stopped");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must confirm a queued close's handoff while its own successor is still live: $out"
+  [ -z "$out" ] || fail "Pi repeated-close test printed output: $out"
+  pass "Pi confirms a queued close's handoff inside the continuity operation"
+}
+
 # The former after-delivery expectation conflicts with the approved restore
 # contract: a verified failure keeps its bounded retry during held delivery.
 test_pi_successor_failure_during_delivery_is_retried_immediately() {
@@ -6202,6 +6338,7 @@ test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_actionable_closes_restore_while_branch_delivery_is_held
 test_pi_actionable_closes_restore_while_branch_delivery_is_held replacement
 test_pi_actionable_closes_restore_while_branch_delivery_is_held quit
+test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff
 test_pi_successor_failure_during_delivery_is_retried_immediately
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique

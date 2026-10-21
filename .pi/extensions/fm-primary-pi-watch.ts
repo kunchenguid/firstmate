@@ -103,6 +103,12 @@ type UnconsumedWake = {
 type ActionableRestoration = {
   failure: string;
   recovery?: { generation: string; watcherPid: string };
+  // The handling handoff is confirmed inside the continuity operation, while
+  // this close's own successor is still the live arm. A later successor
+  // replacing that arm must not turn this close's delivery into a false
+  // restoration failure, so the delivery reads this cached outcome instead of
+  // confirming a token that may since have been superseded.
+  confirmation?: { ok: boolean; detail: string; superseded?: boolean };
 };
 
 type SessionGeneration = {
@@ -775,11 +781,17 @@ export default function (pi: ExtensionAPI) {
     message: string,
     repairFailed: boolean,
     pending: PendingActionableClose,
-    recovery?: { generation: string; watcherPid: string },
+    restoration?: ActionableRestoration,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    const recovery = restoration?.recovery;
     if (recovery) {
-      const confirmed = confirmHandlingDeliveryWithRetry(recovery);
+      // The confirmation ran inside the continuity operation, right after this
+      // close's own successor became the live arm. A successor that replaced
+      // it afterwards is a newer owner of the same episode, never a rejection
+      // of this close, so the cached outcome decides and the stale token is
+      // never re-confirmed here.
+      const confirmed = restoration?.confirmation ?? confirmHandlingDeliveryWithRetry(recovery);
       appendExtensionLog(
         `confirm generation=${recovery.generation} watcherPid=${recovery.watcherPid} result=${confirmed.ok ? "confirmed" : confirmed.superseded ? "superseded" : "rejected"}`,
       );
@@ -969,7 +981,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration);
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
@@ -1069,7 +1081,14 @@ export default function (pi: ExtensionAPI) {
       );
       const ready = Boolean(replacement.ok && successorChild && await waitForReadiness(successorChild));
       if (ready && successorChild && liveArmChild(owner) === successorChild) {
-        return { failure: "", recovery: armRecovery.get(successorChild) };
+        const recovery = armRecovery.get(successorChild);
+        // Confirm the handling handoff here, inside the continuity operation,
+        // while this close's own successor is still the live arm. A successor
+        // that replaces it later owns the same episode, and a delivery-time
+        // confirmation of the replaced token would read that healthy newer
+        // watcher as a restoration failure.
+        const confirmation = recovery ? confirmHandlingDeliveryWithRetry(recovery) : undefined;
+        return { failure: "", recovery, confirmation };
       }
       if (replacement.ok) {
         if (ready) {
