@@ -1109,7 +1109,11 @@ The portable regression is `bash tests/fm-nm-drive-detach.test.sh`.
 It executes Bash detach shapes against a stub drive and separately checks the generated brief as an instruction contract; it requires neither Pi nor the shared no-mistakes daemon.
 The observed Pi/Grok worker incident involved detached drive calls returning before the parked gate was available to the worker.
 The earlier 2026-10-21 macOS arm64 smoke queried Pi 1.3.0 only for its version and executed Bash, so it was not a real Pi end-to-end result.
-This correction covers the generated instruction contract and portable process behavior; empirical post-fix agent continuation remains unverified.
+On 2026-10-21 UTC, Pi 1.3.0 with the existing `xai/grok-4.6` login completed a bounded positive continuation smoke in an isolated fixture using the generated drive instruction and a test-only Bash stand-in.
+The command used `pi --offline --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-session --tools bash --provider xai --model grok-4.6 --thinking low --mode json -p` with a single prompt to execute `bash ./drive.sh`, wait for its result, and report its marker.
+The stand-in slept three seconds; the actual Bash tool returned `SMOKE_GATE_READY 2026-10-21T22:12:12Z` after 3.080 seconds, and Pi reported that same marker without another user or supervisor message before exiting successfully after 5.457 seconds.
+The JSON tool result and subsequent assistant report are retained with private test evidence.
+This proves foreground tool-result continuation in that bounded Pi smoke, not autonomous continuation of a real no-mistakes run or a detached background notification; the shared daemon and real runs were untouched.
 
 ## Gemini
 
