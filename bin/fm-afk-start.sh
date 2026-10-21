@@ -83,18 +83,10 @@ daemon_lock_owner() {
 }
 
 daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
-  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
+  local pid=$1 owner=$2 identity current
+  identity=$(cat "$owner/pid-identity" 2>/dev/null) || return 2
+  current=$(fm_pid_identity "$pid") || return 2
+  fm_pid_identity_compare "$current" "$identity"
 }
 
 daemon_lock_pid() {
@@ -151,15 +143,20 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
+  local pid owner_result=0
+  pid=$(daemon_lock_pid 2>/dev/null || true)
+  daemon_lock_held_by_live_daemon || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    echo "afk: live daemon identity is unverifiable; preserving lifecycle state" >&2
+    return 1
+  fi
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
     fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 
-  local pid
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
+  if [ "$owner_result" -eq 0 ]; then
     echo "afk: daemon already running pid=$pid"
     return 0
   fi

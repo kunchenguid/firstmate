@@ -568,7 +568,7 @@ unit_stop_ordering() {
 }
 
 unit_stop_rejects_reused_pid() {
-  local st lock sleeper_pid
+  local st lock sleeper_pid identity rc=0
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX")
   mkdir -p "$st/state"
   date '+%s' > "$st/state/.afk"
@@ -578,9 +578,14 @@ unit_stop_rejects_reused_pid() {
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$sleeper_pid" > "$lock/pid"
-  printf 'different-process-identity' > "$lock/pid-identity"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if kill -0 "$sleeper_pid" 2>/dev/null; then
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleeper_pid")
+  case "$identity" in
+    *cmdline-hex=*) identity="${identity}00" ;;
+    *) identity="$identity different-command" ;;
+  esac
+  printf '%s' "$identity" > "$lock/pid-identity"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -e "$st/state/.afk" ] && kill -0 "$sleeper_pid" 2>/dev/null; then
     pass "stop identity: stale lock cannot signal an unrelated live process"
   else
     fail "stop identity: stale lock signaled an unrelated live process"
@@ -1786,6 +1791,183 @@ e2e_rex() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+unit_unverifiable_owners_preserve_lifecycle() {
+  local st pid kind mode action rc owner artifact
+  for kind in legacy malformed empty missing unavailable; do
+    for mode in away quiet; do
+      st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-unverifiable.XXXXXX")
+      mkdir -p "$st/state" "$st/bin"
+      if [ "$mode" = quiet ]; then
+        mkdir "$st/daemon-owner"
+        ln -s ../daemon-owner "$st/state/.supervise-daemon.lock"
+      else
+        mkdir "$st/state/.supervise-daemon.lock"
+      fi
+      FM_AFK_MODE="$mode" enter_posture "$st"
+      printf '%s\nretained timestamp\n' "$mode" > "$st/state/.afk"
+      printf 'tmux\tdisposable-terminal\towned\n' > "$st/state/.afk-daemon-terminal"
+      for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked .wake-queue; do
+        printf 'retained %s\n' "$artifact" > "$st/state/$artifact"
+      done
+      printf '#!/usr/bin/env bash\n: > "$FM_HOME/acted"\nexit 1\n' > "$st/bin/tmux"
+      cp "$st/bin/tmux" "$st/bin/daemon"
+      chmod +x "$st/bin/tmux" "$st/bin/daemon"
+      sleep 600 &
+      pid=$!
+      owner="$st/state/.supervise-daemon.lock"
+      printf '%s' "$pid" > "$owner/pid"
+      case "$kind" in
+        legacy) TZ=America/Argentina/Buenos_Aires LC_ALL=C COLUMNS=10000 ps -p "$pid" -o lstart= -o command= > "$owner/pid-identity" ;;
+        malformed) printf 'unknown-identity\n' > "$owner/pid-identity" ;;
+        empty) : > "$owner/pid-identity" ;;
+        missing) ;;
+        unavailable)
+          bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$owner/pid-identity"
+          mkdir -p "$st/proc/$pid"
+          printf 'unreadable stat record' > "$st/proc/$pid/stat"
+          printf 'disposable command' > "$st/proc/$pid/cmdline"
+          ;;
+      esac
+      cp -R "$st/state" "$st/before"
+      cp -RL "$owner" "$st/saved-owner"
+      for action in direct prepared start start-native stop reconcile readiness; do
+        rc=0
+        if [ "$action" = direct ] || [ "$action" = prepared ]; then
+          FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" bash -c '
+            . "$1"
+            FM_AFK_DAEMON="$FM_HOME/bin/daemon"
+            if [ "$2" = prepared ]; then FM_AFK_STATE_PREPARED=1; fi
+            fm_afk_start_main
+          ' _ "$START" "$action" > "$st/output" 2>&1 || rc=$?
+        elif [ "$action" = readiness ]; then
+          FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" FM_AFK_LAUNCH_ENTRY= \
+            PATH="$st/bin:$PATH" bash -c '
+              . "$1"
+              fm_afk_launch_commit_terminal tmux disposable-terminal owned 1
+            ' _ "$LAUNCH" > "$st/output" 2>&1 || rc=$?
+        else
+          FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" FM_SUPERVISOR_TARGET=disposable-captain \
+            FM_SUPERVISOR_BACKEND=tmux PATH="$st/bin:$PATH" \
+            "$LAUNCH" "$action" > "$st/output" 2>&1 || rc=$?
+        fi
+        if [ "$rc" -ne 0 ] && kill -0 "$pid" 2>/dev/null \
+          && [ ! -e "$st/acted" ] && diff -r "$st/before" "$st/state" > "$st/diff" \
+          && { [ "$mode" != quiet ] || [ -L "$owner" ]; } \
+          && diff -r "$st/saved-owner" "$owner" >> "$st/diff"; then
+          pass "$action ($mode, $kind): unknown live daemon preserves claim, feedback, posture, and terminal"
+        else
+          fail "$action ($mode, $kind): unknown live daemon lifecycle changed (rc=$rc): $(cat "$st/output")"
+        fi
+      done
+      mv "$st/state/.supervise-daemon.lock" "$st/state/.afk-launch.lock"
+      owner="$st/state/.afk-launch.lock"
+      rm -rf "$st/before"
+      cp -R "$st/state" "$st/before"
+      rc=0
+      FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" PATH="$st/bin:$PATH" \
+        "$LAUNCH" stop > "$st/output" 2>&1 || rc=$?
+      if [ "$rc" -ne 0 ] && kill -0 "$pid" 2>/dev/null \
+        && [ ! -e "$st/acted" ] && diff -r "$st/before" "$st/state" > "$st/diff" \
+        && { [ "$mode" != quiet ] || [ -L "$owner" ]; } \
+        && diff -r "$st/saved-owner" "$owner" >> "$st/diff"; then
+        pass "launcher ($mode, $kind): unknown live owner blocks acquisition and preserves lifecycle"
+      else
+        fail "launcher ($mode, $kind): unknown live claim reclaimed (rc=$rc): $(cat "$st/output")"
+      fi
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -rf "$st"
+    done
+  done
+}
+
+unit_readiness_uncertainty_preserves_started_lifecycle() {
+  local st pid rc=0
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-readiness-unknown.XXXXXX")
+  mkdir -p "$st/state" "$st/bin" "$st/owner"
+  enter_posture "$st"
+  sleep 600 &
+  pid=$!
+  printf '%s' "$pid" > "$st/owner/pid"
+  TZ=America/Argentina/Buenos_Aires LC_ALL=C COLUMNS=10000 ps -p "$pid" -o lstart= -o command= > "$st/owner/pid-identity"
+  cat > "$st/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = new-session ]; then
+  cp -R "$FM_HOME/owner" "$FM_HOME/state/.supervise-daemon.lock"
+  printf 'new feedback\n' > "$FM_HOME/state/.subsuper-escalations"
+else
+  : > "$FM_HOME/closed"
+fi
+SH
+  chmod +x "$st/bin/tmux"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=disposable-captain \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY= PATH="$st/bin:$PATH" \
+    "$LAUNCH" start > "$st/output" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && kill -0 "$pid" 2>/dev/null && [ ! -e "$st/closed" ] \
+    && [ -f "$st/state/.afk" ] && [ -f "$st/state/.afk-contract" ] \
+    && [ -f "$st/state/.afk-daemon-terminal" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations" 2>/dev/null)" = 'new feedback' ] \
+    && diff -r "$st/owner" "$st/state/.supervise-daemon.lock" > "$st/diff"; then
+    pass "readiness: uncertain live owner preserves newly started lifecycle without terminal closure or rollback"
+  else
+    fail "readiness: uncertain live owner lost lifecycle state (rc=$rc): $(cat "$st/output")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_launcher_reclaims_proven_stale_owners() {
+  local st pid kind identity rc
+  for kind in mismatch dead; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-proven-stale.XXXXXX")
+    mkdir -p "$st/state/.afk-launch.lock"
+    sleep 600 &
+    pid=$!
+    identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid")
+    printf '%s' "$pid" > "$st/state/.afk-launch.lock/pid"
+    if [ "$kind" = dead ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    else
+      case "$identity" in
+        *cmdline-hex=*) identity="${identity}00" ;;
+        *) identity="$identity different-command" ;;
+      esac
+    fi
+    printf '%s' "$identity" > "$st/state/.afk-launch.lock/pid-identity"
+    rc=0
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" --help > "$st/output" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
+      pass "launcher ($kind): proven stale claim remains reclaimable"
+    else
+      fail "launcher ($kind): proven stale claim blocked acquisition: $(cat "$st/output")"
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$st"
+  done
+}
+
+if [ "${FM_AFK_TEST_OWNERSHIP_ONLY:-0}" = 1 ]; then
+  unit_unverifiable_owners_preserve_lifecycle
+  unit_launcher_reclaims_proven_stale_owners
+  unit_readiness_uncertainty_preserves_started_lifecycle
+  unit_fresh_vs_refresh
+  unit_mode_refresh_preserves_quiet
+  unit_mode_quiet_daemon_to_away
+  unit_stop_ordering
+  unit_stop_rejects_reused_pid
+  unit_lock_initialization_grace
+  unit_stop_confirms_daemon_exit
+  unit_supervision_host_quiet_failed_start
+  [ "$FAILED" -eq 0 ]
+  exit $?
+fi
+
+unit_unverifiable_owners_preserve_lifecycle
+unit_launcher_reclaims_proven_stale_owners
+unit_readiness_uncertainty_preserves_started_lifecycle
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
