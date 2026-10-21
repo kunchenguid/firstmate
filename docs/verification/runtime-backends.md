@@ -1690,6 +1690,7 @@ Only showing models from configured providers. Use /login to add providers.
   Model catalogs refreshed.
 
   Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
+────────────────────────────────────────────────────────────────────────
 ```
 
 The rows in that capture come from a local `models.json` provider with no reachable endpoint: the selector's own structure is what is measured, and no provider was called.
