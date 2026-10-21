@@ -772,7 +772,9 @@ fm_sol_cap_has_owned_occupancy() {  # <id> <state-dir>
       return 1
     fi
     case "$occupancy" in
-      -1) return 1 ;;
+      # -1 is a confirmed stop and -3 a superseded incarnation: neither
+      # holds a slot, exactly as the count treats them.
+      -1 | -3) return 1 ;;
       -2 | 0 | '' | *[!0-9]*) return 0 ;;
     esac
     fm_pid_alive "$occupancy"
