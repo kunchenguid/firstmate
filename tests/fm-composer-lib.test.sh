@@ -1899,6 +1899,39 @@ test_pi_model_selector_is_named_and_blocks_enter() {
   pass "the Pi model selector is named by its recorded rows and footer"
 }
 
+test_dialog_matcher_is_portable_awk() {
+  # The matcher runs under whatever awk the host has. A stock macOS awk
+  # and mawk both read a \S as a literal S, so a \S pattern would never
+  # match the recorded row and the guard would be silently dead on
+  # those hosts while passing on a GNU-awk host.
+  #
+  # Every awk the host provides is exercised: the case must match under
+  # all of them, and a pattern the host's awk cannot read must not be
+  # what the matcher uses. This asserts the BEHAVIOUR under each awk,
+  # never the bytes of the matcher's source.
+  local screen out rc awk_bin
+  screen=$(pi_model_picker_screen)
+  for awk_bin in $(compgen -c awk 2>/dev/null | sort -u) \
+    $(compgen -c mawk 2>/dev/null | sort -u) \
+    $(compgen -c gawk 2>/dev/null | sort -u) \
+    $(compgen -c nawk 2>/dev/null | sort -u); do
+    command -v "$awk_bin" >/dev/null 2>&1 || continue
+    local dir
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX")
+    ln -sf "$(command -v "$awk_bin")" "$dir/awk"
+    out=$(PATH="$dir:$PATH" bash -c '
+      . "$1"
+      fm_composer_blocking_dialog "$2"
+    ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null); rc=$?
+    rm -rf "$dir"
+    [ "$rc" -eq 0 ] \
+      || fail "the recorded Pi model selector did not match under $awk_bin (rc $rc)"
+    [ "$out" = 'Pi model selector' ] \
+      || fail "under $awk_bin the dialog name was '$out'"
+  done
+  pass "the recorded Pi model selector matches under every awk on this host"
+}
+
 test_dialog_note_skips_the_match_when_no_sink_is_set() {
   local screen out rc before after
   screen=$(exit_picker_screen)
@@ -1954,6 +1987,7 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_pi_model_selector_is_named_and_blocks_enter
+test_dialog_matcher_is_portable_awk
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives

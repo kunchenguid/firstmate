@@ -2253,8 +2253,12 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   # picker. A screen that merely quotes those words - a diff, a note, a
   # test fixture above a normal composer - has no selected row, so it does
   # not match.
+  #
+  # The class is [^[:space:]] and not \S: a stock macOS awk and mawk both
+  # read \S as a literal S, so a \S pattern would never match the
+  # recorded row and the guard would be silently dead there.
   if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
-    /^[ \t]*→[ \t]*✓[ \t]+\S/ { selected = 1 }
+    /^[ \t]*→[ \t]*✓[ \t]+[^[:space:]]/ { selected = 1 }
     /[^ \t\r]/ { last = $0 }
     END { exit !(selected && last ~ /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t\r]*$/) }
   '; then
