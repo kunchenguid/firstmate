@@ -2553,21 +2553,6 @@ Each is one line in a local, gitignored `config/` file, with an environment vari
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
 
-### External reader contract
-
-Out-of-tree readers may use the machine-readable `fm-inbox.sh` surfaces below without reading a home's state files.
-`note --request-id <id> --json -` is the stable idempotent capture surface for an external writer, and returns `fm-inbox-note.v1` with `outcome`, `id`, `request_id`, `saved`, `announced`, `acknowledged`, and `path`.
-`reply --json <id> -` records the primary's one final reply and returns `fm-inbox-reply.v1` with `outcome`, `id`, and `path`.
-`receipts` returns `fm-inbox-receipts.v1` with `home`, `generated`, `pending`, `handled`, `replies`, `reply_cursor`, and `omitted`.
-Each pending or handled receipt has `id`, `at`, `source`, `request_id`, `acknowledged`, `announced`, `body`, and `reply`.
-Each reply receipt has `id`, `at`, `body`, and its strictly ordered `cursor`.
-Each omission has `surface` and `reveal`, so a bounded response is never an implicit complete listing.
-`ready` returns `fm-primary-ready.v1` with `home`, `observed_at`, `lock`, `wake_consumer`, `posture`, and `can_receive`.
-`lock` has `state`, `pid`, and `live_harness`; `wake_consumer` has `state`, `reason`, and `beacon_age_seconds`; and `posture` has `state`.
-These versioned schemas are stable within their named major version.
-Future compatible changes add fields or new schema versions, and readers must ignore fields they do not recognize.
-The script's header and `--help` own flags, bounds, and other command mechanics.
-
 | File | Environment | Holds |
 | --- | --- | --- |
 | `config/voice-region` | `FM_VOICE_REGION` | Bedrock region for the relay's bidirectional session, required by `bin/fm-voice-relay.py`. |
@@ -2591,6 +2576,21 @@ The two read files use different parsing rules:
 - In `config/voice-read-deny`, every line that is neither blank nor a `#` comment adds one substring.
 
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
+
+### External reader contract
+
+Out-of-tree readers may use the machine-readable `fm-inbox.sh` surfaces below without reading a home's state files.
+`note --request-id <id> --json -` is the stable idempotent capture surface for an external writer, and returns `fm-inbox-note.v1` with `outcome`, `id`, `request_id`, `saved`, `announced`, `acknowledged`, and `path`.
+`reply --json <id> -` records the primary's one final reply and returns `fm-inbox-reply.v1` with `outcome`, `id`, and `path`.
+`receipts` returns `fm-inbox-receipts.v1` with `home`, `generated`, `pending`, `handled`, `replies`, `reply_cursor`, and `omitted`.
+Each pending or handled receipt has `id`, `at`, `source`, `request_id`, `acknowledged`, `announced`, `body`, and `reply`.
+Each reply receipt has `id`, `at`, `body`, and its strictly ordered `cursor`.
+Each omission has `surface` and `reveal`, so a bounded response is never an implicit complete listing.
+`ready` returns `fm-primary-ready.v1` with `home`, `observed_at`, `lock`, `wake_consumer`, `posture`, and `can_receive`.
+`lock` has `state`, `pid`, and `live_harness`; `wake_consumer` has `state`, `reason`, and `beacon_age_seconds`; and `posture` has `state`.
+These versioned schemas are stable within their named major version.
+Future compatible changes add fields or new schema versions, and readers must ignore fields they do not recognize.
+The script's header and `--help` own flags, bounds, and other command mechanics.
 
 ## Environment variables
 
