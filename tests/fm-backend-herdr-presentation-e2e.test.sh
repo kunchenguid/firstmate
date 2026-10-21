@@ -425,11 +425,11 @@ spawn_task() {  # <id> <home> <project> [extra fm-spawn args...]; SPAWN_DEADLINE
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
-  local id=$1 status=$2 out=$3 err=$4
+  local id=$1 status=$2 out=$3 err=$4 home=${5:-$HOME_DIR}
   [ "$status" -ne 0 ] || return 0
-  grep -F "task set is locked" "$err" >/dev/null 2>&1 \
+  grep -E "task set is locked|worker placement lock unavailable" "$err" >/dev/null 2>&1 \
     || fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
-  spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
+  spawn_task "$id" "$home" "$PROJECT_DIR" > "$out" 2> "$err" \
     || fail "projected spawn $id retry failed after task-set publication completed: $(cat "$err")"
 }
 
@@ -545,14 +545,34 @@ write_ship_brief "$HOME_DIR" default-on 'Projection default-on fixture.'
 make_project "$PROJECT_DIR"
 make_project "$RECOVERY_PROJECT_DIR"
 
-# Keep one ordinary primary task live so the durable firstmate workspace is
-# first and remains present while disposable workers are projected around it.
-spawn_task anchor "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/anchor.out" 2> "$TMP_ROOT/anchor.err" \
-  || fail "opted-out anchor spawn failed: $(cat "$TMP_ROOT/anchor.err")"
-ANCHOR_META="$HOME_DIR/state/anchor.meta"
-remember_meta_worktree "$ANCHOR_META" >/dev/null
-FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
-[ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
+# The historical suite used flat workers below the safe workspace-removal floor.
+# That topology is no longer a fallback: verify the refusal on those releases
+# before entering the supported-release projection and concurrency cases.
+INITIAL_STATUS=$(lab status --json)
+INITIAL_FLOOR=$(bash -c '
+  . "$0/bin/backends/herdr.sh"
+  result=0
+  fm_backend_herdr_release_floor_verdict "$1" "$2" || result=$?
+  printf "%s\n" "$result"
+' "$ROOT" "$(printf '%s' "$INITIAL_STATUS" | jq -r '.server.protocol')" "$(printf '%s' "$INITIAL_STATUS" | jq -r '.server.version')")
+if [ "$INITIAL_FLOOR" != 0 ]; then
+  if spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/shape-floor.out" 2> "$TMP_ROOT/shape-floor.err"; then
+    fail "unsupported release created a worker through shared-parent fallback"
+  fi
+  grep -F 'requires a dedicated workspace on a focus-safe herdr release' "$TMP_ROOT/shape-floor.err" >/dev/null || fail "unsupported-release refusal reason wrong"
+  [ ! -e "$HOME_DIR/state/shape.meta" ] || fail "unsupported release published a worker endpoint"
+  pass "real Herdr lab: below-floor default refuses unsafe dedicated creation and shared-parent fallback"
+  cleanup_all || fail "below-floor lab cleanup failed"
+  trap - EXIT
+  exit 0
+fi
+
+# Seed a primary container independently of workers. An opted-out worker no
+# longer doubles as the primary's workspace or grouping anchor.
+ANCHOR_OUT=$(lab workspace create --cwd "$HOME_DIR" --label firstmate --no-focus) \
+  || fail "could not create the primary grouping anchor"
+FIRSTMATE_WSID=$(printf '%s' "$ANCHOR_OUT" | jq -r '.result.workspace.workspace_id')
+[ -n "$FIRSTMATE_WSID" ] || fail "anchor did not record the firstmate workspace"
 
 # The same task id and project run once opted out and once projected, so
 # Treehouse commands and metadata can be compared after normalizing endpoint
@@ -570,7 +590,7 @@ cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
   || fail "opted-out spawn invoked the presentation-only workspace mover"
 OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CALL_LOG")
-if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^(api\tschema|session\tlist)' >/dev/null 2>&1; then
+if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^api\tschema' >/dev/null 2>&1; then
   fail "opted-out spawn added presentation-ordering capability or socket calls"
 fi
 pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
@@ -578,8 +598,8 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
 
 # A home that configured nothing at all follows the version floor: it is
-# projected on a release at or above it, and takes the ordinary flat layout with
-# one naming warning below it. The only difference from the opted-out spawn
+# projected on a release at or above it; below-floor refusal was verified
+# before entering these supported-release cases. The only difference from the opted-out spawn
 # above is the removed file, so this case is the floor's live end-user proof on
 # whichever Herdr this lab is running.
 rm -f "$HOME_DIR/config/herdr-presentation-spaces"
@@ -611,13 +631,7 @@ if [ "$FLOOR_VERDICT" = 0 ]; then
     || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
   pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
 else
-  [ ! -e "$DEFAULT_ON_JOURNAL" ] \
-    || fail "an unconfigured home published a presentation journal on below-floor herdr $FLOOR_VERSION"
-  [ "$DEFAULT_ON_WSID" = "$FIRSTMATE_WSID" ] \
-    || fail "an unconfigured home did not land in the flat firstmate workspace on below-floor herdr $FLOOR_VERSION (got '${DEFAULT_ON_WSID:-<empty>}')"
-  grep -q "$FLOOR_VERSION" "$TMP_ROOT/default-on.err" \
-    || fail "the below-floor fallback did not name herdr $FLOOR_VERSION: $(cat "$TMP_ROOT/default-on.err")"
-  pass "real Herdr lab: a home that configured nothing falls back flat on below-floor herdr $FLOOR_VERSION with one naming warning"
+  fail "the supported-release case unexpectedly crossed below the version floor"
 fi
 teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$TMP_ROOT/default-on-teardown.err" \
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
@@ -729,7 +743,6 @@ LOCK_CONTENTION_OWNER_PID=$!
 while [ ! -e "$LOCK_CONTENTION_READY" ] && kill -0 "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null; do sleep 0.01; done
 [ -e "$LOCK_CONTENTION_READY" ] || fail "could not hold the guarded lab presentation lock"
 LOCK_CONTENTION_START=$(log_line_count)
-LOCK_CONTENTION_FOCUS_START=$(focus_audit_line_count)
 LOCK_CONTENTION_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
 if spawn_task lock-contended "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/lock-contended.out" 2> "$TMP_ROOT/lock-contended.err"; then
   LOCK_CONTENTION_STATUS=0
@@ -739,31 +752,18 @@ fi
 : > "$LOCK_CONTENTION_RELEASE"
 wait "$LOCK_CONTENTION_OWNER_PID" || fail "guarded lab presentation lock owner failed"
 LOCK_CONTENTION_OWNER_PID=
-[ "$LOCK_CONTENTION_STATUS" -eq 0 ] \
-  || fail "bounded presentation lock contention did not fall back to a successful flat spawn: $(cat "$TMP_ROOT/lock-contended.err")"
-grep -F "presentation focus lock unavailable; using the ordinary flat layout without projection" "$TMP_ROOT/lock-contended.err" >/dev/null 2>&1 \
-  || fail "bounded presentation lock contention did not warn about flat fallback"
-LOCK_CONTENTION_META="$HOME_DIR/state/lock-contended.meta"
-remember_meta_worktree "$LOCK_CONTENTION_META" >/dev/null
-LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut -d= -f2-)
-[ "$LOCK_CONTENTION_WSID" = "$FIRSTMATE_WSID" ] \
-  || fail "bounded lock contention did not use the ordinary flat firstmate workspace"
-[ ! -e "$HOME_DIR/state/lock-contended.herdr-presentation" ] \
-  || fail "bounded lock contention published a projection journal"
+[ "$LOCK_CONTENTION_STATUS" -ne 0 ] || fail "contended worker placement must refuse"
+grep -F "worker placement lock unavailable" "$TMP_ROOT/lock-contended.err" >/dev/null 2>&1 \
+  || fail "lock contention refused for an unrelated reason"
+[ ! -e "$HOME_DIR/state/lock-contended.meta" ] || fail "contention published a worker endpoint"
+[ ! -e "$HOME_DIR/state/lock-contended.herdr-presentation" ] || fail "contention published a journal"
 LOCK_CONTENTION_CALLS=$(sed -n "$((LOCK_CONTENTION_START + 1)),\$p" "$HERDR_CALL_LOG")
-# session list is required to resolve the shared session lock path before the
-# bounded acquire attempt; it must not unlock projection create or move.
-if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|pane\tclose|api\tschema)' >/dev/null 2>&1; then
-  fail "bounded lock contention performed an unlocked projection mutation or ordering capability call"
+if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|tab\tcreate|pane\tclose|api\tschema)' >/dev/null 2>&1; then
+  fail "lock contention mutated a worker endpoint"
 fi
-[ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] \
-  || fail "bounded lock contention invoked workspace.move"
-assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback"
-assert_raw_presentation_mutations_preserved_since "$LOCK_CONTENTION_FOCUS_START" "bounded presentation lock flat fallback"
-teardown_task lock-contended "$HOME_DIR" > "$TMP_ROOT/lock-contended-teardown.out" 2> "$TMP_ROOT/lock-contended-teardown.err" \
-  || fail "flat lock-contention fixture teardown failed: $(cat "$TMP_ROOT/lock-contended-teardown.err")"
-assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback teardown"
-pass "real Herdr lab: bounded lock contention warns and falls back flat without projection or focus drift"
+[ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] || fail "contention moved a workspace"
+assert_focus_is "$CAPTAIN_FOCUS" "bounded placement lock refusal"
+pass "real Herdr lab: bounded lock contention refuses without parent placement or focus drift"
 PROJECTION_ORDER_START=$(log_line_count)
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
@@ -1120,9 +1120,12 @@ spawn_task acw "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/acw.out" 2> "$TMP_RO
 ACW_PID=$!
 spawn_task bcw "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bcw.out" 2> "$TMP_ROOT/bcw.err" &
 BCW_PID=$!
-wait "$PCW_PID" || fail "cross-home concurrent primary failed: $(cat "$TMP_ROOT/pcw.err")"
-wait "$ACW_PID" || fail "cross-home concurrent A failed: $(cat "$TMP_ROOT/acw.err")"
-wait "$BCW_PID" || fail "cross-home concurrent B failed: $(cat "$TMP_ROOT/bcw.err")"
+PCW_RC=0; wait "$PCW_PID" || PCW_RC=$?
+ACW_RC=0; wait "$ACW_PID" || ACW_RC=$?
+BCW_RC=0; wait "$BCW_PID" || BCW_RC=$?
+finish_concurrent_spawn pcw "$PCW_RC" "$TMP_ROOT/pcw.out" "$TMP_ROOT/pcw.err"
+finish_concurrent_spawn acw "$ACW_RC" "$TMP_ROOT/acw.out" "$TMP_ROOT/acw.err" "$SECOND_HOME_A"
+finish_concurrent_spawn bcw "$BCW_RC" "$TMP_ROOT/bcw.out" "$TMP_ROOT/bcw.err" "$SECOND_HOME_B"
 remember_meta_worktree "$HOME_DIR/state/pcw.meta" >/dev/null
 remember_meta_worktree "$SECOND_HOME_A/state/acw.meta" >/dev/null
 remember_meta_worktree "$SECOND_HOME_B/state/bcw.meta" >/dev/null
@@ -1139,12 +1142,12 @@ printf '%s' "$CROSS_LIST" | jq -e '
 PCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$HOME_DIR/state/pcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 ACW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/acw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 BCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/bcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$PCW_LABEL" in $'└ pcw · p:'*|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
-case "$ACW_LABEL" in $'└ acw · p:'*|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
-case "$BCW_LABEL" in $'└ bcw · p:'*|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
+case "$PCW_LABEL" in $'└ pcw · p:'*) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
+case "$ACW_LABEL" in $'└ acw · p:'*) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
+case "$BCW_LABEL" in $'└ bcw · p:'*) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
 pass "real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus"
 
-# Hold the shared session lock from a different home and force flat fallback.
+# Hold the shared session lock from a different home and require safe refusal.
 CROSS_LOCK_READY="$TMP_ROOT/cross-lock-ready"
 CROSS_LOCK_RELEASE="$TMP_ROOT/cross-lock-release"
 CROSS_LOCK_PATH=$(session_presentation_lock_path) \
@@ -1168,21 +1171,12 @@ else
 fi
 : > "$CROSS_LOCK_RELEASE"
 wait "$CROSS_LOCK_PID" || fail "cross-home session lock owner failed"
-[ "$AFLAT_STATUS" -eq 0 ] \
-  || fail "cross-home lock contention did not fall back flat: $(cat "$TMP_ROOT/aflat.err")"
-grep -F "presentation focus lock unavailable; using the ordinary flat layout without projection" "$TMP_ROOT/aflat.err" >/dev/null 2>&1 \
-  || fail "cross-home lock contention did not warn about flat fallback"
-remember_meta_worktree "$SECOND_HOME_A/state/aflat.meta" >/dev/null
-AFLAT_WSID=$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/aflat.meta" | cut -d= -f2-)
-AFLAT_LABEL=$(lab workspace get "$AFLAT_WSID" | jq -r '.result.workspace.label')
-[ "$AFLAT_LABEL" = 2ndmate-alpha ] \
-  || fail "cross-home lock contention did not use the ordinary secondmate home workspace: $AFLAT_LABEL"
-[ ! -e "$SECOND_HOME_A/state/aflat.herdr-presentation" ] \
-  || fail "cross-home lock contention published a projection journal"
-assert_focus_is "$CAPTAIN_FOCUS" "cross-home lock contention flat fallback"
-teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_ROOT/aflat-teardown.err" \
-  || fail "flat cross-home contention fixture teardown failed"
-pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
+[ "$AFLAT_STATUS" -ne 0 ] || fail "cross-home contention must refuse shared-parent placement"
+grep -F "worker placement lock unavailable" "$TMP_ROOT/aflat.err" >/dev/null 2>&1 || fail "cross-home refusal reason wrong"
+[ ! -e "$SECOND_HOME_A/state/aflat.meta" ] || fail "cross-home contention published a worker endpoint"
+[ ! -e "$SECOND_HOME_A/state/aflat.herdr-presentation" ] || fail "cross-home contention published a journal"
+assert_focus_is "$CAPTAIN_FOCUS" "cross-home placement lock refusal"
+pass "real Herdr lab: session lock contention from a secondmate refuses parent placement"
 
 # Same-identity recovery replaces only one exact agent-free husk in its
 # original projected workspace. These full-session restarts also stop the
@@ -1216,7 +1210,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   # Stopping the whole Herdr session also ends the anchor's agent. Its restored
   # shell remains useful as the durable layout anchor, but its task record no
   # longer represents a live slot owner and must not poison later slot reuse.
-  rm -f "$ANCHOR_META"
+  # The primary anchor is a standalone shell, not a task record.
   lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
     || fail "$RESTART_ID restart did not preserve the projected pane structurally"
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
@@ -1519,8 +1513,8 @@ assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
-# The duplicate case allows flat fallback only when every matching pane is
-# positively agent-free.
+# The duplicate case permits non-projecting dedicated-worker recovery only
+# when every matching pane is positively agent-free.
 # shellcheck source=/dev/null
 . "$ROOT/bin/backends/herdr.sh"
 

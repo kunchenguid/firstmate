@@ -93,9 +93,10 @@ trap on_exit EXIT
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
 mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
-# Backend auto-detection is what is under test here, so opt out of the default-on
-# presentation projection and keep the assertions on the flat per-home workspace.
-printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
+# Backend auto-detection is what is under test here.
+# The fixture explicitly enables dedicated worker placement so the test remains
+# valid on Herdr releases below the default-on presentation safety floor.
+printf 'on\n' > "$CONFIG/herdr-presentation-spaces"
 cat > "$DATA/$ID/brief.md" <<'EOF'
 # Task
 ## Captain's intent

@@ -1689,8 +1689,8 @@ test_presentation_unrecognized_value_warns_and_keeps_the_default() {
   [ "$verdict" = on ] || fail "an unrecognized value at the floor must keep the default on, got '$verdict'"
   assert_contains "$(cat "$stderr")" 'unrecognized value' \
     "an unrecognized value must warn so a typo is visible"
-  # A typo is not a deliberate opt-in, so below the floor it takes the default's
-  # flat fallback rather than forcing a focus-unsafe projection.
+  # A typo is not a deliberate opt-in, so below the floor it disables automatic
+  # grouping rather than forcing a focus-unsafe projection.
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
   verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
   [ "$verdict" = off ] || fail "an unrecognized value below the floor must follow the default, got '$verdict'"
@@ -5942,6 +5942,60 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_worker_container_never_adopts_a_parent_or_same_label_workspace() {
+  local dir fb state log raw container seeded ids ws
+  dir="$TMP_ROOT/worker-container"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir"); state="$dir/state.json"
+  jq '.workspaces += [{workspace_id:"parent",label:"2ndmate-frontdesk"},
+    {workspace_id:"other",label:"fm-worker"}]' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  raw=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure "$1" worker fmtest fm-worker' "$ROOT" "$dir")
+  expect_code 0 "$?" "worker container creation failed"
+  container=${raw%%$'\t'*}; seeded=${raw#*$'\t'}; ws=${container#*:}
+  [ "$ws" != parent ] && [ "$ws" != other ] || fail "worker adopted an existing workspace"
+  ids=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" fm-worker "$2" "$3"' "$ROOT" "$container" "$dir" "$seeded")
+  expect_code 0 "$?" "worker task creation failed"
+  [ -n "$ids" ] || fail "worker task returned no endpoint"
+  jq -e --arg ws "$ws" '
+    ([.workspaces[] | select(.workspace_id==$ws and .label=="fm-worker")] | length)==1
+    and ([.tabs[] | select(.workspace_id==$ws)] | length)==1
+    and ([.tabs[] | select(.workspace_id==$ws)][0].label=="fm-worker")
+  ' "$state" >/dev/null || fail "worker workspace did not converge to its task only"
+  pass "herdr worker container: creates its own labelled workspace without adopting a parent or label collision"
+}
+
+test_worker_workspace_relaunch_guard_requires_role_and_exact_shape() {
+  local dir fb log resp out rc label tabs
+  dir="$TMP_ROOT/worker-role-guard"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  fb=$(make_herdr_fakebin "$dir")
+  for label in fm-worker '└ worker · p:AbCdEfGhIjKlMnOpQrStUv' 2ndmate-frontdesk; do
+    for tabs in 1 2; do
+      rm -f "$resp/.count"; : > "$log"
+      jq -n --arg label "$label" '{result:{workspaces:[{workspace_id:"w1",label:$label}]}}' > "$resp/1.out"
+      jq -n --argjson count "$tabs" '{result:{tabs:[range($count) | {tab_id:"w1:t1",label:"fm-worker"}]}}' > "$resp/2.out"
+      printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/3.out"
+      out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worker_workspace_matches fmtest w1 w1:t1 w1:p1 fm-worker' "$ROOT" 2>&1); rc=$?
+      if [ "$tabs" = 1 ] && [ "$label" != 2ndmate-frontdesk ]; then
+        expect_code 0 "$rc" "a correctly named dedicated worker should be adoptable: $out"
+      else
+        expect_code 1 "$rc" "a shared or parent-labelled worker workspace should refuse: $out"
+      fi
+    done
+  done
+  rm -f "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"└ worker · p:AbCdEfGhIjKlMnOpQrStUv"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-fm-worker"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/3.out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worker_workspace_matches fmtest w1 w1:t1 w1:p1 fm-fm-worker' "$ROOT"
+  expect_code 0 "$?" "a task ID already prefixed fm- must retain its canonical concise projection title"
+  pass "herdr worker relaunch: accepts dedicated normal/projected workspaces and refuses parent names or shared shapes"
+}
+
+test_worker_container_never_adopts_a_parent_or_same_label_workspace
+test_worker_workspace_relaunch_guard_requires_role_and_exact_shape
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr

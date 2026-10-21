@@ -2454,7 +2454,7 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   if [ -f "$D/herdr-stopped" ]; then
     printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
   else
-    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n'
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"version":"0.9.0","protocol":22}}\n'
   fi
   exit 0
 fi
@@ -2518,8 +2518,24 @@ case "${1:-} ${2:-}" in
         : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
+  'session list')
+    session=fmlab
+    previous=
+    for argument in "$@"; do
+      [ "$previous" != --session ] || session=$argument
+      previous=$argument
+    done
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$session" "$D"
+    exit 0 ;;
   'workspace list')
-    printf '{"result":{"workspaces":[]}}\n'
+    workspace=ws1
+    [ "$(cat "$D/herdr-pane")" != '%9' ] || workspace=wsnew
+    printf '{"result":{"workspaces":[{"workspace_id":"%s","label":"%s"}]}}\n' "$workspace" "$(cat "$D/herdr-task-label")"
+    exit 0 ;;
+  'pane list')
+    tab=tab1
+    [ "$(cat "$D/herdr-pane")" != '%9' ] || tab=tabnew
+    printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"%s"}]}}\n' "$(cat "$D/herdr-pane")" "$tab"
     exit 0 ;;
   'workspace create')
     if [ -f "$D/herdr-workspace-create-fails" ]; then
@@ -2529,7 +2545,12 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"workspace":{"workspace_id":"wsnew"},"tab":{"tab_id":"seedtab"}}}\n'
     exit 0 ;;
   'tab list')
-    printf '{"result":{"tabs":[]}}\n'
+    if [ "$(cat "$D/herdr-pane")" = '%9' ]; then tab=tabnew; else tab=tab1; fi
+    case "$*" in
+      *'--workspace wsnew'*)
+        if [ "$tab" != tabnew ]; then printf '{"result":{"tabs":[]}}\n'; exit 0; fi ;;
+    esac
+    printf '{"result":{"tabs":[{"tab_id":"%s","label":"%s"}]}}\n' "$tab" "$(cat "$D/herdr-task-label")"
     exit 0 ;;
   'tab create')
     # The re-created endpoint. Recording it lets a case prove the pane the
@@ -2596,6 +2617,7 @@ EOF
   } > "$home/state/$id.meta"
   printf '%s' "$wt" > "$dir/fake/cwd"
   printf '%s' "$survivor" > "$dir/fake/herdr-pane"
+  printf 'fm-%s' "$id" > "$dir/fake/herdr-task-label"
   : > "$dir/fake/herdr-log"
   : > "$dir/fake/herdr-stopped"
   TASK_TMPS+=("/tmp/fm-$id")
