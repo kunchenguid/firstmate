@@ -799,6 +799,16 @@ do_exit() {
       esac
       ;;
   esac
+  local generation predecessor
+  generation=$(fm_meta_get "$META" spawn_gen)
+  if [ -n "$generation" ]; then
+    predecessor=$(control_seats show "$ID") || die "could not read $ID's predecessor seat before stopping it"
+    if printf '%s\n' "$predecessor" | jq -e --arg g "$generation" \
+      'any(.incarnations[]; .generation == $g and (.lifecycle == "reserved" or .lifecycle == "confirmed"))' >/dev/null 2>&1; then
+      control_seats confirm "$ID" --generation "$generation" >/dev/null \
+        || die "could not record $ID's exact predecessor startup before stopping it"
+    fi
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -1328,15 +1338,7 @@ do_relaunch() {
     [ -z "$seat_out" ] || printf '%s\n' "$seat_out" >&2
   fi
 
-  if [ "$SEAT_TRACKED" = 1 ] && [ -n "$SEAT_PREV_GEN" ] && [ "$(agent_state)" = alive ]; then
-    local predecessor
-    predecessor=$(control_seats show "$ID") || die "could not read $ID's predecessor seat before stopping it"
-    if printf '%s\n' "$predecessor" | jq -e --arg g "$SEAT_PREV_GEN" \
-      'any(.incarnations[]; .generation == $g and (.lifecycle == "reserved" or .lifecycle == "confirmed"))' >/dev/null 2>&1; then
-      control_seats confirm "$ID" --generation "$SEAT_PREV_GEN" >/dev/null \
-        || die "could not record $ID's exact predecessor startup before stopping it"
-    fi
-  fi
+
 
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
