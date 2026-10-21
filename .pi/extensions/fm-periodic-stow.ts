@@ -296,22 +296,48 @@ function genuineUserMessage(message: unknown): boolean {
   return Boolean(text) && classifyFirstmateOperationalText(text) === undefined;
 }
 
+function reminderActivityIdentity(entry: Record<string, unknown>): string | null {
+  if (entry.type === "custom_message") {
+    if (entry.customType === "fm-branch-merge" && entry.display === true) {
+      return `branch-note:${createHash("sha256").update(String(entry.content || "")).digest("hex")}`;
+    }
+    if (entry.customType === "firstmate-feishu-inbound") {
+      const details = entry.details as { deliveryRef?: unknown } | undefined;
+      return typeof details?.deliveryRef === "string" ? `feishu:${details.deliveryRef}` : null;
+    }
+    if (entry.customType === "fm-short-agent-error") {
+      return `short-error:${createHash("sha256").update(String(entry.content || "")).digest("hex")}`;
+    }
+    return null;
+  }
+  if (entry.type !== "custom" || entry.customType !== "fm-branch-visible-outcome") return null;
+  const data = entry.data as { seq?: unknown; task?: unknown; verdict?: unknown;
+    taskGeneration?: unknown; evidenceKey?: unknown } | undefined;
+  if (typeof data?.taskGeneration === "string" && typeof data.evidenceKey === "string") {
+    return `branch-outcome:${String(data.task || "")}:${data.taskGeneration}:${data.evidenceKey}:${String(data.verdict || "")}`;
+  }
+  return typeof data?.seq === "number" && Number.isSafeInteger(data.seq)
+    ? `branch-outcome-seq:${String(data.seq)}`
+    : null;
+}
+
 function reminderActivitySince(ctx: ExtensionContext, entryId: string | null): boolean {
   if (!entryId) return false;
   const branch = ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>;
   const anchor = branch.findIndex((entry) => entry.id === entryId);
   if (anchor < 0) return true;
+  const covered = new Set(branch.slice(0, anchor + 1).map(reminderActivityIdentity)
+    .filter((identity): identity is string => identity !== null));
   return branch.slice(anchor + 1).some((entry) => {
     if (entry.type === "message") {
       const message = entry.message as { role?: unknown } | undefined;
       if (message?.role !== "user") return false;
       return genuineUserMessage(message);
     }
-    if (entry.type === "custom_message") {
-      return entry.customType === "firstmate-feishu-inbound" || entry.customType === "fm-short-agent-error" ||
-        (entry.customType === "fm-branch-merge" && entry.display === true);
-    }
-    return entry.type === "custom" && entry.customType === "fm-branch-visible-outcome";
+    const identity = reminderActivityIdentity(entry);
+    if (!identity || covered.has(identity)) return false;
+    covered.add(identity);
+    return true;
   });
 }
 
@@ -348,7 +374,7 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
         pending = { id: details.reminder_id, at: entryTime(entry.timestamp),
           inventoryFingerprint: typeof details.inventory_fingerprint === "string"
             ? details.inventory_fingerprint
-            : null };
+            : reminderRequestInventoryFingerprint(entry.content) };
         recovered = null;
       }
       continue;
@@ -359,12 +385,15 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
         inventory_fingerprint?: unknown } | undefined;
       const handledAt = entryTime(data?.handled_at);
       if (data?.version === 1 && handledAt > 0) {
+        const inventoryFingerprint = typeof data.inventory_fingerprint === "string"
+          ? data.inventory_fingerprint
+          : pending && data.reminder_id === pending.id
+            ? pending.inventoryFingerprint
+            : null;
         if (handledAt >= generation.reminderLastHandledAt) {
           generation.reminderLastHandledAt = handledAt;
           generation.reminderLastHandledEntryId = typeof entry.id === "string" ? entry.id : null;
-          generation.reminderLastInventoryFingerprint = typeof data.inventory_fingerprint === "string"
-            ? data.inventory_fingerprint
-            : null;
+          generation.reminderLastInventoryFingerprint = inventoryFingerprint;
         }
         if (pending && (entry.customType === reminderEmptyType || entry.customType === reminderUnchangedType ||
             data?.reminder_id === pending.id)) {
@@ -464,8 +493,30 @@ function reminderInventoryFingerprint(snapshot: Record<string, unknown>): string
     })),
     decisions_open: (inventory.decisions_open as Array<Record<string, unknown>>).map((row) => ({
       id: row.id, key: row.key, verb: row.verb, owner: row.owner,
+      summary: materialDecisionSummary(row.summary),
     })),
   })).digest("hex");
+}
+
+function materialDecisionSummary(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  return value.replace(/:\s+held \d+d:\s+/gu, ": ").replace(/^held \d+d$/u, "held");
+}
+
+function reminderRequestInventoryFingerprint(content: unknown): string | null {
+  if (typeof content !== "string") return null;
+  const marker = "\nCanonical snapshot:\n";
+  const markerAt = content.lastIndexOf(marker);
+  if (markerAt < 0) return null;
+  try {
+    const snapshot = JSON.parse(content.slice(markerAt + marker.length).trim()) as unknown;
+    if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") {
+      return null;
+    }
+    return reminderInventoryFingerprint(snapshot as Record<string, unknown>);
+  } catch {
+    return null;
+  }
 }
 
 function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string): string {
