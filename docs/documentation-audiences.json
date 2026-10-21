@@ -164,7 +164,7 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/stow/SKILL.md",
+      "path": ".agents/stow.md",
       "audience": "agent-runtime"
     },
     {
@@ -358,10 +358,6 @@
     {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "skills/stow/SKILL.md",
-      "audience": "public-product"
     },
     {
       "path": "docs/task-continuation.md",

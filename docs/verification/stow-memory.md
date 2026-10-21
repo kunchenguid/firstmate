@@ -1,9 +1,9 @@
-# Startup-memory `/stow` verification
+# Startup-memory stow verification
 
 Audience: maintainer verification.
 
 This record supports the active guarantee that Pi can discover and JIT-load a user-owned local skill excluded through the clone's `.git/info/exclude` when Firstmate supplies the `.agents/skills` root through Pi's public skill interface.
-The internal [`stow` skill](../../.agents/skills/stow/SKILL.md) owns tiering, curation, archival, offload, and completion-receipt behavior.
+The internal [`stow` skill](../../.agents/stow.md) owns tiering, curation, archival, offload, and completion-receipt behavior.
 [`docs/configuration.md`](../configuration.md) owns the current operator-facing startup-memory setting and estimate.
 
 ## Git-excluded local skill discovery and loading

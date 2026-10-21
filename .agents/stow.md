@@ -1,12 +1,12 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or for the knowledge duty of an authorized heartbeat.
-user-invocable: true
+description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use before a session reset or context compaction, or for the knowledge duty of an authorized heartbeat.
+user-invocable: false
 metadata:
   internal: true
 ---
 
-<!-- maintainers: this is the firstmate-internal skill. The public, installer-facing counterpart lives at skills/stow/SKILL.md - deliberately a separate file with no shared code or environment branching. Keep them independent. -->
+<!-- maintainers: this is the firstmate-internal skill. It is not an installer-facing or user-invocable skill. -->
 
 # stow
 
@@ -74,7 +74,7 @@ While the flag is present:
 
 ## Required startup-memory pass
 
-Every `/stow` invocation performs this complete pass, even when the session contains no new finding:
+Every internal stow pass performs this complete pass, even when the session contains no new finding:
 
 1. Run `bin/fm-startup-memory-budget.sh report` before considering a write.
    Record its effective budget and each file's estimated-token total.
@@ -170,7 +170,7 @@ Approved project-level destinations are not produced by stow: they ship normally
 - A user-owned local skill: a directory under `.agents/skills/<freeform-name>/` whose path is appended to the active home clone's repository-local exclude file, never to a `.gitignore`.
   Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, and anchor every destination index check, exclude-path lookup, and ignore verification to that root with `git -C "$home_root"`.
   Before approval and again before migration, validate that the chosen freeform destination under `home_root` is absent from that home's git index and collides with no existing file or directory, and reject the destination if either check fails.
-  The name is freeform with no user-vs-firstmate naming convention, the skill stays per-home and untracked, and the harness still lists and JIT-loads it because skill discovery scans the filesystem and ignores git status (verified in `docs/verification/stow-memory.md`).
+  The name is freeform with no user-vs-firstmate naming convention, the per-home skill stays untracked, and this internal contract is read directly by authorized Firstmate maintenance rather than exposed through Pi skill discovery.
   Its precise, condition-stated description line is its entire trigger; it gets no `AGENTS.md` declaration because `AGENTS.md` is shared tracked material.
   Because this destination is local and untracked, it is also the JIT home for private conditional knowledge that no committed surface may hold.
 - An already-existing user-owned local on-demand note with an established trigger, after confirming it is untracked, private, and able to hold the quoted entry.
@@ -268,10 +268,10 @@ Do not hide an over-budget result behind a reset-safe claim.
 
 ## Coordinated heartbeat or recoverable invocation
 
-Automatic maintenance is the heartbeat coordinator described in [`docs/configuration.md`](../../../docs/configuration.md#heartbeat-maintenance-configperiodic-stowjson), replacing only periodic stow.
+Automatic maintenance is the heartbeat coordinator described in [`docs/configuration.md`](../docs/configuration.md#heartbeat-maintenance-configperiodic-stowjson), replacing only periodic stow.
 An `fm-heartbeat-request` uses this skill for knowledge curation and open-record persistence; its task archival and continuation duties remain with the existing guarded task owners named by the coordinator.
 It adds no archive authority, never changes pinned preferences automatically, and uses the same provenance, privacy, retention, budget, and verified-write rules below.
-Manual and pre-compaction stow still execute the complete skill.
+Pre-compaction and authorized heartbeat maintenance still execute the complete internal pass.
 
 When an `fm-stow-request` custom message supplies a `run_id`, this complete skill remains the content owner, while `bin/fm-stow-run.sh` owns the durable request and run lifecycle.
 Treat message delivery and `agent_end` as neither consumption nor completion: call the requested `begin` or `recover` operation with the current state revision before planning, and call `finish` only after writing and reading back the machine receipt.

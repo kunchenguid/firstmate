@@ -85,6 +85,14 @@ const settings = sdk.SettingsManager.inMemory({
   retry: { enabled: false, provider: { maxRetries: 0 } },
   cacheWarming: "off", packages: [], extensions: [], skills: [], prompts: [], themes: [],
 });
+const skillDiscovery = new sdk.DefaultResourceLoader({
+  cwd: root, agentDir: home, settingsManager: settings, noExtensions: true,
+  noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  additionalSkillPaths: [path.join(root, ".agents/skills")],
+});
+await skillDiscovery.reload();
+assert.equal(skillDiscovery.getSkills().skills.some((skill) => skill.name === "stow"), false,
+  "installed Pi must not expose the internal stow contract as a skill command");
 const runtime = await sdk.ModelRuntime.create();
 runtime.registerProvider("idle-reminder-local", providerConfig);
 await runtime.refresh({ providers: ["idle-reminder-local"], allowNetwork: false });
