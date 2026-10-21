@@ -478,6 +478,19 @@ case "${FM_FAKE_SSH_MODE:-ok}" in
 esac
 case "${rargs[1]:-}" in
   route)
+    # The host's route answer is the generation authority when the parent holds
+    # no seat generation of its own, so a host that has moved on answers with
+    # the newer generation from its next route answer on.
+    if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
+      route_calls=0
+      [ -f "$FM_FAKE_DIR/route-calls" ] && route_calls=$(cat "$FM_FAKE_DIR/route-calls" 2>/dev/null || echo 0)
+      route_calls=$((route_calls + 1))
+      printf '%s\n' "$route_calls" > "$FM_FAKE_DIR/route-calls"
+      if [ "$route_calls" -gt 1 ]; then
+        printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=g-new\n' "${rargs[2]}"
+        exit 0
+      fi
+    fi
     printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=%s\n' "${rargs[2]}" "${FM_FAKE_HOST_GENERATION:-g-initial}"
     ;;
   send|send-stdin)
