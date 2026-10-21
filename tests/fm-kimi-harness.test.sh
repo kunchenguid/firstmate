@@ -100,8 +100,20 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    [ ! -s "$FM_FAKE_KIMI_STATE.window" ] || cat "$FM_FAKE_KIMI_STATE.window"
+    exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$FM_FAKE_KIMI_STATE.window"
+    exit 0 ;;
+  kill-window) : > "$FM_FAKE_KIMI_STATE.window"; exit 0 ;;
+  has-session|new-session) exit 0 ;;
   send-keys)
     prev=
     literal=

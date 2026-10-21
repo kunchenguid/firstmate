@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It writes the durable away-posture record with the captain's away words verbatim as the whole mandate in the same turn as /afk, before any other work and without waiting for a further go, reads the words back in plain sentences after entry, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked, as the supervision host does on a non-Pi home that runs it; the daemon still delivers batched digests elsewhere for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  Load it at once in the /afk turn, before any other work, and on the first unmarked message while away to render the return brief.
 user-invocable: true
 metadata:
   internal: true
@@ -95,7 +95,7 @@ afk changes how the captain is informed and what happens at a captain-owned deci
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
 While the away-posture record exists, any pull request green at its live head may merge under away authority; which one the captain's words meant is the away session's reading, and a merge the words do not call for holds for the return.
 Away authority never releases a captain hold, and it expires when the away record is archived.
-`--allow-red` and `--allow-missing` remain attended-only and are refused while the away record exists.
+`--allow-red`, `--allow-missing`, and `--allow-no-pipeline` remain attended-only and are refused while the away record exists.
 A merge under away authority must be synchronous; `fm-pr-merge.sh` refuses auto-merge and any GitHub queue state that cannot prove an immediate merge while the away record exists.
 The same gates bind whichever actor performs the action: on Pi the parked main's standing authority relocates to the supervision branch, which meets exactly these rules, and the spend cap recorded at entry is enforced by `fm-spawn.sh` for both actors while the away record exists.
 The captain's away words are their explicit instruction given before leaving, recorded verbatim and acted on by the away session's judgment at the moment an event makes them relevant; the words cover nothing they do not say, are never applied by analogy, and die at archive.
