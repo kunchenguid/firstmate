@@ -385,6 +385,22 @@ test_the_adoption_resolves_a_superseded_row() {
   pass "the adoption resolves a superseded row into the live incarnation it names"
 }
 
+# A replacement that never completes must not consume capacity: the row it
+# marked superseded claims no slot, so the next capped dispatch still fits.
+test_an_abandoned_replacement_consumes_no_capacity() {
+  local case_dir out
+  case_dir=$(make_case abandoned task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0
+  rm -f -- "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
+  assert_equals "$(registry_row_field "$case_dir" task-c 4)" "-3" \
+    "the abandoned replacement did not mark the prior incarnation's row"
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-d gpt-6.1-sol) || fail "an abandoned replacement consumed the capacity: $out"
+  assert_equals "$out" "claimed" "an abandoned replacement consumed the capacity"
+  pass "an abandoned replacement leaves no capacity behind"
+}
+
 # A superseded row whose current incarnation claims no slot is resolved: the
 # prior incarnation's occupancy must not count forever.
 test_an_uncapped_incarnation_resolves_a_superseded_row() {
@@ -1105,6 +1121,7 @@ test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row
 test_a_replacement_on_an_excluded_model_invalidates_the_prior_row
 test_the_adoption_resolves_a_superseded_row
 test_an_uncapped_incarnation_resolves_a_superseded_row
+test_an_abandoned_replacement_consumes_no_capacity
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

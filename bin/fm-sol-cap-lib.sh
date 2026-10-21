@@ -303,10 +303,10 @@ fm_sol_cap_entry_shape() {  # <start> <pid>
 fm_sol_cap_entry_live() {  # <start> <pid>
   local start=$1 pid=$2
   case "$start" in '' | *[!0-9]*) return 1 ;; esac
-  # A superseded row (-3) still counts: the incarnation it names is being
-  # replaced, and the replacement must not take a second slot before the
-  # next adoption resolves the marker.
-  case "$pid" in -2 | -3) return 0 ;; '' | *[!0-9]*) return 1 ;; esac
+  # A superseded row (-3) does not count: the incarnation it names is being
+  # replaced, and a replacement that never completes must not consume
+  # capacity forever. The next adoption resolves the marker.
+  case "$pid" in -2) return 0 ;; -3) return 1 ;; '' | *[!0-9]*) return 1 ;; esac
   [ "$pid" = 0 ] || fm_pid_alive "$pid"
 }
 
@@ -352,10 +352,22 @@ fm_sol_cap_adopt_workers() (
     model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$meta") || return 1
     if ! fm_sol_cap_model_capped "$model"; then
       # This incarnation claims no slot, but it may be replacing a capped
-      # one: its superseded row must be resolved here, or the prior
-      # incarnation's occupancy counts forever.
-      if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id && $4 == -3 {found=1; exit} END {exit !found}' "$file"; then
-        fm_sol_cap_registry_remove_row "$file" "$id" || return 1
+      # one: its uncertain or superseded row must be resolved here, or the
+      # prior incarnation's occupancy counts forever. A replacement in
+      # flight owns this task's spawn lock, and its row is not resolved
+      # while that replacement runs.
+      if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id && ($4 == -2 || $4 == -3) {found=1; exit} END {exit !found}' "$file"; then
+        owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
+        fm_current_pid current || return 1
+        [ "$owner" != "$current" ] || continue
+        if ! fm_lock_try_acquire "$state/.spawn-$id.lock"; then
+          continue
+        fi
+        fm_sol_cap_registry_remove_row "$file" "$id" || {
+          fm_lock_release "$state/.spawn-$id.lock" || return 1
+          return 1
+        }
+        fm_lock_release "$state/.spawn-$id.lock" || return 1
       fi
       continue
     fi
