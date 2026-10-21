@@ -718,7 +718,7 @@ SH
 }
 
 test_partial_identity_reads_refuse() {
-  local dir fakebin field got
+  local dir fakebin got
   dir="$TMP_ROOT/partial-identity"
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/ps" <<'SH'
