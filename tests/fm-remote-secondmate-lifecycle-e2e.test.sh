@@ -3,10 +3,12 @@
 # Pass --watcher-only to exercise recovery without unrelated lifecycle cases.
 set -u
 WATCHER_ONLY=0
+SPAWN_RECOVERY_ONLY=0
 case "${1:-}" in
   --watcher-only) WATCHER_ONLY=1 ;;
+  --spawn-recovery-only) WATCHER_ONLY=1; SPAWN_RECOVERY_ONLY=1 ;;
   '') ;;
-  *) printf 'usage: %s [--watcher-only]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s [--watcher-only|--spawn-recovery-only]\n' "$0" >&2; exit 2 ;;
 esac
 
 # shellcheck source=tests/lib.sh
@@ -936,7 +938,30 @@ pass "host launch validation confirms refusal before any agent starts"
 # host placement separately from that backend and arms the reply source.
 printf 'pi\n' > "$PARENT/config/crew-harness"
 if [ "$WATCHER_ONLY" = 1 ]; then
-  out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate) || fail "watcher fixture launch failed: $out"
+  if [ "$SPAWN_RECOVERY_ONLY" = 1 ]; then
+    printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$PARENT/config/fleet-seats"
+    remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null || fail "recovery policy could not be confirmed"
+    remote_env bash -c '
+      "$1/bin/fm-fleet-seats.sh" reserve ios --generation prepared-recovery --kind secondmate \
+        --harness codex --model pool-model-a --holder-pid "$$" >/dev/null
+    ' _ "$ROOT" || fail "could not reserve the abandoned initial launch"
+  fi
+  if [ "$SPAWN_RECOVERY_ONLY" = 1 ]; then
+    out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-a) || fail "recovery fixture launch failed: $out"
+  else
+    out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate) || fail "watcher fixture launch failed: $out"
+  fi
+  if [ "$SPAWN_RECOVERY_ONLY" = 1 ]; then
+    recovery_ledger=$(remote_env "$ROOT/bin/fm-fleet-seats.sh" show ios)
+    assert_equals reclaimed "$(printf '%s\n' "$recovery_ledger" | jq -r '.incarnations[] | select(.generation == "prepared-recovery") | .lifecycle')" "abandoned initial launch was not reclaimed"
+    assert_equals true "$(printf '%s\n' "$recovery_ledger" | jq '[.incarnations[] | select(.lifecycle == "confirmed")] | length == 1 and (.[0] | .previous_generation == null and .route.spawn_gen == .generation and .route.target != null)')" "recovered launch did not bind its own host generation without a predecessor"
+    bound_generation=$(printf '%s\n' "$recovery_ledger" | jq -r '.incarnations[] | select(.lifecycle == "confirmed") | .generation')
+    out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-a) || fail "retry with the bound host predecessor failed: $out"
+    recovery_ledger=$(remote_env "$ROOT/bin/fm-fleet-seats.sh" show ios)
+    assert_equals true "$(printf '%s\n' "$recovery_ledger" | jq --arg g "$bound_generation" '(.incarnations | last | .previous_generation == $g and .lifecycle == "released") and ([.incarnations[] | select(.lifecycle == "confirmed") | .generation] == [$g])')" "retry failed to preserve the host-bound generation and release its unused candidate"
+    pass "initial remote launch recovery never names a never-dispatched host predecessor"
+    exit 0
+  fi
 else
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)

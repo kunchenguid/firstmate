@@ -1474,15 +1474,9 @@ spawn_remote_secondmate() {
   # The seat ledger, not this record, names the running generation: after a
   # failed publication the record can be missing or stale, and a retry must
   # replace the confirmed generation rather than refuse beside it.
-  seat_prev=-
-  if [ -f "$meta" ]; then
-    seat_prev=$(fm_meta_get "$meta" fleet_seat_generation)
-    [ -n "$seat_prev" ] || seat_prev=-
-  fi
   seat_ledger_gen=$(spawn_seats show "$id" 2>/dev/null |
     jq -r '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | ((map(select(.lifecycle == "confirmed")) | last) // last) | .generation // empty' 2>/dev/null || true)
   if [ -n "$seat_ledger_gen" ]; then
-    seat_prev=$seat_ledger_gen
     if ! spawn_seats reclaim "$id" --generation "$seat_ledger_gen"; then
       fm_lock_release "$remote_lock" || true
       fm_lock_release "$registry_lock" || true
@@ -1491,6 +1485,19 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
+  if ! seat_prev=$(set -o pipefail; spawn_seats show "$id" |
+    jq -r --arg host "$host" --arg root "$root" --arg home "$home" '
+      [.incarnations[]? | select(.startup_confirmed == true and .route.placement == "remote"
+        and .route.host == $host and .route.remote_root == $root and .route.home == $home
+        and .route.spawn_gen == .generation and (.route.target | type == "string" and length > 0))]
+      | last | .route.spawn_gen // "-"'); then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id's host predecessor could not be resolved; no replacement was reserved" >&2
+    return 1
+  fi
+  [ -n "$seat_prev" ] || seat_prev=-
   if ! seat_out=$(spawn_seats reserve "$id" --generation "$SPAWN_GEN" --previous-generation "$seat_prev" \
     --kind secondmate --harness "$harness" --model "${model#-}" --holder-pid "$$"); then
     fm_lock_release "$remote_lock" || true
