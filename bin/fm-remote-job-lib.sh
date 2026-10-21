@@ -1177,7 +1177,7 @@ fm_remote_job_probe() { # <account-home>; require a fresh heartbeat outside an a
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   local root=$1 account_home=$2 i=0
   while [ "$i" -lt 200 ]; do
-    fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
+    fm_remote_job_worker_owned_alive "$root" "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     i=$((i + 1))
     sleep 0.1
   done

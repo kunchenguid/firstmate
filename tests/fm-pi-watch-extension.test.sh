@@ -3540,6 +3540,10 @@ await waitFor(
   () => original.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
   "old-session queued follow-up",
 );
+original.handlers.get("before_agent_start")?.({
+  type: "before_agent_start", messageType: "custom",
+  message: { role: "custom", customType: "fixture", content: original.prompts[0] },
+}, {});
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-followup`);

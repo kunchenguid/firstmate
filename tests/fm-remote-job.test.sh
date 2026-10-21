@@ -426,6 +426,24 @@ fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_J
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
+# A current heartbeat and code hash belong to the serving lock owner, not an
+# unrelated process substituted into the persisted pid file.
+sleep 120 &
+OTHER_PID=$!
+OTHER_START=$(fm_remote_job_process_start "$OTHER_PID") || fail "sentinel birth is unavailable"
+printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.pid"
+if fm_remote_job_wait_for_probe "$REMOTE_ROOT" "$ACCOUNT_HOME"; then
+  fail "readiness accepted a persisted pid that does not own the live worker lock"
+fi
+kill -0 "$OTHER_PID" 2>/dev/null || fail "readiness signaled the unrelated sentinel"
+[ "$(fm_remote_job_process_start "$OTHER_PID")" = "$OTHER_START" ] || fail "readiness changed sentinel identity"
+printf '%s\n' "$NEW_WORKER_PID" > "$STATE_ROOT/worker.pid"
+fm_remote_job_wait_for_probe "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "readiness refused the matching live worker"
+kill "$OTHER_PID" 2>/dev/null || true
+wait "$OTHER_PID" 2>/dev/null || true
+OTHER_PID=
+pass "readiness requires the persisted pid to own the matching live worker"
+
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true

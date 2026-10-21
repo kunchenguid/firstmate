@@ -1053,6 +1053,10 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "custom",
+  message: { role: "custom", customType: "fixture", content: "custom turn" },
+}, mainCtx);
 const operational = spawnSync(
   "bash",
   [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
