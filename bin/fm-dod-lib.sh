@@ -384,8 +384,9 @@ fm_nm_driving_block() {  # <forge>
 "
     pr_reattach_clause="; once checks are green it returns \`checks-passed\` immediately, and"
   fi
-  # config/wait-no-turns selects the foreground drive. Absent, the text matches
-  # the backgrounded drive a home had before that flag.
+  # config/wait-no-turns selects the foreground drive. Absent, a drive may
+  # background only on a tracked harness completion path; nohup and a trailing
+  # `&` return a pid and are not that path.
   wait_cfg=${CONFIG:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}}
   if [ -e "$wait_cfg/wait-no-turns" ]; then
     drive_block="Drive the run with ONE foreground \`no-mistakes axi run\` and let it block.
@@ -395,10 +396,13 @@ Never background a wait, and never arm a timer to stand in for one: a background
 ${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - that is not a failure: reattach at once by re-running \`no-mistakes axi run\` without flags, and issue the same foreground call again, one at a time, until a gate or outcome comes back${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
   else
     drive_block="One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-So background the drive call instead of sitting in one blocking hold your harness will kill, and read its return when it finishes.
-Declare that wait using the brief's status-reporting rule before waiting on the backgrounded drive call.
-Where a harness's own command limit is not established, assume it bounds commands and use that same backgrounded shape.
-${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - reattach at once by re-running \`no-mistakes axi run\` without flags, backgrounded the same way${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
+If you cannot keep that call in one tracked foreground hold, background it only through the harness mechanism that returns the command's own output to this worker: Claude background notify, Codex yield plus write_stdin until exit, Grok background:true, or the same shell tool with its timeout.
+Do not \`nohup\`, and do not use a trailing \`&\`: those return a pid while the drive is still running, so the parked gate never arrives as a tool result.
+Declare that wait using the brief's status-reporting rule before the drive call.
+A \`paused:\` line is wait evidence for firstmate, not permission to end the turn, and not a substitute for reading the drive return.
+Do not end the turn until the drive's own output contains a gate or outcome.
+Where a harness's own command limit is not established, assume it bounds commands and use that same tracked shape.
+${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - reattach at once by re-running \`no-mistakes axi run\` without flags, on the same tracked path${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
   fi
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
