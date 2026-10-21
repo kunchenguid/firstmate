@@ -359,6 +359,7 @@ fm_sol_cap_adopt_workers() (
       fi
       continue
     fi
+    pid=
     if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$file"; then
       pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$file") || return 1
       case "$pid" in
@@ -381,6 +382,10 @@ fm_sol_cap_adopt_workers() (
       lifecycle_lock=$state/.spawn-$id.lock
     fi
     if [ "$lifecycle_held" = 1 ]; then
+      # A superseded marker is preserved until lifecycle ownership permits
+      # its resolution: it still counts, and resolving it here would lose
+      # the marker the next adoption needs.
+      [ "$pid" = -3 ] && continue
       fm_sol_cap_registry_claim "$file" "$id" "$model" "$now" -2 || return 1
       continue
     fi
@@ -529,6 +534,22 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
   return 0
 }
 
+# fm_sol_cap_lock_try_briefly <lock-dir>
+# Take the admission boundary if it is free within a short wait. The
+# invalidation path uses it: a dispatch that reserves no slot must not wait
+# long on a boundary it does not need, but it must not lose the invalidation
+# to ordinary contention either.
+fm_sol_cap_lock_try_briefly() {  # <lock-dir>
+  local lock=$1 i=0
+  while :; do
+    fm_lock_try_acquire "$lock" && return 0
+    i=$((i + 1))
+    [ "$i" -lt 8 ] || break
+    sleep 0.25
+  done
+  return 1
+}
+
 # fm_sol_cap_registry_remove_row <registry-file> <id>
 # Remove this task id's row, keeping every other row. Used to resolve a
 # superseded row whose current incarnation claims no slot, so the prior
@@ -618,14 +639,16 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # never hands the same capacity to two sessions. A first dispatch has no
     # prior incarnation to mark, and a home with no row to mark never waits
     # on the admission boundary at all.
-    [ -e "$state/$id.meta" ] || return 0
+    # The task id still has a row, so this dispatch reuses an id whose
+    # earlier incarnation left evidence behind. That is true whether the
+    # earlier incarnation's metadata is still published or a confirmed
+    # cleanup already removed it.
     grep -Fq "$(printf '%s\t' "$id")" "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || return 0
-    # The invalidation never waits on the admission boundary: a dispatch that
-    # reserves no slot must not be aborted by ceiling contention, and the
-    # row it marks keeps counting until the next adoption resolves it.
-    if ! fm_lock_try_acquire "$lock"; then
-      return 0
-    fi
+    # The invalidation waits only briefly for the admission boundary, and it
+    # never aborts this dispatch: a dispatch that reserves no slot must not
+    # be refused by ceiling contention, and the row it marks keeps counting
+    # until the next adoption resolves it.
+    fm_sol_cap_lock_try_briefly "$lock" || return 0
     if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
       return 0

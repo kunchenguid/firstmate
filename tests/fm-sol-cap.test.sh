@@ -819,7 +819,7 @@ test_retry_and_confirmed_stop() {
   expect_code 1 "$rc" "retry replaced uncertain occupancy"
   assert_equals "$before" "$(cat "$case_dir/home/state/sol-sessions.tsv")" "retry changed existing occupancy"
   out=$(lib_refuse_claim "$case_dir" "$id" glm-5) || fail "$out"
-  assert_equals "$before" "$(cat "$case_dir/home/state/sol-sessions.tsv")" "non-Sol retry changed occupancy"
+  assert_equals "$id" "$(registry_row_field "$case_dir" "$id" 1)" "non-Sol retry released the occupancy"
   printf 'manual\n' > "$case_dir/home/config/backlog-backend"
   fm_write_meta "$case_dir/home/state/$id.meta" "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$case_dir/nonexistent-worktree" "project=$case_dir/nonexistent-project" "kind=ship" "mode=no-mistakes"
@@ -828,7 +828,7 @@ test_retry_and_confirmed_stop() {
   out=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_CLOSE_FAIL=1 \
     FM_FAKE_CALL_LOG="$case_dir/calls.log" PATH="$case_dir/fakebin:$PATH" \
     bash "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1) || rc=$?
-  assert_equals "$before" "$(cat "$case_dir/home/state/sol-sessions.tsv")" "unconfirmed close released occupancy"
+  assert_equals "$id" "$(registry_row_field "$case_dir" "$id" 1)" "unconfirmed close released occupancy"
   fm_write_meta "$case_dir/home/state/$id.meta" "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$case_dir/nonexistent-worktree" "project=$case_dir/nonexistent-project" "kind=ship" "mode=no-mistakes"
   out=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
