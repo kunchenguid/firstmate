@@ -1150,6 +1150,80 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# Two records naming one pool slot - a finished task whose stale record still
+# names the slot, and the task the pool handed it to - follow the slot's owner
+# claim, never the record scan alone.
+write_two_records_on_one_slot() {  # <case> <stale-id> <owner-id>
+  local dir=$1 stale=$2 owner=$3
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+}
+
+test_two_records_on_one_slot_follow_the_owner_claim() {
+  local dir stale=stale-task owner=owner-task rc
+
+  # mine: the claim names the task being torn down, so the other record naming
+  # the slot is stale rather than ambiguous. The owner returns its own slot and
+  # drops its claim; the stale record is left for its own teardown.
+  dir=$(make_case two-records-claim-mine)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$owner.meta" "mine: the owner's record was not removed"
+  assert_present "$dir/home/state/$stale.meta" "mine: the stale task's record was removed by another task's teardown"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "mine: the owner left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "mine: the owner did not return its own pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$stale" "mine: the warning should name the stale record"
+  assert_contains "$(cat "$dir/stderr")" "stale" "mine: the warning should call the other record stale"
+
+  # other: the claim names a different task, so this teardown is records-only
+  # and every slot step is skipped, whatever the record scan would find.
+  dir=$(make_case two-records-claim-other)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  set +e
+  run_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "records-only teardown of the stale record failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$owner" "other: stale record beside the owner's record"
+  assert_present "$dir/worktree/sentinel" "other: records-only teardown reset the owner's slot"
+  assert_present "$dir/home/state/$owner.meta" "other: records-only teardown removed the owner's record"
+
+  # absent: no claim proves either record, so the record scan still refuses
+  # both teardowns exactly as before.
+  dir=$(make_case two-records-claim-absent)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  assert_refused_without_mutation "$dir" "$owner" "absent: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "absent: the owner's refusal should name the other record"
+  assert_refused_without_mutation "$dir" "$stale" "absent: stale teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $owner's recorded worktree" \
+    "absent: the stale task's refusal should name the other record"
+  assert_present "$dir/home/state/$owner.meta" "absent: a refusal removed the other record"
+
+  # A claim naming this task id but recorded by a different home is not proof
+  # this record owns the slot, so the record scan still refuses.
+  dir=$(make_case two-records-claim-foreign-home)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner" "$dir/other-home"
+  assert_refused_without_mutation "$dir" "$owner" "foreign-home claim: owner teardown"
+  assert_present "$dir/pool/1/.fm-slot-owner" "foreign-home claim: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "foreign-home claim: the other record was removed"
+
+  pass "fm-teardown: two records on one pool slot follow the slot's owner claim"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1539,6 +1613,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
+test_two_records_on_one_slot_follow_the_owner_claim
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
