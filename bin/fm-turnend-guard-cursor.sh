@@ -269,7 +269,7 @@ current_session_still_ours() {
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$LOCK_PID" || exit 0
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_pid_blocks_reclaim "$LOCK_PID" && exit 0
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi

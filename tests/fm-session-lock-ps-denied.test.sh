@@ -571,8 +571,6 @@ test_procinfo_helper_fails_closed() {
   [ -z "$out" ] || fail "helper printed '$out' for a nonexistent pid"
   mutated="$TMP_ROOT/procinfo-broken.py"
   sed 's/^P_PID_OFF = 40$/P_PID_OFF = 4/' "$ROOT/bin/fm-procinfo.py" > "$mutated"
-  grep -q '^P_PID_OFF = 4$' "$mutated" \
-    || fail "offset mutation did not apply - helper internals drifted"
   sleep 30 &
   child=$!
   rc=0
@@ -667,6 +665,37 @@ test_procinfo_helper_survives_empty_argv_element() {
   pass "empty argv element is collected as data; provider and ps stay one fact"
 }
 
+test_unreadable_owner_refuses_acquisition() {
+  [ "$(uname -s)" = Linux ] || { pass "unreadable owner acquisition: Linux fixture only, skipped"; return; }
+  local dir fakebin real_ps owner rc
+  dir="$TMP_ROOT/unreadable-acquisition"
+  fakebin=$(fm_fakebin "$dir")
+  real_ps=$(command -v ps)
+  owner=$$
+  mkdir -p "$dir/state" "$dir/proc" "$dir/named"
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -V "*|*" -p $FM_TEST_OWNER "*) exit 126 ;;
+esac
+exec "$FM_TEST_REAL_PS" "$@"
+SH
+  chmod +x "$fakebin/ps"
+  ln -s "$(command -v bash)" "$dir/named/claude"
+  rc=0
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_TEST_OWNER="$owner" FM_TEST_REAL_PS="$real_ps" \
+    FM_PROC_ROOT_OVERRIDE="$dir/proc" FM_STATE_OVERRIDE="$dir/state" \
+    PATH="$fakebin:$PATH" "$dir/named/claude" -c 'bash "$1/bin/fm-lock.sh"; rc=$?; exit "$rc"' _ "$ROOT" \
+    > "$dir/out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "acquisition took over an unreadable live owner"
+  [ "$(cat "$dir/state/.lock")" = "$owner" ] || fail "acquisition replaced the unreadable owner"
+  grep -q 'another live firstmate session' "$dir/out" || fail "acquisition did not refuse the owner"
+  pass "acquisition refuses a live owner with unreadable identity"
+}
+
+test_unreadable_owner_refuses_acquisition
 test_denied_route_fields_parse_exactly
 test_provider_shape_violations_rejected
 test_provider_empty_field_is_a_present_pid

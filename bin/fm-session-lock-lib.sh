@@ -578,18 +578,32 @@ EOF
 }
 
 # True if $1 is a live process that looks like a verified harness.
-# A tagged Windows pid is answered from the Windows process table, because
-# kill -0 cannot see across that boundary and would report a live harness as
-# dead - which would hand a running session's home to a second one.
-fm_harness_pid_alive() {
-  local pid=$1 comm winpid
+# A tagged Windows pid uses the Windows process table; numeric pids use the
+# shared identity provider and kill probe to distinguish dead from unreadable.
+fm_session_lock_pid_verdict() {
+  local pid=$1 probe winpid rc=0 comm
+  FM_SESSION_LOCK_PID_VERDICT=unreadable
   if winpid=$(fm_win_untag_pid "$pid"); then
-    comm=$(fm_win_command "$winpid") || return 1
-    fm_harness_process_matches "$comm" "$comm"
-    return
+    comm=$(fm_win_command "$winpid") || rc=$?
+    case $rc in
+      0) FM_PROC_COMM=$comm FM_PROC_ARGS=$comm FM_PROC_PPID=; FM_SESSION_LOCK_PID_VERDICT=readable ;;
+      1) FM_SESSION_LOCK_PID_VERDICT=dead ;;
+    esac
+    return 0
   fi
-  kill -0 "$pid" 2>/dev/null || return 1
-  fm_proc_info "$pid" || return 1
+  case "$pid" in ''|*[!0-9]*|0) return 0 ;; esac
+  if fm_proc_info "$pid"; then
+    FM_SESSION_LOCK_PID_VERDICT=readable
+  elif probe=$(LC_ALL=C kill -0 "$pid" 2>&1); then
+    return 0
+  else
+    case "$probe" in *'No such process'*) FM_SESSION_LOCK_PID_VERDICT=dead ;; esac
+  fi
+}
+
+fm_harness_pid_alive() {
+  fm_session_lock_pid_verdict "$1"
+  [ "$FM_SESSION_LOCK_PID_VERDICT" = readable ] || return 1
   fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"
 }
 
@@ -619,6 +633,18 @@ fm_session_pid_identity() {  # <value>
     return 0
   fi
   fm_pid_identity "$1"
+}
+
+# True when session-lock pid $1 must not be reclaimed: a readable harness owner
+# that still matches holds the lock, an unreadable-but-live process is refused
+# rather than guessed at, and only a dead process frees the lock.
+fm_session_lock_pid_blocks_reclaim() {
+  fm_session_lock_pid_verdict "$1"
+  case "$FM_SESSION_LOCK_PID_VERDICT" in
+    dead) return 1 ;;
+    unreadable) return 0 ;;
+    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" ;;
+  esac
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -757,7 +783,7 @@ fm_session_lock_foreign_owner_live() {
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$lock_pid" || return 1
-  fm_harness_pid_alive "$lock_pid" || return 1
+  fm_session_lock_pid_blocks_reclaim "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pid_listed "$lock_pid" "$pids" && return 1
   fm_session_lock_same_session "$state" "$pids" && return 1
@@ -817,33 +843,16 @@ fm_session_lock_inspect() {  # <state>
       FM_LOCK_INSPECT_LIVE_HARNESS=true
       return 0
     fi
-    win_rc=0
-    fm_win_command "$winpid" >/dev/null || win_rc=$?
-    case "$win_rc" in
-      0) FM_LOCK_INSPECT_LIVE_HARNESS=false ;;
-      1)
-        FM_LOCK_INSPECT_STATE=stale
-        FM_LOCK_INSPECT_LIVE_HARNESS=false
-        ;;
-    esac
-    return 0
   fi
-  if kill -0 "$pid" 2>/dev/null; then
-    if fm_harness_pid_alive "$pid"; then
-      FM_LOCK_INSPECT_STATE=held
-      FM_LOCK_INSPECT_LIVE_HARNESS=true
-    else
+  fm_session_lock_pid_verdict "$pid"
+  case "$FM_SESSION_LOCK_PID_VERDICT" in
+    dead)
+      FM_LOCK_INSPECT_STATE=stale
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+      ;;
+    readable)
       FM_LOCK_INSPECT_STATE=unknown
       FM_LOCK_INSPECT_LIVE_HARNESS=false
-    fi
-    return 0
-  fi
-  if fm_proc_info "$pid"; then
-    FM_LOCK_INSPECT_STATE=unknown
-    return 0
-  fi
-  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
-  FM_LOCK_INSPECT_STATE=stale
-  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
-  FM_LOCK_INSPECT_LIVE_HARNESS=false
+      ;;
+  esac
 }
