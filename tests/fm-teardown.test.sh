@@ -4969,6 +4969,18 @@ test_leaked_tasktmp_process_is_reaped() {
   mkdir -p "$case_dir/tasktmp"
   land_shippable_commit "$case_dir"
 
+  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
+  # installed, matching the worktree process-reaping test above.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+for proc in /proc/[0-9]*; do
+  pid=${proc##*/}
+  cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
+  printf 'p%s\nfcwd\nn%s\n' "$pid" "$cwd"
+done
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+
   ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
   pid=$!
   disown
