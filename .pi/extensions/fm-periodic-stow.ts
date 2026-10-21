@@ -337,17 +337,20 @@ function recordReminderCheck(
 }
 
 function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generation: CoordinatorGeneration): void {
-  let pending: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
+  let pending: { id: string; at: number; inventoryFingerprint: string | null;
+    allowSilentResponse: boolean; intervenedByUser: boolean } | null = null;
   let recovered: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
   for (const entry of ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>) {
     if (entry.type === "custom_message" && entry.customType === reminderMessageType) {
       const details = entry.details as { version?: unknown; reminder_id?: unknown;
-        inventory_fingerprint?: unknown } | undefined;
+        inventory_fingerprint?: unknown; reporting_scope?: unknown } | undefined;
       if (details?.version === 1 && typeof details.reminder_id === "string") {
         pending = { id: details.reminder_id, at: entryTime(entry.timestamp),
           inventoryFingerprint: typeof details.inventory_fingerprint === "string"
             ? details.inventory_fingerprint
-            : reminderRequestInventoryFingerprint(entry.content) };
+            : reminderRequestInventoryFingerprint(entry.content),
+          allowSilentResponse: details.reporting_scope === "decisions-only",
+          intervenedByUser: false };
         recovered = null;
       }
       continue;
@@ -388,11 +391,18 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
       continue;
     }
     if (pending && entry.type === "message") {
-      const message = entry.message as { stopReason?: unknown } | undefined;
-      if (assistantText(message) && message?.stopReason !== "error" && message?.stopReason !== "aborted") {
+      const message = entry.message as { role?: unknown; stopReason?: unknown } | undefined;
+      if (message?.role === "user") {
+        pending.intervenedByUser = true;
+        recovered = null;
+        continue;
+      }
+      const successfulAssistant = message?.role === "assistant" && message.stopReason !== "error" &&
+        message.stopReason !== "aborted" && message.stopReason !== "toolUse";
+      if (!pending.intervenedByUser && successfulAssistant &&
+          (assistantText(message) || pending.allowSilentResponse)) {
         recovered = { id: pending.id, at: entryTime(entry.timestamp) || entryTime((message as { timestamp?: unknown }).timestamp),
           inventoryFingerprint: pending.inventoryFingerprint };
-        if (message?.stopReason === "toolUse") recovered = null;
       }
     }
   }

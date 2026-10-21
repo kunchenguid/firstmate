@@ -841,7 +841,9 @@ const messages = [];
 const entries = [];
 const pi = {
   on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
-  events: { on() {}, emit() {} }, registerCommand() {}, sendMessage(message) { messages.push(message); },
+  events: { on() {}, emit() {} }, registerCommand() {}, sendMessage(message) { messages.push(message);
+    branch.push({ type: "custom_message", id: `entry-${branch.length + 1}`, timestamp: new Date(now).toISOString(),
+      customType: message.customType, content: message.content, display: message.display, details: message.details }); },
   appendEntry(customType, data) { entries.push({ customType, data });
     branch.push({ type: "custom", id: `entry-${branch.length + 1}`, customType, data, timestamp: new Date(now).toISOString() }); },
   async exec(command, args, options) { const result = spawnSync(command, args,
@@ -884,11 +886,15 @@ const silentAssistant = { role: "assistant", content: [], stopReason: "stop", ti
 branch.push({ type: "message", id: `entry-${branch.length + 1}`, timestamp: new Date(now).toISOString(),
   message: silentAssistant });
 await emit("message_end", { type: "message_end", message: silentAssistant });
-await emit("agent_settled", { type: "agent_settled", aborted: false });
+await emit("session_shutdown", { type: "session_shutdown", reason: "reload-before-receipt" });
+handlers.clear();
+const reloaded = await import(`${pathToFileURL(process.env.PLUGIN).href}?silent-reload=1`);
+reloaded.default(pi);
+await emit("session_start", { type: "session_start", reason: "reload" });
 await new Promise((resolve) => setTimeout(resolve, 30));
 if (entries.filter((entry) => entry.customType === "fm-idle-reminder-delivered").length !== 1 ||
     entries.some((entry) => entry.customType === "fm-idle-reminder-failed") || messages.length !== 1) {
-  throw new Error("a permitted silent decision reminder did not settle successfully at the ordinary cadence");
+  throw new Error("a permitted silent decision reminder did not recover successfully at the ordinary cadence");
 }
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 console.log(JSON.stringify({ reminders: messages.length, empty: entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length,
