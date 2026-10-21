@@ -357,6 +357,9 @@ await emit("agent_settled");
 const requests = messages.filter((item) => item.message.customType === "fm-heartbeat-request");
 if (requests.some((item) => item.message.display !== false)) throw new Error("automatic maintenance did not use silent heartbeat delivery");
 if (requests.length !== 3) throw new Error(`expected three bounded offers, got ${requests.length}`);
+if (requests.some((item) => !item.message.content.includes(".agents/stow.md"))) {
+  throw new Error("heartbeat offer does not point at the relocated internal stow contract");
+}
 const ids = new Set(requests.map((item) => item.message.details.run_id));
 if (ids.size !== 1) throw new Error("redelivery changed run_id");
 if (messages.some((item) => item.options.deliverAs !== "followUp" || item.options.triggerTurn !== true)) {
@@ -369,11 +372,11 @@ if (escalations.length !== 1 || !escalations[0].message.display) throw new Error
 await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
 if (messages.filter((item) => item.message.customType === "fm-heartbeat-escalation").length !== 1) throw new Error("exhausted heartbeat duplicated its reserved handoff");
-await commands.get("stow")("", ctx);
+if (commands.has("stow")) throw new Error("manual stow command remains user-invocable");
 await emit("session_before_compact", { type: "session_before_compact" });
 const status = JSON.parse((await import("node:fs")).readFileSync(`${process.env.FM_HOME}/state/stow/state.json`, "utf8"));
-if (!status.active.reasons.includes("manual") || !status.active.reasons.includes("precompact")) {
-  throw new Error("manual and precompact reasons did not deduplicate into the active run");
+if (status.active.reasons.includes("manual") || !status.active.reasons.includes("precompact")) {
+  throw new Error("precompact internal retention was not preserved without a manual command");
 }
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 console.log(JSON.stringify({ messages: requests.length, escalations: escalations.length, notices: notices.length, attempts: status.active.attempts }));
