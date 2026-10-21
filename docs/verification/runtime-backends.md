@@ -886,6 +886,33 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-10-21 Pi Codex usage-limit banner on pi 1.3.0
+
+Verified on 2026-10-21 on macOS arm64 against installed pi 1.3.0, using the live guard's isolated tmux server and loopback Codex error endpoint.
+Before adding 1.3.0 to the default pin set, the candidate-pin command below passed all five live checks.
+The same guard then passed without a pin override, exercising the adapter's installed-version lookup and refreshed default pin set.
+Pi 1.3.0 renders the same usage-limit banner and fixed bug-report hint as the earlier pinned releases.
+The stale `working` and `unknown` identities classify `empty`, while an absent Pi identity remains `unknown`.
+
+Refresh the pin only after the candidate-pin guard passes, then verify the default:
+
+```sh
+FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=1.3.0 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
+FM_COMPOSER_PI_BANNER_LIVE=1 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
+```
+
+Both commands produced:
+
+```text
+# pi (1.3.0): rendered banner row: Error: Codex error: The usage limit has been reached
+ok - pi (1.3.0): banner screen classifies empty on the cursorless styled read with a working status
+ok - pi (1.3.0): banner screen classifies empty on the cursorless styled read with a unknown status
+ok - pi (1.3.0): banner screen classifies empty on the cursorless styled read with a idle status
+ok - pi (1.3.0): the banner over the same screen with the identity probe absent stays unknown
+ok - pi (1.3.0): banner screen classifies empty on the cursor-anchored tmux read
+ok - live pi banner guard verified 5 live surface(s)
+```
+
 ### 2026-10-02 Pi Codex usage-limit banner on pi 0.99.2 and 1.0.0
 
 Verified on 2026-10-02 on macOS arm64 with the same live guard and stub Codex endpoint as the 2026-09-25 entry below, against pi 0.87.1 (installed), and pi 0.99.2 and 1.0.0 installed into isolated npm prefixes from `@earendil-works/pi-coding-agent`.

@@ -2220,7 +2220,8 @@ _fm_composer_pi_terminal_banner_above() {  # <screen>
 # The one status the structure CAN disprove is a stale one: a live pi whose
 # last non-blank row above the pair is its terminal provider-error banner
 # (fm_composer_pi_adapter_terminal_banner_above, version-pinned) has ended its turn on that banner
-# whatever its integration last reported, so that shape reads empty on every# registered status (issue #5000). A blocked pi's menu, a running pi's
+# whatever its integration last reported, so that shape reads empty on every
+# registered status (issue #5000). A blocked pi's menu, a running pi's
 # retitled rule, and a fresh prompt all displace the banner from that row.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
