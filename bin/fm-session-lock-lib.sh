@@ -595,7 +595,7 @@ EOF
 # A tagged Windows pid uses the Windows process table; numeric pids use the
 # shared identity provider and kill probe to distinguish dead from unreadable.
 fm_session_lock_pid_verdict() {
-  local pid=$1 probe winpid rc=0 comm
+  local pid=$1 winpid rc=0 comm
   FM_SESSION_LOCK_PID_VERDICT=unreadable
   if winpid=$(fm_win_untag_pid "$pid"); then
     comm=$(fm_win_command "$winpid") || rc=$?
@@ -606,12 +606,26 @@ fm_session_lock_pid_verdict() {
     return 0
   fi
   case "$pid" in ''|*[!0-9]*|0) return 0 ;; esac
-  if fm_proc_info "$pid"; then
-    FM_SESSION_LOCK_PID_VERDICT=readable
-  elif probe=$(LC_ALL=C kill -0 "$pid" 2>&1); then
-    return 0
+  # Liveness first, identity second. A pid this session cannot signal is
+  # not a live owner it may reclaim over; a pid it CAN signal is alive,
+  # and only then is its identity worth reading. Asking the identity
+  # first would let a stale process-table entry report a dead owner as
+  # live and keep a stale lock from ever being reclaimed - the same
+  # permanent read-only wedge this change exists to remove.
+  if kill -0 "$pid" 2>/dev/null; then
+    # Alive. Its identity may still be unreadable, and that is the case
+    # this verdict exists for: the owner is live, so its lock must not
+    # be reclaimed.
+    fm_proc_info "$pid" && FM_SESSION_LOCK_PID_VERDICT=readable
+  elif fm_proc_info "$pid"; then
+    # The process exists - this session simply may not signal it - so
+    # it is not a dead owner, but it is not a harness this session can
+    # prove either. The base contract treats that as "no live harness
+    # owner", and the lock stays reclaimable.
+    FM_SESSION_LOCK_PID_VERDICT=unknown
   else
-    case "$probe" in *'No such process'*) FM_SESSION_LOCK_PID_VERDICT=dead ;; esac
+    # Nothing can see the pid: it is gone.
+    FM_SESSION_LOCK_PID_VERDICT=dead
   fi
 }
 
@@ -658,6 +672,7 @@ fm_session_lock_pid_blocks_reclaim() {
   case "$FM_SESSION_LOCK_PID_VERDICT" in
     dead) return 1 ;;
     unreadable) return 0 ;;
+    unknown) return 1 ;;
     readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" ;;
   esac
 }
