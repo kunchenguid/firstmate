@@ -2,6 +2,9 @@
 # Park a ship or scout worker whose only remaining wait is on an external
 # change to one GitHub pull request - a maintainer review or merge, or a fork
 # CI run that waits for maintainer approval - so the wait costs no session.
+# This is a PR-wait park, owned by this script and bound to one pull request;
+# it is not a bin/fm-control.sh lifecycle verb, and it stops the session only
+# through `bin/fm-control.sh <id> exit`.
 #
 # Usage:
 #   fm-pr-park.sh park <task-id> <pr-url>
