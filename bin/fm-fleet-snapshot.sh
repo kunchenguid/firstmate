@@ -92,6 +92,10 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
+#     Each decisions_open entry carries ask: the call's stored structured ask
+#     (docs/captain-hold-lifecycle.md) for its current hold lifecycle, or null.
+#     A stored ask that breaks bin/fm-captain-ask-lib.sh's rule is published as
+#     null and counted in omitted[] as surface "decision_asks".
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -227,6 +231,9 @@ esac
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-captain-ask-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-captain-ask-lib.sh"  # FM_CAPTAIN_ASK_JQ_DEFS: the stored-ask rule
 # shellcheck source=bin/fm-merge-authority-lib.sh
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
@@ -251,7 +258,8 @@ inventory contradictions or unavailable child state invalid.
 kind=secondmate meta records are not child inventory for unowned_current or
 terminal_in_flight; they never have backlog rows.
 Its invalidity object names the normalized failure kind and affected ids.
-Actionable tasks-axi captain holds appear as decisions_open and stay visible in
+Actionable tasks-axi captain holds appear as decisions_open, each with its
+stored structured ask or a null ask, and stay visible in
 queued with hold_reason, hold_kind, hold_until,
 hold_bucket, hold_age_days, and plural blocker fields for downstream
 projections. A captain hold is actionable only when every blocker is Done, any
@@ -965,11 +973,32 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
       }'
 }
 
+# Every stored captain ask record written by bin/fm-captain-hold.sh, keyed by
+# the task its file names. A record that is oversized or not one JSON object is
+# kept as null so the summary can disclose it rather than publish it.
+captain_asks_json() {
+  local dir="$DATA/captain-asks" f
+  { [ -d "$dir" ] && [ ! -L "$dir" ]; } || { printf '[]\n'; return 0; }
+  for f in "$dir"/*.json; do
+    { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
+    if [ "$(LC_ALL=C wc -c < "$f" | tr -d ' ')" -le 16384 ]; then
+      jq -cs --arg task "$(basename "$f" .json)" \
+        '{task:$task,record:(if length == 1 and (.[0] | type) == "object" then .[0] else null end)}' \
+        "$f" 2>/dev/null \
+        || jq -cn --arg task "$(basename "$f" .json)" '{task:$task,record:null}'
+    else
+      jq -cn --arg task "$(basename "$f" .json)" '{task:$task,record:null}'
+    fi
+  done | jq -s .
+}
+
 # Project one home's canonical structured inventory into the bounded shape a
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
+  local asks_file="$JSON_TRANSPORT_DIR/captain-asks.json"
+  captain_asks_json > "$asks_file" || return 1
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
@@ -979,9 +1008,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
+    --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" \
+    --slurpfile asks "$asks_file" "$FM_LANDED_JQ_DEFS$FM_CAPTAIN_ASK_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
+    | ($asks[0]) as $asks
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
@@ -1004,13 +1035,30 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
               (.state == "in_flight" and .current_role == "held"
                and (.id as $id
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
-    | ([ $queued_all[]
+    # A stored ask is published only for the hold lifecycle it was written
+    # for; one that breaks bin/fm-captain-ask-lib.sh rule is withheld and
+    # counted in omitted[] instead.
+    | def stored_ask($row):
+        ([$asks[] | select(.task == $row.id)] | first // null) as $stored
+        | ($stored.record // null) as $record
+        | if $stored == null then {ask:null,withheld:false}
+          elif ($record | type) != "object" or $record.schema != "fm-captain-ask.v1"
+               or $record.task != $row.id or ($record.hold_set | type) != "string" then
+            {ask:null,withheld:true}
+          elif $record.hold_set != ($row.hold_set // null) then {ask:null,withheld:false}
+          elif ($record.ask | captain_ask_valid) then {ask:($record.ask | captain_ask_normalize),withheld:false}
+          else {ask:null,withheld:true} end;
+    ([ $queued_all[]
          | select(.captain_actionable == true)
+         | stored_ask(.) as $stored
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+            hold_age_days:(.hold_age_days // null),source:"backlog",
+            ask:$stored.ask,ask_withheld:$stored.withheld} ]) as $captain_holds_asked
+    | ([ $captain_holds_asked[] | select(.ask_withheld) ] | length) as $asks_withheld
+    | ($captain_holds_asked | map(del(.ask_withheld))) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
@@ -1063,7 +1111,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",ask:null} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
@@ -1147,7 +1195,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
-          (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
+          (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end),
+          (if $asks_withheld > 0 then {surface:"decision_asks",count:$asks_withheld} else empty end)
         ]
       }'
 }

@@ -67,6 +67,25 @@ Repeat and edge cases:
   If that write fails, the backend hold is not attempted.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+- `--ask-file` attaches the call's structured ask in the same act, as described next.
+
+### The call's structured ask
+
+A held call may carry a structured ask: the question, its options, which option is recommended, whether a free-text answer is allowed, and an optional link.
+Without one, the call reaches the dashboard as a read-only line built from its title and hold reason.
+With one, the home summary publishes it as that call's `decisions_open[].ask`, and the dashboard shows the question with its options and the recommended one marked.
+
+`hold --ask-file <path>` attaches the ask while holding, and re-running `hold --ask-file <path>` on an already-held call attaches or replaces it.
+[`bin/fm-captain-ask-lib.sh`](../bin/fm-captain-ask-lib.sh) owns the accepted fields and structural limits (at most 6 options, at most one recommended, unique option ids); an ask that breaks them is refused before anything is written.
+The rule does not inspect wording, so keep task or issue ids, branch names, hashes, and status prefixes out of the question and option text when composing the ask.
+The recommended option is published first.
+
+The stored ask is bound to the hold lifecycle it was written for:
+
+- Repeating an active hold keeps the stored ask unless a new `--ask-file` replaces it.
+- A new hold lifecycle never shows the previous lifecycle's ask.
+- Answering or releasing the call removes its ask.
+- A stored ask that no longer satisfies the rule is withheld from the summary and counted as a `decision_asks` entry in its `omitted[]` disclosure.
 
 ### Answering a call (`answer`)
 

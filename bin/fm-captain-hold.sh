@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--ask-file <path>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -56,6 +57,18 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# `--ask-file` attaches the structured question the dashboard renders for the
+# call: a JSON object
+# `{"question": "...", "options": [{"id": "...", "label": "...", "recommended": true}],
+# "free_text_allowed": false, "link": null}` where only `question` is required.
+# bin/fm-captain-ask-lib.sh owns the field rules; an ask that breaks them is
+# refused before anything is written. The normalized ask is stored in
+# `data/captain-asks/<task-id>.json`, bound to the call's hold-set stamp, and
+# bin/fm-fleet-snapshot.sh publishes it as that call's `decisions_open[].ask`.
+# Repeating an active hold with `--ask-file` replaces the stored ask, repeating
+# it without keeps the stored ask, a new hold lifecycle drops it, and a resolved
+# call removes it. A call with no stored ask publishes exactly as before.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -237,6 +250,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-captain-ask-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-captain-ask-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -340,6 +356,51 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
     || fail "decision file exceeds 8192 bytes"
   DECISION_TEXT=$decision
   DECISION_DIGEST=$(sha256_text "$decision")
+}
+
+# --- the structured ask a captain call carries to the dashboard ---------------
+
+ASK_DIR="$DATA/captain-asks"
+ASK_SCHEMA=fm-captain-ask.v1
+
+ask_record_path() { printf '%s/%s.json\n' "$ASK_DIR" "$1"; }
+
+# bin/fm-captain-ask-lib.sh owns what an ask may contain; this only reads the
+# file and reports that rule's problems verbatim.
+load_ask() {  # <path>; sets ASK_JSON to the normalized ask
+  local path=$1 problems
+  [ -n "$path" ] || fail "--ask-file needs a path"
+  [ -f "$path" ] || fail "ask file does not exist: $path"
+  [ "$(LC_ALL=C wc -c < "$path" | tr -d ' ')" -le 16384 ] \
+    || fail "ask file exceeds 16384 bytes"
+  problems=$(jq -esr "$FM_CAPTAIN_ASK_JQ_DEFS"'
+    if length != 1 then "the ask file must hold exactly one JSON object"
+    else .[0] | captain_ask_problems | join("; ") end' "$path" 2>/dev/null) \
+    || fail "ask file is not valid JSON: $path"
+  [ -z "$problems" ] || fail "ask in $path is invalid: $problems"
+  ASK_JSON=$(jq -c "$FM_CAPTAIN_ASK_JQ_DEFS"'captain_ask_normalize' "$path") \
+    || fail "could not normalize the ask in $path"
+}
+
+# The record binds the ask to the hold lifecycle it was written for, so a
+# re-held call never shows the previous lifecycle's ask.
+store_ask() {  # <task-id> <hold-set-stamp>
+  local id=$1 hold_set=$2 path tmp
+  path=$(ask_record_path "$id")
+  (umask 077; mkdir -p "$ASK_DIR") || return 1
+  [ -d "$ASK_DIR" ] && [ ! -L "$ASK_DIR" ] || return 1
+  tmp=$(umask 077; mktemp "$ASK_DIR/.ask.XXXXXX") || return 1
+  if jq -n --arg schema "$ASK_SCHEMA" --arg task "$id" --arg hold_set "$hold_set" \
+      --argjson ask "$ASK_JSON" '{schema:$schema,task:$task,hold_set:$hold_set,ask:$ask}' > "$tmp" \
+    && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+remove_ask() {  # <task-id>
+  rm -f -- "$(ask_record_path "$1")"
 }
 
 # Mutations address the configured data directory's backlog from its root, the
@@ -903,6 +964,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local ask_file='' have_ask=0 stamp
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -912,12 +974,14 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --ask-file) shift; ask_file=${1:-}; have_ask=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ "$have_ask" = 0 ] || load_ask "$ask_file"
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1005,8 +1069,15 @@ command_hold() {
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
-    || fail "task $id lost its hold-set stamp while being held"
+  stamp=$(body_hold_set_timestamp "$(show_field_value "$show" body)")
+  [ -n "$stamp" ] || fail "task $id lost its hold-set stamp while being held"
+  if [ "$have_ask" = 1 ]; then
+    store_ask "$id" "$stamp" \
+      || fail "task $id is held for the captain but its ask was not stored; retry the hold with --ask-file"
+  elif [ "$preserve_hold_set" = 0 ]; then
+    # A new hold lifecycle never inherits the previous lifecycle's ask.
+    remove_ask "$id" || fail "task $id is held for the captain but its previous ask could not be removed"
+  fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
@@ -1516,6 +1587,9 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
     fail "could not publish the answered captain-held task $id to its parent"
   fi
   reconcile_request_retire "$id"
+  # Housekeeping only: a resolved call is never published, and a re-hold
+  # starts a new lifecycle that a leftover ask cannot match.
+  remove_ask "$id" 2>/dev/null || true
 }
 
 command_reconcile_requests() {
