@@ -734,14 +734,12 @@ SH
   # a partial identity: a live harness whose arguments could not be read
   # must not be reduced to a bare interpreter name, so the read is
   # unreadable and the lock is not reclaimable.
-  for field in args; do
-    PATH="$fakebin:$PATH" FM_TEST_FAILED_FIELD="$field" bash -c '
-      . "$1"
-      kill() { return 0; }
-      fm_session_lock_pid_blocks_reclaim 700 || exit 1
-      [ "$FM_SESSION_LOCK_PID_VERDICT" = unreadable ]
-    ' _ "$LIB" || fail "failed ps $field read permitted reclaim"
-  done
+  PATH="$fakebin:$PATH" FM_TEST_FAILED_FIELD=args bash -c '
+    . "$1"
+    kill() { return 0; }
+    fm_session_lock_pid_blocks_reclaim 700 || exit 1
+    [ "$FM_SESSION_LOCK_PID_VERDICT" = unreadable ]
+  ' _ "$LIB" || fail "failed ps args read permitted reclaim"
   # The ppid is a walk input, not an identity field: a ppid that cannot be
   # read only ends the ancestry walk one hop early, which is the
   # conservative direction. The base read it the same tolerant way, and
