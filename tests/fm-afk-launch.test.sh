@@ -1881,6 +1881,49 @@ unit_unverifiable_owners_preserve_lifecycle() {
   done
 }
 
+unit_readiness_waits_for_identity_publication() {
+  local st pid kind rc i
+  for kind in missing empty; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-identity-publication.XXXXXX")
+    mkdir -p "$st/state/.supervise-daemon.lock"
+    if [ "$kind" = empty ]; then
+      : > "$st/state/.supervise-daemon.lock/pid-identity"
+    fi
+    bash -c '
+      : > "$1/ready"
+      while [ ! -f "$1/polled" ]; do sleep 0.01; done
+      cp "$1/identity" "$1/state/.supervise-daemon.lock/pid-identity"
+      while :; do sleep 0.1; done
+    ' _ "$st" &
+    pid=$!
+    i=0
+    while [ ! -f "$st/ready" ] && [ "$i" -lt 100 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    [ -f "$st/ready" ] || fail "identity publication fixture did not start"
+    printf '%s' "$pid" > "$st/state/.supervise-daemon.lock/pid"
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$st/identity"
+    rc=0
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY= bash -c '
+      . "$1"
+      sleep() { : > "$FM_HOME/polled"; command sleep "$@"; }
+      tmux() { : > "$FM_HOME/terminal-probe"; return 1; }
+      fm_afk_launch_commit_terminal tmux disposable-terminal owned
+    ' _ "$LAUNCH" > "$st/output" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$st/polled" ] && [ ! -e "$st/terminal-probe" ] \
+      && kill -0 "$pid" 2>/dev/null && [ -f "$st/state/.afk-daemon-terminal" ] \
+      && cmp "$st/identity" "$st/state/.supervise-daemon.lock/pid-identity"; then
+      pass "readiness ($kind): waits through PID publication until a matching identity becomes readable"
+    else
+      fail "readiness ($kind): rejected a successfully published live daemon (rc=$rc): $(cat "$st/output")"
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$st"
+  done
+}
+
 unit_readiness_uncertainty_preserves_started_lifecycle() {
   local st pid rc=0
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-readiness-unknown.XXXXXX")
@@ -1951,6 +1994,7 @@ unit_launcher_reclaims_proven_stale_owners() {
 
 unit_unverifiable_owners_preserve_lifecycle
 unit_launcher_reclaims_proven_stale_owners
+unit_readiness_waits_for_identity_publication
 unit_readiness_uncertainty_preserves_started_lifecycle
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon

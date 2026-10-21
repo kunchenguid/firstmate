@@ -563,12 +563,11 @@ fm_afk_launch_wait_ready() {  # <backend> <target>
     daemon_lock_held_by_live_daemon || owner_result=$?
     case "$owner_result" in
       0) return 0 ;;
-      2) return 2 ;;
+      1) fm_afk_launch_terminal_alive "$backend" "$target" || return 1 ;;
     esac
-    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
     sleep 0.05
   done
-  return 1
+  return "$owner_result"
 }
 
 fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]

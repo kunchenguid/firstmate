@@ -764,8 +764,80 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+test_watch_unverifiable_live_owner_is_preserved() {
+  local dir state fakebin live kind representation mode owner rc
+  for kind in legacy malformed empty missing unavailable; do
+    for representation in directory symlink; do
+      dir=$(make_case "unverifiable-$kind-$representation")
+      state="$dir/state"
+      fakebin="$dir/fakebin"
+      if [ "$representation" = symlink ]; then
+        mkdir "$dir/owner"
+        ln -s ../owner "$state/.watch.lock"
+      else
+        mkdir "$state/.watch.lock"
+      fi
+      owner="$state/.watch.lock"
+      sleep 300 &
+      live=$!
+      printf '%s\n' "$live" > "$owner/pid"
+      printf '%s\n' "$dir" > "$owner/fm-home"
+      printf '%s\n' "$WATCH" > "$owner/watcher-path"
+      case "$kind" in
+        legacy) TZ=America/Argentina/Buenos_Aires LC_ALL=C COLUMNS=10000 ps -p "$live" -o lstart= -o command= > "$owner/pid-identity" ;;
+        malformed) printf 'unknown identity\n' > "$owner/pid-identity" ;;
+        empty) : > "$owner/pid-identity" ;;
+        missing) ;;
+        unavailable)
+          bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" > "$owner/pid-identity"
+          mkdir -p "$dir/proc/$live"
+          printf 'invalid stat record' > "$dir/proc/$live/stat"
+          printf 'disposable command' > "$dir/proc/$live/cmdline"
+          ;;
+      esac
+      touch -t 200001010000 "$state/.last-watcher-beat"
+      printf '1\t1\tcheck\tdisposable\tretained feedback\n' > "$state/.wake-queue"
+      cp -RL "$owner" "$dir/expected-owner"
+      cp "$state/.wake-queue" "$dir/expected-queue"
+      for mode in arm restart stop take-over handling-delivered; do
+        case "$mode" in
+          arm) set -- ;;
+          take-over) set -- --take-over "$$" ;;
+          handling-delivered) set -- --handling-delivered disposable-generation --watcher-pid "$live" ;;
+          *) set -- "--$mode" ;;
+        esac
+        rc=0
+        PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$dir/proc" \
+          FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" "$@" > "$dir/$mode.out" 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || fail "$mode accepted an unverifiable $kind owner"
+        grep -F 'identity is unverifiable' "$dir/$mode.out" >/dev/null \
+          || fail "$mode did not explain ownership uncertainty: $(cat "$dir/$mode.out")"
+        is_live_non_zombie "$live" || fail "$mode signalled the unverifiable holder"
+        diff -r "$dir/expected-owner" "$owner" || fail "$mode changed the live claim"
+        cmp "$dir/expected-queue" "$state/.wake-queue" || fail "$mode changed retained feedback"
+        [ ! -e "$state/.watcher-down" ] || fail "$mode reclaimed the unverifiable claim"
+        if [ "$representation" = symlink ]; then
+          [ -L "$owner" ] || fail "$mode replaced the owner symlink"
+        fi
+      done
+      rc=0
+      PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$dir/proc" \
+        FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=3 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/evict.out" 2>&1 || rc=$?
+      [ "$rc" -ne 0 ] || fail "stalled eviction accepted an unverifiable holder"
+      grep -F 'heartbeat is stale' "$dir/evict.out" >/dev/null \
+        || fail "stalled eviction did not reach the ownership guard: $(cat "$dir/evict.out")"
+      is_live_non_zombie "$live" || fail "stalled eviction signalled the unverifiable holder"
+      diff -r "$dir/expected-owner" "$owner" || fail "stalled eviction changed the claim"
+      kill "$live" 2>/dev/null || true
+      wait "$live" 2>/dev/null || true
+      pass "watcher ($kind, $representation): all arm actions preserve the unverifiable live claim"
+    done
+  done
+}
+
 test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
+  local dir state fakebin out live pid i identity
   dir=$(make_case restart-reused-pid)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -776,7 +848,12 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") || fail "could not identify the disposable holder"
+  case "$identity" in
+    *cmdline-hex=*) identity="${identity}00" ;;
+    *) identity="$identity different-command" ;;
+  esac
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
@@ -1687,6 +1764,7 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_watch_unverifiable_live_owner_is_preserved
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
