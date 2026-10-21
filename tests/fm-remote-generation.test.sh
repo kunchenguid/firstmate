@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -eu
+
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 . "$ROOT/bin/fm-backend.sh"
 . "$ROOT/bin/fm-remote-generation-lib.sh"
 TMP=$(fm_test_tmproot fm-remote-generation)
