@@ -1247,17 +1247,39 @@ _wedge_cap_markers_clear() {
 # episode end and keeps its own removal of the marker: that pane is still wedged,
 # and its escalation count must keep climbing.
 #
+# keep-count=1 marks a call site whose pre-cap shape kept the escalation
+# counter instead of resetting it - the first-sight stale SURFACES, where
+# upstream dropped the wedge timer (or re-armed it) and left the count
+# standing, so a pane that surfaced there and wedged again resumed the ladder
+# where it had left off. The count is cap state, so at those sites it still
+# resets under a configured cap: an episode boundary includes the count
+# restart, and that is what lets a re-wedged window escalate from 1 again past
+# a released marker. With the cap at its default 0 the counter is left exactly
+# as the pre-cap watcher left it, so a home that has not configured anything
+# keeps today's ladder unchanged - a stuck pane still reaches the
+# demand-deep-inspection prompt on the same rung it always did.
+#
+# The other episode-ending routes are NOT keep-count sites: the pre-cap
+# watcher reset the count there too (the declared-wait absorb, the turn-end
+# churn absorb, the busy-pane and hash-change resets, and the provably-working
+# absorb, whose clear_pause_tracking removed it), so those keep resetting it
+# in both postures.
+#
 # keep-cap=1 is the cap-fire route itself. It ends the episode and resets the
 # escalation count itself, but the cap markers it has just written are the whole
 # point of that route and outlive the episode they silenced - that is what holds
 # the window quiet until the horizon, a recovery, or the operator intervenes.
-# wedge_episode_end <window-key> [keep-cap]
+# wedge_episode_end <window-key> [keep-cap] [keep-count]
 wedge_episode_end() {
-  local key=$1 keep_cap=${2:-0} status=0
+  local key=$1 keep_cap=${2:-0} keep_count=${3:-0} status=0
   if [ "$keep_cap" = 1 ]; then
     rm -f "$STATE/.stale-since-$key" || status=1
   else
-    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" || status=1
+    if [ "$keep_count" = 1 ] && [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ]; then
+      rm -f "$STATE/.stale-since-$key" || status=1
+    else
+      rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" || status=1
+    fi
     _wedge_cap_markers_clear "$key" || status=1
   fi
   return "$status"
@@ -2510,7 +2532,9 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
-  wedge_episode_end "$key"
+  # First-sight surface: the pre-cap watcher kept the escalation counter here,
+  # so the count resets only under a configured cap (keep-count contract).
+  wedge_episode_end "$key" 0 1
   clear_write_tracking "$key"
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
@@ -3745,7 +3769,8 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
-              wedge_episode_end "$key"
+              # Pre-cap shape kept the count here (keep-count contract).
+              wedge_episode_end "$key" 0 1
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
@@ -3758,7 +3783,8 @@ EOF
               # and a new hash after it alarms again. A stable hash stays as inert
               # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
-              wedge_episode_end "$key"
+              # Pre-cap shape kept the count here (keep-count contract).
+              wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
@@ -3766,7 +3792,8 @@ EOF
               fm_wake_append stale "$w" "$stale_reason" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
-              wedge_episode_end "$key"
+              # Pre-cap shape kept the count here (keep-count contract).
+              wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
               stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
@@ -3820,6 +3847,8 @@ EOF
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
+                # The pre-cap shape reset the count here too, through
+                # clear_pause_tracking, so this route is not a keep-count site.
                 wedge_episode_end "$key"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
