@@ -348,14 +348,19 @@ test_orphan_secondmates_cannot_become_authorities() {
   for orphan in "$grandchild" "$child"; do
     mv "$orphan/.fm-secondmate-parent" "$orphan/parent.saved"
     # Test both a direct orphan and a descendant whose intermediate parent
-    # is orphaned, with and without an inherited pool declaration.
+    # is orphaned, with and without an inherited pool declaration. A marked
+    # home whose parent binding is gone is not refused outright: it inherits
+    # the authority of the fleet root that governed it, proved by the durable
+    # authority record its own binding published, so the root's occupied pool
+    # refuses it at capacity instead of an "authority unreachable" refusal.
     for home in "$child" "$grandchild"; do
       [ "$orphan" != "$grandchild" ] || [ "$home" = "$grandchild" ] || continue
       out=$(reserve "$home" contender pool-model-a 2>&1)
-      expect_code 5 "$?" "a marked unbound ancestry endpoint with inherited pools: $out"
+      expect_code 4 "$?" "a marked unbound ancestry endpoint with inherited pools: $out"
+      assert_contains "$out" "existing" "an unbound endpoint did not see the root's own holder"
       mv "$home/config/fleet-seats" "$home/config/pools.saved"
       out=$(reserve "$home" contender pool-model-a 2>&1)
-      expect_code 5 "$?" "a marked unbound ancestry endpoint without pools: $out"
+      expect_code 4 "$?" "a marked unbound ancestry endpoint without pools: $out"
       mv "$home/config/pools.saved" "$home/config/fleet-seats"
       assert_absent "$home/state/fleet-seats" "an orphan created an independent ledger"
     done
@@ -371,6 +376,49 @@ test_orphan_secondmates_cannot_become_authorities() {
   expect_code 0 "$?" "a genuine primary can opt out: $out"
   assert_equals '' "$out" "primary opt-out must remain silent"
   pass "orphaned direct and intermediate secondmates cannot create independent seat authorities"
+}
+
+test_a_marked_home_inherits_its_root_authority() {
+  local base="$TMP_ROOT/marked-inherit" root mate standalone out status
+  root="$base/primary"
+  mate="$base/mate"
+  standalone="$base/standalone"
+  make_home "$root"
+  pools "$root" 1
+  make_local_secondmate "$mate" "$root" mate
+  make_home "$standalone"
+  printf '%s\n' standalone > "$standalone/.fm-secondmate-home"
+  new_holder
+
+  # A bound marked home records the root that governs it, so a later loss of
+  # the binding still leaves the home able to name its authority.
+  out=$(reserve "$mate" bound pool-model-a 2>&1)
+  expect_code 0 "$?" "a bound marked home must reserve against its root: $out"
+  assert_present "$mate/state/.fm-fleet-seats-authority" \
+    "a bound marked home published no durable authority record"
+
+  # A marked home with no parent binding and no authority record is a
+  # firstmate home in its own right: the seat guard stays inert for it, exactly
+  # as it does for a home with no pool declaration, so dispatch from it works
+  # and it never owns a ledger of its own.
+  out=$(reserve "$standalone" solo pool-model-a 2>&1)
+  status=$?
+  expect_code 0 "$status" "a marked home with no provable authority must not be refused: $out"
+  assert_equals '' "$out" "a marked home with no provable authority must reserve silently"
+  assert_absent "$standalone/state/fleet-seats" \
+    "a marked home with no provable authority created a ledger of its own"
+
+  # With its binding gone, the marked home inherits the root's authority: the
+  # root's occupied pool refuses it at capacity instead of letting it take a
+  # separate seat, and it holds nothing of its own.
+  mv "$mate/.fm-secondmate-parent" "$mate/parent.saved"
+  out=$(reserve "$mate" unbound pool-model-a 2>&1)
+  status=$?
+  expect_code 4 "$status" "a marked home without its binding must be refused by its root's capacity: $out"
+  assert_contains "$out" "bound" "the unbound marked home did not see the root's own holder"
+  assert_absent "$mate/state/fleet-seats" "the unbound marked home created an independent ledger"
+  mv "$mate/parent.saved" "$mate/.fm-secondmate-parent"
+  pass "a marked home inherits its root's authority and never owns one of its own"
 }
 
 test_live_supervisors_hold_seats_even_while_idle() {
@@ -1799,7 +1847,7 @@ project=$home"
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1812,6 +1860,7 @@ test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
 test_nested_secondmate_records_share_capacity
 test_orphan_secondmates_cannot_become_authorities
+test_a_marked_home_inherits_its_root_authority
 test_live_supervisors_hold_seats_even_while_idle
 test_explicit_model_required_while_pooled
 test_stale_reservations_recover_without_preempting_live_work

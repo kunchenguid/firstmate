@@ -21,6 +21,20 @@
 # its local descendants, and receives policy and grants from the primary
 # (REMOTE HOMES below).
 #
+# A MARKED HOME WHOSE BINDING IS GONE. A marked secondmate whose
+# .fm-secondmate-parent binding is absent is still a firstmate home in its own
+# right, so it is never refused outright. It inherits the authority of the
+# fleet root that governed it, proved by the durable authority record this
+# script publishes in that home's own state directory
+# (<home>/state/.fm-fleet-seats-authority, one absolute root home path). With
+# that proof the home is counted against the root's pools, ledger, and
+# capacity, so the root's occupancy refuses it at capacity and it never holds a
+# seat authority of its own. Without that proof the home owns no seat
+# authority at all: the seat guard stays inert for it, exactly as it does for a
+# home with no pool declaration, so dispatch from it keeps working and no
+# ledger of its own is ever written. A marked home is never a fleet root, so
+# it never declares pools of its own.
+#
 # THE LEDGER. Each holder is one record at
 # <authority-state>/fleet-seats/holders/<seat-name>.json, where <seat-name> is
 # derived from the canonical state directory plus task id and the embedded key
@@ -311,23 +325,91 @@ private_file_ok() {
   [ -z "$(find "$path" -prune \( -perm -g=r -o -perm -g=w -o -perm -o=r -o -perm -o=w \) -print 2>/dev/null)" ]
 }
 
+# The durable seat-authority record of a marked secondmate home: the fleet
+# root that governed it the last time its own parent binding resolved. It
+# lives in the home's own state directory, so a home that later loses its
+# parent binding can still name the root whose pools, ledger, lock, and
+# capacity govern it. The record is published by this script, never by a
+# caller, and it is written only for a marked home whose own binding reached
+# a local root. An absent, unreadable, or unusable record proves nothing: the
+# home then owns no seat authority at all, so the seat guard stays inert for
+# it exactly as it does for a home with no pool declaration.
+FM_FLEET_SEATS_AUTHORITY_FILE=".fm-fleet-seats-authority"
+
+# authority_record_path <home>: the record's path in that home's state dir.
+authority_record_path() { printf '%s/state/%s\n' "$1" "$FM_FLEET_SEATS_AUTHORITY_FILE"; }
+
+# authority_record_read <home>: print the recorded root home, or fail when the
+# record is absent, unreadable, or does not name a usable fleet root. The
+# recorded root must be an absolute, existing home that is not itself a marked
+# secondmate, because a marked home is never a fleet root.
+authority_record_read() {
+  local file root
+  file=$(authority_record_path "$1")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  IFS= read -r root < "$file" 2>/dev/null || return 1
+  case "$root" in /*) ;; *) return 1 ;; esac
+  root=$(canon_dir "$root") || return 1
+  [ -d "$root/state" ] || return 1
+  [ ! -e "$root/.fm-secondmate-home" ] || return 1
+  [ ! -L "$root/.fm-secondmate-home" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# authority_record_publish <home> <root>: record the root that governs a
+# marked home, when that home's own binding still reaches one. A home that is
+# not a marked secondmate owns no record, and an existing record that already
+# names the same root is left untouched.
+authority_record_publish() {
+  local file tmp
+  [ -e "$1/.fm-secondmate-home" ] || [ -L "$1/.fm-secondmate-home" ] || return 0
+  [ "$2" = "$1" ] && return 0
+  file=$(authority_record_path "$1")
+  [ -d "${file%/*}" ] || return 0
+  if [ -f "$file" ] && [ ! -L "$file" ] && [ "$(cat "$file" 2>/dev/null)" = "$2" ]; then
+    return 0
+  fi
+  tmp="$file.tmp.$$"
+  if ! { (umask 077 && printf '%s\n' "$2" > "$tmp") && mv -f "$tmp" "$file"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 # Resolve the authority for the calling home. Sets ROOT_REMOTE=1 when the walk
 # ends at a remote parent binding, else ROOT_STATE / ROOT_CONFIG / ROOT_DATA,
-# with ROOT_SELF=1 when this home is the root.
+# with ROOT_SELF=1 when this home is the root. A marked secondmate whose
+# parent binding is absent is still a firstmate home in its own right, so it
+# is never refused outright: it inherits the authority of the fleet root that
+# governed it (ROOT_ORPHAN=1 with a proven root), and without that proof it
+# owns no seat authority at all (ROOT_UNPROVEN=1).
 resolve_authority() {
-  local home_canon root
-  ROOT_REMOTE=0 ROOT_SELF=0
-  ROOT_HOME='' ROOT_STATE='' ROOT_CONFIG='' ROOT_DATA=''
+  local home_canon root proven
+  ROOT_REMOTE=0 ROOT_SELF=0 ROOT_ORPHAN=0 ROOT_UNPROVEN=0
+  ROOT_HOME='' ROOT_STATE='' ROOT_CONFIG='' ROOT_DATA='' ROOT_CALLER_HOME=''
   home_canon=$(canon_dir "$FM_HOME") || return 1
+  ROOT_CALLER_HOME=$home_canon
   root=$(fm_firstmate_root_home "$home_canon") || return 1
   if [ -e "$root/.fm-secondmate-parent" ] || [ -L "$root/.fm-secondmate-parent" ]; then
     fm_secondmate_parent_record_parse "$root/.fm-secondmate-parent" || return 1
     [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ] || return 1
     ROOT_REMOTE=1
   elif [ -e "$root/.fm-secondmate-home" ] || [ -L "$root/.fm-secondmate-home" ]; then
-    # A missing binding ends the walk, but cannot turn a secondmate into an
-    # independent authority with its own inherited policy and ledger.
-    return 1
+    # The walk ended at a marked secondmate whose parent binding is absent.
+    # That home is not refused: it inherits the authority of the fleet root
+    # that governed it, proved by the durable authority record its own binding
+    # published. It never becomes an independent authority with a policy and a
+    # ledger of its own, so the root's capacity still governs it.
+    ROOT_ORPHAN=1
+    if proven=$(authority_record_read "$root"); then
+      root=$proven
+    else
+      # No provable root: this home owns no seat authority, so the seat guard
+      # stays inert for it and no ledger of its own is ever written.
+      ROOT_UNPROVEN=1
+      ROOT_HOME=$root
+      return 0
+    fi
   fi
   ROOT_HOME=$root
   if [ "$root" = "$home_canon" ]; then
@@ -917,8 +999,28 @@ if ! resolve_authority; then
   unavailable "this home's fleet root cannot be resolved from its secondmate parent binding"
 fi
 
+# A marked home whose own parent binding still reaches a local root records
+# that root now, so a later loss of the binding still leaves the home able to
+# name the authority that governs it.
+if [ "$ROOT_ORPHAN" -eq 0 ] && [ "$ROOT_REMOTE" -eq 0 ]; then
+  authority_record_publish "$ROOT_CALLER_HOME" "$ROOT_HOME" || true
+fi
+
 # The ledger this home's operations act on, and the policy that governs it.
-if [ "$ROOT_REMOTE" -eq 1 ]; then
+LEDGER=''
+LOCK=''
+if [ "$ROOT_UNPROVEN" -eq 1 ]; then
+  # This home cannot prove the fleet root that governs it, so it owns no seat
+  # authority: no policy arms the guard and no ledger of its own is touched.
+  # The seat guard stays inert here, exactly as it does for a home with no
+  # pool declaration, so dispatch from a firstmate home in its own right
+  # keeps working.
+  LEDGER_STATE=''
+  LEDGER=''
+  LOCK=''
+  POLICY=''
+  DELIVERED=''
+elif [ "$ROOT_REMOTE" -eq 1 ]; then
   LEDGER_STATE=$ROOT_STATE
   DELIVERED=$ROOT_STATE/fleet-seats/policy.json
   if [ -e "$DELIVERED" ] || [ -L "$DELIVERED" ]; then
@@ -931,10 +1033,11 @@ else
   POLICY=$ROOT_CONFIG/fleet-seats
   DELIVERED=
 fi
-LEDGER=$LEDGER_STATE/fleet-seats
-LOCK=$LEDGER_STATE/.fleet-seats.lock
+[ -n "$LEDGER" ] || LEDGER=$LEDGER_STATE/fleet-seats
+[ -n "$LOCK" ] || LOCK=$LEDGER_STATE/.fleet-seats.lock
 
 declared() {
+  [ -n "$POLICY" ] || return 1
   [ -e "$POLICY" ] || [ -L "$POLICY" ] || return 1
   if [ -n "$DELIVERED" ] && [ "$POLICY" = "$DELIVERED" ] && [ -f "$DELIVERED" ] && [ ! -L "$DELIVERED" ] \
     && cmp -s "$DELIVERED" <(printf '{"pools":[]}\n'); then
@@ -945,6 +1048,12 @@ declared() {
 
 # Reserve opts out without a declaration; existing ledger transitions remain available.
 OPT_OUT=0
+if [ "$ROOT_UNPROVEN" -eq 1 ]; then
+  # No provable authority: every operation is inert. Nothing is reserved,
+  # confirmed, released, or written, and no ledger of this home's own is
+  # created, so the home can never hold a seat authority of its own.
+  exit 0
+fi
 case "$CMD" in
   reserve) declared || { [ -d "$LEDGER/holders" ] || exit 0; OPT_OUT=1; } ;;
   dispatch|confirm|release|reclaim|reconcile-remote|show)

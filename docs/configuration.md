@@ -2132,6 +2132,9 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 **Which homes share a pool**
 
 - The primary home and every local secondmate whose parent binding leads to it share the primary's pools and one lock, so simultaneous launches cannot both take the last seat.
+- A marked secondmate home whose `.fm-secondmate-parent` binding is absent is still a firstmate home in its own right: it is never refused outright, and dispatch from it keeps working. It never owns a seat authority of its own.
+  `bin/fm-fleet-seats.sh` publishes the fleet root that governed a marked home in that home's own `state/.fm-fleet-seats-authority` record (one absolute root home path), so a later loss of the binding still leaves the home able to name its authority.
+  With that record the home inherits the root's pools, ledger, lock, and capacity, so the root's occupancy refuses it at capacity and it holds nothing of its own; without it the seat guard stays inert for that home, exactly as it does for a home with no pool declaration, and no ledger of its own is written.
 - The count includes every pooled agent recorded in the primary and in local secondmates reached through each home's `data/secondmates.md`, including nested homes and agents launched before the pool was declared.
 - A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired.
   A record with a resolved unpooled model occupies none.
