@@ -2995,7 +2995,10 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend> [<lock-parent>]
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  fm_home_worktree_lock_release "$abs_home_path" "$expected_id" "$lock_parent" || return 1
+  if ! fm_home_worktree_lock_release "$abs_home_path" "$expected_id" "$lock_parent"; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+    return 1
+  fi
   if [ "$FM_HOME_LOCK_LINKED" = 1 ]; then
     git --git-dir="$FM_HOME_LOCK_DIR" worktree remove --force "$abs_home_path" || removal_rc=$?
   else
