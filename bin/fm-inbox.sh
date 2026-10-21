@@ -336,7 +336,7 @@ result = {
     "acknowledged": acknowledged == "1",
     "path": path,
 }
-attachments = raw_attachments.splitlines() if raw_attachments else []
+attachments = raw_attachments.split("\n") if raw_attachments else []
 if attachments:
     result["attachments"] = attachments
 json.dump(result, sys.stdout, separators=(",", ":"))
@@ -741,7 +741,7 @@ def parse_record(path):
             body = ""
     meta = {}
     attachments = []
-    for line in headers.splitlines():
+    for line in headers.split("\n"):
         if "=" in line:
             key, val = line.split("=", 1)
             if key == "attach":

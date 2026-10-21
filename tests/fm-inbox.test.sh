@@ -105,6 +105,19 @@ replay_paths=$(printf '%s' "$attached_replay" | python3 -c 'import json,sys; pri
 assert_equals "$first_attachment|$second_attachment" "$replay_paths" \
   "a replay returns the attachments already recorded for the request"
 
+separator_attachment=$'/tmp/a\x1cb'
+separator_note=$(run_inbox "$home" note --attach "$separator_attachment" --json "separator path") \
+  || fail "an attachment with a non-newline separator should succeed"
+separator_paths=$(printf '%s' "$separator_note" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["attachments"]))')
+assert_equals '["/tmp/a\u001cb"]' "$separator_paths" \
+  "the receipt keeps a path with a non-newline separator as one attachment"
+separator_receipts=$(run_inbox "$home" receipts --all-pending) || fail "receipts should succeed"
+separator_receipt_paths=$(printf '%s' "$separator_receipts" | SEP_ID="$(printf '%s' "$separator_note" | json_get id)" python3 -c 'import json,os,sys
+rows=[r for r in json.load(sys.stdin)["pending"] if r["id"]==os.environ["SEP_ID"]]
+print(json.dumps(rows[0]["attachments"]))')
+assert_equals '["/tmp/a\u001cb"]' "$separator_receipt_paths" \
+  "receipts keep a path with a non-newline separator as one attachment"
+
 human_attached=$(run_inbox "$home" note --attach /human/receipt.txt "human attachment") \
   || fail "a human attachment note should succeed"
 assert_contains "$human_attached" "attachment /human/receipt.txt" \
@@ -123,7 +136,7 @@ set -e
 expect_code 1 "$relative_code" "relative attachments are refused"
 assert_contains "$relative_attachment" "must be absolute" \
   "the attachment refusal explains the absolute-path requirement"
-assert_equals "2" "$(count_notes "$home")" \
+assert_equals "3" "$(count_notes "$home")" \
   "a refused attachment does not create a note"
 pass "attachments are opt-in metadata and do not require file access"
 
