@@ -27,7 +27,7 @@ fm_forge_normalize_host() {
 # guess: unknown/missing remotes are reported as "unknown", never silently
 # defaulted to github or gitlab.
 #
-# Output: one line, one of: github gitlab gerrit local unknown
+# Output: one line, one of: github gitlab gerrit forgejo external local unknown
 # Exit: 0 always (the classification itself is the result; "unknown" is not
 #       a script failure)
 fm_forge_github_hosts() {
@@ -152,7 +152,10 @@ fm_forge_registered_binding() {
   data=${FM_DATA_OVERRIDE:-$home/data}
   if forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null); then
-    [ "$forge" = gerrit ] || return 1
+    case "$forge" in
+      gerrit|forgejo|external) ;;
+      *) return 1 ;;
+    esac
     printf '%s\n' "$forge"
     return 0
   fi
@@ -289,6 +292,11 @@ fm_forge_provider_tools() {
     gerrit)
       printf '%s\n' gerrit-axi jq
       ;;
+    forgejo)
+      printf '%s\n' tea
+      ;;
+    external)
+      ;;
     local|unknown)
       return 5
       ;;
@@ -339,7 +347,7 @@ fm_forge_check_auth() {
         glab auth status >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH"; return 1; }
       fi
       ;;
-    gerrit|local) return 0 ;;
+    gerrit|forgejo|external|local) return 0 ;;
     unknown)
       echo "FORGE_UNSUPPORTED"
       return 1

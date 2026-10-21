@@ -451,6 +451,25 @@ test_explicit_gerrit_binding_allows_sync() {
   pass "direct fleet-sync honors an explicit Gerrit binding"
 }
 
+test_explicit_legacy_bindings_allow_sync() {
+  local home clone forge
+  home=$(new_home)
+  mkdir -p "$home/data"
+  for forge in forgejo external; do
+    clone=$(build_pair "$home" "$forge-project")
+    advance_origin "$home" "$forge-project" C1
+    printf -- '- %s-project [no-mistakes forge=%s] - review project (added 2026-09-15)\n' "$forge" "$forge" \
+      >> "$home/data/projects.md"
+  done
+
+  out=$(run_sync "$home")
+  assert_contains "$out" "forgejo-project: synced" \
+    "an explicit Forgejo binding must allow clone refresh"
+  assert_contains "$out" "external-project: synced" \
+    "an explicit external binding must allow clone refresh"
+  pass "direct fleet-sync honors explicit Forgejo and external bindings"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -814,6 +833,7 @@ test_already_current_unchanged
 test_no_origin_skipped
 test_unknown_origin_is_skipped_even_when_invoked_directly
 test_explicit_gerrit_binding_allows_sync
+test_explicit_legacy_bindings_allow_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves

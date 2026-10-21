@@ -1310,6 +1310,32 @@ test_forge_provider_explicit_gerrit_binding() {
   pass "bootstrap honors explicit Gerrit provider bindings"
 }
 
+test_forge_provider_explicit_legacy_bindings() {
+  local case_dir fakebin out forgejo external
+  case_dir="$TMP_ROOT/forge-legacy-bindings"
+  forgejo="$case_dir/home/projects/forgejo-project"
+  external="$case_dir/home/projects/external-project"
+  mkdir -p "$forgejo" "$external" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- forgejo-project [no-mistakes forge=forgejo] - review project (added 2026-09-15)' > "$case_dir/home/data/projects.md"
+  printf '%s\n' '- external-project [direct-PR forge=external] - review project (added 2026-09-15)' >> "$case_dir/home/data/projects.md"
+  git -C "$forgejo" init -q
+  git -C "$forgejo" remote add origin https://forge.example/team/project.git
+  git -C "$external" init -q
+  git -C "$external" remote add origin https://review.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: tea (install: brew install tea  # or the platform's package manager)" \
+    "explicit Forgejo binding must require tea"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED: forgejo-project" \
+    "explicit Forgejo binding must remain supported"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED: external-project" \
+    "explicit external binding must remain supported"
+  pass "bootstrap preserves explicit Forgejo and external bindings"
+}
+
 test_forge_host_trailing_dot_is_canonicalized() {
   local case_dir fakebin out project
   case_dir="$TMP_ROOT/forge-trailing-dot"
@@ -2481,6 +2507,7 @@ test_gh_axi_min_version
 test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
 test_forge_provider_explicit_gerrit_binding
+test_forge_provider_explicit_legacy_bindings
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
