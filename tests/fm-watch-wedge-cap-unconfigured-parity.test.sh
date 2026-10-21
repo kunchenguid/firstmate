@@ -55,16 +55,20 @@ mark_status_seen() {
 # else differing.
 upstream_tree() {  # <dest-dir>
   local dest=$1 ref
-  ref=$(git -C "$ROOT" rev-parse --verify --quiet origin/main) || {
-    fail "no origin/main ref in $ROOT - the parity baseline cannot be resolved; fetch origin/main and re-run"
+  # The baseline is read in a command substitution, so `fail` (which exits)
+  # would end only the SUBSHELL and leave the caller with an empty baseline -
+  # a silent skip, not a failure. Report here and return non-zero so the
+  # caller's guard aborts the whole test with the specific reason.
+  if ! ref=$(git -C "$ROOT" rev-parse --verify --quiet origin/main); then
+    printf 'not ok - no origin/main ref in %s - the parity baseline cannot be resolved; fetch origin/main and re-run\n' "$ROOT" >&2
     return 1
-  }
+  fi
   rm -rf "$dest"
   mkdir -p "$dest"
-  git -C "$ROOT" archive "$ref" bin | tar -x -C "$dest" || {
-    fail "could not extract upstream main's bin/ tree ($ref)"
+  if ! git -C "$ROOT" archive "$ref" bin | tar -x -C "$dest"; then
+    printf 'not ok - could not extract upstream main bin/ tree (%s)\n' "$ref" >&2
     return 1
-  }
+  fi
   printf '%s\n' "$dest/bin/fm-watch.sh"
 }
 
@@ -197,7 +201,7 @@ run_scenario() {  # <watch> <tag> [cap-env] [rounds]: drive the stuck-pane scena
 
 test_unconfigured_ladder_matches_upstream_main() {
   local baseline candidate base_trace
-  baseline=$(upstream_tree "$TMP_ROOT/upstream-main")
+  baseline=$(upstream_tree "$TMP_ROOT/upstream-main") || fail "could not materialise upstream main's bin/ tree for the parity baseline"
   candidate="$ROOT/bin/fm-watch.sh"
   base_trace=$(run_scenario "$baseline" upstream)
   PARITY_BRANCH_TRACE=$(run_scenario "$candidate" branch)
