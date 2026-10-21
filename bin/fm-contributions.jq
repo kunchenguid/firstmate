@@ -50,6 +50,11 @@ def projected($input; $saved; $now; $max_age):
     | ([$input.backlog.records[]? | select(.structured and
          (.id == $k.task or ((.links // []) | index($k.url)) != null))
          | select(.hold_bucket == "live")] | first) as $hold
+    # The owning row without the live-only filter: a blocked or dated row is not
+    # a live captain call, but it still says why a ready PR is not yet the captain's.
+    | ([$input.backlog.records[]? | select(.structured and .id == $k.task)] | first
+       // ([$input.backlog.records[]? | select(.structured and ((.links // []) | index($k.url)) != null)] | first)) as $owner
+    | ($owner.unresolved_blocker_ids // []) as $owner_blockers
     | ([$input.tasks[]? | select(.id == $k.task and .pr.url == $k.url)
        | {head:(.pr.head | select(. != null and . != "")), merge_authority:(.merge_authority // "unknown")}] | first) as $task
     | ($task.head // null) as $recorded_head
@@ -100,6 +105,10 @@ def projected($input; $saved; $now; $max_age):
        elif $o.review_decision == "REVIEW_REQUIRED" then {actor:"maintainer",reason:"review required"}
        elif $o.can_merge == true and $merge_authority == "away" then
          {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
+       elif $o.can_merge == true and ($owner_blockers | length) > 0 then
+         {actor:"fleet",reason:("held: blocked by " + ($owner_blockers | join(", ")))}
+       elif $o.can_merge == true and $owner.hold_bucket == "dated" then
+         {actor:"fleet",reason:("held until " + ($owner.hold_until // "a set date"))}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
     | $k + {kind:($record.kind // (if ($k.url | contains("/issues/")) then "issue" else "pr" end)),
