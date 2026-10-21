@@ -308,8 +308,8 @@ function reminderActivitySince(ctx: ExtensionContext, entryId: string | null): b
       return genuineUserMessage(message);
     }
     if (entry.type === "custom_message") {
-      return entry.customType === "firstmate-feishu-inbound" || entry.customType === "fm-branch-merge" ||
-        entry.customType === "fm-short-agent-error";
+      return entry.customType === "firstmate-feishu-inbound" || entry.customType === "fm-short-agent-error" ||
+        (entry.customType === "fm-branch-merge" && entry.display === true);
     }
     return entry.type === "custom" && entry.customType === "fm-branch-visible-outcome";
   });
@@ -456,9 +456,15 @@ function reminderInventoryFingerprint(snapshot: Record<string, unknown>): string
   const inventory = reminderInventory(snapshot);
   return createHash("sha256").update(JSON.stringify({
     schema: inventory.schema,
-    in_flight: inventory.in_flight,
-    gates: inventory.gates,
-    decisions_open: inventory.decisions_open,
+    in_flight: (inventory.in_flight as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id, kind: row.kind, state: row.state, repo: row.repo,
+    })),
+    gates: (inventory.gates as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id, blocked_by: row.blocked_by, owner: row.owner, filed: row.filed,
+    })),
+    decisions_open: (inventory.decisions_open as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id, key: row.key, verb: row.verb, owner: row.owner,
+    })),
   })).digest("hex");
 }
 

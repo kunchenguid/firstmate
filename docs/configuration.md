@@ -401,10 +401,10 @@ It creates no daemon, watcher cycle, task ledger, channel, or credential.
 
 The complete version 1 object has exactly `version`, `enabled`, and `interval_seconds`.
 `interval_seconds` is an integer of at least 1800 seconds.
-The requested half-hour configuration is:
+The requested two-hour configuration is:
 
 ```json
-{"version":1,"enabled":true,"interval_seconds":1800}
+{"version":1,"enabled":true,"interval_seconds":7200}
 ```
 
 The first interval starts from the configuration file modification time.
