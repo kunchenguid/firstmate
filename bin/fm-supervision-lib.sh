@@ -5,7 +5,10 @@
 # Reports whether a firstmate home needs supervision (fm_supervision_status
 # below is the single owner of that condition set), and whether its watcher has
 # a fresh liveness beacon (state/.last-watcher-beat, touched every poll cycle,
-# within the grace window).
+# within the grace window). fm_supervision_home_verdict lets a primary judge
+# ANOTHER home's supervision from the outside (its session lock, startup
+# completion, and beacon), which is what detects a secondmate that is alive but
+# unsupervised after a restart.
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
@@ -110,4 +113,174 @@ fm_supervision_needed() {
 fm_supervision_unhealthy() {
   fm_supervision_status "$@"
   [ "$FM_SUP_NEEDED" = true ] && [ "$FM_SUP_WATCHER_FRESH" = false ]
+}
+
+FM_SUP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# fm_sup_endpoint_agent_age <endpoint-pid>: seconds since the endpoint's
+# current agent started - the youngest of <endpoint-pid> itself and each
+# verified harness process in its subtree with no harness among its ancestors
+# below <endpoint-pid> (the
+# classifier in bin/fm-agent-process-lib.sh), so a relaunch typed into a
+# long-lived pane shell is measured from its new agent, while an old agent's
+# own tool or MCP children never make it look young. Ages come from the
+# portable `ps -o etime=` ([[dd-]hh:]mm:ss). Fails when the endpoint pid is
+# gone or the process table is unreadable.
+fm_sup_endpoint_agent_age() {
+  local root=$1 rows pid ppid secs name args argv0 agents=' ' parents=' ' up age=''
+  if ! command -v fm_agent_process_classify >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-agent-process-lib.sh
+    . "$FM_SUP_LIB_DIR/fm-agent-process-lib.sh"
+  fi
+  rows=$(LC_ALL=C ps -axo pid=,ppid=,etime=,comm= 2>/dev/null) || return 1
+  rows=$(printf '%s\n' "$rows" | awk -v root="$root" '
+    {
+      pid[NR] = $1; ppid[NR] = $2
+      etime = $3
+      days = 0
+      if (index(etime, "-")) { days = substr(etime, 1, index(etime, "-") - 1); etime = substr(etime, index(etime, "-") + 1) }
+      k = split(etime, part, ":")
+      secs[NR] = 0
+      for (i = 1; i <= k; i++) secs[NR] = secs[NR] * 60 + part[i]
+      secs[NR] += days * 86400
+      line = $0
+      sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[0-9:-]+[ \t]+/, "", line)
+      comm[NR] = line
+    }
+    END {
+      want[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (n = 1; n <= NR; n++) {
+          if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+        }
+      }
+      for (n = 1; n <= NR; n++) {
+        if (pid[n] in want) { printf "%s\t%s\t%s\t%s\n", pid[n], ppid[n], secs[n], comm[n]; found = 1 }
+      }
+      exit(found ? 0 : 1)
+    }') || return 1
+  while IFS=$'\t' read -r pid ppid secs name; do
+    [ "$pid" != "$root" ] || continue
+    parents="$parents$pid:$ppid "
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" != agent ] || agents="$agents$pid "
+  done <<EOF
+$rows
+EOF
+  while IFS=$'\t' read -r pid ppid secs name; do
+    case "$secs" in ''|*[!0-9]*) continue ;; esac
+    if [ "$pid" != "$root" ]; then
+      case "$agents" in *" $pid "*) ;; *) continue ;; esac
+      up=$ppid
+      while [ "$up" != "$root" ]; do
+        case "$agents" in *" $up "*) continue 2 ;; esac
+        case "$parents" in *" $up:"*) ;; *) break ;; esac
+        up=${parents##*" $up:"}
+        up=${up%% *}
+      done
+    fi
+    if [ -z "$age" ] || [ "$secs" -lt "$age" ]; then age=$secs; fi
+  done <<EOF
+$rows
+EOF
+  [ -n "$age" ] || return 1
+  printf '%s\n' "$age"
+}
+
+# fm_supervision_home_verdict <home> [grace-seconds] [endpoint-pid] [harness]
+# The cross-home supervision check a primary can run against a secondmate home
+# it does not itself occupy: a home is supervised only when its session lock
+# names a live harness process, its startup completion record names that same
+# pid, and - when the home actually needs a watcher - its beacon is fresh.
+# Endpoint liveness cannot decide this, because the leaked/restored session this
+# predicate exists to catch has a genuinely running agent. Sets
+# FM_SUP_HOME_OK=yes|no|starting and, on no or starting, FM_SUP_HOME_REASON to
+# a short cause. starting means that home's own session start may still be
+# running, so it is neither healthy nor a reason to relaunch: either the live
+# lock is younger than the session-start runtime bound (FM_SESSION_START_TIMEOUT,
+# default 120s) with no completion yet, or the lock is absent or names a dead
+# pid while the agent on the endpoint-pid process (the secondmate's backend
+# endpoint, see fm_backend_endpoint_pid; aged by fm_sup_endpoint_agent_age) is
+# younger than that same bound - a freshly restored or relaunched agent that has
+# not reached its own lock yet. Past that bound the same shapes
+# are failures. The watcher leg is fm_watcher_supervision_verdict (from
+# bin/fm-wake-lib.sh, which the caller has loaded) on that home's own state and
+# root under the supervision model of <harness>, its recorded harness, so a
+# Claude mate mid-turn under auto-arm is judged exactly as its own pull guard
+# judges it; only its stale-beacon verdict fails, because this check samples the
+# home at arbitrary times and a fresh beacon with no watcher process is an
+# ordinary handling turn. Always returns 0; the caller reads the vars. An unreadable or
+# absent home is a failure with its own reason, never treated as healthy.
+# shellcheck disable=SC2034  # FM_SUP_HOME_OK/FM_SUP_HOME_REASON are read by callers after the call.
+fm_supervision_home_verdict() {
+  local home=$1 grace=${2:-${FM_GUARD_GRACE:-300}} endpoint_pid=${3:-} harness=${4:-unknown}
+  local lock_pid complete_pid model
+  local start_bound=${FM_SESSION_START_TIMEOUT:-120} lock_mtime endpoint_age=''
+  FM_SUP_HOME_OK=no
+  FM_SUP_HOME_REASON=""
+  if [ -z "$home" ] || [ ! -d "$home/state" ]; then
+    FM_SUP_HOME_REASON="its own state directory is unreadable"
+    return 0
+  fi
+  if ! command -v fm_harness_pid_alive >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$FM_SUP_LIB_DIR/fm-session-lock-lib.sh"
+  fi
+  case "$start_bound" in ''|*[!0-9]*) start_bound=120 ;; esac
+  [ "$start_bound" -gt 0 ] || start_bound=120
+  lock_pid=$(cat "$home/state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*)
+      FM_SUP_HOME_REASON="its own session lock is absent or malformed"
+      ;;
+    *)
+      fm_harness_pid_alive "$lock_pid" \
+        || FM_SUP_HOME_REASON="its own session lock names pid $lock_pid, which is not a live harness"
+      ;;
+  esac
+  if [ -n "$FM_SUP_HOME_REASON" ]; then
+    case "$endpoint_pid" in
+      ''|*[!0-9]*) ;;
+      *) endpoint_age=$(fm_sup_endpoint_agent_age "$endpoint_pid") || endpoint_age='' ;;
+    esac
+    if [ -n "$endpoint_age" ] && [ "$endpoint_age" -lt "$start_bound" ]; then
+      FM_SUP_HOME_OK=starting
+      FM_SUP_HOME_REASON="its endpoint agent started ${endpoint_age}s ago and its own session start has not taken its lock yet"
+    fi
+    return 0
+  fi
+  complete_pid=$(cat "$home/state/.session-start-complete" 2>/dev/null || true)
+  if [ "$complete_pid" != "$lock_pid" ]; then
+    lock_mtime=$(fm_sup_stat_mtime "$home/state/.lock")
+    case "$lock_mtime" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ $(( $(date +%s) - lock_mtime )) -lt "$start_bound" ]; then
+          FM_SUP_HOME_OK=starting
+          FM_SUP_HOME_REASON="its own session start is still in progress for live lock pid $lock_pid"
+          return 0
+        fi
+        ;;
+    esac
+    FM_SUP_HOME_REASON="its own startup completion is not recorded for live lock pid $lock_pid"
+    return 0
+  fi
+  # A secondmate with no in-flight work, relay poll, registered source, or
+  # registered custom check legitimately holds its lock with no fresh beacon.
+  fm_supervision_status "$home/state" "$grace"
+  if [ "$FM_SUP_NEEDED" = true ]; then
+    model=$(fm_supervision_model "$harness")
+    FM_SUPERVISION_MODEL=$model fm_watcher_supervision_verdict \
+      "$home/state" "$home/bin/fm-watch.sh" "$grace" "$home" "$home"
+    if [ "$FM_WATCHER_VERDICT_OK" != true ] && [ "$FM_WATCHER_VERDICT_REASON" = stale-beacon ]; then
+      FM_SUP_HOME_REASON="its watcher beacon is ${FM_SUP_BEACON_DESC} while supervision is required"
+      return 0
+    fi
+  fi
+  FM_SUP_HOME_OK=yes
+  return 0
 }

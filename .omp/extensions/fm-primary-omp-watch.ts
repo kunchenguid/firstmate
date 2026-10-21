@@ -69,6 +69,7 @@ import { Type } from "typebox";
 // resolves bin/fm-operational-input.sh relative to its own location, which is
 // the same repository root this file lives in.
 import { encodeFirstmateOperationalInput } from "../../.pi/extensions/lib/fm-operational-input.ts";
+import { resolveFirstmateHome, resolveFirstmateRoot } from "../../.pi/extensions/lib/fm-home-resolve.ts";
 
 // The omp extension API surface this file uses. omp is a Pi fork and ships no
 // separately installable type package, so the contract is declared locally
@@ -136,8 +137,8 @@ type SessionGeneration = {
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
-const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = resolveFirstmateHome(root);
+const fmRoot = resolveFirstmateRoot(root);
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;

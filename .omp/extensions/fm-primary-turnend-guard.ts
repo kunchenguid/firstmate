@@ -37,6 +37,11 @@ import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
 } from "../../.pi/extensions/lib/fm-operational-input.ts";
+import {
+  firstmateChildEnv,
+  resolveFirstmateHome,
+  resolveFirstmateRoot,
+} from "../../.pi/extensions/lib/fm-home-resolve.ts";
 
 // The omp extension API surface this file uses, declared locally: omp ships no
 // separately installable type package and is a Pi fork whose event names match
@@ -51,7 +56,8 @@ type LockOwnership = "owned" | "missing" | "other";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = resolveFirstmateHome(root);
+const fmRoot = resolveFirstmateRoot(root);
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.omp-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
@@ -285,6 +291,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
             ]
           : ["--source", generation.source, "--pi-prerequisite"],
         {
+          env: firstmateChildEnv(fmHome, fmRoot),
           detached: supervised,
           stdio: supervised
             ? ["ignore", "pipe", "ignore", "ipc"]
@@ -463,6 +470,7 @@ async function claimSessionstartMessage(
 function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+      env: firstmateChildEnv(fmHome, fmRoot),
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
@@ -485,6 +493,7 @@ function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: stri
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+      env: firstmateChildEnv(fmHome, fmRoot),
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";

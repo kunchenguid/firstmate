@@ -44,6 +44,9 @@ These variables override individual operational directories for tests and specia
 | `FM_PROJECTS_OVERRIDE` | Local project clones |
 | `FM_CONFIG_OVERRIDE` | Local configuration |
 
+A seeded second mate home (one carrying `.fm-secondmate-home`) always operates on its own root: `bin/fm-home-lib.sh` and `.pi/extensions/lib/fm-home-resolve.ts` ignore an inherited `FM_HOME` or `FM_ROOT_OVERRIDE` that disagrees with that root, because the only way it can disagree is a launcher or backend environment leak that would otherwise misroute a restored session onto another home.
+A crewmate task worktree carries no marker, so its ordinary inherited-home behavior is unchanged.
+
 ### Relative paths and lifecycle safety
 
 Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` saves a path or passes it to another process, it handles each applicable `FM_HOME`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` directory as follows:
@@ -1606,7 +1609,7 @@ Local routes use direct guarded filesystem operations, while remote routes deleg
 - It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 - When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
 - If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
-- The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
+- The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped, its relaunch fails, or a live endpoint's own home fails the cross-home supervision check (`fm_supervision_home_verdict` in `bin/fm-supervision-lib.sh`); already-live-and-supervised and successfully relaunched secondmates are handled silently.
 
 **Push inherited configuration during a session**
 

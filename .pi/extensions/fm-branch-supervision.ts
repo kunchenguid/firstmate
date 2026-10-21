@@ -134,12 +134,13 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import { resolveFirstmateHome, resolveFirstmateRoot } from "./lib/fm-home-resolve.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
-const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = resolveFirstmateHome(root);
+const fmRoot = resolveFirstmateRoot(root);
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const sessionsDir = join(state, "branch-session");

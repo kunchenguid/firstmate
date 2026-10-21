@@ -68,6 +68,16 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the home and backend selection an operator's live firstmate session
+# exports (FM_HOME at its real home, FM_BACKEND=herdr, ...). bin/fm-test-run.sh
+# already strips these per script, but a suite run directly would otherwise
+# resolve the operator's home ahead of its fixture and drive the operator's
+# backend - fm-turnend-guard's Grok native-stop case and fm-omp-harness's herdr
+# spawn both failed that way. A case that verifies an ambient override sets it
+# itself.
+unset FM_HOME FM_ROOT FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+  FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the

@@ -20,7 +20,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>|alive but unsupervised: <cause>; recover with bin/fm-control.sh <id> relaunch",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
@@ -47,7 +47,11 @@
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
-#          failed names whether the endpoint was missing or agent-less.
+#          failed names whether the endpoint was missing or agent-less; and
+#          alive-but-unsupervised names a live endpoint whose OWN home is not
+#          supervised (stale session lock, missing startup completion, or a
+#          stale beacon while supervision is required), which endpoint liveness
+#          alone cannot see.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -169,6 +173,8 @@ export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -195,6 +201,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -798,7 +806,7 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # Probe classification, kill, and spawn live in fm-secondmate-liveness-lib.sh;
 # this function keeps this sweep's exact reporting.
 secondmate_liveness_one() {  # <meta> <id>
-  local meta=$1 id=$2
+  local meta=$1 id=$2 home
   if ! fm_secondmate_liveness_lock "$id"; then
     echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
     return 0
@@ -808,7 +816,31 @@ secondmate_liveness_one() {  # <meta> <id>
     silent)
       ;;
     alive)
-      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
+      # Endpoint liveness is exactly the signal that misleads for a local
+      # secondmate that came back alive after a restart while its own session
+      # never retook its lock (a leaked FM_HOME, a stale pre-reboot lock, or a
+      # pane relaunched from a server environment): the agent process is
+      # genuinely running, so the endpoint reads alive while nothing polls its
+      # checks. Judge the home's OWN supervision from the outside and report
+      # the gap actionably. Recovery stays an explicit control-plane relaunch,
+      # because an alive agent is not a recovery-grade dead/missing state. A
+      # home whose own session start is still in progress - including a
+      # freshly restored endpoint that has not reached its own lock yet - is
+      # not reported: a relaunch would kill a healthy startup, and the
+      # watcher's liveness tick re-judges it once that window has passed.
+      home=$(fm_meta_get "$meta" home)
+      if [ -z "$(fm_meta_get "$meta" remote_host)" ] && [ -n "$home" ] && [ -d "$home/state" ]; then
+        fm_supervision_home_verdict "$home" "" \
+          "$(fm_backend_endpoint_pid "$FM_SM_LIVE_BACKEND" "$FM_SM_LIVE_TARGET")" \
+          "$(fm_meta_get "$meta" harness)"
+        if [ "$FM_SUP_HOME_OK" = no ]; then
+          echo "SECONDMATE_LIVENESS: secondmate $id: alive but unsupervised: $FM_SUP_HOME_REASON; recover with bin/fm-control.sh $id relaunch"
+        elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+          echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
+        fi
+      elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+        echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
+      fi
       ;;
     relaunchable)
       if fm_secondmate_liveness_relaunch "$meta" "$id"; then

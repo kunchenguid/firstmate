@@ -171,6 +171,8 @@ done
 [ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || exit 0
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}

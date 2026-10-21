@@ -49,6 +49,7 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import { resolveFirstmateHome } from "./lib/fm-home-resolve.ts";
 import {
   installCalmPendingOperationalLayout,
   refreshCalmPendingOperationalRows,
@@ -173,7 +174,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+  const fmHome = resolveFirstmateHome(root);
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
   // "max" is the legacy value written by the removed third presentation level, whose

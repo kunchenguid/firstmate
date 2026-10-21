@@ -24,6 +24,7 @@ install_runner() {  # <case-dir>
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-home-lib.sh" "$dir/bin/fm-home-lib.sh"
   cp "$ROOT/bin/fm-lock-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
@@ -484,7 +485,7 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
   for harness in claude pi; do
     dir="$TMP_ROOT/window-pointer-$harness"
     install_runner "$dir"
-    for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+    for f in fm-supervision-engine-lib.sh fm-harness.sh fm-home-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
       cp "$ROOT/bin/$f" "$dir/bin/"
     done
     : > "$dir/home/config/supervision-host"
@@ -521,7 +522,7 @@ test_return_brief_all_silent_window_does_not_point_at_drain() {
   local dir fakebin out f
   dir="$TMP_ROOT/window-pointer-silent"
   install_runner "$dir"
-  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-home-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/"
   done
   : > "$dir/home/config/supervision-host"
@@ -961,7 +962,7 @@ test_return_brief_reports_only_an_open_downtime_episode_as_a_gap() {
 # main-session lock so the latch record's key is the current one.
 seed_host_latch() {  # <case-dir> <errors> <cooldown> <retry-after> <log-lines>
   local dir=$1 key f
-  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-home-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/"
   done
   printf 'claude sonnet\n' > "$dir/home/config/supervision-host"

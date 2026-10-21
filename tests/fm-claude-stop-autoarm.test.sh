@@ -35,6 +35,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-home-lib.sh" "$dir/bin/fm-home-lib.sh"
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/fm-afk-contract.sh"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"

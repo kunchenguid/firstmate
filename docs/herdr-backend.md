@@ -653,6 +653,8 @@ When the selected named server is not running, the adapter launches it without t
 - The supervision-model override.
 
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+A pane whose harness process Herdr re-executes after a server restart can therefore inherit an `FM_HOME` naming a different home while its working directory stays the restored secondmate home.
+The tracked extensions resolve a seeded secondmate home from its own `.fm-secondmate-home` marker before honoring an inherited override, so that restored session still comes up on its own home (`.pi/extensions/lib/fm-home-resolve.ts` owns the correction).
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 

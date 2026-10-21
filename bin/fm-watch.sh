@@ -181,6 +181,8 @@
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -250,6 +252,10 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# The cross-home supervision verdict (fm_supervision_home_verdict) the tick
+# applies to an alive local mate, the same one the session-start sweep reports.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -1079,12 +1085,18 @@ EOF
 # budget. The per-mate liveness lock serializes this tick against a concurrent
 # session-start sweep, so neither side can kill or re-probe an endpoint the
 # other is mid-relaunch on.
+# An alive local mate's own home is re-judged every tick with
+# fm_supervision_home_verdict, so a restore the session-start sweep saw only
+# as `starting` is still reported once its startup window has passed: a home
+# judged unsupervised queues one `check` row and stamps a per-mate marker that
+# suppresses repeats until the home reads supervised or starting again.
 secondmate_liveness_tick() {
   local tick_marker="$STATE/.secondmate-liveness-tick"
   [ "$(age_of "$tick_marker")" -ge "$SECONDMATE_LIVENESS_SECS" ] || return 0
   touch "$tick_marker" || return 1
   local now=$(( $(date +%s) )) meta id kind
   local bound_marker attempts notify_key reason queued err first_reason='' failed=0
+  local home unsup_marker
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
@@ -1095,6 +1107,7 @@ secondmate_liveness_tick() {
     fm_secondmate_liveness_lock "$id" || continue
     fm_secondmate_liveness_probe "$meta" "$id" poll
     bound_marker="$STATE/.secondmate-relaunch-bound-$id"
+    unsup_marker="$STATE/.secondmate-unsupervised-$id"
     reason='' notify_key='' err=''
     case "$FM_SM_LIVE_STATUS" in
       relaunchable)
@@ -1129,6 +1142,19 @@ secondmate_liveness_tick() {
             triage_log "secondmate $id live again; auto-relaunch pause cleared"
           fi
         fi
+        home=$(fm_meta_get "$meta" home 2>/dev/null || true)
+        if [ -z "$(fm_meta_get "$meta" remote_host 2>/dev/null || true)" ] \
+          && [ -n "$home" ] && [ -d "$home/state" ]; then
+          fm_supervision_home_verdict "$home" "" \
+            "$(fm_backend_endpoint_pid "$FM_SM_LIVE_BACKEND" "$FM_SM_LIVE_TARGET")" \
+            "$(fm_meta_get "$meta" harness 2>/dev/null || true)"
+          if [ "$FM_SUP_HOME_OK" != no ]; then
+            rm -f "$unsup_marker"
+          elif [ ! -e "$unsup_marker" ]; then
+            reason="check: secondmate $id alive but unsupervised: $FM_SUP_HOME_REASON; recover with bin/fm-control.sh $id relaunch"
+            notify_key="secondmate-unsupervised-$id"
+          fi
+        fi
         ;;
       skipped)
         triage_log "secondmate $id liveness: $FM_SM_LIVE_REASON"
@@ -1139,6 +1165,9 @@ secondmate_liveness_tick() {
       if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
         || fm_wake_append check "$notify_key" "$reason"; then
         [ -n "$first_reason" ] || first_reason=$reason
+        if [ "$notify_key" = "secondmate-unsupervised-$id" ] && ! : > "$unsup_marker"; then
+          err="unsupervised report marker could not be written"
+        fi
       else
         err="check wake row could not be queued: $reason"
       fi

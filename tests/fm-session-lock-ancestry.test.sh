@@ -444,6 +444,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-home-lib.sh" "$dir/bin/fm-home-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   # The fixture arm written here stands in for the watcher arm, so the home opts out
@@ -477,8 +478,9 @@ make_primary_home() {  # <dir>
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
+  launcher=$PPID
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$launcher" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -490,8 +492,9 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
+launcher=$PPID
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$launcher" ]; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -614,8 +617,9 @@ make_background_session_home() {  # <dir>
   # chain the assertions depend on.
   cat > "$dir/frontend.sh" <<'SH'
 #!/usr/bin/env bash
+launcher=$PPID
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$launcher" ]; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -779,11 +783,11 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = "$daemon" ]; }; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != "$daemon" ] || fail "the pty-host was not reparented after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id

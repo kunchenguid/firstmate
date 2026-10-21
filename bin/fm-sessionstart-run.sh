@@ -28,11 +28,15 @@
 #   clear, compact          `--reemit` digest only when this lock owner recorded
 #                           a completed full startup; otherwise a full digest,
 #                           so a startup killed mid-sweep is finished first
-#   resume, reload, fork    delegate to the nudge wrapper. Prior context is
-#                           restored on these, so re-running is redundant when
-#                           this process still holds the lock (the nudge stays
-#                           silent) and a plain instruction is enough when a new
-#                           process resumed an old session (the nudge fires).
+#   resume, reload, fork    delegate to the nudge wrapper ONLY when this
+#                           process's own harness ancestry already holds the
+#                           lock, so re-running is redundant. Prior context is
+#                           restored on these, but a lock this process does not
+#                           hold (absent, or naming a pid that is dead or
+#                           belongs to another session) means no live process
+#                           ever took the helm for it - an advisory nudge can be
+#                           silently deferred by an idle agent, so this falls
+#                           through to the same full digest `startup` runs.
 #
 # Every ordinary transport path exits 0, exactly like the nudge wrapper: a
 # Claude SessionStart exit 2 blocks session initialization, so a failed session
@@ -48,6 +52,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -139,7 +145,11 @@ fi
 
 case "$SOURCE" in
   resume|reload|fork)
-    exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
+    if fm_session_lock_owned_by_self "$STATE"; then
+      exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
+    else
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+    fi
     ;;
   clear|compact)
     if session_start_completed; then
