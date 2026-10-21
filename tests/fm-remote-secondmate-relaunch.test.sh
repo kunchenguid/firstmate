@@ -31,6 +31,7 @@ printf -- '- ios - iOS delivery (host: remote-mac; root: /srv/fm; home: /srv/fm-
   > "$HOME_DIR/data/secondmates.md"
 
 reset_meta() {
+  printf 'host-old\n' > "$HOME_DIR/state/fake-host-generation"
   fm_write_meta "$HOME_DIR/state/ios.meta" \
     "window=remote:ios" \
     "endpoint_task_id=ios" \
@@ -84,7 +85,7 @@ disposition() {
   [ "$prev" = - ] || prevj="\"$prev\""
   if [ -n "$actual" ]; then
     actualj="\"$actual\""
-    route='{"placement":"remote","backend":"herdr","target":"fm-remote:w1:p1","home":"/srv/fm-home","host":null,"remote_root":null,"spawn_gen":null}'
+    route=$(jq -cn --arg g "$actual" '{placement:"remote",backend:"herdr",target:"fm-remote:w1:p1",home:"/srv/fm-home",host:null,remote_root:null,spawn_gen:$g}')
   fi
   printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":"%s","operation":"%s","requested_generation":"%s","actual_generation":%s,"previous_generation":%s,"disposition":"%s","startup_confirmed":%s,"old_stopped":%s,"route":%s,"actual_model":"%s","complete":true}\n' \
     "$id" "$op" "$requested" "$actualj" "$prevj" "$1" "$2" "$3" "$route" "$model"
@@ -104,16 +105,25 @@ if [ "$action" = disposition ]; then
   esac
   exit 0
 fi
+host_generation=${FM_FAKE_HOST_GENERATION:-$(cat "$FM_HOME/state/fake-host-generation")}
+if [ "$action" = route ]; then
+  printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:w1:p1\nspawn_gen=%s\n' "$host_generation"
+  exit 0
+fi
 [ "$action" = relaunch ] || exit 94
+[ "$expected" != - ] || exit 96
+if [ -n "$op" ]; then
+  [ "$prev" = "$expected" ] || exit 97
+fi
 if [ -n "$op" ]; then
   jq -e --arg g "$op" '
     keys == ["incarnations", "schema", "task"]
     and (.incarnations | length == 1) and .incarnations[0].generation == $g
   ' >/dev/null || exit 95
 fi
-if [ "${FM_FAKE_HOST_GENERATION:-}" != "" ] && [ "$expected" != - ] && [ "$expected" != "$FM_FAKE_HOST_GENERATION" ]; then
+if [ "$expected" != "$host_generation" ]; then
   [ -z "$op" ] || disposition prelaunch false false >&2
-  printf 'error: generation-mismatch: host now runs %s\n' "$FM_FAKE_HOST_GENERATION" >&2
+  printf 'error: generation-mismatch: host now runs %s\n' "$host_generation" >&2
   exit 6
 fi
 old_stopped=false
@@ -152,6 +162,7 @@ case "$FM_FAKE_RELAUNCH_MODE" in
   publication-failure)
     # The host starts the candidate, but the parent cannot publish it: the
     # route block it would republish from never arrives.
+    printf '%s\n' "$op" > "$FM_HOME/state/fake-host-generation"
     disposition started true "$old_stopped" "$op"
     exit 0
     ;;
@@ -171,9 +182,11 @@ printf 'harness=%s\n' "$harness"
 printf 'model=%s\n' "$model"
 printf 'effort=%s\n' "$effort"
 if [ -n "$op" ]; then
+  printf '%s\n' "$op" > "$FM_HOME/state/fake-host-generation"
   printf 'spawn_gen=%s\n' "$op"
   disposition started true "$old_stopped" "$op"
 else
+  printf 'host-generation\n' > "$FM_HOME/state/fake-host-generation"
   printf 'spawn_gen=host-generation\n'
 fi
 SH
@@ -261,7 +274,10 @@ pass "a remote relaunch records the identity the host confirmed"
 
 # --- a refused relaunch leaves the parent's record untouched -----------------
 reset_meta
-cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-refusal.meta"
+{
+  printf 'remote_spawn_gen=host-old\nremote_target=fm-remote:w1:p1\n'
+  sed '/^remote_target=/d' "$HOME_DIR/state/ios.meta"
+} > "$TMP/ios-before-refusal.meta"
 FM_FAKE_RELAUNCH_MODE='refuse'
 OUT=$(run_relaunch ios notaharness - -); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
@@ -269,8 +285,8 @@ unset FM_FAKE_RELAUNCH_MODE
 assert_contains "$OUT" "unverified remote secondmate harness" \
   "the refusal reason should reach the caller"
 cmp -s "$TMP/ios-before-refusal.meta" "$HOME_DIR/state/ios.meta" \
-  || fail "a refused relaunch must not touch the parent's record"
-pass "a refused remote relaunch leaves the parent's record untouched"
+  || fail "a refused relaunch changed fields beyond the verified host identity"
+pass "a refused remote relaunch preserves the parent record with its verified host identity"
 
 # --- a local (non-remote) secondmate is refused, not silently mishandled ----
 fm_write_meta "$HOME_DIR/state/local1.meta" \
@@ -329,9 +345,13 @@ FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
   "$SEATS" reserve ios --generation prepared --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null
 ' || fail "could not seed a never-dispatched predecessor"
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-expect_code 0 "$RC" "relaunch after the reserving owner died before dispatch: $OUT"
-assert_equals reclaimed "$(ios_lifecycle prepared)" "relaunch could not reclaim its never-dispatched predecessor"
-pass "remote relaunch reclaims never-dispatched predecessors without metadata self-contention"
+[ "$RC" -ne 0 ] || fail "relaunch accepted an unresolved never-dispatched predecessor"
+assert_contains "$OUT" "predecessor is unresolved" "the unresolved predecessor refusal was lost"
+assert_equals reserved "$(ios_lifecycle prepared)" "relaunch released its unresolved predecessor"
+assert_equals 1 "$(seats show ios | jq '.incarnations | length')" "refusal reserved a replacement candidate"
+seats reclaim ios --generation prepared >/dev/null || fail "explicit reclamation could not resolve the prepared predecessor"
+assert_equals reclaimed "$(ios_lifecycle prepared)" "explicit reclamation did not release the prepared predecessor"
+pass "remote relaunch retains unresolved predecessors until explicit reconciliation"
 
 reset_meta
 seed_pool
@@ -391,7 +411,7 @@ for mode in unmarked-failure wrong-token uncertain-failure; do
   assert_equals reserved "$(ios_lifecycle "$CAND")" "a $mode outcome released its candidate"
   OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
   [ "$RC" -ne 0 ] || fail "a new relaunch started beside the unresolved $mode candidate"
-  assert_contains "$OUT" "still unresolved" "the unresolved $mode candidate did not block another launch"
+  assert_contains "$OUT" "predecessor is unresolved" "the unresolved $mode candidate did not block another launch"
   # The host later proves the candidate never ran.
   printf '{"schema":"fm-remote-seat-operation.v2","task":"ios","operation":"%s","requested_generation":"%s","actual_generation":null,"previous_generation":"%s","disposition":"prelaunch","startup_confirmed":false,"old_stopped":false,"route":null,"actual_model":null,"complete":true}\n' \
     "$CAND" "$CAND" "$G2" > "$TMP/resolve.json"
@@ -473,7 +493,7 @@ pass "remote relaunch publishes and fences its host generation without pools"
 perl -pi -e 's/^remote_spawn_gen=.*/remote_spawn_gen=host-old/' "$HOME_DIR/state/ios.meta"
 OUT=$(FM_FAKE_HOST_GENERATION=host-new run_relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
 expect_code 6 "$RC" "a stale parent whose host already replaced the mate: $OUT"
-assert_contains "$OUT" "generation-mismatch" "the expected generation did not reach the host"
+assert_contains "$OUT" "generation-mismatch" "the verified host generation did not fence the stale restart"
 pass "a newer host incarnation refuses a stale parent restart binding"
 
 reset_meta
@@ -503,7 +523,7 @@ FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
   (umask 077 && printf "{\"placement\":\"remote\",\"backend\":\"herdr\",\"target\":null,\"home\":\"/srv/fm-home\",\"host\":\"remote-mac\",\"remote_root\":\"/srv/fm\",\"operation\":\"request-existing\"}\n" > "$route")
   "$SEATS" dispatch ios --generation request-existing --route-file "$route" >/dev/null
 ' || fail "could not dispatch the existing-generation request"
-jq -n '{schema:"fm-remote-seat-operation.v2",task:"ios",operation:"request-existing",requested_generation:"request-existing",actual_generation:"actual-existing",previous_generation:null,disposition:"existing",startup_confirmed:true,old_stopped:false,route:{placement:"remote",backend:"herdr",target:"fm-remote:w1:p1"},actual_model:"pool-model-a",complete:true}' > "$TMP/existing-response"
+jq -n '{schema:"fm-remote-seat-operation.v2",task:"ios",operation:"request-existing",requested_generation:"request-existing",actual_generation:"actual-existing",previous_generation:null,disposition:"existing",startup_confirmed:true,old_stopped:false,route:{placement:"remote",backend:"herdr",target:"fm-remote:w1:p1",home:"/srv/fm-home",spawn_gen:"actual-existing"},actual_model:"pool-model-a",complete:true}' > "$TMP/existing-response"
 chmod 0600 "$TMP/existing-response"
 seats reconcile-remote ios --generation request-existing --response-file "$TMP/existing-response" >/dev/null || fail "could not import the existing generation"
 assert_equals released "$(ios_lifecycle request-existing)" "the unused request candidate kept its seat"
@@ -520,7 +540,10 @@ OUT=$(FM_FAKE_DISPOSITION=unknown seats reclaim ios --generation actual-existing
 expect_code 3 "$RC" "an uncertain imported generation: $OUT"
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "the imported generation stopped counting: $OUT"
-OUT=$(FM_FAKE_DISPOSITION=dead-existing FM_FAKE_ACTUAL_GENERATION=actual-existing run_relaunch ios claude pool-model-a medium); RC=$?
+printf 'actual-existing\n' > "$HOME_DIR/state/fake-host-generation"
+OUT=$(FM_FAKE_DISPOSITION=dead-existing FM_FAKE_ACTUAL_GENERATION=actual-existing seats reclaim ios --generation actual-existing 2>&1); RC=$?
+expect_code 0 "$RC" "explicit reconciliation of the imported generation's death: $OUT"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 expect_code 0 "$RC" "relaunch after an imported generation's own death: $OUT"
 assert_equals reclaimed "$(ios_lifecycle actual-existing)" "recovery stranded the imported generation"
 assert_equals confirmed "$(ios_lifecycle "$(ios_generation)")" "recovery did not confirm the replacement"

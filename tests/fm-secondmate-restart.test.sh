@@ -478,7 +478,7 @@ case "${FM_FAKE_SSH_MODE:-ok}" in
 esac
 case "${rargs[1]:-}" in
   route)
-    printf 'schema=fm-remote-secondmate-control.v1\nspawn_gen=%s\n' "${FM_FAKE_HOST_GENERATION:-g-initial}"
+    printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=%s\n' "${rargs[2]}" "${FM_FAKE_HOST_GENERATION:-g-initial}"
     ;;
   send|send-stdin)
     if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
