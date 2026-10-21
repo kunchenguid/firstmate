@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# tests/fm-project-mode.test.sh - unit tests for the `forgejo` value of
-# bin/fm-project-mode.sh's closed `forge=` registry binding. The binding's
-# grammar, its Gerrit value, and its refusals are pinned in
-# tests/fm-task-delivery.test.sh; this file covers only what forgejo adds: it
-# binds in any token order, keeps +yolo (unlike gerrit), is refused on
-# local-only like every forge, and the plain (no --forge/--raw) output stays
-# exactly two words, because tests/fm-secondmate-safety.test.sh and
+# tests/fm-project-mode.test.sh - unit tests for the `forgejo` and `external`
+# values of bin/fm-project-mode.sh's closed `forge=` registry binding. The
+# binding's grammar, its Gerrit value, and its refusals are pinned in
+# tests/fm-task-delivery.test.sh; this file covers only what forgejo and
+# external add: forgejo binds in any token order, keeps +yolo (unlike gerrit),
+# and is refused on local-only like every forge; external binds, reports
+# yolo=off with a refusal like gerrit, and is refused on local-only; and the
+# plain (no --forge/--raw) output stays exactly two words, because tests/fm-secondmate-safety.test.sh and
 # tests/fm-secondmate-lifecycle-e2e.test.sh assert that shape with strict
 # string equality.
 set -u
@@ -27,6 +28,10 @@ cat > "$DATA/projects.md" <<'EOF'
 - kept [local-only forge=forgejo] - a forge on a mode that publishes nothing (added 2026-01-01)
 - colon [no-mistakes forge:forgejo] - a colon-spelled token is not a forge binding (added 2026-01-01)
 - glabbed [no-mistakes forge=gitlab] - gitlab is not a forge value (added 2026-01-01)
+- reviewed [direct-PR forge=external] - a review tool uploads its own snapshot (added 2026-01-01)
+- reviewed-yolo [direct-PR +yolo forge=external] - +yolo cannot apply to an external review (added 2026-01-01)
+- reviewed-local [local-only forge=external] - an external review on a mode that publishes nothing (added 2026-01-01)
+- near-miss [direct-PR forg=external] - a near miss of the forge key (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -76,7 +81,26 @@ for flag in "" --forge; do
 done
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
 assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name forge=forgejo as an accepted value"
-pass "fm-project-mode: a value outside none|gerrit|forgejo is refused and the refusal names forge=forgejo"
+assert_contains "$err" 'forge=external' "the unknown-forge refusal did not name forge=external as an accepted value"
+pass "fm-project-mode: a value outside none|gerrit|forgejo|external is refused and the refusal names the accepted values"
+
+[ "$(run_forge reviewed)" = "external" ] || fail "forge=external did not resolve: $(run_forge reviewed)"
+[ "$(run_mode reviewed)" = "direct-PR off" ] || fail "forge=external changed the two-word output: $(run_mode reviewed)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" reviewed 2>&1 >/dev/null)
+[ -z "$err" ] || fail "a registered forge=external warned: $err"
+[ "$(run_mode reviewed-yolo)" = "direct-PR off" ] || fail "+yolo on forge=external must report yolo=off: $(run_mode reviewed-yolo)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" reviewed-yolo 2>&1 >/dev/null)
+assert_contains "$err" "yolo is inactive for forge=external" "+yolo on forge=external was dropped without a refusal"
+for flag in "" --forge; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag reviewed-local 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=external did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused local-only external forge still handed the caller a posture: '$out'"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" near-miss 2>&1 >/dev/null)
+assert_contains "$err" "forge=external" "the near-miss warning does not list forge=external"
+pass "fm-project-mode: forge=external binds direct-PR, reports yolo=off with a refusal, and is refused on local-only"
 
 [ "$(run_forge missing-project)" = "none" ] || fail "a missing project must default --forge to none: $(run_forge missing-project)"
 [ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge legacy 2>/dev/null)" = "none" ] \

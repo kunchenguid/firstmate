@@ -20,6 +20,7 @@
 # `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
@@ -35,10 +36,71 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   esac
 }
 
+# Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
+# per isolated workspace, each against its own NM_HOME. The home cannot be
+# derived from the worktree's `no-mistakes` remote, because every workspace of
+# a project shares one gate URL, so the site provides a resolver and Firstmate
+# only calls it. The resolver is the executable whose absolute path is the
+# first line of this home's config/nm-home-resolver; it is called with the
+# worktree path as its only argument, bounded by 5 seconds, and its stdout,
+# when it exits 0 with exactly one line naming an existing directory by
+# absolute path, is the no-mistakes home for that worktree. The directory
+# must already exist because the CLI creates a fresh home's skeleton on first
+# read, so a wrong answer must not plant one.
+# An explicit non-empty NM_HOME always wins and the resolver is not called.
+# With no config file, a config file naming no absolute executable, or a
+# resolver that fails, times out, or prints anything else, nothing is resolved
+# and every read uses the ambient home exactly as without the hook.
+# Prints the resolved home, or nothing. Never starts a daemon.
+fm_nm_home_resolver_home() {  # <worktree>
+  local wt=$1 cfg cmd out
+  [ -z "${NM_HOME:-}" ] || return 0
+  cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
+  [ -f "$cfg" ] || return 0
+  IFS= read -r cmd < "$cfg" || [ -n "$cmd" ] || return 0
+  cmd=$(fm_nm_trim "$cmd")
+  case "$cmd" in /*) ;; *) return 0 ;; esac
+  [ -f "$cmd" ] && [ -x "$cmd" ] || return 0
+  out=$(fm_nm_bounded "$wt" 5 "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
+  case "$out" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  case "$out" in *$'\n'*) return 0 ;; esac
+  [ -d "$out" ] || return 0
+  printf '%s\n' "$out"
+}
+
+# 0 when the `no-mistakes` arguments are a host read or a run-targeted abort,
+# the only calls the home resolver above may redirect: the bare `axi`
+# overview, `axi status`, `axi logs`, `runs`, `daemon status`, and
+# `axi abort --run <id>`. Anything else, such as starting or driving a run,
+# keeps the ambient home.
+fm_nm_home_resolver_applies() {  # <no-mistakes args...>
+  case "${1:-}" in
+    axi)
+      [ "$#" -eq 1 ] && return 0
+      case "${2:-}" in
+        status|logs) return 0 ;;
+        abort) [ "${3:-}" = --run ] && [ -n "${4:-}" ] && return 0 ;;
+      esac ;;
+    runs) return 0 ;;
+    daemon) [ "${2:-}" = status ] && return 0 ;;
+  esac
+  return 1
+}
+
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2
+  local dir=$1 timeout_secs=$2 home=''
   shift 2
-  fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  if fm_nm_home_resolver_applies "$@"; then
+    home=$(fm_nm_home_resolver_home "$dir")
+  fi
+  if [ -n "$home" ]; then
+    NM_HOME=$home fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  else
+    fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  fi
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -66,11 +128,13 @@ fm_nm_strip_quotes() {
 }
 
 # Path of no-mistakes' local state database as the CLI would see it from
-# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME defaulting to
-# ~/.no-mistakes and a relative NM_HOME resolving from that worktree. Readers
-# open it with SQLite's mode=ro, so a missing database is never created.
+# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME falling back to the home
+# resolver above and then to ~/.no-mistakes, and a relative NM_HOME resolving
+# from that worktree. Readers open it with SQLite's mode=ro, so a missing
+# database is never created.
 fm_nm_state_db() {  # <worktree>
   local root=${NM_HOME:-}
+  [ -n "$root" ] || root=$(fm_nm_home_resolver_home "$1")
   [ -n "$root" ] || root=~/.no-mistakes
   case "$root" in
     /*) ;;
