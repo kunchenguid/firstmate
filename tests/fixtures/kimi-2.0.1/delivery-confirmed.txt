@@ -1,0 +1,23 @@
+   to install
+
+   No session yet — one will be created on your
+ first message.
+   MCP server "Refero" failed: MCP HTTP bearer token
+ env var "REFERO_MCP_TOKEN" is not set or is empty
+
+ ✨ Read the brief at /tmp/test-brief.md and follow
+    it exactly.
+
+ ● Let me read the brief.
+
+ ✗ Used Read (/tmp/test-brief.md) · 1 line
+   "/tmp/test-brief.md" does not exist.
+
+ ⠹ thinking…
+   The file doesn't exist. Let me check /tmp for it
+   or similar files.
+ ╭─────────────────────────────────────────────────╮
+ │ >                                               │
+ ╰─────────────────────────────────────────────────╯
+ Never Ask  K2.8 Preview thinking: max  ~
+                              context: 3% (21.1k/1M)

@@ -1,0 +1,2 @@
+justinlobaito@macbookpro ~ % kimi --auto
+
