@@ -156,7 +156,7 @@ test_c_locale_cookie_verifies_under_localized_ps() (
   export FM_PROC_ROOT_OVERRIDE="$proc_root"
   canonical=$(LC_ALL=C /bin/ps -p "$$" -o lstart=) || fail "C lstart read failed"
   for candidate in de_DE.UTF-8 fr_FR.UTF-8 ja_JP.UTF-8; do
-    locale -a | tr '[:upper:]' '[:lower:]' | fgrep -ix "$candidate" >/dev/null || continue
+    locale -a | tr '[:upper:]' '[:lower:]' | grep -Fix "$candidate" >/dev/null || continue
     export LC_ALL="$candidate"
     localized=$(/bin/ps -p "$$" -o lstart=) || fail "localized lstart read failed"
     [ "$localized" != "$canonical" ] || continue
