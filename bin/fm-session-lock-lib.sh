@@ -347,7 +347,7 @@ fm_os_proc_triple() {  # <pid>
         argv=()
         count=0
         while IFS= read -r -d '' element; do
-          argv[$count]=$element
+          argv[count]=$element
           count=$((count + 1))
         done < "$proc_root/$1/cmdline" || exit 1
         while [ "$count" -gt 0 ] && [ -z "${argv[$((count - 1))]}" ]; do
