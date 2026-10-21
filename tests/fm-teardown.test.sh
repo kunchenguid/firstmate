@@ -4926,6 +4926,18 @@ test_leaked_worktree_process_is_reaped() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
 
+  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
+  # installed, keeping this process-reaping test hermetic.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+for proc in /proc/[0-9]*; do
+  pid=${proc##*/}
+  cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
+  printf 'p%s\nfcwd\nn%s\n' "$pid" "$cwd"
+done
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+
   # A backgrounded, disowned process rooted (by cwd) under the task's own
   # worktree - the same shape the observed incident's leaked `go test`
   # binaries took (reparented to init, no live task meta to attribute them
