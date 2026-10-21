@@ -775,6 +775,22 @@ test_nonpid_records_allow_acquisition() {
   pass "empty, whitespace and non-numeric lock records allow acquisition"
 }
 
+test_unreadable_verdict_returns_success() {
+  local dir fakebin table got
+  dir="$TMP_ROOT/unreadable-verdict"
+  fakebin=$(fm_fakebin "$dir"); make_denied_ps "$fakebin"
+  table="$dir/t"
+  : > "$table"
+  got=$(FM_TEST_KILL_RC=0 lib_eval_denied "$fakebin" "$table" '
+    set -e
+    fm_session_lock_pid_verdict 700
+    printf "%s|%s\n" "$?" "$FM_SESSION_LOCK_PID_VERDICT"
+  ') || fail "unreadable verdict aborted an errexit caller"
+  [ "$got" = '0|unreadable' ] || fail "unreadable verdict returned unexpected status or value: $got"
+  pass "live owner with unreadable identity returns a successful verdict"
+}
+
+test_unreadable_verdict_returns_success
 test_partial_identity_reads_refuse
 test_nonpid_records_allow_acquisition
 

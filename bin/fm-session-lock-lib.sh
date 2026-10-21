@@ -616,7 +616,9 @@ fm_session_lock_pid_verdict() {
     # Alive. Its identity may still be unreadable, and that is the case
     # this verdict exists for: the owner is live, so its lock must not
     # be reclaimed.
-    fm_proc_info "$pid" && FM_SESSION_LOCK_PID_VERDICT=readable
+    if fm_proc_info "$pid"; then
+      FM_SESSION_LOCK_PID_VERDICT=readable
+    fi
   elif fm_proc_info "$pid"; then
     # The process exists - this session simply may not signal it - so
     # it is not a dead owner, but it is not a harness this session can
@@ -627,6 +629,7 @@ fm_session_lock_pid_verdict() {
     # Nothing can see the pid: it is gone.
     FM_SESSION_LOCK_PID_VERDICT=dead
   fi
+  return 0
 }
 
 fm_harness_pid_alive() {
