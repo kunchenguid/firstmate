@@ -6,6 +6,9 @@
 #   - the one safe drift self-heals: a clean, detached HEAD that holds no unique
 #     commits (it is an ancestor of origin/<default>) and whose <default> is free
 #     to check out is re-attached and then fast-forwarded ("recovered:").
+#   - a linked worktree (clean, detached, no unique commits, <default> checked out
+#     in another worktree of the same clone) is fast-forwarded in place to
+#     origin/<default> as routine "synced" / "already current", never STUCK.
 #   - every other off-default state is left untouched and reported as a loud,
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
@@ -85,6 +88,22 @@ advance_origin() {
   work="$home/work-$name"
   commit_file "$work" file.txt "$msg" "$msg"
   git -C "$work" push -q origin main
+}
+
+# build_linked_pair <home> <name>: like build_pair, but projects/<name> is a LINKED
+# worktree (detached at C0) of a primary clone kept outside projects/ that holds
+# main checked out - the shape of a spawning home whose project dirs are
+# worktrees of one shared clone. main can never be attached in the linked dir,
+# so detached at origin/main is its healthy steady state. Echoes the linked dir;
+# the primary is at "$home/primary-<name>".
+build_linked_pair() {
+  local home=$1 name=$2 primary linked
+  build_pair "$home" "$name" >/dev/null
+  primary="$home/primary-$name"
+  linked="$home/projects/$name"
+  mv "$linked" "$primary"
+  git -C "$primary" worktree add --quiet --detach "$linked" >/dev/null 2>&1
+  printf '%s\n' "$linked"
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
@@ -296,6 +315,82 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched() {
   ! git -C "$clone" symbolic-ref -q HEAD >/dev/null || fail "clone re-attached to local default"
   [ "$(git -C "$clone" rev-parse main)" = "$local_main" ] || fail "local default branch was moved"
   pass "detached clean ancestor with diverged local default is reported STUCK and left untouched"
+}
+
+test_linked_worktree_detached_behind_fast_forwards() {
+  local home linked primary out before primary_main primary_head
+  home=$(new_home)
+  linked=$(build_linked_pair "$home" linked-behind)
+  primary="$home/primary-linked-behind"
+  advance_origin "$home" linked-behind C1
+  before=$(head_sha "$linked")
+  primary_main=$(git -C "$primary" rev-parse main)
+  primary_head=$(head_sha "$primary")
+
+  out=$(run_sync "$home" "$linked")
+
+  assert_contains "$out" "linked-behind: synced" "linked detached worktree behind origin reports synced"
+  assert_not_contains "$out" "STUCK" "linked detached worktree is not flagged STUCK"
+  assert_not_contains "$out" "recovered" "a linked worktree catching up is routine, not a self-heal"
+  [ "$(head_sha "$linked")" != "$before" ] || fail "linked detached HEAD was not fast-forwarded"
+  [ "$(head_sha "$linked")" = "$(git -C "$linked" rev-parse origin/main)" ] \
+    || fail "linked detached HEAD is not at origin/main"
+  ! git -C "$linked" symbolic-ref -q HEAD >/dev/null || fail "linked worktree was attached to a branch"
+  [ "$(git -C "$primary" rev-parse main)" = "$primary_main" ] || fail "primary clone's main was moved"
+  [ "$(head_sha "$primary")" = "$primary_head" ] || fail "primary clone's HEAD was moved"
+  pass "linked detached worktree behind origin is fast-forwarded in place, primary untouched"
+}
+
+test_linked_worktree_detached_current_is_quiet() {
+  local home linked out before
+  home=$(new_home)
+  linked=$(build_linked_pair "$home" linked-current)
+  before=$(head_sha "$linked")
+
+  out=$(run_sync "$home" "$linked")
+
+  assert_contains "$out" "linked-current: already current" "linked detached worktree at origin reports already current"
+  assert_not_contains "$out" "STUCK" "a current linked worktree is not flagged STUCK"
+  assert_not_contains "$out" "recovered" "a current linked worktree is not labelled recovered"
+  [ "$(head_sha "$linked")" = "$before" ] || fail "current linked worktree was moved"
+  ! git -C "$linked" symbolic-ref -q HEAD >/dev/null || fail "linked worktree was attached to a branch"
+  pass "linked detached worktree already at origin/main is reported current, never STUCK"
+}
+
+test_linked_worktree_dirty_is_stuck_untouched() {
+  local home linked out before
+  home=$(new_home)
+  linked=$(build_linked_pair "$home" linked-dirty)
+  advance_origin "$home" linked-dirty C1
+  printf 'dirty\n' >> "$linked/file.txt"
+  before=$(head_sha "$linked")
+
+  out=$(run_sync "$home" "$linked")
+
+  assert_contains "$out" "linked-dirty: STUCK:" "dirty linked worktree reports STUCK"
+  assert_contains "$out" "uncommitted changes" "STUCK names the dirty state"
+  assert_contains "$out" "1 commits behind origin/main" "STUCK quantifies how far behind"
+  assert_not_contains "$out" "synced" "dirty linked worktree is never fast-forwarded"
+  [ "$(head_sha "$linked")" = "$before" ] || fail "dirty linked worktree was moved"
+  [ "$(cat "$linked/file.txt")" = "$(printf 'v0\ndirty\n')" ] || fail "dirty change was lost"
+  pass "dirty linked worktree is still reported STUCK and left untouched"
+}
+
+test_linked_worktree_unique_commit_is_stuck_untouched() {
+  local home linked out before
+  home=$(new_home)
+  linked=$(build_linked_pair "$home" linked-unique)
+  commit_file "$linked" extra.txt unique "local unique work"
+  before=$(head_sha "$linked")
+  advance_origin "$home" linked-unique C1
+
+  out=$(run_sync "$home" "$linked")
+
+  assert_contains "$out" "linked-unique: STUCK:" "linked worktree with unique commit reports STUCK"
+  assert_contains "$out" "unique commits" "STUCK names the unique-commit state"
+  assert_not_contains "$out" "synced" "unique-commit linked worktree is never fast-forwarded"
+  [ "$(head_sha "$linked")" = "$before" ] || fail "unique-commit linked worktree was moved"
+  pass "linked worktree with unique commits is still reported STUCK and left untouched"
 }
 
 test_dirty_is_stuck_untouched() {
@@ -521,6 +616,9 @@ test_bootstrap_relays_recovered_and_stuck() {
   rec=$(build_pair "$home" rec-clone)
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
+  # And a current linked worktree (main checked out in its primary clone), whose
+  # detached HEAD is its healthy steady state and must not surface at all.
+  build_linked_pair "$home" linked-clone >/dev/null
 
   # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
@@ -528,7 +626,8 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"
-  pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
+  assert_not_contains "$out" "linked-clone" "bootstrap surfaced a current linked worktree"
+  pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes, and keeps a current linked worktree silent"
 }
 
 # --- packed-refs.lock guard tests -------------------------------------------
@@ -750,6 +849,10 @@ test_non_signature_fetch_failure_is_not_retried() {
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
+test_linked_worktree_detached_behind_fast_forwards
+test_linked_worktree_detached_current_is_quiet
+test_linked_worktree_dirty_is_stuck_untouched
+test_linked_worktree_unique_commit_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
