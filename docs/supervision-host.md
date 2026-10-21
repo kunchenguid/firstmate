@@ -268,9 +268,10 @@ When the host loses session-lock ownership or its auto-arm generation, it stands
 A host that starts without that ownership stands down before activation.
 So it never stops the owner's host or watcher or releases its leases.
 
-### A host that dies without a close
+### A host killed without a close
 
 The host's owner retries it.
+[`bin/fm-claude-stop-autoarm.sh`](../bin/fm-claude-stop-autoarm.sh)'s header owns Claude's retry and failure rules.
 Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
 Before it arms, the next host does two things:
 

@@ -27,6 +27,7 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -467,27 +468,40 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+  local dir out rc url
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
+  url=https://github.com/example/repo/pull/19
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' "pr=$url"
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
   } >> "$dir/home/state/rl19.meta"
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/trace-context"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  fm_pr_poll_prepare "$dir/home/state" rl19 github "$url" github.com example/repo 19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the registered PR watch before relaunch"
+  fm_pr_poll_publish_prepared || fail "could not publish the registered PR watch before relaunch"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789abcdef0123456789abcdef01234567" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  [ -n "$(meta_field "$dir" rl19 traceparent)" ] \
+    || fail "relaunch did not retain the enabled trace context"
+  fm_pr_poll_snapshot_capture "$dir/home/state" rl19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the existing PR watch was refused after relaunch"
+  pass "fm-control relaunch: the existing PR watch remains accepted after replacement launch publication"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {

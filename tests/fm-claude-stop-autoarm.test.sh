@@ -1719,6 +1719,9 @@ SH
       crash)
         printf 'kill -KILL "$$"\n'
         ;;
+      silent-failure)
+        printf 'exit 1\n'
+        ;;
     esac
     printf 'exit 0\n'
   } > "$dir/bin/fm-supervision-host.sh"
@@ -1916,6 +1919,20 @@ test_host_lost_announced_handback_notifies_once_per_episode() {
   pass "auto-arm: a lost host hand-back on an announced marker notifies once per failure episode"
 }
 
+test_host_silent_failure_notifies_without_retry() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-silent-failure")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" silent-failure
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host failure without readiness output must notify main"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a returned host failure started another park"
+  assert_contains "$out" "auto-arm FAILED" "the silent host failure must deliver a failure notice"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "the silent host failure must commit outcome=failed"
+  pass "auto-arm: a returned host failure notifies without retry, even without readiness output"
+}
+
 test_host_crash_is_retried_then_reported() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-crash")
@@ -2045,6 +2062,7 @@ test_host_stand_down_is_silent
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
+test_host_silent_failure_notifies_without_retry
 test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
