@@ -390,7 +390,8 @@ test_the_adoption_resolves_a_superseded_row() {
 test_an_abandoned_replacement_consumes_no_capacity() {
   local case_dir out
   case_dir=$(make_case abandoned task-c)
-  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0
+  # A confirmed cleanup left a stopped row and removed the task's metadata.
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
   rm -f -- "$case_dir/home/config/sol-cap"
   out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
   assert_equals "$(registry_row_field "$case_dir" task-c 4)" "-3" \
@@ -399,6 +400,20 @@ test_an_abandoned_replacement_consumes_no_capacity() {
   out=$(lib_refuse_claim "$case_dir" task-d gpt-6.1-sol) || fail "an abandoned replacement consumed the capacity: $out"
   assert_equals "$out" "claimed" "an abandoned replacement consumed the capacity"
   pass "an abandoned replacement leaves no capacity behind"
+}
+
+# A row whose session is still live holds its slot: a dispatch that has not
+# displaced that session yet must not release its occupancy.
+test_a_live_row_is_not_superseded() {
+  local case_dir out
+  case_dir=$(make_case live-row task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0
+  fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
+  rm -f -- "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || fail "the dispatch was refused: $out"
+  assert_equals "0" "$(registry_row_field "$case_dir" task-c 4)" \
+    "a dispatch that displaced no session released its occupancy"
+  pass "a live row is not superseded by a dispatch that displaced no session"
 }
 
 # A superseded row whose current incarnation claims no slot is resolved: the
@@ -1122,6 +1137,7 @@ test_a_replacement_on_an_excluded_model_invalidates_the_prior_row
 test_the_adoption_resolves_a_superseded_row
 test_an_uncapped_incarnation_resolves_a_superseded_row
 test_an_abandoned_replacement_consumes_no_capacity
+test_a_live_row_is_not_superseded
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

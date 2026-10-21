@@ -617,7 +617,7 @@ fm_sol_cap_registry_supersede() {  # <registry-file> <id>
 # reservation. A malformed declaration, an unavailable count, or a claim lock
 # refuses loudly rather than launching possibly uncounted.
 fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <state-dir>
-  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start existing_model covered
+  local id=$1 harness=$3 model=$4 config=$5 state=$6 reuse=${7:-} registry now lock root local_home existing_pid existing_start existing_model covered row_start row_pid
   FM_SOL_CAP_REFUSAL=
   FM_SOL_CLAIM_CREATED=
   [ -n "$id" ] || return 0
@@ -656,6 +656,15 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # earlier incarnation's metadata is still published or a confirmed
     # cleanup already removed it.
     grep -Fq "$(printf '%s\t' "$id")" "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || return 0
+    # Only a row that holds no live occupancy may be superseded. A row whose
+    # session is still live or still uncertain holds its slot, and this
+    # dispatch has not displaced that session yet: superseding it would
+    # release a live worker's occupancy.
+    row_start=$(awk -F'\t' -v id="$id" '$1 == id {print $3; exit}' "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || true)
+    row_pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || true)
+    if fm_sol_cap_entry_live "$row_start" "$row_pid"; then
+      return 0
+    fi
     # The invalidation waits only briefly for the admission boundary, and it
     # never aborts this dispatch: a dispatch that reserves no slot must not
     # be refused by ceiling contention, and the row it marks keeps counting
