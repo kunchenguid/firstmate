@@ -122,6 +122,15 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# Home-local watcher tuning is independent of Relay's generated cadence
+# artifact. Relay, when active, is sourced second so its required 30s cadence
+# remains authoritative for an opted-in home.
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/watch.env" ] && . "$CONFIG/watch.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"

@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -92,6 +92,7 @@ fm_control_harness_family() {  # <recorded-harness>
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
     commandcode) printf 'commandcode' ;;
+    polytoken) printf 'polytoken' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -106,7 +107,7 @@ fm_control_harness_family() {  # <recorded-harness>
 }
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
-# and commandcode are crewmate/scout adapters only: none has a primary
+# commandcode, and polytoken are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
@@ -115,9 +116,26 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin|commandcode) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
+}
+
+# Which transport a harness's interrupt verb rides: `rest` for a typed API
+# call, `key` for the keyplane sequence the tables below describe. polytoken
+# is the one rest adapter: its TUI has NO interrupt chord at all (verified
+# live on 0.8.19 through the full `print tui-command-actions` inventory:
+# `submit-prompt` is the only Enter action in Prompt scope, a single Escape
+# does nothing in Prompt scope, and Escape Escape opens the rewind picker),
+# so an interrupt MUST be POST /turn/cancel on the session daemon, and the
+# keyplane tables below deliberately refuse it so nothing can improvise a
+# key. Every other verified harness interrupts through the keyplane.
+fm_control_interrupt_transport() {  # <harness>
+  case "${1-}" in
+    polytoken) printf 'rest' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'key' ;;
+    *) return 1 ;;
+  esac
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,
@@ -198,6 +216,10 @@ fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
     commandcode) printf '%s' 'Select a checkpoint to restore your session|Press Enter to select · Esc to cancel' ;;
+    # polytoken's interrupt rides the REST API, never keys, so no key can open
+    # a hazard surface on its path; the /quit exit opens only the slash palette,
+    # where Enter accepts the preselected /quit row (verified live).
+    polytoken) ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
     *) return 1 ;;
   esac
@@ -243,7 +265,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -292,7 +314,7 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux)
+    tmux|herdr|zellij|cmux|paseo)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -303,7 +325,7 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
+# herdr implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
 # `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
@@ -382,9 +404,11 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
-# pointing at a retired generation. Prints zero or more absolute paths, one per
-# line: worktree-resident hook files and firstmate-owned state tokens only,
-# never a harness's own managed config.
+# pointing at a retired generation. Teardown's worktree return also reads this
+# table for Polytoken; both consumers preserve git-tracked Polytoken layers.
+# Prints zero or more absolute paths, one per line: worktree-resident
+# hook files and firstmate-owned state tokens only, never a harness's own
+# managed config.
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [kind]
   local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
@@ -431,6 +455,47 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # commandcode leaves none: its tracked mod (bin/fm-commandcode-mod.ts) takes
     # the generation from its own launch command, so the retired process
     # takes its wiring with it.
+    # polytoken's per-task wiring spans the worktree's project hook and facet
+    # layers (the only hook and facet discovery a task controls, so a relaunch
+    # must retire them rather than leave a stale hook pointing at a retired
+    # busy generation), the generated no-argv busy writer the hooks reference,
+    # and the per-task config and sessions roots, which are DIRECTORIES and
+    # therefore ride fm_control_harness_wiring_dirs below rather than this
+    # file table. The worktree layers are the project's own discovery paths,
+    # so each is named only while it carries this task's generated content
+    # (the hooks reference this task's busy writer, the facet this task's
+    # inbox); a project's own hook layer or facet is never firstmate's to
+    # retire.
+    polytoken)
+      if grep -qsF "/$id.polytoken-busy.sh" "$wt/.polytoken/hooks.json"; then
+        printf '%s\n' "$wt/.polytoken/hooks.json"
+      fi
+      if grep -qsF "/$id.inbox" "$wt/.polytoken/facets/firstmate-worker.md"; then
+        printf '%s\n' "$wt/.polytoken/facets/firstmate-worker.md"
+      fi
+      printf '%s\n' "$state/$id.polytoken-busy.sh"
+      ;;
+  esac
+}
+
+# The firstmate-owned per-task DIRECTORIES a harness mints, one per line:
+# the same retirement contract as fm_control_harness_wiring_paths for
+# artifacts that are directory trees rather than single files. Consumers
+# remove these recursively; nothing here is ever a harness's own managed
+# config. polytoken's config dir holds the mirrored worker config (the
+# one launch-time autonomy surface, so a replacement must regenerate it
+# from the current operator config), and the sessions root holds the
+# versioned `<root>-v1` session tree the launch writes beside it, so both
+# the root and its versioned sibling are named.
+fm_control_harness_wiring_dirs() {  # <harness> <state-dir> <id>
+  local harness=${1-} state=${2-} id=${3-}
+  [ -n "$state" ] && [ -n "$id" ] || return 1
+  case "$harness" in
+    polytoken)
+      printf '%s\n' "$state/$id.polytoken-config"
+      printf '%s\n' "$state/$id.polytoken-sessions"
+      printf '%s\n' "$state/$id.polytoken-sessions-v1"
+      ;;
   esac
 }
 

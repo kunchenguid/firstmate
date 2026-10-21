@@ -676,6 +676,9 @@ test_matrix_opencode_leftbar_signals() {
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen captured_idle captured_pending out
+  local footer_119 cwd_119 captured_119_idle captured_119_pending
+  local mode_cell separator_cell model_cell provider_cell effort_cell branch_cell reset_cell
+  reset_cell="${ESC}[38;2;255;255;255m"
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -705,6 +708,71 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode placeholder-like input on plain backends" unknown "$CAPS_PLAIN" "$typed"
   typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
   assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
+  # The opencode 1.19.0 regression, carried over from an idle live pane
+  # captured through tmux -e on 2026-10-14 with an installed opencode 1.19.0.
+  # The footer row's mode word is RGB 67;133;190 and its separators are
+  # 111;110;105 - luminances 119.8 and 109.7, both under the 128 ghost
+  # threshold - so fm_composer_strip_ghost deleted them and left the row
+  # opening at the BRIGHT model cell instead of at `Build`. The
+  # `^(Build|Plan)·` exemption was therefore unreachable on every styled
+  # backend, this idle composer read `pending`, and `pending` is the verdict
+  # that refuses every fm-send, refuses every interrupt/exit/relaunch, and
+  # skips every fm-task-inbox-lib doorbell - the cost measured was three
+  # manual interventions into worker panes in one day. Only the foreground
+  # truecolor triples and the drawn glyphs are carried over; the background
+  # runs and pane padding are dropped, so this is not a byte-for-byte copy of
+  # the capture, matching captured_idle above. The cwd
+  # row opencode 1.19.0 also draws inside the box is de-emphasised too, so it
+  # is empty under the ghost strip and never reaches this verdict.
+  mode_cell="${ESC}[38;2;67;133;190mBuild${reset_cell}"
+  separator_cell="${ESC}[38;2;111;110;105m·${reset_cell} "
+  provider_cell="${ESC}[38;2;111;110;105mOpenCode Go${reset_cell} "
+  model_cell="${ESC}[38;2;206;205;195mSpace Bunny${reset_cell} "
+  effort_cell="${ESC}[1m${ESC}[38;2;218;112;44mmax${ESC}[0m${reset_cell}"
+  branch_cell="${ESC}[38;2;206;205;195mfm-composer-footer${reset_cell}"
+  footer_119="  ┃  ${mode_cell} ${separator_cell}${model_cell}${provider_cell}${separator_cell}${effort_cell}  ${branch_cell}"$'\n'
+  cwd_119="  ┃  ${ESC}[38;2;111;110;105m~/.treehouse/fm001-b8697d/1/fm001:fm/${reset_cell}"$'\n'
+  captured_119_idle=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[2m"$'\n  ┃\n'
+  captured_119_idle+="$cwd_119"
+  captured_119_idle+="$footer_119"
+  captured_119_idle+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 de-emphasised footer row" empty "$CAPS_TMUX" "$captured_119_idle" 3
+  # The half that matters: the same de-emphasised footer must not buy a false
+  # `empty` over a composer holding unsent work. A bright input row above it
+  # stays pending on every styled backend.
+  captured_119_pending=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mfix the doorbell skip${ESC}[38;2;255;255;255m"$'\n  ┃\n'
+  captured_119_pending+="$cwd_119"
+  captured_119_pending+="$footer_119"
+  captured_119_pending+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 typed composer above the de-emphasised footer" \
+    pending "$CAPS_TMUX" "$captured_119_pending" 3
+  assert_screen "opencode 1.19.0 typed composer on herdr" \
+    pending "$CAPS_STYLED" "$captured_119_pending"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on herdr" \
+    empty "$CAPS_STYLED" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on zellij" \
+    empty "$CAPS_STYLED_NOID" "$captured_119_idle"
+  # Plain backends keep the strict posture on the SAME bytes: opencode's cwd
+  # row survives an unstyled capture, and an unrecognized shape must defer
+  # rather than read empty, because firstmate types into an `empty` verdict.
+  assert_screen "opencode 1.19.0 idle on plain backends" unknown "$CAPS_PLAIN" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 typed on plain backends" unknown "$CAPS_PLAIN" "$captured_119_pending"
+  # Signal separation for the fix itself: the exemption is proved from the row
+  # ghost stripping cannot reach, so an override that removes that proof must
+  # put the false `pending` straight back.
+  out=$(FM_COMPOSER_LEFTBAR_FOOTER_RE='^NEVER-MATCHES$' \
+    fm_composer_classify_screen "$CAPS_TMUX" "$captured_119_idle" 3)
+  [ "$out" = pending ] \
+    || fail "the 1.19.0 footer exemption must be the only reason this idle pane reads empty, got '$out'"
+  # The extractor reads the same run with the same rule, so a classified-empty
+  # pane must not hand back the footer as composer text: zellij's append proof
+  # requires the typed text and nothing else.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_idle")
+  [ -z "$out" ] \
+    || fail "the de-emphasised 1.19.0 footer must not be extracted as composer text, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_pending")
+  [ "$out" = 'fix the doorbell skip' ] \
+    || fail "extracting above the de-emphasised 1.19.0 footer must yield only the typed row, got '$out'"
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
@@ -990,6 +1058,87 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_grok_144_approval_titled_bottom_border() {
+  # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
+  # top border and appends its approval mode (` · always-approve`). The mid-dot
+  # used to survive the geometry residue test, so an idle pane read unknown and
+  # the guarded exit/relaunch refused to type /exit.
+  local top empty_row typed_row bottom idle typed
+  top='  ╭'$(_grok_rule 74)'╮'
+  empty_row='  │ ❯'"$(printf '%*s' 72 '')"'│'
+  typed_row='  │ ❯ deploy the fix'"$(printf '%*s' 57 '')"'│'
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve')
+  idle="$top"$'\n'"$empty_row"$'\n'"$bottom"
+  typed="$top"$'\n'"$typed_row"$'\n'"$bottom"
+  assert_screen "grok 1.0.44 idle on tmux content row" empty "$CAPS_TMUX" "$idle" 1
+  assert_screen "grok 1.0.44 idle on tmux bottom border" empty "$CAPS_TMUX" "$idle" 2
+  assert_screen "grok 1.0.44 idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok 1.0.44 idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "grok 1.0.44 typed on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "grok 1.0.44 typed on herdr" pending "$CAPS_STYLED" "$typed"
+  # The approval title is proven only on Grok's rounded box. An otherwise
+  # aligned box from another family must not grant permission to type.
+  local family tl tr bl br edge dash unobserved
+  for family in light heavy double ascii; do
+    case "$family" in
+      light) tl=┌; tr=┐; bl=└; br=┘; edge=│; dash=─ ;;
+      heavy) tl=┏; tr=┓; bl=┗; br=┛; edge=┃; dash=━ ;;
+      double) tl=╔; tr=╗; bl=╚; br=╝; edge=║; dash=═ ;;
+      ascii) tl=+; tr=+; bl=+; br=+; edge='|'; dash=- ;;
+    esac
+    unobserved=${idle//╭/$tl}; unobserved=${unobserved//╮/$tr}
+    unobserved=${unobserved//╰/$bl}; unobserved=${unobserved//╯/$br}
+    unobserved=${unobserved//│/$edge}; unobserved=${unobserved//─/$dash}
+    assert_screen "grok approval title rejects $family on tmux" unknown "$CAPS_TMUX" "$unobserved" 1
+    assert_screen "grok approval title rejects $family on herdr" unknown "$CAPS_STYLED" "$unobserved"
+    assert_screen "grok approval title rejects $family on cmux/orca" unknown "$CAPS_PLAIN" "$unobserved"
+  done
+  for effort in low medium high xhigh; do
+    bottom=$(_grok_titled_bottom 74 "Grok 4.6 ($effort) · always-approve")
+    assert_screen "grok 1.0.44 $effort effort" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  done
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · auto-approve')
+  assert_screen "grok unknown approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve now')
+  assert_screen "grok approval suffix with trailing text" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Other 4.7 (high) · always-approve')
+  assert_screen "unknown surface title with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (turbo) · always-approve')
+  assert_screen "unknown effort with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'unknown surface · mode')
+  assert_screen "mid-dot title outside the known shape" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve · extra')
+  assert_screen "second mid-dot after the known suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The approval title is only known at the aligned width.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.7 (high) · always-approve')
+  assert_screen "approval title with 1.0.5 overhang" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The 1.0.5 overhang shape keeps proving empty beside the new equal-width one.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.6 (xhigh)')
+  assert_screen "grok 1.0.5 overhang still empty" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.6 (xhigh)')
+  assert_screen "grok typed title at equal width" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  pass "matrix: grok 1.0.44's approval-titled equal-width bottom is empty while typed and unknown titles stay safe"
+}
+
+# <count> box-drawing rule glyphs, one glyph per iteration so the emitted width
+# never depends on whether ${#} counts bytes or characters in the ambient locale.
+_grok_rule() {  # <count>
+  local n=$1 i=0 out=
+  while [ "$i" -lt "$n" ]; do out+='─'; i=$((i + 1)); done
+  printf '%s' "$out"
+}
+
+# Bottom border of total inner width <width> carrying <title> before a trailing rule.
+# Every non-ASCII glyph these fixtures use is one column wide, so the width is
+# measured on an ASCII twin: the rule stays byte-exact and ${#} equals the column
+# count under any locale, including LC_ALL=C.
+_grok_titled_bottom() {  # <width> <title>
+  local width=$1 title=" $2 " cols lead
+  cols=${title//·/.}
+  lead=$((width - ${#cols} - 1))
+  printf '  ╰%s%s─╯' "$(_grok_rule "$lead")" "$title"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -1244,6 +1393,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

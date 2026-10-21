@@ -19,6 +19,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| Grouping tasks by project with status tags and a sorted agents list | [Project groups](#project-groups) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
@@ -37,7 +38,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -489,6 +490,126 @@ Any of these preserves the candidate and lets session startup continue with at m
 [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence for the focus-flash test.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#attached-foreground-viewer) owns the active versioned evidence and the re-run trigger for the attached-viewer test.
 
+## Project groups
+
+Project groups are an opt-in display layer that shows each task's project group and status in Herdr's sidebar and sorts Herdr's agents list by group and then by status.
+They are off by default, and without the setting nothing in this page's other sections changes.
+They are display-only: no tag or view is task, endpoint, ownership, or cleanup authority.
+
+### Turning project groups on
+
+The local gitignored `config/herdr-project-groups` file controls them.
+It is inherited into secondmate homes, because the agents view is one per Herdr server and every home's tasks share it.
+
+| File content | Result |
+| --- | --- |
+| Absent | Off. No producer runs and no Herdr call is made. |
+| `off` | Off, the same as absent. |
+| `on`, or empty | On, with one group per project, named after the task's project directory. |
+| Rule lines | On, with the groups and group order the rules define. |
+
+Blank lines and lines starting with `#` are ignored.
+
+### Group rules
+
+Each rule line is a group name followed by selectors, separated by whitespace.
+The order in which a group name first appears is that group's display order, and a group may span several lines.
+Group names use letters, digits, `.`, `_`, `+`, and `-`, at most 32 characters.
+
+| Selector | Matches |
+| --- | --- |
+| `task:<prefix>` | A task id equal to `<prefix>` or starting with `<prefix>-`. |
+| `repo:<name>` | A task whose project directory is named `<name>`. |
+| `*` | Every task. |
+
+Task-id selectors win over repository selectors, which win over `*`, across all lines; within one selector kind the first matching line wins.
+A task that no rule matches is grouped by its project directory and listed after every rule group.
+An invalid group name or an unknown selector is ignored with a warning.
+
+Example, grouping by area of work and keeping a catch-all last:
+
+```text
+# config/herdr-project-groups
+Web       task:web task:shop repo:storefront
+Backend   task:api repo:api-server
+Ops       task:deploy task:infra
+Other     *
+```
+
+### Tags and status order
+
+For each ship and scout task recorded in the home with Herdr endpoint metadata, Firstmate reports display-only metadata tokens under the source `firstmate`:
+
+| Token | On | Value |
+| --- | --- | --- |
+| `fm_group` | pane and projected workspace | The group name. |
+| `fm_state` | pane and projected workspace | The display status. |
+| `fm_task` | pane | The task id. |
+| `fm_sort` | pane | `<group order>.<group>.<status rank>.<task>`, at most 80 characters. |
+| `fm_group_order` | projected workspace | `<group order>.<group>`, the key that [placement](#placement-inside-the-group) compares. |
+
+Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and pane, whose live workspace holds that single pane.
+A flat-layout task tab shares its workspace with other tasks, so it gets pane tokens only.
+
+The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, in this rank order:
+
+| Rank | `fm_state` | Status log |
+| --- | --- | --- |
+| 1 | `needs-captain` | An open decision, or a captain-held transfer. |
+| 2 | `problem` | `blocked` or `failed`. |
+| 3 | `running` | Anything else, including `working`, `paused`, and no status yet. |
+| 4 | `done` | `done`. |
+
+It is the worker's latest declaration, not the reconciled current state that `bin/fm-crew-state.sh` owns, and it can lag one watcher poll behind the log.
+Herdr's own agent status dot stays live beside it.
+
+The watcher reconciles every task once per poll cycle, and a spawn tags its new task at once.
+A reconcile reads each session's workspace and pane lists once and reports only tokens whose live value differs.
+Whenever it reports a pane token, it also sets the agents view: `agent.view.set` with source `firstmate`, label `projects`, and sort by the `fm_sort` token, then workspace order.
+Herdr keeps neither tokens nor the agents view across a server restart, so the next reconcile after a restart reports them again.
+Agents without an `fm_sort` token, such as Firstmate itself or another tool's agents, sort after the tagged ones.
+Herdr exposes no CLI for the agents view, so `bin/backends/herdr-agent-view.py` sends only those two whitelisted requests over the named session socket.
+
+Tags and the agents view need Herdr protocol 22, verified with Herdr 0.9.5; the wire schema comes from Herdr 0.9.3, which speaks the same protocol.
+An older client warns once per protocol and the feature stays inactive.
+
+`bin/fm-herdr-groups.sh` owns the commands, including `plan` to preview groups and statuses without touching Herdr and `clear` to remove this home's tags and the agents view after turning the feature off.
+
+### Sidebar rows
+
+Herdr shows custom tokens only where its own configuration names them.
+Firstmate never edits Herdr's configuration on its own.
+`bin/fm-herdr-groups.sh sidebar-config` prints these suggested rows, and `sidebar-config --apply <path>` appends them to that Herdr configuration file after copying it to `<path>.bak-<epoch>`, refusing when the file already defines sidebar rows:
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "$fm_group", bold = true }, "$fm_state"],
+]
+
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
+]
+```
+
+Run `herdr server reload-config` afterwards to apply them.
+Colors can be added with Herdr's inline token styles.
+
+### Placement inside the group
+
+With project groups on, a new projected task is placed inside its owning parent's child block right after the last child whose `fm_group_order` token sorts at or before its own, instead of at the block end.
+A child without that token counts as sorting before it, so untagged children never move behind a new task.
+Everything else is [Ordering](#ordering) unchanged: one verified move of the new workspace only, never an existing child, a parent, or a foreign workspace, and every ambiguity leaves the new task where Herdr created it.
+A task whose group changes later keeps its position until it ends.
+
+### Verification status
+
+The tags, the agents view, and the placement are covered by offline tests against a scripted Herdr CLI and socket helper (`tests/fm-herdr-groups.test.sh` and the ordering cases in `tests/fm-backend-herdr.test.sh`).
+They were also exercised against a real Herdr 0.9.5 server (protocol 22) in a guarded lab session: after one watcher poll `herdr pane list` showed the `fm_*` tokens on each task pane, the agents list header read `projects` with tasks ordered by group and then status, a newly spawned projected task landed after the other tasks of its group with only that workspace moving and no focus change, and `fm-herdr-groups.sh clear` removed the tokens and the view.
+To repeat the check on a live session, turn the feature on, wait one watcher poll, and confirm the same four results.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
@@ -780,7 +901,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 ## Away-mode supervisor support
 
 The away daemon supports tmux and Herdr supervisor panes only.
-It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
+It refuses Zellij, Orca, cmux, and Paseo as supervisor backends rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
@@ -834,6 +955,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ## Active limits
 
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
+- Project groups need protocol 22 and Python, are tested offline, and were checked live once against Herdr 0.9.5 on protocol 22.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
@@ -857,6 +979,7 @@ tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh

@@ -60,7 +60,7 @@ A stopped agent whose pane still shows the dialog text is not refused.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, gemini, devin, and commandcode resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, devin, and commandcode resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
 A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
 
@@ -70,11 +70,11 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
-   Otherwise a `kind=secondmate` task re-resolves its durable `config/secondmate-harness` pin, including that file's optional model and effort tokens, exactly as every other respawn does - so setting the pin and relaunching is the ordinary way to move a secondmate's runtime.
+   Without an explicit harness, a `kind=secondmate` task re-resolves its [configured runtime pin for that mate](configuration.md#choose-the-secondmate-harness) before the checkpoint.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
-   A Claude or Pi replacement must also pass the home's [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account), so a pin that no longer resolves or is signed out refuses before the old agent stops.
+   A Claude or Pi replacement must also pass the home's [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account), or a secondmate's own [per-secondmate account pin](configuration.md#per-secondmate-account-pins) when one is set, so a pin that no longer resolves or is signed out refuses before the old agent stops.
    Ship and scout replacements also pass the [worker tool exclusion checks](configuration.md#worker-tool-exclusions-configcrew-exclude-tools) at this step.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
@@ -168,7 +168,7 @@ The worktree and the task's records are unaffected either way.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
-  zellij, orca, and cmux are refused rather than reported as successful blind.
+  zellij, orca, cmux, and paseo are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
@@ -187,6 +187,7 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | zellij | yes | yes | yes | yes | no |
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
+| paseo | yes | yes | yes | yes | no |
 
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`, with adapters outside its lane pinning their control mechanics in their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.

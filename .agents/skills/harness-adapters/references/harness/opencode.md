@@ -1,6 +1,6 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4 and composer furniture re-verified on 2026-09-18 using 1.18.31.
+Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4, composer furniture re-verified on 2026-09-18 using 1.18.31, and the mode-footer furniture re-verified on 2026-10-14 using 1.19.0.
 
 ## Operating facts
 
@@ -24,6 +24,7 @@ If the pane shows the exit banner, use the verified resume path above.
 Since OpenCode 1.18.0 (upstream anomalyco/opencode#36457, merged 2026-07-11) the idle composer draws the pane's working directory and git branch right-aligned inside the composer rows above the Build footer, wrapped over up to three rail-width fragments whose final fragment continues onto the footer row's right end, whenever the pane has an active session and no higher-priority footer hint.
 That cwd:branch indicator is composer furniture, never typed text, and the shared classifier in `../../../../../bin/fm-composer-lib.sh` (`_fm_composer_leftbar_cwd_start`) recognises it structurally by position and shape, for a cwd under `$HOME` (`~/...`) or an absolute cwd outside it, so an idle or busy pane still reads proven `empty`.
 An earlier read treated those fragments as unsent typed input, which made every idle 1.18.x tmux worker unsteerable (observed live on 1.18.31) until the doorbell was typed by hand.
+OpenCode 1.19.0 also draws the mode/model/branch footer row de-emphasised, with its mode word and middle-dot separators under `fm_composer_strip_ghost`'s luminance threshold, so that furniture is gone from the row the ghost-stripped read sees and the classifier proves it from the ANSI-stripped form of the row instead; the dated capture, the safe plain-form argument, and the regression pointers are in [runtime-backends.md](../../../../../docs/verification/runtime-backends.md).
 Without a cursor anchor a full-pane capture of this version still defers as `unknown` because the status rail below the composer floor row is contiguous, non-blank content; that deferral is the strict posture, not a misclassification.
 
 ## Busy-queued Enter

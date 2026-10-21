@@ -226,9 +226,9 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      # The Pi extension tests read the installed Pi package's own types and
-      # runtime, so without it they gate-skip and pass silently. It is a public
-      # npm package and needs no credential, so CI can hold the real thing.
+      # Runtime-facing Pi extension probes need the installed public package
+      # to avoid capability skips. tests/fm-pi-primary-types.test.sh owns its
+      # separate compiler dependencies.
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
@@ -244,8 +244,6 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # The Pi package is installed above and CI provides npm and tsc, so
-          # any missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
