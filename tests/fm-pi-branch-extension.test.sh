@@ -63,6 +63,7 @@ install_pi_branch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$repo/.pi/extensions/lib/fm-feishu-native-channel.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-idle-reminder-config.ts" "$repo/.pi/extensions/lib/fm-idle-reminder-config.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-short-notification.mjs" "$repo/bin/fm-short-notification.mjs"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -1075,6 +1076,32 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
 );
 if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
+}
+
+// A per-home decisions-only preference suppresses later routine presentation
+// without dropping the durable outcome or its read acknowledgement.
+writeFileSync(`${home}/config/idle-reminder.json`, JSON.stringify({
+  version: 1,
+  enabled: true,
+  interval_seconds: 7200,
+  reporting_scope: "decisions-only",
+}));
+const sentBeforeDecisionsOnly = sentToMain.length;
+const routineEntriesBefore = mainEntries.length;
+const decisionsOnlyRoutine = await report.execute(
+  "decisions-only-routine",
+  { task: "task-9", verdict: "routine", summary: "source gap remains unchanged" },
+  undefined,
+  undefined,
+  {},
+);
+if (decisionsOnlyRoutine.isError) throw new Error(`decisions-only routine report failed: ${JSON.stringify(decisionsOnlyRoutine)}`);
+if (sentToMain.length !== sentBeforeDecisionsOnly || mainEntries.length !== routineEntriesBefore) {
+  throw new Error("decisions-only mode rendered or processed a routine outcome");
+}
+const decisionsOnlyRows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (decisionsOnlyRows.at(-1)?.summary !== "source gap remains unchanged" || outcomeScript(["unread"]) !== "") {
+  throw new Error("decisions-only mode dropped the durable routine outcome or its read acknowledgement");
 }
 process.exit(0);
 EOF
@@ -5448,6 +5475,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$fixture/.pi/extensions/lib/fm-feishu-native-channel.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-idle-reminder-config.ts" "$fixture/.pi/extensions/lib/fm-idle-reminder-config.ts"
   mkdir -p "$fixture/bin"
   cp "$ROOT/bin/fm-short-notification.mjs" "$fixture/bin/fm-short-notification.mjs"
   cp "$ROOT/bin/fm-feishu-state.mjs" "$fixture/bin/fm-feishu-state.mjs"
@@ -6870,6 +6898,7 @@ EOF
 
 case "${FM_PI_BRANCH_TEST_CASE:-}" in
   prompt-event-contract)
+    test_branch_dispatch_two_stage_filter_and_prefix_contract
     test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
     test_stale_generation_boundaries_are_side_effect_free
     test_prompt_event_contract_in_installed_pi_session
