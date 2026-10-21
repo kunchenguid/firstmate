@@ -973,3 +973,67 @@ fm_session_lock_inspect() {  # <state>
       ;;
   esac
 }
+
+# --- naming a live lock holder -----------------------------------------------
+# The read-only classification above says WHETHER a live session holds the
+# lock. These two helpers say WHO it is, in the terms an operator can act on:
+# the pid, the process start time, and the process age, all read live from the
+# process itself rather than remembered from when the lock was taken. A pid
+# alone cannot be acted on safely, because a recycled pid is not the same
+# holder; the start time and the age are what tell them apart.
+#
+# Nothing here is stored in state/.lock: the values are read from the live
+# process every time they are needed, so they cannot go stale.
+
+# Read the live process $1's start time and age. Sets:
+#   FM_SESSION_LOCK_HOLDER_STARTED  the process start time, or empty
+#   FM_SESSION_LOCK_HOLDER_AGE      the process age, or empty
+# Returns 1 when the process cannot be inspected at all, so the caller can say
+# "started unknown; age unknown" instead of guessing.
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_STARTED=
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_AGE=
+fm_session_lock_process_liveness() {  # <pid>
+  local pid=$1 out started age
+  local -a fields
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # One read of both fields, so the start time and the age describe the same
+  # observation of the same process. lstart is five whitespace-separated
+  # fields and etime is the last one. LC_ALL=C pins the date format, and
+  # COLUMNS is pinned wide so the ambient terminal width can never truncate
+  # a field (the same reason fm_pid_identity pins both).
+  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o etime= 2>/dev/null) || return 1
+  out=${out%%$'\n'*}
+  [ -n "$out" ] || return 1
+  read -r -a fields <<< "$out"
+  [ "${#fields[@]}" -ge 6 ] || return 1
+  started="${fields[0]} ${fields[1]} ${fields[2]} ${fields[3]} ${fields[4]}"
+  age=${fields[5]}
+  case "$age" in ''|*[!0-9:-]*) return 1 ;; esac
+  case "$age" in *[0-9]*) ;; *) return 1 ;; esac
+  case "$started" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=$started
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=$age
+  return 0
+}
+
+# Print one line naming the live process $1: its pid, its start time, and its
+# age. The start time and age are "started unknown; age unknown" when the
+# process cannot be inspected, never a guess.
+fm_session_lock_holder_summary() {  # <pid>
+  local pid=$1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if fm_session_lock_process_liveness "$pid"; then
+    printf 'pid %s, started %s, age %s\n' "$pid" "$FM_SESSION_LOCK_HOLDER_STARTED" "$FM_SESSION_LOCK_HOLDER_AGE"
+  else
+    printf 'pid %s, started unknown; age unknown\n' "$pid"
+  fi
+}

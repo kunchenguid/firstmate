@@ -15,6 +15,12 @@
 # (bin/fm-afk-contract.sh owns the record schema; the words are the whole
 # mandate and no script parses them). The record is the posture in every
 # harness.
+# The away entry needs the fleet lock: a read-only session cannot carry out the
+# away words, so `enter` refuses while another live session holds the lock and
+# names that holder (pid, process start time, process age, read live from the
+# process). Stopping the holder is never automatic; the refusal only names it.
+# The quiet path is settled BEFORE that check, so a read-only session may still
+# enter quiet mode: quiet mode spawns nothing.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
@@ -167,8 +173,38 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 # The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
+# The session-lock identity owner: the away posture needs this session to hold
+# the fleet lock, and the refusal names the live holder.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-session-lock-lib.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+# The away posture is a mandate this session has to carry out, so it needs the
+# fleet lock: a read-only session cannot dispatch, steer, merge, or repair
+# anything the away words name. Refuse the entry while another live session
+# holds the lock, and name that holder so the operator can act.
+#
+# The check is deliberately narrow:
+#   - A session that owns the lock passes. That is the ordinary case.
+#   - A session that owns no lock and faces no live holder passes too. The
+#     other reasons a session is read-only (an unwritable lock, an unresolved
+#     harness identity) are unchanged by this check, and the away words still
+#     need a record.
+#   - A stale lock (the recorded pid is gone) is not a live holder, so it
+#     never blocks an entry.
+# Stopping the holder is never automatic: the refusal only names it.
+fm_afk_launch_require_fleet_lock() {
+  local summary
+  if fm_session_lock_owned_by_self "$FM_AFK_LAUNCH_STATE"; then
+    return 0
+  fi
+  fm_session_lock_inspect "$FM_AFK_LAUNCH_STATE"
+  [ "$FM_LOCK_INSPECT_STATE" = held ] || return 0
+  summary=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID") || return 0
+  fm_afk_launch_log "another live firstmate session holds the lock ($summary); the away posture needs this session to hold the fleet lock, so the away entry refuses until that session is gone. Stopping it is the operator's call, never this script's."
+  return 1
+}
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -385,6 +421,10 @@ fm_afk_launch_enter() {
         fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
         return 3 ;;
     esac
+  else
+    # The quiet path is settled before this check on purpose: quiet mode
+    # spawns nothing, so a read-only session may still enter quiet mode.
+    fm_afk_launch_require_fleet_lock || return 1
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note

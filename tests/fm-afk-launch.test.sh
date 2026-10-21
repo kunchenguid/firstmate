@@ -368,6 +368,71 @@ unit_fresh_vs_refresh() {
 }
 
 # ---------------------------------------------------------------------------
+# UNIT 0b: the away entry needs the fleet lock. A read-only session cannot
+# carry out the away words, so the entry refuses while another live session
+# holds the lock, and it names that holder (pid, process start time, process
+# age, read live from the process). Stopping the holder is never automatic.
+# The quiet path is settled BEFORE the check, so a read-only session may still
+# enter quiet mode: quiet mode spawns nothing.
+# ---------------------------------------------------------------------------
+unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
+  local st st_quiet holder_pid out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock.XXXXXX")
+  mkdir -p "$st/state"
+  # A live session-shaped process outside this session's ancestry: it stands
+  # for the other live session that holds the fleet lock. The executable name
+  # is not what identifies it - the path component in its argv[0] is, exactly
+  # as a real harness session presents itself.
+  bash -c 'exec -a /fm-fleet-lock-other-session/claude /bin/bash -c "sleep 30; true"' &
+  holder_pid=$!
+  sleep 0.3
+  printf '%s\n' "$holder_pid" > "$st/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null \
+    && printf '%s' "$out" | grep -F 'started ' >/dev/null \
+    && printf '%s' "$out" | grep -F 'age ' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'started unknown' >/dev/null; then
+    pass "enter: refuses while another live session holds the fleet lock, names that holder's pid, start time, and age, and writes no record"
+  else
+    fail "enter: a live lock holder did not refuse the away entry by name (rc=$rc): $out"
+  fi
+  # The quiet path is settled before the check: quiet mode spawns nothing, so
+  # a read-only session may still enter quiet mode. A separate home, so this
+  # case never depends on what the away case wrote.
+  st_quiet=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-quiet.XXXXXX")
+  mkdir -p "$st_quiet/state"
+  printf '%s\n' "$holder_pid" > "$st_quiet/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_quiet" FM_STATE_OVERRIDE="$st_quiet/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'quiet down' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$st_quiet/state/.afk-contract" ] \
+    && [ "$(FM_HOME="$st_quiet" FM_STATE_OVERRIDE="$st_quiet/state" "$CONTRACT" mode)" = quiet ]; then
+    pass "enter: quiet mode still enters for a read-only session while another live session holds the fleet lock"
+  else
+    fail "enter: the live lock holder blocked the quiet entry too (rc=$rc): $out"
+  fi
+  rm -rf "$st_quiet"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  # A lock whose recorded pid is gone is not a live holder: it never blocks an
+  # entry, because the ordinary stale-owner path reclaims it.
+  rm -f "$st/state/.afk-contract"
+  printf '999999\n' > "$st/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ]; then
+    pass "enter: a stale lock with no live holder does not block the away entry"
+  else
+    fail "enter: a stale lock blocked the away entry (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
 # UNIT 2a: away/quiet mode plumbing (kunchenguid/firstmate#2356). fm_afk_mode
 # is the single owner of reading the mode; these pin its write side
 # (fm_afk_launch_flag_write / fm_afk_flag_write) against the exact double-
@@ -1788,6 +1853,7 @@ e2e_rex() {
 
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
+unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
