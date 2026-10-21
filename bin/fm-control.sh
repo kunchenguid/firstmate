@@ -71,7 +71,9 @@
 #              a tmux `missing` cannot be proven absent from a task record, so
 #              it refuses.
 #              An explicit `default` model or effort clears that
-#              axis for the replacement. With no explicit axis, a secondmate
+#              axis for the replacement. A same-harness relaunch whose record
+#              has no stored model refuses unless a model is named or resolved
+#              from configuration. With no explicit axis, a secondmate
 #              re-resolves its durable profile through fm-harness.sh with its
 #              id (per-mate pin or global fallback), exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
@@ -1028,6 +1030,8 @@ resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
+  PRIOR_MODEL_MISSING=0
+  [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL_MISSING=1
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
@@ -1085,6 +1089,9 @@ resolve_relaunch_profile() {
     TARGET_MODEL=$PRIOR_MODEL
   else
     TARGET_MODEL=default
+  fi
+  if [ "$MODEL_SET" = 0 ] && [ "$PRIOR_MODEL_MISSING" = 1 ] && [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ] && [ "$TARGET_MODEL" = default ]; then
+    die "task $ID has no stored model for $TARGET_HARNESS; refusing to relaunch on its default model; pass --model explicitly"
   fi
   if [ "$EFFORT_SET" = 1 ]; then
     TARGET_EFFORT=$NEW_EFFORT
@@ -1295,7 +1302,9 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
-  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+  if [ "$TARGET_MODEL" != default ] || [ "$MODEL_SET" = 1 ]; then
+    spawn_args+=(--model "$TARGET_MODEL")
+  fi
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ "$ACCOUNT_SET" = 0 ] || spawn_args+=(--account "$ACCOUNT_CHOICE")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \

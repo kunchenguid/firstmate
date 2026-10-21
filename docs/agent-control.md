@@ -73,6 +73,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
+   A relaunch on the same harness whose record has no stored model refuses before the stop unless a model is named or resolved from configuration, so it never silently starts on the tool's default model.
    A Claude or Pi replacement must also pass the home's [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account), so a pin that no longer resolves or is signed out refuses before the old agent stops.
    With `--account`, a pin wins and refuses the flag; otherwise the [pool account move](configuration.md#moving-one-worker-between-accounts-relaunch---account) validates the choice here, while the recorded account's rest and its proving pick run after the note, as the last step before the stop.
    Before the checkpoint, apply [host memory admission](configuration.md#host-memory-guard-confighost-memory).
