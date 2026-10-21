@@ -58,6 +58,7 @@ agentdir="$TMP_ROOT/agent-dir"
 mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
   "$home/state" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
+cp "$ROOT/.pi/extensions/lib/fm-idle-reminder-config.ts" "$repo/.pi/extensions/lib/fm-idle-reminder-config.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"

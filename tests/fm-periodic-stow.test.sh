@@ -817,6 +817,96 @@ EOF
   pass "idle reminder stays quiet for an empty canonical inventory"
 }
 
+test_idle_reminder_decisions_only_filters_unfinished_work() {
+  local home session out
+  home=$(new_home idle-reminder-decisions-only)
+  session=$(seed_session "$home" session)
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add unfinished-work 'Finish the open outcome' --kind ship >/dev/null
+  out=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_PERIODIC_STOW_TICK_MS=1000000 PLUGIN="$ROOT/.pi/extensions/fm-periodic-stow.ts" \
+    SESSION_FILE="$session" bash -c 'exec -a pi node --input-type=module' launcher 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+let now = 2_000_000_000_000;
+Date.now = () => now;
+const configFile = `${process.env.FM_HOME}/config/idle-reminder.json`;
+writeFileSync(configFile, JSON.stringify({ version: 1, enabled: true, interval_seconds: 1800,
+  reporting_scope: "decisions-only" }));
+utimesSync(configFile, new Date(now - 3_600_000), new Date(now - 3_600_000));
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const branch = [{ id: "entry-1" }];
+const handlers = new Map();
+const messages = [];
+const entries = [];
+const pi = {
+  on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
+  events: { on() {}, emit() {} }, registerCommand() {}, sendMessage(message) { messages.push(message);
+    branch.push({ type: "custom_message", id: `entry-${branch.length + 1}`, timestamp: new Date(now).toISOString(),
+      customType: message.customType, content: message.content, display: message.display, details: message.details }); },
+  appendEntry(customType, data) { entries.push({ customType, data });
+    branch.push({ type: "custom", id: `entry-${branch.length + 1}`, customType, data, timestamp: new Date(now).toISOString() }); },
+  async exec(command, args, options) { const result = spawnSync(command, args,
+    { encoding: "utf8", cwd: options?.cwd, timeout: options?.timeout, env: process.env });
+    return { stdout: result.stdout || "", stderr: result.stderr || "", code: result.status ?? 99, killed: false }; },
+};
+const ctx = { mode: "tui", hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+  ui: { getEditorText: () => "", notify() {} }, sessionManager: { getSessionId: () => "session-1",
+    getSessionFile: () => process.env.SESSION_FILE, getLeafId: () => branch.at(-1)?.id, getBranch: () => branch } };
+const emit = async (name, event = { type: name }) => { for (const handler of handlers.get(name) || []) await handler(event, ctx); };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await emit("session_start", { type: "session_start", reason: "startup" });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (messages.length !== 0) throw new Error("unfinished work emitted a decisions-only reminder");
+if (entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length !== 1) {
+  throw new Error("filtered unfinished work did not settle the reminder cadence");
+}
+const taskScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-tasks-axi.sh`;
+let result = spawnSync(taskScript, ["add", "choose-path", "Choose the rollout path", "--kind", "ship"],
+  { encoding: "utf8", env: process.env });
+if (result.status !== 0) throw new Error(`decision task add failed: ${result.stderr}`);
+result = spawnSync(taskScript, ["hold", "choose-path", "--kind", "captain", "--reason",
+  "Choose option A for the smaller rollout or option B for the broader rollout; recommend A."],
+  { encoding: "utf8", env: process.env });
+if (result.status !== 0) throw new Error(`decision hold failed: ${result.stderr}`);
+now += 1_800_000;
+await emit("agent_settled", { type: "agent_settled", aborted: false });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (messages.length !== 1) throw new Error(`expected one decision reminder, got ${messages.length}`);
+if (!messages[0].content.includes("choose-path") || messages[0].content.includes("unfinished-work")) {
+  throw new Error(`decision reminder leaked unfinished work or omitted the decision: ${messages[0].content}`);
+}
+if (!messages[0].content.includes("concrete options") || !messages[0].content.includes("recommendation")) {
+  throw new Error("decisions-only prompt lost its options and recommendation contract");
+}
+await emit("before_agent_start", { type: "before_agent_start", messageType: "custom", message: messages[0],
+  systemPrompt: "", systemPromptOptions: {} });
+const silentAssistant = { role: "assistant", content: [], stopReason: "stop", timestamp: now };
+branch.push({ type: "message", id: `entry-${branch.length + 1}`, timestamp: new Date(now).toISOString(),
+  message: silentAssistant });
+await emit("message_end", { type: "message_end", message: silentAssistant });
+await emit("session_shutdown", { type: "session_shutdown", reason: "reload-before-receipt" });
+handlers.clear();
+const reloaded = await import(`${pathToFileURL(process.env.PLUGIN).href}?silent-reload=1`);
+reloaded.default(pi);
+await emit("session_start", { type: "session_start", reason: "reload" });
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (entries.filter((entry) => entry.customType === "fm-idle-reminder-delivered").length !== 1 ||
+    entries.some((entry) => entry.customType === "fm-idle-reminder-failed") || messages.length !== 1) {
+  throw new Error("a permitted silent decision reminder did not recover successfully at the ordinary cadence");
+}
+await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+console.log(JSON.stringify({ reminders: messages.length, empty: entries.filter((entry) => entry.customType === "fm-idle-reminder-empty").length,
+  delivered: entries.filter((entry) => entry.customType === "fm-idle-reminder-delivered").length }));
+EOF
+  ) || fail "decisions-only idle reminder lifecycle failed: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.reminders')" -eq 1 ] || fail "decision reminder evidence missing: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.empty')" -eq 1 ] || fail "unfinished-filter evidence missing: $out"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.delivered')" -eq 1 ] || fail "silent settlement evidence missing: $out"
+  pass "decisions-only idle reminders suppress unfinished work, preserve concrete decisions, and settle permitted silence"
+}
+
 test_idle_reminder_is_not_suppressed_by_old_maintenance() {
   local home session out
   home=$(new_home idle-reminder-maintenance)
@@ -993,6 +1083,7 @@ test_idle_reminder_waits_for_owned_settlement_followup() {
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin"
   cp "$ROOT/.pi/extensions/fm-periodic-stow.ts" "$repo/.pi/extensions/fm-periodic-stow.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-idle-reminder-config.ts" "$repo/.pi/extensions/lib/fm-idle-reminder-config.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -1096,6 +1187,7 @@ test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
 test_idle_reminder_uses_successful_settlement_cadence
 test_idle_reminder_restores_legacy_receipt_fingerprint
 test_idle_reminder_stays_silent_for_empty_inventory
+test_idle_reminder_decisions_only_filters_unfinished_work
 test_idle_reminder_is_not_suppressed_by_old_maintenance
 test_idle_reminder_runs_through_installed_pi
 test_idle_reminder_waits_for_owned_settlement_followup

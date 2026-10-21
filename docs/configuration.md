@@ -233,7 +233,8 @@ Homes on any other primary harness never load this feature and are entirely unaf
 The [Pi supervision branch contract](pi-supervision-branch.md#two-stage-noise-filter) owns captain-outcome persistence, identity-only processing retries, exact durable-store loading, and the acknowledgement prerequisite.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note.
+By default every other routine outcome still appends a rendered, sailboat-prefixed note; a home whose `config/idle-reminder.json` sets `reporting_scope` to `decisions-only` instead records and acknowledges those routine outcomes without rendering them, while captain outcomes retain their ordinary durable display and MAIN processing path.
 
 ### Historical routine continuation policy (config/task-continuation-policy.json)
 
@@ -395,16 +396,23 @@ The heartbeat receipt requires separately bound evidence for all three duties, a
 
 ## Idle reminders (config/idle-reminder.json)
 
-`config/idle-reminder.json` is an optional per-home opt-in for concise unfinished-work and unanswered-decision reminders in the Pi main session.
+`config/idle-reminder.json` is an optional per-home opt-in for concise unfinished-work and unanswered-decision reminders in the Pi main session, and its optional `reporting_scope` field also controls whether Pi renders unsolicited routine branch outcomes for that home.
 It reuses `.pi/extensions/fm-periodic-stow.ts`'s existing session timer, structural idle boundary, primary-session identity, verified fleet-lock ownership, native follow-up delivery, and bound chat mirroring.
 It creates no daemon, watcher cycle, task ledger, channel, or credential.
 
-The complete version 1 object has exactly `version`, `enabled`, and `interval_seconds`.
+The version 1 object requires exactly `version`, `enabled`, and `interval_seconds`, with optional `reporting_scope` as its only additional field.
 `interval_seconds` is an integer of at least 1800 seconds.
+`reporting_scope` is either `unfinished-and-decisions` or `decisions-only`; omitting it preserves the original `unfinished-and-decisions` behavior.
 The requested two-hour configuration is:
 
 ```json
 {"version":1,"enabled":true,"interval_seconds":7200}
+```
+
+A home that should proactively report only genuine unanswered decisions uses:
+
+```json
+{"version":1,"enabled":true,"interval_seconds":7200,"reporting_scope":"decisions-only"}
 ```
 
 The first interval starts from the configuration file modification time.
@@ -417,14 +425,17 @@ After a handled reminder, an unchanged inventory stays silent until a genuine us
 The same receipt and branch evidence survive extension reload or process restart on that session, so an unchanged handled reminder is not duplicated.
 A failed snapshot or model run preserves the due obligation but releases maintenance and continuation scheduling, then retries no sooner than a later timer boundary; a cold restart records the unowned queued request as failed before releasing it, so an intervening ordinary reply cannot become false reminder-delivery evidence.
 
-The reminder reads only `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-queued` and sends the model only its unfinished, gated, and captain-decision projections.
+The reminder reads only `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-queued`.
+The default scope sends the model its unfinished, gated, and captain-decision projections; `decisions-only` removes unfinished and gated rows before fingerprinting or delivery, so a snapshot with no genuine open decision settles the cadence without a model turn or user-facing reminder.
 That canonical projection excludes completed and archived records even when worker metadata or historical decision evidence remains.
 A changed or newly re-armed unanswered captain decision remains eligible after the next interval, while an unchanged snapshot with no new conversation or outcome stays silent.
-The generated Chinese reminder lists unfinished outcomes and their real blocker or next action before genuine user decisions, gives decision options and a concise recommendation, uses UTC+8 for any displayed time, and never answers or closes a decision itself.
+The default generated Chinese reminder lists unfinished outcomes and their real blocker or next action before genuine user decisions.
+In `decisions-only` mode it lists only genuine user decisions.
+Both modes give decision options and a concise recommendation, use UTC+8 for any displayed time, and never answer or close a decision themselves.
 Standing local-Dorado routing and already-authorized ordinary permission declarations are not re-asked.
 
 This integration is Pi-only because it depends on Pi's persisted session entries, `agent_settled`, structural idle state, pending-message state, and native custom follow-up delivery.
-Codex primary sessions retain their existing foreground checkpoint and supervision behavior and do not load this reminder extension.
+Codex primary sessions retain their existing foreground checkpoint and supervision behavior and do not load this reminder or Pi branch extension.
 TraeX remains a worker and scout harness rather than a supported primary integration.
 After installing a version that contains this feature, reload or restart the Pi primary once so it loads the changed extension, then create the configuration file in that primary's `FM_HOME`.
 Creating or changing the configuration file after the extension is loaded needs no further reload because every tick reads it again.

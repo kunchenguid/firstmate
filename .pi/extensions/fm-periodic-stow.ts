@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ContinuationReadbackOffer } from "./lib/fm-task-continuation.ts";
+import { readIdleReminderConfig, type IdleReminderConfig } from "./lib/fm-idle-reminder-config.ts";
 import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInput,
@@ -27,16 +28,10 @@ type PeriodicConfig = {
   enabledAtMs: number;
 };
 
-type IdleReminderConfig = {
-  version: 1;
-  enabled: boolean;
-  interval_seconds: number;
-  enabledAtMs: number;
-};
-
 type IdleReminderRun = {
   id: string;
   answered: boolean;
+  allowSilentResponse: boolean;
   inventoryFingerprint: string;
 };
 
@@ -143,28 +138,6 @@ function readConfig(): { config?: PeriodicConfig; error?: string } {
     };
   } catch (error) {
     return { error: `cannot read periodic stow config: ${String(error)}` };
-  }
-}
-
-function readReminderConfig(): { config?: IdleReminderConfig; error?: string } {
-  if (!existsSync(reminderConfigFile)) return {};
-  try {
-    const info = lstatSync(reminderConfigFile);
-    if (info.isSymbolicLink() || !info.isFile()) return { error: "config/idle-reminder.json must be a regular non-symlink file" };
-    const raw: unknown = JSON.parse(readFileSync(reminderConfigFile, "utf8"));
-    if (!raw || typeof raw !== "object") return { error: "idle reminder config must be a JSON object" };
-    const value = raw as Record<string, unknown>;
-    if (Object.keys(value).sort().join(",") !== "enabled,interval_seconds,version") {
-      return { error: "idle reminder config has unknown or missing fields" };
-    }
-    if (value.version !== 1 || typeof value.enabled !== "boolean" ||
-        !Number.isSafeInteger(value.interval_seconds) || Number(value.interval_seconds) < 1800) {
-      return { error: "idle reminder config requires version 1, a boolean enabled value, and interval_seconds >=1800" };
-    }
-    return { config: { version: 1, enabled: value.enabled,
-      interval_seconds: Number(value.interval_seconds), enabledAtMs: info.mtimeMs } };
-  } catch (error) {
-    return { error: `cannot read idle reminder config: ${String(error)}` };
   }
 }
 
@@ -364,17 +337,20 @@ function recordReminderCheck(
 }
 
 function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generation: CoordinatorGeneration): void {
-  let pending: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
+  let pending: { id: string; at: number; inventoryFingerprint: string | null;
+    allowSilentResponse: boolean; intervenedByUser: boolean } | null = null;
   let recovered: { id: string; at: number; inventoryFingerprint: string | null } | null = null;
   for (const entry of ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>) {
     if (entry.type === "custom_message" && entry.customType === reminderMessageType) {
       const details = entry.details as { version?: unknown; reminder_id?: unknown;
-        inventory_fingerprint?: unknown } | undefined;
+        inventory_fingerprint?: unknown; reporting_scope?: unknown } | undefined;
       if (details?.version === 1 && typeof details.reminder_id === "string") {
         pending = { id: details.reminder_id, at: entryTime(entry.timestamp),
           inventoryFingerprint: typeof details.inventory_fingerprint === "string"
             ? details.inventory_fingerprint
-            : reminderRequestInventoryFingerprint(entry.content) };
+            : reminderRequestInventoryFingerprint(entry.content),
+          allowSilentResponse: details.reporting_scope === "decisions-only",
+          intervenedByUser: false };
         recovered = null;
       }
       continue;
@@ -415,11 +391,18 @@ function restoreReminderState(pi: ExtensionAPI, ctx: ExtensionContext, generatio
       continue;
     }
     if (pending && entry.type === "message") {
-      const message = entry.message as { stopReason?: unknown } | undefined;
-      if (assistantText(message) && message?.stopReason !== "error" && message?.stopReason !== "aborted") {
+      const message = entry.message as { role?: unknown; stopReason?: unknown } | undefined;
+      if (message?.role === "user") {
+        pending.intervenedByUser = true;
+        recovered = null;
+        continue;
+      }
+      const successfulAssistant = message?.role === "assistant" && message.stopReason !== "error" &&
+        message.stopReason !== "aborted" && message.stopReason !== "toolUse";
+      if (!pending.intervenedByUser && successfulAssistant &&
+          (assistantText(message) || pending.allowSilentResponse)) {
         recovered = { id: pending.id, at: entryTime(entry.timestamp) || entryTime((message as { timestamp?: unknown }).timestamp),
           inventoryFingerprint: pending.inventoryFingerprint };
-        if (message?.stopReason === "toolUse") recovered = null;
       }
     }
   }
@@ -464,25 +447,29 @@ function reminderDue(config: IdleReminderConfig, generation: CoordinatorGenerati
   return now >= anchor + config.interval_seconds * 1000;
 }
 
-function reminderHasInventory(snapshot: unknown): snapshot is Record<string, unknown> {
+function reminderHasInventory(snapshot: unknown, config: IdleReminderConfig): snapshot is Record<string, unknown> {
   if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") return false;
   const value = snapshot as { in_flight?: unknown; decisions_open?: unknown; gates?: unknown };
-  return [value.in_flight, value.decisions_open, value.gates]
+  const candidates = config.reporting_scope === "decisions-only"
+    ? [value.decisions_open]
+    : [value.in_flight, value.decisions_open, value.gates];
+  return candidates
     .some((items) => Array.isArray(items) && items.length > 0);
 }
 
-function reminderInventory(snapshot: Record<string, unknown>): Record<string, unknown> {
+function reminderInventory(snapshot: Record<string, unknown>, config: IdleReminderConfig): Record<string, unknown> {
+  const decisionsOnly = config.reporting_scope === "decisions-only";
   return {
     schema: snapshot.schema,
     generated: snapshot.generated,
-    in_flight: Array.isArray(snapshot.in_flight) ? snapshot.in_flight : [],
-    gates: Array.isArray(snapshot.gates) ? snapshot.gates : [],
+    in_flight: !decisionsOnly && Array.isArray(snapshot.in_flight) ? snapshot.in_flight : [],
+    gates: !decisionsOnly && Array.isArray(snapshot.gates) ? snapshot.gates : [],
     decisions_open: Array.isArray(snapshot.decisions_open) ? snapshot.decisions_open : [],
   };
 }
 
-function reminderInventoryFingerprint(snapshot: Record<string, unknown>): string {
-  const inventory = reminderInventory(snapshot);
+function reminderInventoryFingerprint(snapshot: Record<string, unknown>, config: IdleReminderConfig): string {
+  const inventory = reminderInventory(snapshot, config);
   return createHash("sha256").update(JSON.stringify({
     schema: inventory.schema,
     in_flight: (inventory.in_flight as Array<Record<string, unknown>>).map((row) => ({
@@ -513,20 +500,24 @@ function reminderRequestInventoryFingerprint(content: unknown): string | null {
     if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") {
       return null;
     }
-    return reminderInventoryFingerprint(snapshot as Record<string, unknown>);
+    const config = readIdleReminderConfig(reminderConfigFile).config;
+    return config ? reminderInventoryFingerprint(snapshot as Record<string, unknown>, config) : null;
   } catch {
     return null;
   }
 }
 
-function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string): string {
+function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string, config: IdleReminderConfig): string {
+  const contentInstruction = config.reporting_scope === "decisions-only"
+    ? "List only genuine unanswered decisions requiring user judgment, with concrete options and one concise recommendation. If there is no such decision, emit no user-facing reminder."
+    : "First list unfinished outcomes with the real blocker or next action. Then list only genuine unanswered decisions requiring user judgment, with their options and one concise recommendation.";
   return encodeFirstmateOperationalInput("watcher", [
     "FIRSTMATE IDLE REMINDER",
     `reminder_id=${reminderId}`,
     "This is a scheduled operational follow-up at a safely idle MAIN-session boundary, not user input or implementation authority.",
     "Use only the canonical snapshot below. It already excludes completed and archived work; do not inspect historical reports or create another inventory.",
     "Write one concise Simplified Chinese reminder addressed to captain. If a time is useful, show it in UTC+8.",
-    "First list unfinished outcomes with the real blocker or next action. Then list only genuine unanswered decisions requiring user judgment, with their options and one concise recommendation.",
+    contentInstruction,
     "Do not expose task ids or internal status labels. Do not repeat standing local-Dorado routing or already-authorized ordinary permission declarations.",
     "Do not answer, release, close, or mutate any decision or task. Do not run stow or maintenance.",
     "If any row lacks its real blocker, next action, or decision options, use bin/fm-bearings-snapshot.sh --task with that row's internal id before replying.",
@@ -538,7 +529,7 @@ function reminderPrompt(snapshot: Record<string, unknown>, reminderId: string): 
 async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
   const generation = activeGeneration;
   if (!generation?.live || !isMainEligible()) return false;
-  const configured = readReminderConfig();
+  const configured = readIdleReminderConfig(reminderConfigFile);
   if (configured.error) {
     notifyReminderConfiguration(ctx, configured.error);
     return false;
@@ -560,8 +551,8 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
     if (!snapshot || typeof snapshot !== "object" || (snapshot as { schema?: unknown }).schema !== "fm-bearings.v1") {
       throw new Error("canonical reminder inventory returned the wrong schema");
     }
-    const inventoryFingerprint = reminderInventoryFingerprint(snapshot as Record<string, unknown>);
-    if (!reminderHasInventory(snapshot)) {
+    const inventoryFingerprint = reminderInventoryFingerprint(snapshot as Record<string, unknown>, config);
+    if (!reminderHasInventory(snapshot, config)) {
       recordReminderCheck(pi, ctx, generation, reminderEmptyType, inventoryFingerprint);
       return false;
     }
@@ -573,10 +564,10 @@ async function checkIdleReminder(pi: ExtensionAPI, ctx: ExtensionContext): Promi
     const reminderId = randomUUID();
     generation.reminderPendingId = reminderId;
     pi.sendMessage({ customType: reminderMessageType, display: false,
-      content: reminderPrompt(reminderInventory(snapshot), reminderId),
+      content: reminderPrompt(reminderInventory(snapshot, config), reminderId, config),
       details: { version: 1, reminder_id: reminderId, session_id: generation.sessionId,
         session_file: generation.sessionFile, requested_at: new Date(Date.now()).toISOString(),
-        inventory_fingerprint: inventoryFingerprint } },
+        inventory_fingerprint: inventoryFingerprint, reporting_scope: config.reporting_scope } },
     { triggerTurn: true, deliverAs: "followUp" });
     lastDispatchError = "";
     return true;
@@ -847,19 +838,21 @@ export default function periodicStow(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event) => {
     if (event.messageType !== "custom" || event.message.customType !== reminderMessageType) return;
     const details = event.message.details as { version?: unknown; reminder_id?: unknown;
-      inventory_fingerprint?: unknown } | undefined;
+      inventory_fingerprint?: unknown; reporting_scope?: unknown } | undefined;
     const generation = activeGeneration;
     if (!generation?.live || details?.version !== 1 || details.reminder_id !== generation.reminderPendingId ||
         typeof details.inventory_fingerprint !== "string") return;
     generation.reminderRun = { id: String(details.reminder_id), answered: false,
+      allowSilentResponse: details.reporting_scope === "decisions-only",
       inventoryFingerprint: details.inventory_fingerprint };
   });
   pi.on("message_end", (event) => {
     const run = activeGeneration?.reminderRun;
     if (!run || (event.message as { role?: unknown }).role !== "assistant") return;
     const message = event.message as { stopReason?: unknown };
-    run.answered = Boolean(assistantText(event.message)) && message.stopReason !== "error" &&
-      message.stopReason !== "aborted" && message.stopReason !== "toolUse";
+    const settledSuccessfully = message.stopReason !== "error" && message.stopReason !== "aborted" &&
+      message.stopReason !== "toolUse";
+    run.answered = settledSuccessfully && (run.allowSilentResponse || Boolean(assistantText(event.message)));
   });
   pi.on("agent_settled", (event, ctx) => {
     compacting = false;

@@ -131,6 +131,7 @@ import {
   successfulNotification,
   successfulResultSummary,
 } from "../../bin/fm-short-notification.mjs";
+import { readIdleReminderConfig } from "./lib/fm-idle-reminder-config.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -149,6 +150,7 @@ const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
 const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
+const reminderConfigFile = join(config, "idle-reminder.json");
 const CODEX_COMPAT_PACKAGE = "pi-openai-codex-compat";
 const CODEX_COMPAT_SOURCE = `npm:${CODEX_COMPAT_PACKAGE}`;
 
@@ -1325,6 +1327,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverRoutineOutcome(row: OutcomeRow): void {
+    if (readIdleReminderConfig(reminderConfigFile).config?.reporting_scope === "decisions-only") return;
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,

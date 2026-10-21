@@ -57,6 +57,7 @@ herdr_test_guard_cli "$LAB_SESSION" "$LAB/guard" "$HELPER" || fail 'Herdr lab gu
 export PATH="$LAB/guard:$PATH" HERDR_SESSION="$LAB_SESSION"
 
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$PROJECT/.pi/extensions/fm-branch-supervision.ts"
+cp "$ROOT/.pi/extensions/lib/fm-idle-reminder-config.ts" "$PROJECT/.pi/extensions/lib/fm-idle-reminder-config.ts"
 for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-feishu-native-channel fm-native-contract fm-operational-input fm-task-continuation; do
   cp "$ROOT/.pi/extensions/lib/$lib.ts" "$PROJECT/.pi/extensions/lib/$lib.ts"
 done
