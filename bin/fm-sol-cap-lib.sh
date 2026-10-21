@@ -295,7 +295,9 @@ fm_sol_cap_state_covers() {  # <state-dir> <model>
 fm_sol_cap_entry_shape() {  # <start> <pid>
   local start=$1 pid=$2
   case "$start" in '' | *[!0-9]*) return 1 ;; esac
-  case "$pid" in -1 | -2) return 0 ;; '' | *[!0-9]*) return 1 ;; esac
+  # -1 is a confirmed stop, -2 an adopted uncertain claim, -3 a superseded
+  # incarnation the next adoption resolves.
+  case "$pid" in -1 | -2 | -3) return 0 ;; '' | *[!0-9]*) return 1 ;; esac
 }
 
 fm_sol_cap_entry_live() {  # <start> <pid>
@@ -325,7 +327,7 @@ fm_sol_cap_home() {
 }
 
 fm_sol_cap_adopt_workers() (
-  local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current config
+  local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current config lifecycle_held
   trap '[ -z "$lifecycle_lock" ] || fm_lock_release "$lifecycle_lock"' EXIT
   file=$state/$FM_SOL_REGISTRY_NAME
   case "$state" in
@@ -355,24 +357,24 @@ fm_sol_cap_adopt_workers() (
         -2 | -3) ;;
         *) continue ;;
       esac
-      # The lifecycle boundary: a replacement in flight owns this task's
-      # spawn lock, and the metadata it is replacing must not be read as a
-      # stopped worker until that replacement has finished.
-      owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
-      fm_current_pid current || return 1
-      [ "$owner" != "$current" ] || continue
-      fm_lock_try_acquire "$state/.spawn-$id.lock" || continue
-      lifecycle_lock=$state/.spawn-$id.lock
+    fi
+    # The lifecycle boundary: a replacement in flight owns this task's spawn
+    # lock. The metadata it is replacing must not be read as a stopped
+    # worker, and the worker must not go uncounted either, so it is adopted
+    # as an uncertain claim rather than recorded as a stop.
+    lifecycle_held=0
+    owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
+    fm_current_pid current || return 1
+    if [ "$owner" = "$current" ]; then
+      lifecycle_held=1
+    elif ! fm_lock_try_acquire "$state/.spawn-$id.lock"; then
+      lifecycle_held=1
     else
-      # An initial adoption reads the metadata of a task with no row. A
-      # replacement in flight owns this task's spawn lock, so the stop
-      # evidence of the incarnation it is replacing must not be recreated
-      # here.
-      owner=$(cat "$state/.spawn-$id.lock/pid" 2>/dev/null || true)
-      fm_current_pid current || return 1
-      [ "$owner" != "$current" ] || continue
-      fm_lock_try_acquire "$state/.spawn-$id.lock" || continue
       lifecycle_lock=$state/.spawn-$id.lock
+    fi
+    if [ "$lifecycle_held" = 1 ]; then
+      fm_sol_cap_registry_claim "$file" "$id" "$model" "$now" -2 || return 1
+      continue
     fi
     verdict=unreadable
     host=$(awk -F= '$1 == "remote_host" {sub(/^[^=]*=/, ""); print; exit}' "$meta") || return 1
@@ -589,12 +591,15 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # on the admission boundary at all.
     [ -e "$state/$id.meta" ] || return 0
     grep -Fq "$(printf '%s\t' "$id")" "$state/$FM_SOL_REGISTRY_NAME" 2>/dev/null || return 0
-    if ! fm_sol_cap_lock_acquire "$lock" "task $id"; then
-      return 1
+    # The invalidation never waits on the admission boundary: a dispatch that
+    # reserves no slot must not be aborted by ceiling contention, and the
+    # row it marks keeps counting until the next adoption resolves it.
+    if ! fm_lock_try_acquire "$lock"; then
+      return 0
     fi
     if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
-      return 1
+      return 0
     fi
     fm_lock_release "$lock" || true
     return 0
