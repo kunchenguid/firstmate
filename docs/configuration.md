@@ -2119,14 +2119,6 @@ FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh models   $FM_HOME/config   # the declared
 FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh ceiling  $FM_HOME/config   # the effective ceiling, or "inert"
 ```
 
-**The declaration is the contract**
-
-- There is no built-in ceiling and no built-in model set: the ceiling value, the declared maximum, and the covered models all come from the captain's own file.
-- An absent `config/sol-cap` leaves the guard inert: no ceiling, no reservation, no registry row, and no change to any dispatch.
-- A `config/sol-cap` that is present but unreadable or malformed refuses dispatch loudly, naming the file and the problem, instead of falling back to a default.
-- A `ceiling` above the declared `max` is refused, so the effective cap can only ever lower the captain's own maximum.
-- The guard's model set is exactly what the captain declared; a model the declaration does not name is never capped and never counted, whatever a dispatch table happens to contain.
-
 **One model, one capacity path**
 
 This guard is the narrow, per-home form of a fleet-wide capacity rule.
