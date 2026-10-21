@@ -58,6 +58,20 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   content=$(cat "$file")
   content=${content//'{TASK}'/$intent}
   content=${content//'{FIRSTMATE_SPEC}'/$spec}
+  content=${content//'{ACCEPTANCE_CRITERIA}'/$intent}
+  content=${content//'{VERIFICATION_PATH}'/Exercise the spawn behavior under test.}
+  content=${content//'{REQUIRED_ARTIFACT}'/A task record for this task.}
+  content=${content//'{OUT_OF_SCOPE}'/Nothing beyond the task under test.}
+  printf '%s\n' "$content" > "$file"
+}
+
+# Fill only the two Task subsections, leaving the four required task fields
+# at their scaffolded placeholders.
+fill_brief_task_sections_only() {  # <file> <intent> <spec>
+  local file=$1 intent=$2 spec=$3 content
+  content=$(cat "$file")
+  content=${content//'{TASK}'/$intent}
+  content=${content//'{FIRSTMATE_SPEC}'/$spec}
   printf '%s\n' "$content" > "$file"
 }
 
@@ -732,6 +746,61 @@ EOF
   assert_contains "$out" "must contain nonempty ## Captain's intent and ## Firstmate spec" \
     "empty Task subsections were not rejected semantically"
   assert_absent "$home/state/$id.meta" "empty-subsection spawn wrote task metadata"
+
+  # The four required task fields are a dispatch gate, not prose. A brief
+  # whose field still holds its placeholder, whose field body is empty, or
+  # whose field section was removed must be refused, and the refusal must
+  # name the field to write. A brief carrying all four and filled must pass
+  # the gate and fail later instead, on the fake tmux.
+  id=delivery-unfilled-field
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "unfilled-field ship brief should still scaffold"
+  fill_brief_task_sections_only "$home/data/$id/brief.md" "Ship the change." "Keep the mode."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a brief with an unfilled task field should exit non-zero"
+  assert_contains "$out" "missing a required task field" \
+    "an unfilled task field did not stop the spawn"
+  assert_contains "$out" "## Acceptance criteria" \
+    "the field refusal did not name the first unfilled field to write"
+  assert_absent "$home/state/$id.meta" "an unfilled task field still wrote task metadata"
+
+  id=delivery-empty-field
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "empty-field ship brief should still scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the change." "Keep the mode."
+  awk 'BEGIN{skip=0} /^## Required artifact$/ {skip=1; next} /^## Out of scope$/ {skip=0; print ""; next} !skip {print}' \
+    "$home/data/$id/brief.md" > "$home/data/$id/brief.md.tmp" \
+    && mv "$home/data/$id/brief.md.tmp" "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a brief with an empty task field should exit non-zero"
+  assert_contains "$out" "missing a required task field" \
+    "an empty task field did not stop the spawn"
+  assert_contains "$out" "## Required artifact" \
+    "the field refusal did not name the empty field"
+
+  id=delivery-removed-field
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "removed-field ship brief should still scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the change." "Keep the mode."
+  awk 'BEGIN{skip=0} /^## Required artifact$/ {skip=1; next} /^## Out of scope$/ {skip=0; print "## Required artifact"; next} !skip {print}' \
+    "$home/data/$id/brief.md" > "$home/data/$id/brief.md.tmp" \
+    && mv "$home/data/$id/brief.md.tmp" "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a brief with a removed task field should exit non-zero"
+  assert_contains "$out" "missing a required task field" \
+    "a removed task field did not stop the spawn"
+
+  # A brief that predates the field contract carries no field section at all.
+  # It stays dispatchable, so a task already in flight can still be relaunched.
+  id=delivery-legacy-no-fields
+  mkdir -p "$home/data/$id"
+  write_brief "$home" "$id" direct-PR
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "missing a required task field" \
+    "a brief predating the field contract was refused for missing fields"
 
   id=promote-unfilled-e1
   meta="$home/state/$id.meta"

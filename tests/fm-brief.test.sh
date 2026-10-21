@@ -17,6 +17,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-brief-heading-lib.sh
+. "$ROOT/bin/fm-brief-heading-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
@@ -740,19 +742,78 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     count=$(grep -c -F '{FIRSTMATE_SPEC}' "$brief")
     [ "$count" = 1 ] \
       || fail "$kind brief must carry exactly one {FIRSTMATE_SPEC} fill site, found $count"
+    count=$(grep -c -F '{ACCEPTANCE_CRITERIA}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {ACCEPTANCE_CRITERIA} fill site, found $count"
+    count=$(grep -c -F '{VERIFICATION_PATH}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {VERIFICATION_PATH} fill site, found $count"
+    count=$(grep -c -F '{REQUIRED_ARTIFACT}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {REQUIRED_ARTIFACT} fill site, found $count"
+    count=$(grep -c -F '{OUT_OF_SCOPE}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {OUT_OF_SCOPE} fill site, found $count"
     content=$(cat "$brief")
     filled=${content//'{TASK}'/$body}
     filled=${filled//'{FIRSTMATE_SPEC}'/$spec}
+    filled=${filled//'{ACCEPTANCE_CRITERIA}'/$body}
+    filled=${filled//'{VERIFICATION_PATH}'/$spec}
+    filled=${filled//'{REQUIRED_ARTIFACT}'/$body}
+    filled=${filled//'{OUT_OF_SCOPE}'/$spec}
     count=$(printf '%s\n' "$filled" | grep -c -F "$body")
-    [ "$count" = 1 ] \
-      || fail "$kind brief: the documented {TASK} replace duplicated the intent body $count times"
+    [ "$count" = 3 ] \
+      || fail "$kind brief: the documented replaces duplicated a fill body $count times"
     count=$(printf '%s\n' "$filled" | grep -c -F "$spec")
-    [ "$count" = 1 ] \
-      || fail "$kind brief: the {FIRSTMATE_SPEC} replace duplicated the spec body $count times"
+    [ "$count" = 3 ] \
+      || fail "$kind brief: the documented replaces duplicated a fill body $count times"
     printf '%s\n' "$filled" | grep -qF 'this scaffold cannot inspect the task text' \
       || fail "$kind brief: the Herdr safety gate did not survive the documented fill"
   done
-  pass "fm-brief.sh: the documented {TASK} and {FIRSTMATE_SPEC} fills cannot corrupt the Herdr safety gate"
+  pass "fm-brief.sh: the documented fills cannot corrupt the Herdr safety gate"
+}
+
+# Every ship and scout brief carries four required task fields, each its own
+# section with a fill placeholder, and the dispatch path refuses a brief whose
+# field is missing, empty, or still a placeholder. A brief that predates the
+# contract (no field section at all) stays valid, so a task dispatched before
+# the contract landed can still be relaunched.
+test_ship_and_scout_briefs_carry_four_required_task_fields() {
+  local home id brief kind token heading placeholder body
+  home="$TMP_ROOT/four-field-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="four-field-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    for token in \
+      "## Acceptance criteria|{ACCEPTANCE_CRITERIA}" \
+      "## Verification path|{VERIFICATION_PATH}" \
+      "## Required artifact|{REQUIRED_ARTIFACT}" \
+      "## Out of scope|{OUT_OF_SCOPE}"; do
+      heading="${token%%|*}"
+      placeholder="${token##*|}"
+      assert_grep "$heading" "$brief" "$kind brief is missing the $heading field"
+      body=$(fm_brief_task_heading_body "$brief" "$heading")
+      assert_equals "$placeholder" "$body" \
+        "$kind brief: the $heading field must scaffold as its own placeholder"
+    done
+  done
+
+  # A secondmate charter is not a task brief and must not grow the fields.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle sample work.' \
+    "$ROOT/bin/fm-brief.sh" four-field-mate --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/four-field-mate/brief.md"
+  assert_no_grep "## Acceptance criteria" "$brief" \
+    "a secondmate charter must not grow the ship task fields"
+
+  pass "fm-brief.sh: every ship and scout brief carries the four required task fields"
 }
 
 test_secondmate_no_projects_charter() {
@@ -1655,6 +1716,7 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
+test_ship_and_scout_briefs_carry_four_required_task_fields
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract

@@ -58,12 +58,18 @@ import sys
 
 brief = Path(sys.argv[1])
 status = sys.argv[2]
-brief.write_text(brief.read_text().replace("{TASK}", f'''Run a cmux communication probe.
+text = brief.read_text().replace("{TASK}", f'''Run a cmux communication probe.
 
 Immediately append `working [at=<epoch>]: cmux composer probe ready` to `{status}`, substituting `<epoch>` as rule 4 instructs.
 Then append exactly `needs-decision [at=<epoch>] [key=probe-decision]: awaiting codeword` to that file and stop to wait for a firstmate message.
 When you receive a firstmate message containing `ALBATROSS`, append `done [at=<epoch>]: received ALBATROSS` to that status file and stop.
-Do not change project files or make a commit.'''))
+Do not change project files or make a commit.''')
+text = text.replace("{FIRSTMATE_SPEC}", "Append the three status lines the intent names and change nothing else.")
+text = text.replace("{ACCEPTANCE_CRITERIA}", "The probe appends the working, needs-decision, and done status lines and changes no project file.")
+text = text.replace("{VERIFICATION_PATH}", "Read the probe's status file and confirm the three lines are present.")
+text = text.replace("{REQUIRED_ARTIFACT}", "Three status lines in the probe's status file.")
+text = text.replace("{OUT_OF_SCOPE}", "No project file change and no commit.")
+brief.write_text(text)
 PY
 
 FM_HOME="$LAB" "$ROOT/bin/fm-spawn.sh" "$TASK" "$LAB/projects/comms" --scout --harness claude --model haiku --backend cmux \

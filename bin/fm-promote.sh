@@ -264,6 +264,10 @@ if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before promotion" >&2
   exit 1
 fi
+if UNFILLED_FIELD=$(fm_brief_task_field_unfilled "$SCOUT_BRIEF"); then
+  echo "error: $SCOUT_BRIEF is missing a required task field: $UNFILLED_FIELD is absent, empty, or still its placeholder; fill it before promotion" >&2
+  exit 1
+fi
 if ADDRESS_LINE=$(fm_brief_intent_address_line "$SCOUT_BRIEF"); then
   echo "error: $SCOUT_BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before promotion, since the heading already records provenance" >&2
   exit 1

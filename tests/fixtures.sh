@@ -304,6 +304,18 @@ $intent
 
 ## Firstmate spec
 Exercise the spawn behavior under test.
+
+## Acceptance criteria
+The spawn behavior under test reaches its expected outcome.
+
+## Verification path
+Run the suite that covers the spawn behavior under test.
+
+## Required artifact
+A task record for $id.
+
+## Out of scope
+Nothing beyond the spawn behavior under test.
 EOF
 }
 

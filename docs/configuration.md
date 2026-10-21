@@ -1169,6 +1169,18 @@ The text is static and never executed or expanded; secondmate charters never tak
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
 
+## Required brief task fields
+
+Every ship and scout brief carries four required task fields in its `# Task` section, each scaffolded as its own section with a fill placeholder: `## Acceptance criteria` (`{ACCEPTANCE_CRITERIA}`), `## Verification path` (`{VERIFICATION_PATH}`), `## Required artifact` (`{REQUIRED_ARTIFACT}`), and `## Out of scope` (`{OUT_OF_SCOPE}`).
+They state what "done" means, the exact command or check that proves it, what the task produces, and what the task does not cover.
+
+`bin/fm-spawn.sh` and `bin/fm-promote.sh` refuse a brief whose field is absent, empty, or still its placeholder, and the refusal names the field to write, so a task cannot reach a worker without them.
+A brief that carries none of the four sections predates the contract and stays dispatchable, so a task already in flight can still be relaunched.
+A secondmate charter is not a task brief and never carries them.
+
+`bin/fm-brief-heading-lib.sh` owns the field list and the unfilled-field reader, and `bin/fm-brief.sh`'s header owns the scaffold syntax.
+The [verification record](verification/brief-task-fields.md) holds the measured before-state and the re-measurement procedure.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

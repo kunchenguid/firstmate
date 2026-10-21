@@ -2049,6 +2049,10 @@ test_worker_launch_delivers_role_scope() {
       content=$(cat "$brief")
       content=${content//'{TASK}'/brief for $id}
       content=${content//'{FIRSTMATE_SPEC}'/Exercise the spawn behavior under test.}
+      content=${content//'{ACCEPTANCE_CRITERIA}'/The spawn behavior under test reaches its expected outcome.}
+      content=${content//'{VERIFICATION_PATH}'/Run the suite that covers the spawn behavior under test.}
+      content=${content//'{REQUIRED_ARTIFACT}'/A task record for $id.}
+      content=${content//'{OUT_OF_SCOPE}'/Nothing beyond the spawn behavior under test.}
       printf '%s\n' "$content" > "$brief"
     fi
     cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"

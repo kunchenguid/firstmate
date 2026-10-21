@@ -3574,6 +3574,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
+  if UNFILLED_FIELD=$(fm_brief_task_field_unfilled "$BRIEF"); then
+    echo "error: $BRIEF is missing a required task field: $UNFILLED_FIELD is absent, empty, or still its placeholder; fill it before spawn" >&2
+    exit 1
+  fi
   if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
