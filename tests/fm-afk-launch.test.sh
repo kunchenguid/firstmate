@@ -1809,7 +1809,11 @@ unit_unverifiable_owners_preserve_lifecycle() {
       for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked .wake-queue; do
         printf 'retained %s\n' "$artifact" > "$st/state/$artifact"
       done
-      printf '#!/usr/bin/env bash\n: > "$FM_HOME/acted"\nexit 1\n' > "$st/bin/tmux"
+      cat > "$st/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/acted"
+exit 1
+SH
       cp "$st/bin/tmux" "$st/bin/daemon"
       chmod +x "$st/bin/tmux" "$st/bin/daemon"
       sleep 600 &
@@ -1840,7 +1844,7 @@ unit_unverifiable_owners_preserve_lifecycle() {
             fm_afk_start_main
           ' _ "$START" "$action" > "$st/output" 2>&1 || rc=$?
         elif [ "$action" = readiness ]; then
-          FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" FM_AFK_LAUNCH_ENTRY= \
+          FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_PROC_ROOT_OVERRIDE="$st/proc" FM_AFK_LAUNCH_ENTRY='' \
             PATH="$st/bin:$PATH" bash -c '
               . "$1"
               fm_afk_launch_commit_terminal tmux disposable-terminal owned 1
@@ -1905,7 +1909,7 @@ unit_readiness_waits_for_identity_publication() {
     printf '%s' "$pid" > "$st/state/.supervise-daemon.lock/pid"
     bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$st/identity"
     rc=0
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY= bash -c '
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY='' bash -c '
       . "$1"
       sleep() { : > "$FM_HOME/polled"; command sleep "$@"; }
       tmux() { : > "$FM_HOME/terminal-probe"; return 1; }
@@ -1944,7 +1948,7 @@ fi
 SH
   chmod +x "$st/bin/tmux"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=disposable-captain \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY= PATH="$st/bin:$PATH" \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY='' PATH="$st/bin:$PATH" \
     "$LAUNCH" start > "$st/output" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ] && kill -0 "$pid" 2>/dev/null && [ ! -e "$st/closed" ] \
     && [ -f "$st/state/.afk" ] && [ -f "$st/state/.afk-contract" ] \
