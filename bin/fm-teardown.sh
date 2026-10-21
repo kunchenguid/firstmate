@@ -2658,13 +2658,13 @@ require_exclusive_task_worktree_slot() {
 # The record scan above proves that no OTHER task record names the slot, unless
 # a claim from this home names this task, in which case any such record whose
 # own recorded endpoint is proven not live is stale. The scan alone cannot prove
-# that THIS record is
-# not the stale one, because the task that took the slot next may leave no record
-# this scan can reach: its own worker may have exited and its record been cleaned
-# up, or it may belong to a home this machine does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# that THIS record is not the stale one, because the task that took the slot next
+# may leave no record this scan can reach: its own worker may have exited and its
+# record been cleaned up, or it may belong to a home this machine does not
+# register. The claim closes that gap from the other side - it names the task
+# that actually took the slot, and it is written under the same project lock that
+# allocates it - so a claim naming another task is proof the slot was reassigned
+# after this record was written.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
