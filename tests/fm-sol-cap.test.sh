@@ -385,6 +385,27 @@ test_the_adoption_resolves_a_superseded_row() {
   pass "the adoption resolves a superseded row into the live incarnation it names"
 }
 
+# A superseded row whose current incarnation claims no slot is resolved: the
+# prior incarnation's occupancy must not count forever.
+test_an_uncapped_incarnation_resolves_a_superseded_row() {
+  local case_dir state
+  case_dir=$(make_case superseded-uncapped)
+  state=$case_dir/home/state
+  FM_HOME=$case_dir/home
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+  . "$ROOT/bin/fm-sol-cap-lib.sh"
+  fm_backend_of_meta() { printf tmux; }
+  fm_backend_target_of_meta() { printf '%s' "${1##*/}"; }
+  fm_backend_agent_state() { printf alive; }
+  fm_write_meta "$state/one.meta" "model=glm-5" "kind=ship"
+  printf 'one\tgpt-6.1-sol\t1\t-3\n' > "$state/sol-sessions.tsv"
+  fm_sol_cap_active_count "$state" || fail "the adoption failed"
+  [ ! "$(registry_row_field "$case_dir" one 1)" ] ||
+    fail "a superseded row for an uncapped incarnation was not resolved"
+  pass "an uncapped incarnation resolves the superseded row it replaced"
+}
+
 # A replacement dispatched while the guard is off must not leave the prior
 # incarnation's row behind: that row names this task's id while describing a
 # session that has exited, and adoption skips it, so a later declaration would
@@ -1083,6 +1104,7 @@ test_a_row_whose_model_was_dropped_holds_no_occupancy
 test_a_replacement_while_the_guard_is_off_invalidates_the_prior_row
 test_a_replacement_on_an_excluded_model_invalidates_the_prior_row
 test_the_adoption_resolves_a_superseded_row
+test_an_uncapped_incarnation_resolves_a_superseded_row
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

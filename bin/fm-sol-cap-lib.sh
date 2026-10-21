@@ -350,7 +350,15 @@ fm_sol_cap_adopt_workers() (
     id=${meta##*/}
     id=${id%.meta}
     model=$(awk -F= '$1 == "model" {sub(/^[^=]*=/, ""); print; exit}' "$meta") || return 1
-    fm_sol_cap_model_capped "$model" || continue
+    if ! fm_sol_cap_model_capped "$model"; then
+      # This incarnation claims no slot, but it may be replacing a capped
+      # one: its superseded row must be resolved here, or the prior
+      # incarnation's occupancy counts forever.
+      if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id && $4 == -3 {found=1; exit} END {exit !found}' "$file"; then
+        fm_sol_cap_registry_remove_row "$file" "$id" || return 1
+      fi
+      continue
+    fi
     if [ -f "$file" ] && awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$file"; then
       pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$file") || return 1
       case "$pid" in
@@ -516,6 +524,27 @@ fm_sol_cap_registry_claim() {  # <registry-file> <id> <model> <now>
   mv -- "$tmp" "$file" || {
     rm -f -- "$tmp"
     echo "error: Sol ceiling: Sol registry $file could not be rewritten" >&2
+    return 1
+  }
+  return 0
+}
+
+# fm_sol_cap_registry_remove_row <registry-file> <id>
+# Remove this task id's row, keeping every other row. Used to resolve a
+# superseded row whose current incarnation claims no slot, so the prior
+# incarnation's occupancy does not count forever.
+fm_sol_cap_registry_remove_row() {  # <registry-file> <id>
+  local file=$1 id=$2 tmp rc
+  [ -f "$file" ] || return 0
+  tmp=$file.tmp.remove.$$
+  awk -F'\t' -v id="$id" '$1 != id' "$file" > "$tmp" 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
     return 1
   }
   return 0
