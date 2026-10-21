@@ -271,7 +271,7 @@ try:
             raise AssertionError('macOS ps lstart public interface unavailable')
         print('skip - timezone public listing: ps -o lstart= unsupported')
     else:
-        (state / (task + '.meta')).write_text('backend=tmux\nwindow=fmtest:fm-timezone-test\n'
+        (state / (task + '.meta')).write_text('backend=tmux\nwindow=fmtest:fm-timezone-test-task\n'
             + 'worktree=' + str(home / 'unused-worktree') + '\nproject=fmtest\n')
         assert pe('register-task', 'lavish', source, task, '--', '/bin/true').returncode == 0
         acquired = shell('fm_procevent_source_lock_acquire "$2" || exit; '
@@ -5130,7 +5130,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.

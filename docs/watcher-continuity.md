@@ -190,7 +190,7 @@ The next Stop then re-arms as before.
 
 The durable wake queue preserves actionable events between a watcher close and the next drain.
 The bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding.
-So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
+[`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns claim replacement eligibility, including the refusal to replace a live claim whose recorded identity is unverifiable.
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.

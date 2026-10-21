@@ -48,6 +48,15 @@
 # daemon to park a present captain's main.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
+# An unverifiable live launcher owner refuses lock reclamation. An unverifiable
+# live daemon owner makes start, start-native, stop, and reconcile return 2,
+# preserving lifecycle state rather than replacing or signalling that owner.
+# Terminal launch readiness keeps polling through transient missing identity
+# for its existing 100 attempts at 0.05-second intervals. If identity remains
+# unverifiable at the deadline, it preserves the terminal and lifecycle records
+# and returns 2; quiet-mode rollback also leaves that uncertain owner intact.
+# The compatibility limit is owned by docs/configuration.md
+# "Machine-wide source ownership".
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
@@ -622,8 +631,8 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
   return 1
 }
 
-# Reconcile a recorded-but-dead terminal: if a record exists and no live daemon
-# owns it, close the leaked terminal by exact id and drop the record.
+# Reconcile a recorded-but-dead terminal only after daemon ownership is proved
+# absent or mismatched in a comparable stable format; uncertainty preserves it.
 fm_afk_launch_reconcile() {
   local read_result owner_result
   owner_result=0

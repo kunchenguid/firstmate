@@ -602,7 +602,9 @@ test_lock_stale_steal_single_winner_under_concurrency() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
+  # Stock macOS Bash can interrupt the FIFO open when a losing child exits.
+  # Keep waiting for the winner instead of joining it before releasing it.
+  until IFS= read -r winner < "$gate"; do :; done
   [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
     [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true

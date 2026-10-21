@@ -29,6 +29,8 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - live watcher identity is unverifiable; preserving lock
+#                                                        - ownership cannot be proved
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
@@ -84,7 +86,10 @@
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
 # as any watcher close does; prints "watcher: stopped pid=<N>" or
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
-# the stop.
+# the stop or its live identity could not be verified.
+# Every mode refuses an unverifiable live watcher claim before signalling,
+# clearing its lock, or launching a replacement. The compatibility limit is
+# owned by docs/configuration.md "Machine-wide source ownership".
 #
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode

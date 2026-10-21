@@ -2294,7 +2294,7 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 **Ownership and recovery**
 
-- A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
+- A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, `uncertain`, or `dead` from the claim and handled captures without a second ownership record.
 - If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
 - The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
 - The interim crew instruction emitted by `bin/fm-brief.sh` points workers at this arm-and-acknowledge contract.
