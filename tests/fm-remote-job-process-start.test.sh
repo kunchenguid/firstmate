@@ -150,6 +150,26 @@ test_pre_update_legacy_lstart_still_verifies() {
   pass "pre-update bare lstart still verifies; drifted and dead cookies do not"
 }
 
+test_c_locale_cookie_verifies_under_localized_ps() (
+  local proc_root="$TMP_ROOT/proc-locale" canonical localized candidate
+  write_fake_proc_stat "$proc_root" "$$" worker 987654
+  export FM_PROC_ROOT_OVERRIDE="$proc_root"
+  canonical=$(LC_ALL=C /bin/ps -p "$$" -o lstart=) || fail "C lstart read failed"
+  for candidate in de_DE.UTF-8 fr_FR.UTF-8 ja_JP.UTF-8; do
+    locale -a | tr '[:upper:]' '[:lower:]' | fgrep -ix "$candidate" >/dev/null || continue
+    export LC_ALL="$candidate"
+    localized=$(/bin/ps -p "$$" -o lstart=) || fail "localized lstart read failed"
+    [ "$localized" != "$canonical" ] || continue
+    fm_remote_job_start_matches "$canonical" "$$" || fail "C cookie rejected under $candidate"
+    fm_remote_job_start_matches "$localized" "$$" || fail "ambient cookie rejected under $candidate"
+    fm_remote_job_start_matches 'invalid-cookie' "$$" && fail "invalid cookie accepted"
+    fm_remote_job_start_matches proc-starttime=1 "$$" && fail "wrong proc token accepted"
+    pass "C and ambient cookies verify with localized ps and proc identity"
+    return
+  done
+  pass "localized cookie comparison skipped without a differing installed locale"
+)
+
 test_pre_update_worker_lock_verifies_then_code_identity_replaces() {
   local old new legacy_start
   has_proc || { pass "pre-update worker lock upgrade skipped without /proc"; return; }
@@ -231,6 +251,7 @@ test_token_changes_with_starttime
 test_malformed_proc_stat_and_pid_are_rejected
 test_lstart_fallback_without_proc
 test_pre_update_legacy_lstart_still_verifies
+test_c_locale_cookie_verifies_under_localized_ps
 test_dead_owner_with_stale_ready_gets_one_replacement
 test_pre_update_worker_lock_verifies_then_code_identity_replaces
 test_repeated_ensure_never_piles_supervisors

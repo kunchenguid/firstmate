@@ -1014,6 +1014,9 @@ fm_remote_job_start_matches() { # <recorded-start> <pid>
     case "$recorded" in proc-starttime=*) return 1 ;; esac
   fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  if value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null); then
+    [ "$recorded" = "$value" ] && return 0
+  fi
   value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
