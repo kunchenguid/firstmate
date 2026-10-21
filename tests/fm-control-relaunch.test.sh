@@ -3279,6 +3279,9 @@ test_observed_predecessors_and_opt_out_successors() {
       cp "$home/config/fleet-seats" "$dir/policy"
       rm "$home/config/fleet-seats"
     fi
+    out=$(run_control "$dir" rl63 exit); rc=$?
+    expect_code 0 "$rc" "exit observing $kind predecessor: $out"
+    assert_equals true "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "exit lost the observed startup for $kind"
     out=$(run_control "$dir" rl63 relaunch --model pool-model-a --note "observed predecessor"); rc=$?
     expect_code 0 "$rc" "observed $kind predecessor: $out"
     gen=$(meta_field "$dir" rl63 spawn_gen)
@@ -3312,9 +3315,8 @@ test_standalone_relaunch_completes_the_predecessor_handoff() {
       PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
       "$SEATS" reserve rl64 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
       (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl64\",\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
-      "$SEATS" dispatch rl64 --generation "$1" --route-file "$3" >/dev/null || exit 1
-      "$SEATS" confirm rl64 --generation "$1" >/dev/null
-    ' _ "$old" "$kind" "$route" || fail "could not confirm the standalone predecessor"
+      "$SEATS" dispatch rl64 --generation "$1" --route-file "$3" >/dev/null
+    ' _ "$old" "$kind" "$route" || fail "could not dispatch the standalone predecessor"
     for model in pool-model-b pool-model-a; do
       out=$(run_control "$dir" rl64 exit); rc=$?
       expect_code 0 "$rc" "stop before standalone $kind relaunch: $out"
@@ -3332,7 +3334,6 @@ test_standalone_relaunch_completes_the_predecessor_handoff() {
       if [ "$kind" = secondmate ]; then
         assert_equals true "$(case_seats "$dir" show rl64 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "fractional startup wait did not confirm the supervisor"
       fi
-      case_seats "$dir" confirm rl64 --generation "$gen" >/dev/null || fail "observing the running replacement"
       old=$gen
     done
   done
