@@ -1103,8 +1103,7 @@ The brief's portable regression is `tests/fm-brief.test.sh`; rerun these command
 
 ## Backgrounded no-mistakes drive detach
 
-When `config/wait-no-turns` is absent, `bin/fm-dod-lib.sh` still allows a backgrounded `no-mistakes axi run`, but only through a harness mechanism that returns the command output to the same worker.
-`nohup` and a trailing `&` are not that path: they return a pid while the drive is still running, so a worker that then ends the turn never sees the parked gate as a tool result.
+The current drive policy is owned by [Waiting worker spends no turns](../configuration.md#waiting-worker-spends-no-turns-configwait-no-turns); `bin/fm-dod-lib.sh` owns the generated worker instructions.
 The portable regression is `bash tests/fm-nm-drive-detach.test.sh`.
 It executes Bash detach shapes against a stub drive and separately checks the generated brief as an instruction contract; it requires neither Pi nor the shared no-mistakes daemon.
 The observed Pi/Grok worker incident involved detached drive calls returning before the parked gate was available to the worker.
