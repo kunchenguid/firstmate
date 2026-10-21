@@ -94,8 +94,8 @@ While supervision is still needed and away mode remains inactive, an actionable 
 
 The hook handles the session lock as follows:
 
-- A session-lock owner, including a tagged `win:<pid>` holder on Windows/Git Bash, that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes.
-- A live owner the session does not own, an absent lock, or an unusable lock keeps the competing hook inert.
+- A well-formed session-lock owner is a numeric PID, or a tagged `win:<pid>` value on a Cygwin-family Git Bash host, and its liveness is judged by the shared `fm_harness_pid_alive` predicate. `bin/fm-lock.sh` reclaims confirmed-dead owners, reused non-harness PIDs, malformed values, and zero-valued numeric records; recovery stays inert when a live owner's identity cannot be read. The shared ownership decision and process-info fallback are defined by `bin/fm-session-lock-lib.sh`.
+- A live owner the session does not own, an absent lock, or a malformed or otherwise unusable lock keeps the competing hook inert.
 
 Whether the session owns that lock is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 That verdict accepts either of two cases:
