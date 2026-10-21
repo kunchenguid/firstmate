@@ -155,6 +155,7 @@ assert_equals 'existing legacy' "$(printf '%s\n' "$DISP" | jq -r '.disposition +
 printf '%s\n' "$DISP" > "$TMP/response"
 OUT=$(seats reconcile-remote ios --generation adoption.success --response-file "$TMP/response" 2>&1); RC=$?
 expect_code 0 "$RC" "importing a successfully bound legacy supervisor: $OUT"
+assert_equals "fixture-host $ROOT" "$(seats show ios | jq -r '.incarnations[] | select(.generation == "legacy") | .route.host + " " + .route.remote_root')" "host confirmation erased the parent route identity"
 assert_equals 'confirmed released' "$(seats show ios | jq -r '(.incarnations[] | select(.generation == "legacy") | .lifecycle) + " " + (.incarnations[] | select(.generation == "adoption.success") | .lifecycle)')" "existing-generation import freed all capacity"
 OUT=$(seats reserve contender --generation contender --harness claude --model pool-model-a --holder-pid "$$" 2>&1); RC=$?
 expect_code 4 "$RC" "successful adoption failed to count its existing supervisor: $OUT"

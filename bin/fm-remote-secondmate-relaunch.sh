@@ -101,20 +101,14 @@ seats() {
 # running: after a failed publication the record can still name an older one,
 # and a later relaunch must replace the confirmed generation, not that stale
 # projection.
-PREV_GEN=$(fm_meta_get "$META" remote_spawn_gen)
-[ -n "$PREV_GEN" ] || PREV_GEN=$(fm_meta_get "$META" fleet_seat_generation)
-LEDGER_GEN=$(seats show "$ID" 2>/dev/null \
-  | jq -r '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | ((map(select(.lifecycle == "confirmed")) | last) // last) | .generation // empty' 2>/dev/null || true)
-[ -z "$LEDGER_GEN" ] || PREV_GEN=$LEDGER_GEN
+# shellcheck source=bin/fm-remote-generation-lib.sh
+. "$SCRIPT_DIR/fm-remote-generation-lib.sh"
+fm_remote_generation_resolve || die "remote secondmate $ID's predecessor is unresolved; nothing was relaunched"
+PREV_GEN=$FM_REMOTE_GENERATION
 if [ -n "$EXPECT_GENERATION" ] && [ "$PREV_GEN" != "$EXPECT_GENERATION" ]; then
   echo "error: generation-mismatch: remote secondmate $ID now records generation '${PREV_GEN:-none}', not the expected $EXPECT_GENERATION; nothing was changed" >&2
   exit 6
 fi
-if [ -n "$LEDGER_GEN" ]; then
-  seats reclaim "$ID" --generation "$LEDGER_GEN" >&2 \
-    || die "remote secondmate $ID's ledger predecessor is unresolved; nothing was changed"
-fi
-[ -n "$PREV_GEN" ] || PREV_GEN=-
 NEW_GEN="s$(date +%s).$$.$RANDOM"
 
 SEAT_OUT=$(seats reserve "$ID" --generation "$NEW_GEN" --previous-generation "$PREV_GEN" --kind secondmate \
@@ -125,7 +119,7 @@ SEAT_TRACKED=0
 case "$SEAT_OUT" in 'fleet-seats: reserved '*|'fleet-seats: recorded '*) SEAT_TRACKED=1 ;; esac
 
 RELAUNCH_ARGS=(relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT")
-[ -z "$EXPECT_GENERATION" ] || RELAUNCH_ARGS+=(--expect-generation "$EXPECT_GENERATION")
+RELAUNCH_ARGS+=(--expect-generation "$PREV_GEN")
 if [ "$SEAT_TRACKED" -eq 1 ]; then
   ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || die "cannot stage the seat route for $ID"
   if ! { jq -cn --arg host "$REMOTE_HOST" --arg root "$(fm_meta_get "$META" remote_root)" \
