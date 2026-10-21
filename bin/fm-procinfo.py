@@ -138,25 +138,23 @@ def _procargs(pid):
             if not raw:
                 continue  # padding between the exec path and argv[0]
             collecting = True
-        if raw:
-            try:
-                argv.append(raw.decode("utf-8"))
-            except UnicodeDecodeError:
-                argv.append("?")
-        else:
-            # An empty element inside argv is real data - ps reports it
-            # too - so it is collected as "", never treated as padding.
-            argv.append("")
+        argv.append(raw)
         if len(argv) == argc:
             return argv
     return None
 
 
-def _flat(s):
-    """Collapse field and record delimiters so one read is one line."""
-    for ch in ("\t", "\r", "\n"):
-        s = s.replace(ch, " ")
-    return s
+def _ps_visible(raw):
+    result = []
+    for byte in raw:
+        if byte >= 128:
+            result.append("M-")
+            byte -= 128
+        if byte < 32 or byte == 127:
+            result.append("^" + chr(byte ^ 64))
+        else:
+            result.append(chr(byte))
+    return "".join(result)
 
 
 def main():
@@ -175,8 +173,8 @@ def main():
         # there - substituting a resolved path from elsewhere would
         # hand the two routes different facts about one process.
         return 1
-    comm = _flat(argv[0])
-    args = _flat(" ".join(argv))
+    comm = _ps_visible(argv[0])
+    args = _ps_visible(b" ".join(argv))
     sys.stdout.write("%d\t%s\t%s\n" % (ppid, comm, args))
     return 0
 

@@ -581,6 +581,29 @@ test_procinfo_helper_fails_closed() {
   pass "fm-procinfo.py: dead pid and broken offsets both produce an empty refusal"
 }
 
+test_control_bytes_match_ps_route() {
+  command -v python3 >/dev/null 2>&1 || { pass "control bytes: python3 absent, skipped"; return; }
+  local marker="$TMP_ROOT/control-ready" child i got expected
+  python3 -c 'import os, sys
+os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time; open(sys.argv[1], chr(119)).close(); time.sleep(40)", os.fsencode(sys.argv[1]), b"tab\tnewline\nhigh\xff"])' "$marker" &
+  child=$!
+  i=0
+  while [ ! -f "$marker" ] && [ "$i" -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
+  if [ ! -f "$marker" ]; then
+    kill "$child" 2>/dev/null
+    wait "$child" 2>/dev/null || :
+    fail "control-byte child did not become ready"
+  fi
+  expected=$(bash -c '. "$1"; fm_proc_info "$2" || exit; printf "%s\t%s\t%s\n" "$FM_PROC_PPID" "$FM_PROC_COMM" "$FM_PROC_ARGS"' x "$LIB" "$child") \
+    || { kill "$child"; fail "ps route refused control-byte child"; }
+  got=$(bash -c '. "$1"; fm_os_proc_triple "$2"' x "$LIB" "$child") \
+    || { kill "$child"; fail "provider refused control-byte child"; }
+  kill "$child" 2>/dev/null
+  wait "$child" 2>/dev/null || :
+  [ "$got" = "$expected" ] || fail "control-byte routes disagree: provider '$got', ps '$expected'"
+  pass "control bytes preserve identical identity fields across routes"
+}
+
 test_helper_identity_matches_ps_route() {
   # Route equivalence, the invariant that keeps a denied-ps host from
   # handing the foreign-owner guard a different verdict than ps gives:
@@ -773,6 +796,7 @@ test_e2e_real_tree_with_blocked_ps
 test_procinfo_helper_reports_real_facts
 test_procinfo_helper_fails_closed
 test_helper_identity_matches_ps_route
+test_control_bytes_match_ps_route
 test_procinfo_helper_survives_empty_argv_element
 
 echo "ALL PASS"
