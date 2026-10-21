@@ -109,6 +109,12 @@ human_attached=$(run_inbox "$home" note --attach /human/receipt.txt "human attac
   || fail "a human attachment note should succeed"
 assert_contains "$human_attached" "attachment /human/receipt.txt" \
   "the human receipt echoes an attachment"
+attached_list=$(run_inbox "$home" list) || fail "list should succeed with attachments"
+assert_contains "$attached_list" "  attachment $first_attachment" \
+  "list echoes the recorded attachment for the firstmate handling the note"
+attached_drain=$(run_inbox "$home" drain) || fail "drain should succeed with attachments"
+assert_contains "$attached_drain" "  attachment /human/receipt.txt" \
+  "drain echoes the recorded attachment"
 
 set +e
 relative_attachment=$(run_inbox "$home" note --attach relative.txt "refuse this" 2>&1)

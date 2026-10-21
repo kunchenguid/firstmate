@@ -41,8 +41,7 @@
 # `note --attach <absolute-path>` may be repeated to record caller-supplied
 # paths alongside a note.
 # Firstmate never opens, fetches, or uploads those paths.
-# They are echoed only in the note receipt and receipts records that list the
-# note.
+# They are echoed in the note receipt, `list`/`drain`, and receipts records.
 # `announce` repairs the wake for an already-saved note without creating another.
 # A note already acknowledged (in handled/) gets no wake from `announce` or a
 # request-id replay; both report it as acknowledged and exit 0.
@@ -1154,6 +1153,7 @@ cmd_list() {
     [ -e "$f" ] || break
     any=1
     printf '%s\n' "$(basename "$f" .note)"
+    read_note_attachments "$f" | sed 's/^/  attachment /'
     sed -n '/^--$/,$p' "$f" | tail -n +2 | sed 's/^/    /'
   done
   [ "$any" -eq 1 ] || printf '(inbox empty)\n'
