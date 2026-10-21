@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 
 fm_remote_generation_resolve() {
-  local ledger active route response tmp line
+  local ledger active route response tmp line config data
+  config=${CONFIG:-$FM_HOME/config}
+  data=${DATA:-$FM_HOME/data}
   ledger=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    FM_CONFIG_OVERRIDE="${CONFIG:-$FM_HOME/config}" FM_DATA_OVERRIDE="${DATA:-$FM_HOME/data}" \
+    FM_CONFIG_OVERRIDE="$config" FM_DATA_OVERRIDE="$data" \
     "$SCRIPT_DIR/fm-fleet-seats.sh" show "$ID") || return 1
   active=$(printf '%s\n' "${ledger:-null}" | jq -c '[.incarnations[]? | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]') || return 1
   if [ "$active" != '[]' ]; then
