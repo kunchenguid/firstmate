@@ -2231,11 +2231,6 @@ EOF
 # is still running opens this picker, and its selected row is Exit and stop tasks.
 #
 # Recorded 2026-10-20 on pi 1.3.0 (Linux): /model opens the model selector.
-# Its selected row is marked with a right arrow and a check, the other rows
-# are indented under it, and the last non-blank row is the select/save/cancel
-# footer. The search prompt and the provider hint above the rows are part of
-# the recorded screen but are not required for the match: the row marker and
-# the footer together are what identify this dialog.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -2248,19 +2243,14 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     printf '%s' 'Claude background-task exit picker'
     return 0
   fi
-  # The Pi model selector. The selected row carries the arrow and check
-  # markers, and the footer names the select, save and cancel keys of THIS
-  # picker. A screen that merely quotes those words - a diff, a note, a
-  # test fixture above a normal composer - has no selected row, so it does
-  # not match.
-  #
   # The class is [^[:space:]] and not \S: a stock macOS awk and mawk both
   # read \S as a literal S, so a \S pattern would never match the
   # recorded row and the guard would be silently dead there.
   if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
-    /^[ \t]*→[ \t]*✓[ \t]+[^[:space:]]/ { selected = 1 }
-    /[^ \t\r]/ { last = $0 }
-    END { exit !(selected && last ~ /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t\r]*$/) }
+    /^[ \t]*→[ \t]+(✓[ \t]+)?[^[:space:]]/ { selected = 1 }
+    /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t\r]*$/ { footer = 1; next }
+    footer && $0 !~ /^([ \t\r]|\342[\224\225][\200-\277])*$/ { footer = 0 }
+    END { exit !(selected && footer) }
   '; then
     printf '%s' 'Pi model selector'
     return 0

@@ -1899,6 +1899,53 @@ test_pi_model_selector_is_named_and_blocks_enter() {
   pass "the Pi model selector is named by its recorded rows and footer"
 }
 
+fm_test_pi_picker_state() {
+  fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN"
+}
+
+test_pi_model_selector_variants_and_quoted_content() {
+  local current border screen out rc sink enters
+  for current in '✓ ' ''; do
+    for border in '' '────────────────────────────────────────'; do
+      screen=$(printf '%s\n' '────────────────────────────────────────' \
+        "→ ${current}alpha-model-one [localfake]" \
+        '    beta-model-two [localfake]' \
+        '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+        "$border")
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+        || fail "Pi selector variant did not match: current='$current', border='$border'"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ "$(cat "$sink")" = 'Pi model selector' ] || fail "retry must report Pi selector"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = unknown ] && [ "$enters" -eq 1 ] \
+        || fail "Pi selector must stop retry: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+      screen=$(printf '%s\n' "$screen" '╭──────────────╮' '│ > next steer │' '╰──────────────╯')
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quoted Pi selector must not match"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ ! -s "$sink" ] || fail "quoted Pi selector must not be reported"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = pending ] && [ "$enters" -eq 3 ] \
+        || fail "quoted Pi selector must retain retries: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+    done
+  done
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "Pi selector marker and border variants block retries; quoted content does not"
+}
+
 test_dialog_matcher_is_portable_awk() {
   # The matcher runs under whatever awk the host has. A stock macOS awk
   # and mawk both read a \S as a literal S, so a \S pattern would never
@@ -1993,3 +2040,4 @@ test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only
+test_pi_model_selector_variants_and_quoted_content
