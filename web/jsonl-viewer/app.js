@@ -25,6 +25,7 @@ const state = {
   taskSelectionGeneration: 0,
   taskDocumentLoading: null,
   taskDocumentContent: null,
+  taskArchiveResults: new Map(),
   timer: null,
   authenticated: false,
   sidebarCollapsed: false,
@@ -180,6 +181,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskSnapshotGeneration = null;
   state.taskLoadError = "";
   state.taskDocumentLoading = null;
+  state.taskArchiveResults.clear();
   state.authenticated = false;
   elements.token.value = "";
   elements.rememberToken.checked = false;
@@ -1045,8 +1047,12 @@ function renderTaskDetail() {
   elements.taskDetailWarning.hidden = !task.warning;
   elements.taskDetailWarning.textContent = task.warning || "";
   elements.archiveTask.hidden = !["Waiting", "Processing"].includes(task.status);
-  elements.archiveTask.disabled = false;
-  elements.taskArchiveStatus.hidden = elements.taskArchiveStatus.dataset.taskId !== task.id;
+  const archiveResult = state.taskArchiveResults.get(task.id);
+  elements.archiveTask.disabled = Boolean(archiveResult?.pending);
+  elements.archiveTask.textContent = archiveResult?.pending ? "Archiving…" : "Archive task";
+  elements.taskArchiveStatus.hidden = !archiveResult;
+  elements.taskArchiveStatus.classList.toggle("error", Boolean(archiveResult?.error));
+  elements.taskArchiveStatus.textContent = archiveResult?.message || "";
   const documentTypes = task.documentTypes || (task.documentType ? [task.documentType] : []);
   for (const [source, button, label] of [
     ["brief", elements.taskDocumentBrief, "Brief"],
@@ -1062,15 +1068,12 @@ function renderTaskDetail() {
 
 async function archiveSelectedTask() {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
-  if (!task || !["Waiting", "Processing"].includes(task.status) || elements.archiveTask.disabled) return;
+  if (!task || !["Waiting", "Processing"].includes(task.status) || state.taskArchiveResults.get(task.id)?.pending) return;
   const confirmed = window.confirm("Archive this task? This stops further automatic progress. Existing code, reports, and unknown remote effects are preserved. Resource cleanup may remain pending when work cannot be safely returned.");
   if (!confirmed) return;
-  elements.archiveTask.disabled = true;
-  elements.archiveTask.textContent = "Archiving…";
-  elements.taskArchiveStatus.dataset.taskId = task.id;
-  elements.taskArchiveStatus.hidden = false;
-  elements.taskArchiveStatus.classList.remove("error");
-  elements.taskArchiveStatus.textContent = "Archiving the task and checking its exact resources…";
+  const pending = { pending: true, error: false, message: "Archiving the task and checking its exact resources…" };
+  state.taskArchiveResults.set(task.id, pending);
+  renderTaskDetail();
   try {
     const result = await apiPost("/api/task-archive", {
       taskId: task.id,
@@ -1078,17 +1081,15 @@ async function archiveSelectedTask() {
       updatedAt: task.updatedAt,
       executionGeneration: task.executionGeneration,
     });
-    elements.taskArchiveStatus.textContent = result.message;
+    state.taskArchiveResults.set(task.id, { pending: false, error: false, message: result.message });
+    renderTaskDetail();
     state.taskSnapshotGeneration = null;
     await loadTasks(true);
   } catch (error) {
-    elements.taskArchiveStatus.classList.add("error");
-    elements.taskArchiveStatus.textContent = error.status === 409
+    state.taskArchiveResults.set(task.id, { pending: false, error: true, message: error.status === 409
       ? `Task changed or another owner is acting on it. Refresh and retry. ${error.message}`
-      : `Archive failed: ${error.message}`;
-    elements.archiveTask.disabled = false;
-  } finally {
-    elements.archiveTask.textContent = "Archive task";
+      : `Archive failed: ${error.message}` });
+    renderTaskDetail();
   }
 }
 

@@ -335,7 +335,7 @@ function listTaskDocuments(root, ids) {
 }
 
 function taskCommandEnvironment(home) {
-  const environment = { ...process.env, FM_HOME: home };
+  const environment = { ...process.env, FM_HOME: home, FM_SUPERVISION_ACTOR: "main" };
   delete environment.FM_JSONL_VIEWER_TOKEN;
   delete environment.FM_JSONL_VIEWER_TOKEN_FILE;
   return environment;
@@ -386,7 +386,7 @@ function taskOverview(home, roots, codeRoot) {
       blockedBy: record.unresolved_blocker_ids, progress: record.compact_progress,
       executionHarness: task?.harness || task?.provider || null, executionModel: task?.model || null,
       executionState: task?.current_state?.state || null,
-      executionGeneration: task?.spawn_gen || null,
+      executionGeneration: task?.execution_generation || null,
       completionAt: record.completion?.date || null,
       updatedAt: record.updated_at || record.since || null,
       hasDocument: Boolean(document), documentType: document?.source,

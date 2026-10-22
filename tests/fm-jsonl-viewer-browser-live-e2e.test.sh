@@ -671,9 +671,19 @@ try {
   await page.getByRole("button", { name: /Held without document/ }).first().click();
   await page.getByText("No canonical task document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
 
+  let releaseArchive;
+  const archiveGate = new Promise(resolve => { releaseArchive = resolve; });
+  await page.route("**/api/task-archive", async route => {
+    await archiveGate;
+    await route.continue();
+  }, { times: 1 });
   page.once("dialog", dialog => dialog.accept());
   await page.locator("#archive-task").click();
-  await page.locator("#task-archive-status").filter({ hasText: "Archived; no task resources were recorded." }).waitFor({ state: "visible", timeout: 5000 });
+  if (!(await page.locator("#archive-task").isDisabled())) throw new Error("pending archive action remained enabled");
+  await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Tall dashboard task 02" }).click();
+  if (await page.locator("#archive-task").isDisabled()) throw new Error("one task's pending archive disabled another task");
+  if (!(await page.locator("#task-archive-status").isHidden())) throw new Error("one task's pending archive status leaked into another task");
+  releaseArchive();
   await page.locator('#sessions .task-card[data-category="history"]').filter({ hasText: "Held without document" }).waitFor({ state: "visible", timeout: 5000 });
   await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Tall dashboard task 02" }).click();
   page.once("dialog", dialog => dialog.accept());

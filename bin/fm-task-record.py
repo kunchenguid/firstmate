@@ -8,6 +8,7 @@ in one process; no aggregate index is persisted.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -43,6 +44,19 @@ def task_path(data: Path, task_id: str) -> Path:
     if not ID_RE.fullmatch(task_id):
         raise Refusal(f"invalid task id: {task_id}")
     return data / task_id / "task.json"
+
+
+def acquire_task_lock(data: Path, task_id: str):
+    path = task_path(data, task_id)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise Refusal(f"task directory is a symlink: {path.parent}")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.parent / ".task.lock", flags, 0o600)
+    os.fchmod(descriptor, 0o600)
+    stream = os.fdopen(descriptor, "r+b")
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+    return stream
 
 
 def clean_continuation(value: Any) -> dict[str, str] | None:
@@ -574,7 +588,11 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     data: Path = args.data
+    task_lock = None
     try:
+        if args.command in {"add", "start", "done", "reopen", "archive", "unhold", "update",
+                            "hold", "block", "unblock", "update-progress", "update-progress-view"}:
+            task_lock = acquire_task_lock(data, args.id)
         if args.command == "backfill-archived":
             if args.preview:
                 print(json.dumps(backfill_preview(data, args.state_dir), ensure_ascii=False))
@@ -663,6 +681,9 @@ def main() -> int:
         print("code: NOT_FOUND", file=sys.stderr); return 1
     except (Refusal, json.JSONDecodeError, OSError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr); return 6
+    finally:
+        if task_lock is not None:
+            task_lock.close()
 
 
 if __name__ == "__main__":

@@ -22,9 +22,8 @@ cleanup() {
   local status=$?
   [ "$BASHPID" = "$TEST_OWNER_BASHPID" ] || return 0
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=1
-  if [ -n "$LEASED_MANAGED_WORKTREE" ] && [ -d "$LEASED_MANAGED_WORKTREE" ]; then
-    (cd "$PROJECT" && treehouse return --force "$LEASED_MANAGED_WORKTREE") >/dev/null 2>&1 || status=1
-  fi
+  # A failed assertion deliberately leaves an unreturned lease for inspection.
+  # Never force-return a path whose exact task ownership may already have changed.
   fm_test_cleanup
   exit "$status"
 }
@@ -60,7 +59,7 @@ write_task_meta() { # <id> <generation> <worktree> <workspace-json>
   tab=$(printf '%s' "$workspace_json" | jq -er '.result.tab.tab_id')
   pane=$(printf '%s' "$workspace_json" | jq -er '.result.root_pane.pane_id')
   {
-    printf 'backend=herdr\nexecutor=local-agent\n'
+    printf 'backend=herdr\nexecutor=local-agent\nharness=traex\n'
     printf 'window=%s:%s\nendpoint_task_id=%s\n' "$HERDR_LAB_SESSION" "$pane" "$id"
     printf 'herdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
       "$HERDR_LAB_SESSION" "$workspace" "$tab" "$pane"

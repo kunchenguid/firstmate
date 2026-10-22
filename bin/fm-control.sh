@@ -264,6 +264,13 @@ fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
+if [ "$VERB" = relaunch ]; then
+  BUSINESS_STATE=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" progress "$ID" | jq -r '.state') \
+    || die "cannot read canonical task state before relaunch"
+  case "$BUSINESS_STATE" in
+    done|archived) die "task $ID is canonically $BUSINESS_STATE and cannot be relaunched" ;;
+  esac
+fi
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
     fm-*)
