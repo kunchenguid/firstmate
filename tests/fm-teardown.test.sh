@@ -2654,6 +2654,55 @@ test_secondmate_pr_registration_publishes_ready_line() {
   pass "fm-pr-check publishes the PR-ready line on a secondmate's parent channel once"
 }
 
+# With config/ready-after-green present, registering a no-mistakes PR in a
+# secondmate home withholds the ready line until the child's own status holds
+# the checks-green report for that exact PR; without the flag it publishes at
+# registration as before.
+test_secondmate_pr_ready_line_waits_for_green_when_opted_in() {
+  local case_dir channel url other pr_head run
+  url=https://github.com/example/repo/pull/7
+  other=https://github.com/example/repo/pull/8
+  case_dir=$(make_case mate-pr-ready-green)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state" "$case_dir/home/config"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  run() {
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+      || fail "mate-pr-ready-green: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  }
+
+  : > "$case_dir/home/config/ready-after-green"
+  printf 'working [at=1]: waiting for CI on %s\n' "$url" > "$case_dir/state/task-x1.status"
+  run
+  grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready-green: the poll was not armed while checks were pending"
+  [ ! -e "$channel" ] || ! grep -q 'child-pr-task-x1' "$channel" \
+    || fail "mate-pr-ready-green: the ready line was published before the checks-green report"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready-green: a withheld ready line was reported as a channel problem"
+
+  printf 'done [at=2]: PR %s checks green\n' "$other" >> "$case_dir/state/task-x1.status"
+  run
+  [ ! -e "$channel" ] || ! grep -q 'child-pr-task-x1' "$channel" \
+    || fail "mate-pr-ready-green: another PR's checks-green report released this PR's ready line"
+
+  printf 'done [at=3]: PR %s checks green\n' "$url" >> "$case_dir/state/task-x1.status"
+  run
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" <(sed -E 's/ \[at=[0-9]+\]//' "$channel") \
+    "mate-pr-ready-green: the ready line did not follow the checks-green report"
+
+  rm -f "$channel" "$case_dir/home/config/ready-after-green"
+  printf 'working [at=4]: waiting for CI on %s\n' "$url" > "$case_dir/state/task-x1.status"
+  run
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" <(sed -E 's/ \[at=[0-9]+\]//' "$channel") \
+    "mate-pr-ready-green: without the flag the ready line left its registration-time behavior"
+  pass "fm-pr-check withholds the PR-ready line until checks are green when config/ready-after-green is present"
+}
+
 # Tearing a child down inside a secondmate home delivers the child's final
 # ledger line to the parent before the record goes, and refuses (retaining
 # every record) while the parent channel cannot be written; a rerun after the
@@ -5544,6 +5593,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
+test_secondmate_pr_ready_line_waits_for_green_when_opted_in
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_teardown_retires_polytoken_wiring_on_pool_return
