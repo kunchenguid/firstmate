@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: agent controls `interrupt`, `exit`, `relaunch`, plus the separate non-agent `cancel-prestart` recovery below.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -63,6 +63,21 @@ Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm
 It is not deterministic across the verified adapters: codex, grok, gemini, devin, and commandcode resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
 A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
+
+## Non-agent prestart cancellation
+
+A failed Treehouse HTTPS fetch can leave its terminal job alive before any agent or task metadata was published.
+`cancel-prestart` is Herdr-only and covers only that narrow phase; it never adopts an endpoint, writes task metadata, controls an agent, closes a terminal, or discards a local copy.
+The operator must identify the specifically authorized failed start from its original evidence, not discover a target by matching labels.
+
+[`fm-control.sh --help`](../bin/fm-control.sh) owns the supported limits and two-step inspection/cancellation invocation; inspection sends no input.
+The fingerprint only constrains freshness; it grants no authority, and every ownership/process condition is checked again.
+The original processes must be gone while the same terminal survives and the project stays clean and unchanged; unconfirmed cancellation never escalates to more input.
+
+[`bin/fm-prestart-control-lib.sh`](../bin/fm-prestart-control-lib.sh) owns the complete narrow proof.
+The existing native project mutex excludes a still-running producer and concurrent starts.
+Existing task records remain authoritative and cannot be bypassed through this operation.
+Its Herdr key delivery is observable-only, so a missing server is never started by prestart cancellation.
 
 ## Transactional relaunch
 
@@ -155,7 +170,7 @@ The worktree and the task's records are unaffected either way.
 ## Fail-closed boundaries
 
 - Targeting is exact.
-  Only a bare task id with a `state/<id>.meta` record in this home is accepted, and that record must pass the shared endpoint-identity validation.
+  Agent controls require a bare task id with a `state/<id>.meta` record in this home passing the shared endpoint-identity validation; the separate non-agent prestart proof above never substitutes for that record.
   A legacy `fm-<id>` window label, an explicit `session:window` endpoint, and a record whose `endpoint_task_id` names another task are all refused.
 - A remotely placed secondmate is refused by name.
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
@@ -197,3 +212,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-control-prestart.test.sh` - executable non-agent prestart snapshots/cancellation over HTTPS (including `git-remote-http` executable names), plaintext HTTP and `git remote-http` command rejection, stale and foreign identities, ambiguous tabs, active agents and producers, unlanded changes, and unconfirmed stops against explicit fixtures.

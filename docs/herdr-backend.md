@@ -642,7 +642,7 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ### Named server and session routing
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
+Ordinary sends start and poll the named server before endpoint calls; [non-agent prestart cancellation](agent-control.md#non-agent-prestart-cancellation) uses a separate observable-only path.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 

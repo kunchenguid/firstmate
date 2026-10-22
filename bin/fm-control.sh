@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # fm-control.sh - the CONTROL PLANE for a firstmate-owned agent: allowlisted
-# lifecycle verbs addressed to an exact task id.
+# lifecycle verbs and narrow non-agent recovery addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> cancel-prestart --pane <pane-id>
+#                                         [--if-match <fingerprint>]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -100,12 +102,27 @@
 # same need for every adapter because the brief on disk, not a harness-private
 # session, is the durable instruction.
 #
-# Targeting is EXACT: only a bare task id with a state/<id>.meta record in
-# THIS home is accepted, and the record must pass the shared endpoint-identity
-# validation (bin/fm-backend.sh's fm_backend_validate_task_endpoint). A legacy
-# fm-<id> label, an explicit session:window endpoint, and a bare window name
-# are all refused - a lifecycle command delivered to the wrong endpoint is far
-# worse than a loud refusal.
+# Agent targeting is EXACT: a bare task id must have a state/<id>.meta record
+# in THIS home passing fm_backend_validate_task_endpoint. Labels and explicit
+# session:window targets remain refused.
+#
+# cancel-prestart is NOT an agent control or metadata-adoption path. It only
+# handles a held, queued ship/scout with NO task record, before any agent
+# started. The explicit pane must bind to the actual local Herdr coordinator,
+# its workspace, the task's single-pane tab and canonical home/projects clone,
+# and a positively verified plain Treehouse/Git HTTPS fetch process tree. The shared
+# project mutex excludes a still-running producer or concurrent start. Labels
+# are contradiction checks, never a way to discover or authorize an endpoint.
+# Other backends, linked project clones, active/unknown agents and unfamiliar
+# processes refuse. bin/fm-prestart-control-lib.sh owns the complete proof.
+# Without --if-match this prints a fresh identity snapshot, fingerprint and
+# input_sent=false; it sends NOTHING. The operator must compare that identity
+# with the specifically authorized failed start. A repeated call with that
+# exact fingerprint reruns every proof, then sends one Ctrl+C ONLY to that
+# prestart and verifies the original processes gone, terminal preserved and
+# project clean. A failed stop verification never sends further input.
+# A fingerprint is a freshness condition, never permission. No task metadata,
+# worktree removal, endpoint closure or generic raw-key interface is added.
 #
 # A remotely placed secondmate is refused by name: its agent runs on another
 # host, so no postcondition this plane verifies could be read for it here.
@@ -198,6 +215,8 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+PRESTART_PROJECT_LOCK=
+PRESTART_PROJECT_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
@@ -211,6 +230,10 @@ control_cleanup() {
   # the next lifecycle command for this task writes the same path.
   if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
     rm -f "$FM_COMPOSER_DIALOG_SINK"
+  fi
+  if [ "${PRESTART_PROJECT_LOCK_HELD:-0}" = 1 ]; then
+    PRESTART_PROJECT_LOCK_HELD=0
+    fm_lock_release "$PRESTART_PROJECT_LOCK" || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -250,6 +273,10 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+PRESTART_PANE=
+PRESTART_PANE_SET=0
+PRESTART_MATCH=
+PRESTART_MATCH_SET=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -260,6 +287,8 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      pane) PRESTART_PANE=$control_arg; PRESTART_PANE_SET=1 ;;
+      if-match) PRESTART_MATCH=$control_arg; PRESTART_MATCH_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -277,6 +306,10 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --pane) control_want_value=pane ;;
+    --pane=*) PRESTART_PANE=${control_arg#--pane=}; PRESTART_PANE_SET=1 ;;
+    --if-match) control_want_value=if-match ;;
+    --if-match=*) PRESTART_MATCH=${control_arg#--if-match=}; PRESTART_MATCH_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -314,6 +347,17 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+if [ "$VERB" = cancel-prestart ]; then
+  [ "$PRESTART_PANE_SET" = 1 ] && [ -n "$PRESTART_PANE" ] || die "cancel-prestart requires --pane"
+  if [ "$PRESTART_MATCH_SET" = 1 ]; then
+    case "$PRESTART_MATCH" in ''|*[!a-f0-9]*) die "--if-match requires the exact fingerprint from the read-only snapshot" ;; esac
+  fi
+  # shellcheck source=bin/fm-prestart-control-lib.sh
+  . "$SCRIPT_DIR/fm-prestart-control-lib.sh"
+  fm_prestart_roots_valid || die "cancel-prestart requires this home's canonical state, data and config directories"
+elif [ "$PRESTART_PANE_SET" = 1 ] || [ "$PRESTART_MATCH_SET" = 1 ]; then
+  die "--pane and --if-match apply to cancel-prestart only"
+fi
 # Supervision lease guard: lifecycle control is overlap territory between the
 # two Pi supervision actors; refuse while the OTHER actor holds this task's
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
@@ -329,8 +373,19 @@ CONTROL_LOCK_HELD=1
 # EXIT trap, so the parent has to hold the path the trap removes. Set it
 # only once the lock is held: a process that loses the lock runs the same
 # trap, and would remove the file the lock holder is reading.
-FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
 META="$STATE/$ID.meta"
+if [ "$VERB" = cancel-prestart ]; then
+  FM_COMPOSER_DIALOG_SINK=
+  [ ! -e "$META" ] && [ ! -L "$META" ] || die "cancel-prestart refuses an existing task record; use the ordinary agent controls"
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  fm_prestart_prepare || die "cancel-prestart could not prove an abandoned held prestart owned by this coordinator; no input sent"
+  fm_prestart_control "$PRESTART_MATCH" || die "cancel-prestart did not establish its required result"
+  exit 0
+fi
+FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
     fm-*)

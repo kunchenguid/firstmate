@@ -3141,11 +3141,21 @@ fm_backend_herdr_normalize_key() {  # <key>
 
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
+_fm_backend_herdr_send_key_parsed() {  # <key>; caller proved the parsed target
+  local key
+  key=$(fm_backend_herdr_normalize_key "$1")
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+}
+
 fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_target_ready "$1" || return 1
-  local key
-  key=$(fm_backend_herdr_normalize_key "$2")
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+  _fm_backend_herdr_send_key_parsed "$2"
+}
+
+# Abandoned non-agent prestarts must never cause a server to be started.
+fm_backend_herdr_send_key_observable() {  # <target> <key>
+  fm_backend_herdr_target_observable "$1" || return 1
+  _fm_backend_herdr_send_key_parsed "$2"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors

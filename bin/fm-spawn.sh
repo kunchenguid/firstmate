@@ -342,6 +342,29 @@
 #   prevents equal task ids in different Firstmate homes from sharing a file.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
+# Treehouse GitHub prefetch credentials:
+#   On fresh Treehouse-backed ship/scout spawns, a per-call descriptor with
+#   GIT_CONFIG_COUNT=2, GIT_CONFIG_KEY_0=credential.helper, empty GIT_CONFIG_VALUE_0,
+#   GIT_CONFIG_KEY_1=credential.https://github.com.helper and GIT_CONFIG_VALUE_1
+#   selecting `!gh auth git-credential` is applied in the destination shell
+#   before Treehouse fetches. An absolute helper path must match the caller's
+#   PATH-resolved gh; that path may also be single-quoted in the descriptor.
+#   The forwarded command always quotes the selected executable path.
+#   Both shells must resolve the same existing physical gh configuration
+#   directory through an absolute XDG_CONFIG_HOME or the HOME/.config fallback.
+#   Differing or indeterminate roots refuse before Treehouse or the helper runs;
+#   HOME and XDG_CONFIG_HOME are never copied or rewritten to force a match.
+#   This only applies to GitHub HTTPS origins, never copies credential values,
+#   and does not write Git or shell configuration. Other Git environments are
+#   unchanged, not generally forwarded. A recognized but unsupported caller
+#   helper or gh authentication environment refuses before endpoint creation;
+#   unsupported destination authentication refuses before Treehouse runs.
+#   The bridge never copies token variables or silently chooses another store.
+#   Missing destination authentication cannot open an askpass or terminal prompt.
+#   This prefetch scope is distinct from the later worker launch environment;
+#   relaunches, secondmates and Orca do not use it.
+#   tests/fm-spawn-github-prefetch.test.sh exercises the shell boundary with
+#   real Bash/Fish and Git credential plumbing, but a fixture helper, not a login.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
@@ -2252,6 +2275,60 @@ shell_quote() {
   printf "'"
 }
 
+# Only the selected native helper and non-secret expected configuration root
+# cross the shell boundary; arbitrary GIT_CONFIG_VALUE_* could copy secrets.
+spawn_treehouse_get_command() {  # <project>
+  local origin gh quoted helper guard config_root
+  if [ "${GIT_CONFIG_COUNT:-}" != 2 ] ||
+    [ "${GIT_CONFIG_KEY_0:-}" != credential.helper ] ||
+    [ -n "${GIT_CONFIG_VALUE_0:-}" ] ||
+    [ "${GIT_CONFIG_KEY_1:-}" != credential.https://github.com.helper ]; then
+    printf 'treehouse get'
+    return 0
+  fi
+  origin=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
+  case "$origin" in
+    https://github.com/*) ;;
+    *) printf 'treehouse get'; return 0 ;;
+  esac
+  if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] ||
+    [ -n "${GH_CONFIG_DIR:-}" ] ||
+    { [ -n "${GH_HOST:-}" ] && [ "$GH_HOST" != github.com ]; }; then
+    echo 'error: GitHub prefetch cannot forward a token or custom gh authentication environment; refusing to choose a different credential store' >&2
+    return 1
+  fi
+  # Defer variable expansion so the target shell checks its own environment.
+  # shellcheck disable=SC2016
+  guard='if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_CONFIG_DIR:-}" ] || { [ -n "${GH_HOST:-}" ] && [ "$GH_HOST" != github.com ]; }; then printf "%s\n" "error: GitHub prefetch refuses unsupported destination gh authentication environment" >&2; exit 1; fi
+base=${XDG_CONFIG_HOME:-${HOME:+$HOME/.config}}
+case "$base" in /*) ;; *) printf "%s\n" "error: GitHub prefetch cannot determine gh configuration root" >&2; exit 1 ;; esac
+root=$(cd -P "$base/gh" 2>/dev/null && pwd -P) || { printf "%s\n" "error: GitHub prefetch cannot determine gh configuration root" >&2; exit 1; }
+if [ "$#" -eq 0 ]; then printf "%s" "$root"; elif [ "$root" != "$1" ]; then printf "%s\n" "error: GitHub prefetch gh configuration root differs from caller" >&2; exit 1; fi'
+  config_root=$(/bin/sh -c "$guard") || return 1
+  gh=$(type -P gh 2>/dev/null) && [ -x "$gh" ] || {
+    echo 'error: GitHub prefetch needs the existing native gh executable' >&2
+    return 1
+  }
+  case "$gh" in
+    /*) ;;
+    *) gh=$(cd -P "$(dirname "$gh")" && printf '%s/%s' "$PWD" "$(basename "$gh")") || return 1 ;;
+  esac
+  quoted=$(shell_quote "$gh")
+  case "${GIT_CONFIG_VALUE_1:-}" in
+    '!gh auth git-credential'|"!$gh auth git-credential"|"!$quoted auth git-credential") ;;
+    *)
+      echo 'error: GitHub prefetch supports only the existing native gh auth git-credential helper, not arbitrary helper values' >&2
+      return 1
+      ;;
+  esac
+  helper="!$quoted auth git-credential"
+  helper=${helper//\'/\'\"\'\"\'}
+  helper=${helper//\\/\'\"\\\\\"\'}
+  config_root=${config_root//\'/\'\"\'\"\'}
+  config_root=${config_root//\\/\'\"\\\\\"\'}
+  printf '/bin/sh -c %s gh-prefetch '\''%s'\'' && GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false GH_PROMPT_DISABLED=1 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1=credential.https://github.com.helper GIT_CONFIG_VALUE_1='\''%s'\'' treehouse get' "$(shell_quote "$guard")" "$config_root" "$helper"
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -3519,6 +3596,13 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
+# Resolve this before creating any endpoint: a server-created shell does not
+# inherit the invoking process's per-call Git helper environment.
+TREEHOUSE_GET_COMMAND='treehouse get'
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  TREEHOUSE_GET_COMMAND=$(spawn_treehouse_get_command "$PROJ_ABS") || exit 1
+fi
+
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -5022,7 +5106,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" "$TREEHOUSE_GET_COMMAND"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

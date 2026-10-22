@@ -394,6 +394,7 @@ family_for_basename() {
     fm-worker-account.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-github-prefetch.test.sh|fm-control-prestart.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
     fm-project-capacity.test.sh|\
@@ -1634,6 +1635,9 @@ families_for_changed_path() {
       # pre-teardown run abort (pr-forge).
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-prestart-control-lib.sh)
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
