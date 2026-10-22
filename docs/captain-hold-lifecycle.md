@@ -107,11 +107,12 @@ A post-teardown visual review can complete against the surviving report and dura
 
 `complete` accepts `--none` as an explicit semantic inventory result.
 `--none` is refused while the origin still has a lifecycle-open keyed status decision.
-Before recording completion, `complete` verifies every listed task against tasks-axi.
+Before recording completion, `complete` verifies every listed task with the same durability check `verify` applies.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
 An entry whose recorded origin differs from the one being completed is refused.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
+An answered entry that the markdown backend's `done_keep` retention rotated into the configured archive is accepted on its recorded answer, and its recorded origin is checked like a live row's.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
 The event names the reviewed inventory.
@@ -123,7 +124,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` checks three things:
 
 - The recorded attestation exists.
-- Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete).
+- Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete), including an answered entry that `done_keep` retention has rotated into the configured markdown archive.
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
@@ -477,7 +478,7 @@ That name-only guess is accepted solely for a single row still held for the capt
 Two such rows refuse rather than attest.
 Because that acceptance rests on a name rather than on evidence, `complete` names the resolved row beside each prefix-attested legacy id in its completion line, so the guess is auditable after the fact.
 
-A markdown home keeps its legacy rows verbatim, so its resolution is unchanged.
+A markdown home keeps its legacy rows verbatim, so its resolution is unchanged; an answered legacy row that `done_keep` rotated into the archive is still accepted, as `verify` describes.
 
 ### The `fm-decision-hold.sh` shim
 
