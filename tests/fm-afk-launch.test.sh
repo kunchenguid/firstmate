@@ -424,8 +424,11 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   # is the one the fleet-lock check has to stop.
   st_away=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-away.XXXXXX")
   mkdir -p "$st_away/state"
-  printf '%s\n' "$holder_pid" > "$st_away/state/.lock"
+  # The standing away record is written first, while no other session holds
+  # the lock: the record writer refuses an away mandate for a read-only
+  # session, so a fixture cannot stage one under a live holder.
   FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" enter >/dev/null 2>&1
+  printf '%s\n' "$holder_pid" > "$st_away/state/.lock" 
   out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'replace the mandate' 2>&1)
   rc=$?
@@ -437,6 +440,22 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
     fail "enter: the quiet-mode exception let an away mandate through a live lock holder (rc=$rc): $out"
   fi
   rm -rf "$st_away"
+
+  # The record writer owns the check, so a direct write of the away record is
+  # refused for a read-only session too, not only the launcher's entry.
+  st_direct=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-direct.XXXXXX")
+  mkdir -p "$st_direct/state"
+  printf '%s\n' "$holder_pid" > "$st_direct/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_direct" FM_STATE_OVERRIDE="$st_direct/state" "$CONTRACT" enter --words 'bypass the launcher' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st_direct/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null; then
+    pass "enter: the record writer itself refuses an away mandate while another live session holds the fleet lock"
+  else
+    fail "enter: a direct record write bypassed the live lock holder (rc=$rc): $out"
+  fi
+  rm -rf "$st_direct"
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   # A lock whose recorded pid is gone is not a live holder: it never blocks an

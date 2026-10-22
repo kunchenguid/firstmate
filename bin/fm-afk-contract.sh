@@ -3,13 +3,11 @@
 # captain's away words recorded verbatim, the read-back rendering, the entry
 # announcement, and the archive at return.
 #
-# FM_AFK_CONTRACT_ENTER_GUARD names an executable the `enter` path runs under
-# this script's own mutation lock, just before it writes the record, with
-# FM_AFK_CONTRACT_ENTER_GUARD_ARG as its first argument. The executable
-# receives the resolved entry mode in FM_AFK_CONTRACT_ENTRY_MODE and refuses
-# the write by exiting non-zero. The guard exists so a check that authorises
-# the write is evaluated under the SAME lock as the write itself: a check made
-# outside it can be overtaken by a concurrent writer.
+# The `enter` path checks the fleet lock under this script's own mutation
+# lock, just before it writes the record: a read-only session must not record
+# an away mandate it cannot carry out. The check is inside the write, so it
+# cannot be overtaken by a concurrent writer, and it applies to every writer
+# of this record, not only the launcher's.
 #
 # POSTURE.
 #
@@ -170,6 +168,9 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# The session-lock identity owner: the away record needs the fleet lock.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-session-lock-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -572,17 +573,13 @@ fm_afk_contract_cmd_enter() {
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
   fi
-  # The record write and the guard that authorises it happen under the SAME
-  # mutation lock, so a check made outside it cannot be overtaken by a
-  # concurrent writer between the check and the write. The guard receives the
-  # resolved entry mode in the environment and refuses the write by exiting
-  # non-zero.
-  if [ -n "${FM_AFK_CONTRACT_ENTER_GUARD:-}" ]; then
-    export FM_AFK_CONTRACT_ENTRY_MODE
-    # The guard is an executable plus its arguments, each quoted separately:
-    # a checkout path may contain spaces, and a path pasted into shell code
-    # would be split there.
-    "$FM_AFK_CONTRACT_ENTER_GUARD" ${FM_AFK_CONTRACT_ENTER_GUARD_ARG:+"$FM_AFK_CONTRACT_ENTER_GUARD_ARG"} || return 1
+  # The away posture is a mandate this session has to carry out, so the write
+  # needs the fleet lock: a read-only session must not record one. The check
+  # runs HERE, under the same mutation lock as the write, so it cannot be
+  # overtaken by a concurrent writer between the check and the write, and it
+  # applies to every writer of this record, not only the launcher's.
+  if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
+    fm_session_lock_may_record "${FM_AFK_CONTRACT_STATE}" || return 1
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then

@@ -1025,6 +1025,30 @@ fm_session_lock_process_liveness() {  # <pid>
   return 0
 }
 
+# True when this session may record a fleet mutation against the home whose
+# state dir is $1: it owns the lock, or no live session holds it.
+#
+# A live session that holds the lock and is not this one is a foreign holder:
+# the session is read-only, and a read-only session must not record a
+# mandate it cannot carry out. The holder is named in the refusal, with its
+# start time and age, so the operator can act on it. Stopping the holder is
+# never automatic.
+#
+# A lock this session cannot classify - unreadable, malformed, or owned by a
+# process it cannot inspect - is not proof of a foreign holder, so it does not
+# refuse. The refusal is for a PROVEN live holder, never a guess.
+fm_session_lock_may_record() {  # <state-dir>
+  local state=$1 summary
+  if fm_session_lock_owned_by_self "$state"; then
+    return 0
+  fi
+  fm_session_lock_inspect "$state"
+  [ "$FM_LOCK_INSPECT_STATE" = held ] || return 0
+  summary=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID") || return 0
+  printf 'another live firstmate session holds the lock (%s); this session does not own the fleet lock, so it must not record a mandate it cannot carry out. Stopping the holder is a decision for the operator, never for this script.\n' "$summary" >&2
+  return 1
+}
+
 # Print one line naming the live process $1: its pid, its start time, and its
 # age. The start time and age are "started unknown; age unknown" when the
 # process cannot be inspected, never a guess.

@@ -180,40 +180,11 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
-# The away posture is a mandate this session has to carry out, so it needs the
-# fleet lock: a read-only session cannot dispatch, steer, merge, or repair
-# anything the away words name. Refuse the entry while another live session
-# holds the lock, and name that holder so the operator can act.
-#
-# The check is deliberately narrow:
-#   - A session that owns the lock passes. That is the ordinary case.
-#   - A session that owns no lock and faces no live holder passes too. The
-#     other reasons a session is read-only (an unwritable lock, an unresolved
-#     harness identity) are unchanged by this check, and the away words still
-#     need a record.
-#   - A stale lock (the recorded pid is gone) is not a live holder, so it
-#     never blocks an entry.
-# Stopping the holder is never automatic: the refusal only names it.
-fm_afk_launch_require_fleet_lock() {
-  local summary
-  if fm_session_lock_owned_by_self "$FM_AFK_LAUNCH_STATE"; then
-    return 0
-  fi
-  fm_session_lock_inspect "$FM_AFK_LAUNCH_STATE"
-  [ "$FM_LOCK_INSPECT_STATE" = held ] || return 0
-  summary=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID") || return 0
-  fm_afk_launch_log "another live firstmate session holds the lock ($summary); the away posture needs this session to hold the fleet lock, so the away entry refuses until that session is gone. Stopping it is the operator's call, never this script's."
-  return 1
-}
-
-# The entry guard, run by bin/fm-afk-contract.sh under its own mutation lock
-# just before the record is written. The resolved entry mode arrives in
-# FM_AFK_CONTRACT_ENTRY_MODE, so the check and the write agree on which mode
-# the write really uses.
-fm_afk_launch_guard() {
-  [ "${FM_AFK_CONTRACT_ENTRY_MODE:-away}" = away ] || return 0
-  fm_afk_launch_require_fleet_lock
-}
+# The fleet-lock check for the away record is owned by the record writer
+# (bin/fm-afk-contract.sh), which runs it under its own mutation lock just
+# before the write. It lives there so every writer of the record is covered,
+# not only this launcher, and so the check and the write cannot be overtaken
+# between them.
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -432,15 +403,10 @@ fm_afk_launch_enter() {
     esac
   fi
   # The quiet path above is settled first on purpose: quiet mode spawns
-  # nothing, so a read-only session may still enter quiet mode.
-  #
-  # The fleet-lock check runs INSIDE the record write, under the record's own
-  # mutation lock, so the check and the write cannot be overtaken between
-  # them. A standing away record keeps away mode even for a quiet-mode
-  # caller, and that write is an away mandate, so the guard refuses it too.
-  FM_AFK_CONTRACT_ENTER_GUARD="$FM_AFK_LAUNCH_DIR/fm-afk-launch.sh" \
-    FM_AFK_CONTRACT_ENTER_GUARD_ARG=guard \
-    "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  # nothing, so a read-only session may still enter quiet mode. The fleet-lock
+  # check belongs to the record write itself, so a standing away record keeps
+  # away mode even for a quiet-mode caller, and that write is refused too.
+  "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }
 
@@ -1025,15 +991,6 @@ fm_afk_launch_quiet_rollback() {  # <status>
 
 fm_afk_launch_main() {
   local result
-  # The entry guard runs INSIDE the record write, which the caller already
-  # holds the launcher lock for. It therefore takes no launcher lock of its
-  # own: the lock is not reentrant, and taking it again would deadlock the
-  # very write the guard authorises.
-  if [ "${1:-}" = guard ]; then
-    shift
-    fm_afk_launch_guard "$@"
-    return $?
-  fi
   # Traps first, lock second. Acquiring before the handlers exist leaves a
   # window where a signal terminates this process by default action and leaks
   # the lock directory, which then blocks the next away-mode launch until the
