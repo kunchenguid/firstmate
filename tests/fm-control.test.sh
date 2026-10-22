@@ -506,7 +506,7 @@ test_unverified_harness_is_refused() {
 
 test_backend_key_capability_matrix() {
   local backend key
-  for backend in tmux herdr zellij cmux paseo; do
+  for backend in tmux herdr zellij cmux paseo rex; do
     # C-u is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
     for key in Escape Enter C-c C-u; do
@@ -639,6 +639,7 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
 test_state_verified_backends_are_exactly_tmux_and_herdr() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  fm_control_backend_state_verified rex || fail "rex has a recovery-grade classifier"
   local backend
   for backend in zellij orca cmux paseo; do
     fm_control_backend_state_verified "$backend" \

@@ -32,6 +32,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+# A Rex pane exports REX_* into every descendant, including a tmux server
+# started from it; no default-backend case here may probe a live Rex server.
+unset REX_SESSION REX_BLOCK REX_SERVER REX_CLIENT
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -526,9 +529,10 @@ test_backend_name_explicit_beats_detection() {
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
+  fm_backend_validate_spawn rex 2>/dev/null || fail "fm_backend_validate_spawn should accept rex"
   local out
   # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
-  # and cmux are all known adapters and spawn-supported.
+  # cmux, paseo, and rex are all known adapters and spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
   out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"

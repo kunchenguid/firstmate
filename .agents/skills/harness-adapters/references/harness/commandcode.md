@@ -33,7 +33,7 @@ Command Code draws a bare `❯` composer between two rules, parks the terminal c
 Its `Ask your question...` placeholder is truecolor bright enough to survive the fleet ghost ceiling, so `../../../bin/fm-composer-lib.sh` reads a screen with a Command Code identity at a higher ceiling; typed text is the default foreground and stays pending.
 The launch clears `NO_COLOR` and pins `COLORTERM=truecolor`, because a 256-colour terminal renders the placeholder in an untested palette colour.
 `../../../bin/fm-tmux-lib.sh` supplies the `commandcode` identity on tmux, while Herdr's native detection reports `cmd`.
-Zellij, cmux, orca, and paseo supply no such identity, so the placeholder would read pending there and `../../../bin/fm-spawn.sh` refuses a Command Code launch on those backends.
+Zellij, cmux, orca, paseo, and rex supply no such identity, so the placeholder would read pending there and `../../../bin/fm-spawn.sh` refuses a Command Code launch on those backends.
 The delivery busy signals are `esc to interrupt` and the bullet-framed elapsed cell on the status row.
 
 ## Primary integration

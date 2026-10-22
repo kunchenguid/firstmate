@@ -20,7 +20,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
-  2>/dev/null || true
+  REX_SESSION REX_BLOCK REX_SERVER REX_CLIENT 2>/dev/null || true
 
 command -v python3 >/dev/null 2>&1 \
   || fail "python3 is required to decode the fm-on.sh argv payload"

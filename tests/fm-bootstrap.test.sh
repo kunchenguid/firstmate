@@ -33,12 +33,14 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
 # config/backend; the dev shell's ambient runtime markers ($TMUX inside tmux,
 # HERDR_ENV inside herdr, CMUX_* inside a cmux terminal, PASEO_AGENT_ID inside a
-# Paseo agent) must not leak into
+# Paseo agent, REX_* inside a Rex pane or anything started from one) must not leak into
 # fm_backend_name and flip a default-backend case onto a non-tmux backend. Unset
 # them once so the suite resolves the tmux reference backend unless a case says
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PASEO_AGENT_ID __CFBundleIdentifier \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  REX_SESSION REX_BLOCK REX_SERVER REX_CLIENT REX_BIN_DIR 2>/dev/null || true
+export FM_BACKEND_REX_BUNDLE_BIN="$TMP_ROOT/no-bundled-rex"
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
@@ -583,6 +585,8 @@ test_session_provider_backends_do_not_require_tmux() {
 herdr^herdr
 zellij^zellij
 cmux^cmux
+paseo^paseo
+rex^rex
 ROWS
   pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
 }
@@ -604,11 +608,12 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     case "$backend" in
       herdr) missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)" ;;
       paseo) missing="MISSING_MANUAL: paseo (instructions: https://paseo.sh)" ;;
+      rex) missing="MISSING_MANUAL: rex (instructions: https://www.superlogical.com/rex/docs/installation)" ;;
       *) missing="MISSING: $cli" ;;
     esac
     assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
     case "$backend" in
-      herdr|paseo)
+      herdr|paseo|rex)
         assert_not_contains "$out" "MISSING: $backend (install:" \
           "backend=$backend must not advertise manual guidance as an executable install command"
         ;;
@@ -619,6 +624,7 @@ herdr^herdr
 zellij^zellij
 cmux^cmux
 paseo^paseo
+rex^rex
 ROWS
   pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
 }
@@ -657,7 +663,7 @@ test_unknown_backend_reports_invalid_configuration() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo)" \
+  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo rex)" \
     "bootstrap should report an unknown resolved backend"
   assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"

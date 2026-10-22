@@ -314,7 +314,7 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux|paseo)
+    tmux|herdr|zellij|cmux|paseo|rex)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -324,14 +324,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
+# Whether <backend> has a recovery-grade agent-state classifier. Only tmux,
+# herdr, and rex implement fm_backend_agent_state; zellij, orca, cmux, and paseo
+# report `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|rex) return 0 ;;
   esac
   return 1
 }
@@ -373,6 +373,10 @@ fm_control_backend_state_verified() {  # <backend>
 #     There is no read available here that closes that gap, so tmux always
 #     returns `unproven` and both verbs refuse. tmux is left exactly as
 #     deadlocked as it was before this change - no worse - but deliberately.
+#   rex CAN prove it. The record carries the server endpoint, and every read
+#     addresses that server by full block id with autostart off, so `missing`
+#     is the reachable recorded server answering "not found" (exit 3) while an
+#     unreachable one reads `unreadable` and stays unproven.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -393,6 +397,14 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
+      esac
+      ;;
+    rex)
+      case "$(fm_backend_rex_endpoint_absence_recheck "$target")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe recorded Rex server could not be reached, or its block could not be classified' ;;
       esac
       ;;
     *)

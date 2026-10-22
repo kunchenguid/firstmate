@@ -151,6 +151,9 @@ exclusion_reason() {
     fm-backend-orca.test.sh)
       printf '%s\n' 'orca backend surface; keep serial until dedicated isolation proof'
       ;;
+    fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh)
+      printf '%s\n' 'rex optional backend; each smoke owns a private server, keep serial'
+      ;;
     *)
       return 1
       ;;

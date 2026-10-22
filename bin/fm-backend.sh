@@ -31,7 +31,12 @@
 # `--backend paseo`, `FM_BACKEND=paseo`, or config/backend, never runtime
 # auto-detection. Paseo stamps PASEO_* markers into every descendant process
 # (a tmux server started from a Paseo tab inherits them), so an inherited
-# marker is not a selection; see docs/paseo-backend.md.
+# marker is not a selection; see docs/paseo-backend.md. P7 adds
+# bin/backends/rex.sh, also EXPERIMENTAL and spawn-capable for ships and
+# scouts, behind `--backend rex`/`FM_BACKEND=rex`/config/backend, and behind
+# runtime auto-detection only when firstmate's own Rex pane is proven
+# structurally (REX_* markers leak into descendants exactly like Paseo's);
+# see docs/rex-backend.md.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -39,7 +44,7 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently herdr, zellij, orca, cmux, or paseo, carries
+# spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, or rex, carries
 # an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -74,9 +79,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # paseo is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij/cmux - verified against the real Paseo daemon on 127.0.0.1:6767
 # (docs/paseo-backend.md).
+# rex is EXPERIMENTAL and spawn-capable for ships and scouts, session-provider-
+# only like herdr - verified against Rex API revision 4 (docs/rex-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -141,8 +148,13 @@ fm_backend_is_known() {  # <name>
 #      scrubbed entirely (no bundle id to inherit); NOT usable from inside
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
+# Rex is checked after tmux and herdr and before cmux. Its REX_* markers reach
+# every descendant, including a tmux server started from a Rex pane, so they
+# never select Rex alone: fm_backend_rex_detect also requires REX_BLOCK to be
+# live on the Rex server inside REX_SESSION with that block's child process an
+# ancestor of this one (docs/rex-backend.md "Selection and detection").
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
-# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
+# TMUX, HERDR_ENV, REX_BLOCK, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
@@ -159,6 +171,12 @@ fm_backend_detect() {
     FM_BACKEND_DETECTED=herdr
     FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
     printf 'herdr'
+    return 0
+  fi
+  if [ -n "${REX_BLOCK:-}" ] && fm_backend_source rex >/dev/null 2>&1 && fm_backend_rex_detect; then
+    FM_BACKEND_DETECTED=rex
+    FM_BACKEND_DETECT_SIGNAL=REX_BLOCK
+    printf 'rex'
     return 0
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
@@ -251,7 +269,8 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # auto-detect prints one loud stderr notice because cmux remains experimental;
 # the notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case. Paseo is never auto-detected, so it
+# distinct from the primary-marker case. Auto-detected Rex prints the same
+# kind of notice while it remains experimental. Paseo is never auto-detected, so it
 # only ever comes out of this function from FM_BACKEND or config/backend.
 fm_backend_name() {
   local line v detected marker
@@ -279,6 +298,9 @@ fm_backend_name() {
         *) marker="CMUX_WORKSPACE_ID" ;;
       esac
       echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
+    if [ "$detected" = rex ]; then
+      echo "NOTICE: auto-detected Rex runtime (firstmate's own Rex pane, proven by REX_BLOCK ancestry) - spawning into the EXPERIMENTAL rex backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0
@@ -309,12 +331,12 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo);
-#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, paseo) whose spawn/liveness
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo/rex);
+#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, paseo, rex) whose spawn/liveness
 #     paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux, paseo); orca owns its own task worktree and terminal,
+#     (tmux, herdr, zellij, cmux, paseo, rex); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
@@ -325,6 +347,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     paseo)  printf '%s' 'paseo jq treehouse' ;;
+    rex)    printf '%s' 'rex jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -342,6 +365,10 @@ fm_backend_required_tool_available() {  # <backend> <tool>
     paseo:paseo)
       fm_backend_source paseo >/dev/null 2>&1 || return 1
       fm_backend_paseo_bin >/dev/null 2>&1
+      ;;
+    rex:rex)
+      fm_backend_source rex >/dev/null 2>&1 || return 1
+      fm_backend_rex_bin >/dev/null 2>&1
       ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
@@ -422,9 +449,30 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   esac
 }
 
+# A Rex server address is an endpoint such as unix:///abs/path/server.sock
+# (percent-encoded, so a path with spaces stays one token) or a host label;
+# the record hands it back to `rex -S` verbatim, so this proves only that it is
+# one non-empty token with no whitespace or control characters.
+fm_backend_rex_server_value_valid() {  # <value>
+  case "$1" in
+    ''|*[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+  esac
+}
+
+# A Rex session or block id is recorded as the bare UUID of its typed id.
+fm_backend_rex_uuid_value_valid() {  # <value>
+  case "$1" in
+    ????????-????-????-????-????????????) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!0-9a-f-]*) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface server
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -576,6 +624,22 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    rex)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: legacy rex endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      server=$(fm_backend_meta_exact_value "$meta" rex_server) || server=
+      recorded_session=$(fm_backend_meta_exact_value "$meta" rex_session_id) || recorded_session=
+      pane=$(fm_backend_meta_exact_value "$meta" rex_block_id) || pane=
+      if [ -z "$recorded_session" ] || [ -z "$pane" ] || [ "$window" != "$recorded_session:$pane" ] \
+        || ! fm_backend_rex_server_value_valid "$server" \
+        || ! fm_backend_rex_uuid_value_valid "$recorded_session" \
+        || ! fm_backend_rex_uuid_value_valid "$pane"; then
+        echo "REFUSED: rex endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -675,6 +739,9 @@ fm_backend_source() {  # <name>
     cmux|paseo)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
+    rex)
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh
+      ;;
     *)
       return 1
       ;;
@@ -725,6 +792,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$adapter" || return 1
         _FM_BACKEND_PASEO_SOURCED=1
+      fi
+      ;;
+    rex)
+      if [ -z "${_FM_BACKEND_REX_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_REX_SOURCED=1
       fi
       ;;
   esac
@@ -799,6 +873,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
     paseo) fm_backend_paseo_capture "$@" ;;
+    rex) fm_backend_rex_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -809,7 +884,10 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # pending live verification: its `read-screen` without `--scrollback` plausibly
 # reads only the viewport, but that has not been observed on a real cmux, and
 # the adapter's own capture opts into history with `--scrollback`. orca's
-# `terminal read --limit` is a history read with no viewport mode.
+# `terminal read --limit` is a history read with no viewport mode. rex is absent
+# because `rex capture` and its `format` method both return scrollback with
+# trailing blank screen rows omitted, so the viewport cannot be located
+# (docs/verification/runtime-backends.md#rex).
 FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij"
 
 # fm_backend_visible_capture_supported: whether <backend> can read the visible
@@ -845,6 +923,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
     paseo) fm_backend_paseo_send_key "$@" ;;
+    rex) fm_backend_rex_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -886,6 +965,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     orca) fm_backend_orca_send_text_submit "$@" || rc=$? ;;
     cmux) fm_backend_cmux_send_text_submit "$@" || rc=$? ;;
     paseo) fm_backend_paseo_send_text_submit "$@" || rc=$? ;;
+    rex) fm_backend_rex_send_text_submit "$@" || rc=$? ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
   fm_composer_dialog_sink_release
@@ -916,6 +996,7 @@ fm_backend_kill() {  # <backend> <target>
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
     paseo) fm_backend_paseo_kill "$@" ;;
+    rex) fm_backend_rex_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -979,6 +1060,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     paseo) fm_backend_paseo_composer_state "$@" ;;
+    rex) fm_backend_rex_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
@@ -1037,6 +1119,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source paseo || return 1
       fm_backend_paseo_target_ready "$target" "$expected_label"
       ;;
+    rex)
+      fm_backend_source rex || return 1
+      fm_backend_rex_target_ready "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -1063,12 +1149,17 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
 # empirically validated. Orca, cmux, and paseo do not support secondmate spawns.
+# The Rex adapter reads the recorded full block id on the recorded server:
+# exit 3 is `missing`, an unreachable server `unreadable`, a kept-open pane
+# whose program ended `dead`, and otherwise the same foreground-group
+# classification as tmux.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    rex) fm_backend_rex_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

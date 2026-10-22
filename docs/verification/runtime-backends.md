@@ -324,13 +324,14 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-rex.test.sh
 ```
 
 Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Paseo records validate while every empty backend target refuses
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -338,7 +339,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and Paseo before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -371,6 +372,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
+| rex | 0, silent (exit 3 on the recorded block id) | 1, resolved by re-inspecting the block's full id after the close; only exit 3 proves it gone, and an unreachable server or a block carrying another identity refuses |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -2205,6 +2207,54 @@ tests/fm-backend-paseo-smoke.test.sh
 ```
 
 The real smoke proves daemon reachability, shared-workspace creation and adoption, sibling tabs without a second project, current-path probing, send and keys, bounded capture, tab-only kill, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+
+## Rex
+
+The current compatibility floor is Rex API revision 4 plus the block methods the adapter calls (`block.close`, `session.new_window`, `session.set_block_label`, `com.superlogical.terminal.process`, and `com.superlogical.terminal.format`).
+The active evidence, recorded 2026-10-21, uses `rex 0.0.1792519967-gd05acf` (commit d05acfc, built 2026-10-20, API revision 4, supports 0 to 4) on macOS arm64 with the Rex Beta app.
+
+Every probe ran on a private headless server started with `rex server run` on a short `/tmp` socket through `bin/fm-rex-lab.sh`, driven with `-S <socket> --autostart=false`, and stopped through that socket; the captain's app-owned server was only listed, and the lab's teardown tripwire confirmed its instance id and sessions were unchanged.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Version gate | `version --json`, `server status --json` | Reports `api_revision` and the server's `instance_id` without starting anything when `--autostart=false` is passed. |
+| Autostart | any call with the default `--autostart` against a missing socket | Starts a fresh, empty server at that socket; with `--autostart=false` the same call exits 4 and creates nothing (the smoke checks the socket never appears). |
+| Session create | `new <label> -c <dir> --json` | Creates a session with one initial window and block; the adapter closes those so the home session holds only task tabs. |
+| Tab create | `window new -s <session> tab -c <dir> --focus=false --keep-open --json` | Adds a tab without moving the session's active window; returns the typed session, window, and block ids. |
+| Block label | `block rename -s <session> <block> <label>` | Sets the label; labels are not unique, and a label-addressed command that matches two blocks refuses as ambiguous, so the adapter addresses blocks by full id only. |
+| Inspect | `block inspect <block-id> --json` | Returns the block's session, label, and `last_exit`; a closed block's full id exits 3. |
+| Foreground process | `block call ... com.superlogical.terminal.process` | Reports the foreground pid, argv, and cwd; the cwd follows a `cd` in the shell, so spawn-time worktree discovery reads it directly. |
+| Send | text on `send -s <session> -b <block>` standard input | Arrives literally, including option-shaped text such as `-n not-an-option`; a trailing newline submits. |
+| Capture | `capture -s <session> -b <block> --trim` and `--format vt` | Both include scrollback and omit trailing blank screen rows: 83 lines came back from a 24-row screen, so the visible screen cannot be located. `--format vt` keeps SGR styling. |
+| Close | `block close -s <session> <block-id>` | Closes only that block and its tab; the sibling tab and the session stay live, and a later inspect of the block exits 3. |
+| Session retire | `kill <session-id>` after the last tab closes | Closes the emptied home session; it runs under the home-wide `state/.rex-session.lock` shared with spawn. |
+| Unreachable server | any call against a dead socket | Exits 4, which the adapter reads as unknown, never gone. |
+
+Environment markers: a Rex pane exports `REX_SERVER`, `REX_SESSION`, `REX_BLOCK`, `REX_CLIENT`, and `REX_BIN_DIR`, and a tmux server started from a Rex pane passes them to its own panes, so a marker alone never selects Rex.
+`fm_backend_detect` selects Rex only when `REX_BLOCK` inspects live on the server, sits in `REX_SESSION`, and that block's process is an ancestor of the detecting process.
+Several commands fall back to `REX_BLOCK` or the focused block when no target is passed, so the adapter strips those markers from its own calls and always passes full ids.
+Children of a server started with `rex server run` get no `REX_SERVER`, and Rex children inherit the login shell's environment rather than the calling CLI's, so `fm-spawn.sh` exports the recorded server into the worker's shell.
+
+```sh
+tests/fm-backend-rex.test.sh
+tests/fm-backend-rex-smoke.test.sh
+FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
+```
+
+The fake-binary suite pins the call contract (`-S`, `--autostart=false`, full ids, stripped markers), server resolution, the version gate, session create, adopt, and refusal paths, keys, composer, agent state, the absence verdict, the kill matrix, detection, and the secondmate refusal.
+The real smoke proves one unfocused `firstmate` session with labeled tabs, duplicate-label refusal, live cwd, literal send and keys, agent state from real processes (an idle shell reads dead, `sleep` reads ambiguous, a `claude`-named process reads alive), the scrollback capture, block-only close with exit 3, session retirement after the last tab, and exit 4 with nothing autostarted.
+
+The opt-in Claude guard passed on 2026-10-21 with `claude 2.1.306 (Claude Code)`:
+
+```text
+ok - rex agent_state reads the real Claude worker as alive
+ok - rex classifies the real Claude idle composer as empty
+ok - rex confirms one steer, closes the keyed decision, and leaves the composer empty
+ok - rex teardown closes the worker's block and proves it gone
+info - Claude program states observed on Rex: done,working (claude 2.1.306 (Claude Code); rex 0.0.1792519967-gd05acf)
+```
 
 ## Codex App host tools
 

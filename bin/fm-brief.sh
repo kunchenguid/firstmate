@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab] [--rex-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab] [--rex-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -34,6 +34,10 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
+#   --rex-lab is mandatory when the task will create, drive, or close Rex
+#   sessions, windows, or blocks, or start or stop a Rex server. It adds the
+#   hard isolation contract backed by bin/fm-rex-lab.sh: a private lab server,
+#   never the live one.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
@@ -210,6 +214,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
 HERDR_LAB=0
+REX_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -249,6 +254,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --rex-lab) REX_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -390,6 +396,10 @@ printf -v BRANCH_Q '%q' "$BRANCH"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$REX_LAB" -eq 1 ]; then
+  echo "error: --rex-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -624,6 +634,27 @@ If the task will start, stop, delete, restart, profile, or otherwise drive Herdr
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
+fi
+
+if [ "$REX_LAB" -eq 1 ]; then
+REX_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-rex-lab.sh")
+# shellcheck disable=SC2016  # single quotes are deliberate: literal brief text whose $(...) and "$REX_LAB" snippets must reach the reading agent verbatim; only the '"$VAR"' break-outs interpolate.
+REX_SECTION=$(printf '%s\n' \
+'# Rex isolation - HARD SAFETY CONTRACT' \
+'This brief was explicitly scaffolded with `--rex-lab` because the task will drive Rex sessions, windows, blocks, or servers.' \
+'The live Rex server and its sessions are the running fleet; every Rex `REX_*` variable in your environment may name the captain'"'"'s supervisor pane, not yours.' \
+'' \
+'1. Set `REX_LAB_HELPER='"$REX_LAB_HELPER"'` and generate the lab name with `REX_LAB=$("$REX_LAB_HELPER" name '"$ID"')`.' \
+'   Install an EXIT cleanup that runs `"$REX_LAB_HELPER" teardown "$REX_LAB"` before provisioning, then provision only with `"$REX_LAB_HELPER" provision "$REX_LAB"`.' \
+'2. Run every Rex command through `"$REX_LAB_HELPER" run "$REX_LAB" <arguments...>`, which supplies `-S <lab> --autostart=false` and strips `REX_*`.' \
+'   For Firstmate scripts, export `FM_REX_SERVER=$("$REX_LAB_HELPER" server "$REX_LAB")` and unset `REX_SESSION`, `REX_BLOCK`, `REX_CLIENT`, and `REX_SERVER`.' \
+'3. Teardown only through `"$REX_LAB_HELPER" teardown "$REX_LAB"`; it stops only the lab server through its own socket.' \
+'4. Forbidden: any `rex` call without an explicit lab `-S` and `--autostart=false`, any `rex server` command outside the helper, and sending input to, renaming, closing, moving, or focusing any session, window, or block on the live server; read-only listing of the live server is allowed.' \
+'5. The helper records the live server'"'"'s instance id and sessions before provisioning and verifies them after teardown.' \
+'   A changed instance id or a vanished session is a hard tripwire failure, never a cleanup warning to ignore.' \
+'' \
+'Ignore any Rex hook prompt to rename a session.')
+HERDR_SECTION="$HERDR_SECTION"$'\n\n'"$REX_SECTION"
 fi
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true

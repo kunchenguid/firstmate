@@ -294,14 +294,22 @@ test_supported_backend_endpoint_records_validate() {
     "backend=paseo" "paseo_terminal_id=terminal-1" "paseo_workspace_id=wks_1"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid paseo endpoint refused"
 
-  for backend in tmux herdr zellij orca cmux paseo; do
+  id=rex-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=01a15f2e-b05a-7449-b8c9-b9eafcadf82a:01a15f2e-c301-7b2b-a2fb-f59d5f593bd5" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=rex" \
+    "rex_server=unix:///Users/me/Library/Application%20Support/rex/server.sock" \
+    "rex_session_id=01a15f2e-b05a-7449-b8c9-b9eafcadf82a" "rex_block_id=01a15f2e-c301-7b2b-a2fb-f59d5f593bd5"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid rex endpoint refused"
+
+  for backend in tmux herdr zellij orca cmux paseo rex; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Paseo records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex records validate while every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {

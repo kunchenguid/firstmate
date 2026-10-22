@@ -865,6 +865,7 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     paseo) echo "https://paseo.sh" ;;
+    rex) echo "https://www.superlogical.com/rex/docs/installation" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
     *) return 1 ;;
   esac
