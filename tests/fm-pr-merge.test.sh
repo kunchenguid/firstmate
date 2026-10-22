@@ -4083,8 +4083,8 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
-# Real check runs carry large output bodies; a head with many of them must not
-# exceed the per-argument exec limit when its producers are compared.
+# Real check runs carry large output bodies, and a head can carry thousands of
+# runs; neither may exceed the per-argument exec limit when producers are compared.
 test_required_producer_large_check_runs() {
   local case_dir head kind filler
   head=a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
@@ -4104,7 +4104,8 @@ test_required_producer_large_check_runs() {
     fi
     jq -n --arg head "$head" --arg filler "$filler" '{check_runs: (
         [range(60) | {name: "other-\(.)", app: {id: 42}, head_sha: $head, output: {text: $filler}}]
-        + [{name: "ci", app: {id: 15368}, head_sha: $head, output: {text: $filler}}])}' \
+        + [range(2500) | {name: "matrix / build (os-\(.), toolchain-stable, feature-set-full)", app: {id: 42}, head_sha: $head}]
+        + [range(3) | {name: "ci", app: {id: 15368}, head_sha: $head, output: {text: $filler}}])}' \
       > "$case_dir/github-runs.json"
     [ "$(wc -c < "$case_dir/github-runs.json")" -gt 131072 ] \
       || fail "large check-runs fixture is not larger than the per-argument limit"
