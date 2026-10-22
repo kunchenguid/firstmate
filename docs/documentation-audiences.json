@@ -195,6 +195,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/cortex.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/cursor.md",
       "audience": "agent-runtime"
     },
@@ -500,6 +504,10 @@
     },
     {
       "path": "docs/verification/commandcode.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/cortex.md",
       "audience": "maintainer-verification"
     },
     {
