@@ -4288,10 +4288,16 @@ if [ "${1:-}" = --handling-delivered ]; then
   gen=${2:-} pid=${4:-}
   # The real script checks the named watcher pid before the episode
   # generation, so a successor that a later close already replaced is
-  # rejected rather than reported as superseded.
+  # rejected rather than reported as superseded. A confirmation of a token
+  # whose generation no longer matches the current one is superseded.
   if ! kill -0 "$pid" 2>/dev/null; then
     printf 'rejected-dead generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
     exit 1
+  fi
+  current=$(cat "${FM_ARM_LOG}.gen" 2>/dev/null || true)
+  if [ -n "$current" ] && [ "$current" != "$gen" ]; then
+    printf 'superseded generation=%s watcher=%s current=%s\n' "$gen" "$pid" "$current" >> "${FM_ARM_LOG:?}"
+    exit 3
   fi
   printf 'confirmed generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
   exit 0
@@ -4302,13 +4308,11 @@ live="$FM_CLOSE_PREFIX.live.$$"
 touch "$live"
 trap 'rm -f "$live"' EXIT
 trap 'exit 0' TERM INT
-# The first arm is the initial cycle and carries no recovery generation, the
-# way the real arm reads one only for a successor of an open episode.
-if [ "$count" -ge 2 ]; then
-  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
-else
-  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-fi
+# Each arm carries its own recovery generation and records it as the current
+# one, so a confirmation of a token from an earlier arm is a generation
+# mismatch rather than an accidental match.
+printf 'gen-%s\n' "$count" > "${FM_ARM_LOG}.gen"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
 printf 'ready=%s\n' "$count" >> "$FM_ARM_LOG"
 while [ "$count" -ne 1 ] && [ ! -e "$FM_CLOSE_PREFIX.$count" ]; do sleep 0.02; done
 printf 'signal: repeated close %s\n' "$count"
@@ -4329,6 +4333,7 @@ const rows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env
 const arms = () => rows().filter((row) => row.startsWith("arm="));
 const confirmations = () => rows().filter((row) => row.startsWith("confirmed generation="));
 const rejections = () => rows().filter((row) => row.startsWith("rejected-dead"));
+const supersessions = () => rows().filter((row) => row.startsWith("superseded generation="));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function waitFor(predicate, label) {
   for (let i = 0; i < 1000; i += 1) {
@@ -4384,6 +4389,13 @@ try {
   if (maxDeliveries !== 1) throw new Error(`delivery escaped its serialization: ${maxDeliveries}`);
   if (rejections().length !== 0) {
     throw new Error(`a live handoff was rejected: ${rows().join(" | ")}`);
+  }
+  if (supersessions().length !== 0) {
+    throw new Error(`a live handoff was reported as superseded: ${rows().join(" | ")}`);
+  }
+  const generations = confirmations().map((row) => row.split(" ")[1]);
+  if (generations.join(",") !== "generation=gen-2,generation=gen-3,generation=gen-4") {
+    throw new Error(`each close was confirmed against its own successor: ${generations.join(" | ")}`);
   }
   const order = offers.map((message) => message.trim());
   const expected = ["signal: repeated close 1", "signal: repeated close 2", "signal: repeated close 3"];
