@@ -122,7 +122,7 @@
 # empty body is not tracked, because its inline threads carry it. The record
 # keeps one threads[] entry per unanswered thread (key, source, author, at,
 # raised). Once a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old, poll adds
-# one pending "unanswered" signal and a wake whose text names the comment's URL
+# one pending "unanswered" signal and a wake whose text names the thread's URL
 # and its age: "check: contributions <task> <key> unanswered <url> <age>". The
 # same thread is raised again after every further reply age, whatever the
 # task's hold state, until it is answered, resolved or the pull request
