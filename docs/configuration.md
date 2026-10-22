@@ -624,6 +624,19 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## PR health monitor (config/pr-health-monitor)
+
+The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.
+With the flag present, session start arms `state/pr-health.check.sh`, and the watcher's check sweep then prints one wake line for each new condition on an owned PR: a definite merge conflict or a failing required check.
+A home owns a PR it recorded, linked, or observed before, a PR named in a live task's status lines, and the open PR on a live task copy's current branch, drafts and adopted branches included, until the PR merges or closes.
+The monitor reads no other PR, so another home's PR never wakes this home, and it never comments on or changes a PR.
+`bin/fm-pr-health.sh` owns the conditions, the fingerprints in `state/pr-health.json`, and the read budget.
+With the flag present and `config/wait-no-turns` also present, the brief's waiting section permits ending a turn only when awaiting a monitored condition on an owned PR.
+A wait for passing checks still needs the ordinary blocking command or a timed pause.
+With the file absent, nothing is armed, an already armed check prints nothing, and briefs omit that rule.
+Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.

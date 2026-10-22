@@ -1259,6 +1259,30 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
 }
 
+# config/pr-health-monitor lets a PR wait end the turn only for an owned PR.
+test_pr_wait_rule_follows_the_monitor_flag() {
+  local home brief
+  home="$TMP_ROOT/pr-wait-on"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/wait-no-turns"
+  : > "$home/config/pr-health-monitor"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pr-wait some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-pr-wait/brief.md"
+  assert_grep "fm-pr-health.sh' owned <pr-url>" "$brief" "the PR wait rule does not name the ownership check"
+  assert_grep "If it prints \`owned:\`, you may append \`paused:\` naming the PR and end your turn" "$brief" \
+    "an owned PR wait may not end the turn"
+  assert_grep "keep the blocking command, or declare \`paused:\` with an \`until\` time" "$brief" \
+    "an unwatched PR wait lost its blocking or until fallback"
+  home="$TMP_ROOT/pr-wait-off"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/wait-no-turns"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pr-wait some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  assert_no_grep "fm-pr-health.sh" "$home/data/brief-pr-wait/brief.md" "an absent monitor flag still added the PR wait rule"
+  pass "fm-brief: a PR wait ends the turn only when the PR health monitor owns the PR"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -1667,6 +1691,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
+test_pr_wait_rule_follows_the_monitor_flag
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
