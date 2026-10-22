@@ -4417,7 +4417,7 @@ EOF
 
 # The former after-delivery expectation conflicts with the approved restore
 # contract: a verified failure keeps its bounded retry during held delivery.
-test_pi_successor_failure_during_delivery_is_retried_immediately() {
+test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
   home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
@@ -4493,10 +4493,12 @@ await tool.execute("initial-arm", {}, undefined, undefined, {});
 await waitFor(() => branchAccepted, "branch accepted the wake behind a verified successor");
 if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
 // The successor dies while the branch still holds the delivery.
-await waitFor(() => arms() === 3, "a retry watcher before the delivery settles");
-await new Promise((resolve) => setTimeout(resolve, 150));
-if (arms() !== 3) throw new Error(`the immediate retry was not single-flight: ${arms()} arms`);
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (arms() !== 2) throw new Error(`a retry launched while the delivery was still in flight: ${arms()} arms`);
 releaseBranch();
+await waitFor(() => arms() === 3, "a retry watcher after the delivery settled");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (arms() !== 3) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
 if (prompts.length !== 0) throw new Error(`a bounded retry surfaced a failure prompt: ${prompts.join(" | ")}`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
@@ -4505,7 +4507,7 @@ EOF
   status=$?
   expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery"
   [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
-  pass "Pi retries a verified successor that failed while wake delivery remains held"
+  pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
 }
 
 test_pi_late_retiring_actionable_reaches_replacement() {
@@ -6351,7 +6353,7 @@ test_pi_actionable_closes_restore_while_branch_delivery_is_held
 test_pi_actionable_closes_restore_while_branch_delivery_is_held replacement
 test_pi_actionable_closes_restore_while_branch_delivery_is_held quit
 test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff
-test_pi_successor_failure_during_delivery_is_retried_immediately
+test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_keeps_predecessor_until_successor

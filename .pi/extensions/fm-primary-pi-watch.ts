@@ -132,7 +132,11 @@ type SessionGeneration = {
   unconsumedWakes: Map<string, UnconsumedWake>;
   // A verified successor's failure during restoration keeps its bounded retry
   // once that continuity operation finishes, independently of wake delivery.
-  deferredClose: { message: string; predecessorArmPid: string } | null;
+  // The guard names the operation that held the close: the retry belongs to
+  // the operation that was in flight when the close arrived, so the
+  // restoration settles it and the delivery settles it, and neither takes the
+  // other's.
+  deferredClose: { message: string; predecessorArmPid: string; guard: "restore" | "delivery" } | null;
 };
 
 function refreshWatchToolShell(
@@ -877,7 +881,15 @@ export default function (pi: ExtensionAPI) {
   function restorePendingActionables(owner: SessionGeneration): Promise<void> {
     if (!generationIsLive(owner)) return Promise.resolve();
     if (owner.restoring) return owner.restoring;
+    // Publish this pump before it restores anything. The pump used to be
+    // published after its first await, so a second pump could start in that
+    // window and the two would restore the same owner at once.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((resolveGate) => {
+      openGate = resolveGate;
+    });
     const restoring = (async () => {
+      await gate;
       while (generationIsLive(owner)) {
         const pending = owner.pendingActionables.find((item) =>
           !item.delivered && !owner.unconsumedWakes.has(item.token) && !owner.restorations.has(item.token),
@@ -891,6 +903,7 @@ export default function (pi: ExtensionAPI) {
       }
     })();
     owner.restoring = restoring;
+    openGate();
     void restoring.catch((error) => {
       const detail = error instanceof Error ? error.message : String(error);
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore an actionable wake\n${detail}`);
@@ -898,8 +911,8 @@ export default function (pi: ExtensionAPI) {
       if (owner.restoring === restoring) owner.restoring = null;
       if (!generationIsLive(owner)) return;
       const deferred = owner.deferredClose;
-      owner.deferredClose = null;
-      if (deferred && !liveArmChild(owner) && !owner.retryTimer) {
+      if (deferred && deferred.guard === "restore") owner.deferredClose = null;
+      if (deferred && deferred.guard === "restore" && !liveArmChild(owner) && !owner.retryTimer) {
         scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
       }
     });
@@ -1020,6 +1033,16 @@ export default function (pi: ExtensionAPI) {
       if (generationIsLive(owner)) {
         owner.delivering = false;
         if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+        // A close that arrived while the continuity operation held the guard
+        // keeps its bounded retry. The retry belongs to the continuity
+        // operation, so it runs when whichever of the delivery and the
+        // restoration settles LAST acts on it. The recorded close is consumed
+        // here, so exactly one of the two paths schedules it.
+        const deferred = owner.deferredClose;
+        if (deferred && deferred.guard === "delivery") owner.deferredClose = null;
+        if (deferred && deferred.guard === "delivery" && !liveArmChild(owner) && !owner.retryTimer) {
+          scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
+        }
       }
     }
   }
@@ -1255,11 +1278,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) {
-        // Only continuity restoration holds this guard. A verified successor
-        // keeps its retry; an unready child's close belongs to that restore.
+      if (owner.restoring || owner.delivering) {
+        // An operation holds the guard: a continuity restoration or a wake
+        // delivery. A verified successor that closes under it keeps its
+        // bounded retry for the end of that operation; an unready child's
+        // close belongs to the restore that started it.
         if (verified && !armRetired.has(armChild)) {
-          owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+          owner.deferredClose = {
+            message: classification.message,
+            predecessorArmPid: predecessor,
+            guard: owner.restoring ? "restore" : "delivery",
+          };
         }
         return;
       }
@@ -1276,7 +1305,7 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) return;
+      if (owner.restoring || owner.delivering) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
