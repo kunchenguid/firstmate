@@ -573,7 +573,7 @@ inbox_steer_busy() {  # <window> <backend> <task> <tail40>
 # dead, or missing worker; the ring helper protects pending composer text.
 # Normal retries keep the watcher blocking rather than waking firstmate.
 # Runs for secondmates too: their pane-staleness exemption is about quiet panes
-# being healthy, while an unacknowledged instruction can still be a stuck steer.
+# being healthy, while an unread instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0

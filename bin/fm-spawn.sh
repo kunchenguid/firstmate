@@ -3489,7 +3489,8 @@ json_escape() {
 # Granted paths are real (symlink-resolved) directories/files under this
 # task's home, matching BRIEF_REAL's own resolution: the brief dir (covers
 # brief.md/launch-brief.md/report.md), the steering inbox directory (covers
-# every steer and its handled/ acknowledgement), and the status file itself.
+# every steer, its .read/ receipt, and its handled/ acknowledgement), and the
+# status file itself.
 rovo_config_override_flag() {
   local effort=$1 data_dir=$2 state_dir=$3 id=$4
   local data_real state_real agent_json paths_json config_json
