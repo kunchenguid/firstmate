@@ -5509,13 +5509,23 @@ EOF
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// One file serves both OpenCode plugin generations: the v1 default server and
+// the v2 default export ({ id, setup(ctx) }). The named export remains for
+// compatibility. OpenCode 2.x skips a plugin without the default export,
+// which left this wiring dark on v2.
+// Semantic state comes from the session lifecycle: on v1 session.status, where
+// busy and retry are active and idle is inactive; on v2 the session.execution
+// bracket, where started is active and the terminal succeeded, failed, or
+// non-shutdown interrupted event is the idle equivalent (v2 publishes no
+// session.idle).
+// The v2 event stream is server-wide, so supported execution events are first
+// resolved to their session's own location and anything outside this worktree
+// is ignored.
+// Scoping latches the first session that reports activity (the worker's main
+// session - a subagent child session can only start while the main session is
+// already busy) and ignores other sessions' status until the latched session
+// settles, so a child's idle can never clear the worker's busy state.
+// When notifyTurnEnd is true, every turn end touches the turn-ended marker, which stays the watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state, event) =>
@@ -5525,7 +5535,11 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
+const touchTurnEnd = () =>
+  new Promise((resolve) => {
+    execFile("touch", ["$TURNEND"], () => resolve());
+  });
+const fmBusyHooks = () => {
   let activeSession = null;
   return {
     event: async ({ event }) => {
@@ -5548,14 +5562,121 @@ export const FmBusyState = async () => {
           activeSession = null;
           await busyEvent("idle", "session-idle");
         }
-        if (notifyTurnEnd) {
-          await new Promise((resolve) => {
-            execFile("touch", ["$TURNEND"], () => resolve());
-          });
-        }
+        if (notifyTurnEnd) await touchTurnEnd();
       }
     },
   };
+};
+export const FmBusyState = async () => fmBusyHooks();
+// v2 events carry their payload under data rather than properties, and an
+// ordinary turn ends with a terminal session.execution.* event instead of
+// session.idle.
+const v2TurnEnd = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
+const isV2TurnEnd = (event) =>
+  v2TurnEnd.has(event.type) &&
+  !(event.type === "session.execution.interrupted" &&
+    event.data && event.data.reason === "shutdown");
+const usableSessionID = (value) =>
+  typeof value === "string" && value.length > 0 ? value : null;
+const v2SessionID = (event) =>
+  usableSessionID(event && event.data && event.data.sessionID) ??
+  usableSessionID(event && event.durable && event.durable.aggregateID);
+const v2Properties = (event, sessionID) => ({
+  ...((event && event.data && typeof event.data === "object") ? event.data : {}),
+  sessionID,
+});
+const v1Event = (event, sessionID) => {
+  const properties = v2Properties(event, sessionID);
+  if (isV2TurnEnd(event)) return { type: "session.idle", properties };
+  return {
+    type: "session.status",
+    properties: { ...properties, status: { type: "busy" } },
+  };
+};
+export default {
+  id: "fm-busy-state",
+  async server() {
+    return fmBusyHooks();
+  },
+  async setup(ctx) {
+    const hooks = fmBusyHooks();
+    const controller = new AbortController();
+    // The v2 plugin event stream is server-wide: sessions from other
+    // locations publish into the same subscription, and the
+    // session.execution.* bracket carries no location, so without a scope a
+    // foreign session could latch this worktree's busy state or touch its
+    // notification marker. Resolve supported execution events to their
+    // session's own location - directly from a located event's envelope, or
+    // through ctx.session.get for each unlocated execution event - and ignore
+    // other locations, mirroring the v1 per-location stream this plugin is
+    // written against.
+    const normalizeDirectory = (directory) => {
+      if (typeof directory !== "string" || directory.length === 0) return "";
+      const normalized = directory.replace(/\/+$/, "");
+      return normalized === "" ? "/" : normalized;
+    };
+    const ownDirectory = normalizeDirectory(ctx.location && ctx.location.directory);
+    const sameLocation = (directory) =>
+      ownDirectory !== "" && normalizeDirectory(directory) === ownDirectory;
+    const sessionOwned = async (sessionID) => {
+      if (typeof ctx.session?.get !== "function") {
+        return undefined;
+      }
+      let directory;
+      try {
+        const session = await ctx.session.get({ sessionID });
+        directory = session && session.location && session.location.directory;
+      } catch {
+        return undefined;
+      }
+      directory = normalizeDirectory(directory);
+      if (directory === "") {
+        return undefined;
+      }
+      return sameLocation(directory);
+    };
+    const scopedEvent = async (event) => {
+      if (!(event && (event.type === "session.execution.started" || isV2TurnEnd(event)))) return null;
+      if (ownDirectory === "") return null;
+      const sessionID = v2SessionID(event);
+      if (sessionID === null) return null;
+      const directory = normalizeDirectory(event && event.location && event.location.directory);
+      if (directory !== "") {
+        return directory === ownDirectory ? v1Event(event, sessionID) : null;
+      }
+      return (await sessionOwned(sessionID)) === true ? v1Event(event, sessionID) : null;
+    };
+    void (async () => {
+      const resubscribeDelays = [100, 200, 400];
+      let resubscriptions = 0;
+      while (!controller.signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            try {
+              const scoped = await scopedEvent(event);
+              if (scoped) await hooks.event({ event: scoped });
+            } catch {}
+          }
+          if (controller.signal.aborted) return;
+          console.error("[fm-busy-state] OpenCode v2 event subscription ended unexpectedly");
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          console.error("[fm-busy-state] OpenCode v2 event subscription failed: " + error);
+        }
+        if (controller.signal.aborted) return;
+        const delay = resubscribeDelays[resubscriptions];
+        if (delay === undefined) return;
+        resubscriptions += 1;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (controller.signal.aborted) return;
+      }
+    })();
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'

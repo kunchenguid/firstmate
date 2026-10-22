@@ -164,7 +164,10 @@ drive_oc_plugin() {
   PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
-const hooks = await mod.FmBusyState({});
+if (typeof mod.default?.server !== "function" || !mod.default?.id) {
+  throw new Error("plugin has no v1 default export with an id and a server function");
+}
+const hooks = await mod.default.server({}, {});
 for (const arg of process.argv.slice(2)) {
   await hooks.event({ event: JSON.parse(arg) });
 }
@@ -177,6 +180,144 @@ oc_status() {  # <sessionID> <type>
 
 oc_idle() {  # <sessionID>
   printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
+}
+
+# drive_oc_v2_plugin <plugin-path> <v2-events...>: load the generated OpenCode
+# plugin's v2 default export in a plain Node host and feed it one v2 event
+# envelope per argument, in order, through the same ctx.event.subscribe entry
+# OpenCode v2 calls. The stub ctx carries a plugin location and a
+# ctx.session.get resolver like the live runtime, so the plugin's location
+# scoping is exercised; FM_OC_V2_FOREIGN_SESSIONS (space-separated) names
+# sessions the resolver places in the foreign location instead.
+# Completion is deterministic: the consumer pulls the next event only after
+# the hook for the previous one settled, so the stub resolves its gate when
+# the loop asks for an event past the last one. A plugin that never consumes
+# the stream fails the drive instead of hanging the suite. The stream mode
+# env var drives transient EOF, rejection, exhaustion, and abort cases.
+OC_V2_OWN_LOCATION=/own/worktree
+OC_V2_FOREIGN_LOCATION=/other/worktree
+drive_oc_v2_plugin() {
+  local plugin=$1
+  shift
+  PLUGIN_PATH="$plugin" \
+    FM_OC_V2_LOCATION="$OC_V2_OWN_LOCATION" \
+    FM_OC_V2_FOREIGN_LOCATION="$OC_V2_FOREIGN_LOCATION" \
+    FM_OC_V2_FOREIGN_SESSIONS="${FM_OC_V2_FOREIGN_SESSIONS:-}" \
+    FM_OC_V2_REPORT_RESOLVER_CALLS="${FM_OC_V2_REPORT_RESOLVER_CALLS:-}" \
+    FM_OC_V2_STREAM_MODE="${FM_OC_V2_STREAM_MODE:-}" \
+    node --input-type=module - "$@" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
+if (typeof mod.default?.setup !== "function" || !mod.default?.id) {
+  throw new Error("plugin has no v2 default export with an id and a setup function");
+}
+const ownLocation = process.env.FM_OC_V2_LOCATION;
+const foreignLocation = process.env.FM_OC_V2_FOREIGN_LOCATION;
+const foreignSessions = new Set((process.env.FM_OC_V2_FOREIGN_SESSIONS ?? "").split(/\s+/).filter(Boolean));
+const sessionLocations = new Map([...foreignSessions].map((sessionID) => [sessionID, foreignLocation]));
+const events = process.argv.slice(2).map((line) => JSON.parse(line));
+const streamMode = process.env.FM_OC_V2_STREAM_MODE ?? "hold";
+let resolverCalls = 0;
+let subscriptionCount = 0;
+let consumed;
+const finished = new Promise((resolve) => { consumed = resolve; });
+const timeout = setTimeout(() => {
+  console.error("v2 event stream was not consumed");
+  process.exit(1);
+}, 10000);
+const ctx = {
+  ...(process.env.FM_OC_V2_MISSING_LOCATION === "1"
+    ? {}
+    : { location: { directory: ownLocation } }),
+  ...(process.env.FM_OC_V2_NO_RESOLVER === "1"
+    ? {}
+    : {
+        session: {
+          get: async ({ sessionID }) => {
+            resolverCalls += 1;
+            return {
+              id: sessionID,
+              location: { directory: sessionLocations.get(sessionID) ?? ownLocation },
+            };
+          },
+        },
+      }),
+  event: {
+    subscribe: ({ signal } = {}) => {
+      subscriptionCount += 1;
+      const subscription = subscriptionCount;
+      return (async function* () {
+        if (signal?.aborted) return;
+        if (streamMode === "reject-once" && subscription === 1) {
+          throw new Error("transient rejection");
+        }
+        const transientEof = (streamMode === "eof-once" || streamMode === "abort-backoff") && subscription === 1;
+        if (transientEof || streamMode === "eof-exhaustion") {
+          if (streamMode === "eof-exhaustion" && subscription === 4) setTimeout(consumed, 0);
+          return;
+        }
+        for (const event of events) {
+          yield event;
+          const sessionID = event.data?.sessionID ?? event.durable?.aggregateID;
+          const directory = event.location?.directory;
+          if (typeof sessionID === "string" && typeof directory === "string") {
+            sessionLocations.set(sessionID, directory);
+          }
+        }
+        consumed();
+        await new Promise(() => {});
+      })();
+    },
+  },
+};
+const dispose = await mod.default.setup(ctx);
+if (streamMode === "abort-backoff") {
+  await new Promise((resolve) => {
+    setTimeout(() => {
+      dispose();
+      setTimeout(resolve, 250);
+    }, 50);
+  });
+} else {
+  await finished;
+  dispose();
+}
+clearTimeout(timeout);
+if (process.env.FM_OC_V2_REPORT_RESOLVER_CALLS === "1") {
+  console.log(`resolver-calls=${resolverCalls}`);
+}
+console.log(`subscribe-count=${subscriptionCount}`);
+EOF
+}
+
+# oc_v2_event: the real v2 session-event envelope: id, created, type, durable
+# aggregate/seq, and the payload under data - with no location, exactly as a
+# session.execution.* bracket event arrives.
+oc_v2_event() {  # <type> <sessionID>
+  printf '{"id":"evt-%s-%s","created":0,"type":"%s","durable":{"aggregateID":"%s","seq":1,"version":1},"data":{}}' \
+    "$1" "$2" "$1" "$2"
+}
+
+oc_v2_event_with_ids() {  # <type> <data-sessionID> <aggregateID>
+  printf '{"id":"evt-%s-%s","created":0,"type":"%s","durable":{"aggregateID":"%s","seq":1,"version":1},"data":{"sessionID":"%s"}}' \
+    "$1" "$2" "$1" "$3" "$2"
+}
+
+oc_v2_event_without_identity() {  # <type>
+  printf '{"id":"evt-%s-no-identity","created":0,"type":"%s","durable":{"seq":1,"version":1},"data":{}}' \
+    "$1" "$1"
+}
+
+oc_v2_event_with_reason() {  # <type> <sessionID> <reason>
+  printf '{"id":"evt-%s-%s","created":0,"type":"%s","durable":{"aggregateID":"%s","seq":1,"version":1},"data":{"reason":"%s"}}' \
+    "$1" "$2" "$1" "$2" "$3"
+}
+
+# oc_v2_located_event: the real v2 envelope for a located session event
+# (tool, step, text, status): the location rides the envelope.
+oc_v2_located_event() {  # <type> <sessionID> <directory>
+  printf '{"id":"evt-%s-%s","created":0,"type":"%s","location":{"directory":"%s"},"data":{"sessionID":"%s"}}' \
+    "$1" "$2" "$1" "$3" "$2"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -225,6 +366,390 @@ test_opencode_plugin_semantic_lifecycle() {
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
   pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+}
+
+# OpenCode 2.x loads only a plugin with a v2 default export and publishes no
+# session.idle: a turn ends with a terminal session.execution.* event, which
+# must both touch the watcher's notification marker and close the busy record.
+test_opencode_v2_plugin_finished_turn_reports_idle_and_turn_end() {
+  local rec id=busy-oc-v2-1 out state plugin terminal
+  rec=$(make_spawn_case oc-v2-lifecycle opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
+
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_FOREIGN_SESSIONS="ses_foreign ses_foreign2" drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event_with_ids session.execution.started ses_main ses_foreign)" \
+    "$(oc_v2_event_with_ids session.execution.succeeded ses_main ses_foreign2)") \
+    || fail "v2 data-session identity drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "v2 data.sessionID identity did not touch the turn-ended notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "v2 data.sessionID identity must close the busy record, got '$out'"
+
+  for terminal in succeeded failed interrupted; do
+    rm -f "$state/$id.turn-ended"
+    out=$(drive_oc_v2_plugin "$plugin" \
+      "$(oc_v2_event session.execution.started ses_main)" \
+      "$(oc_v2_event "session.execution.$terminal" ses_main)") \
+      || fail "v2 $terminal drive failed: $out"
+    [ -f "$state/$id.turn-ended" ] \
+      || fail "v2 session.execution.$terminal did not touch the turn-ended notification marker"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "idle opencode-plugin" ] \
+      || fail "v2 session.execution.$terminal must close the busy record, got '$out'"
+
+    out=$(drive_oc_v2_plugin "$plugin" \
+      "$(oc_v2_event session.execution.started ses_main)") \
+      || fail "v2 started drive failed: $out"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "busy opencode-plugin" ] \
+      || fail "v2 session.execution.started must reopen busy, got '$out'"
+  done
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event_with_reason session.execution.interrupted ses_main shutdown)") \
+    || fail "v2 shutdown interruption drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "v2 shutdown interruption must not touch the turn-ended notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] \
+    || fail "v2 shutdown interruption must keep the busy record active, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event_with_reason session.execution.interrupted ses_main cancelled)") \
+    || fail "v2 non-shutdown interruption drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "v2 non-shutdown interruption must touch the turn-ended notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "v2 non-shutdown interruption must close the busy record, got '$out'"
+  pass "opencode v2: a finished turn touches the notification marker and records idle busy state"
+}
+
+test_opencode_v2_plugin_resubscribes_after_transient_eof() {
+  local rec id=busy-oc-v2-reconnect-eof out state plugin log
+  rec=$(make_spawn_case oc-v2-reconnect-eof opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  log="OpenCode v2 event subscription ended unexpectedly"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_STREAM_MODE=eof-once drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "v2 transient EOF drive failed: $out"
+  assert_contains "$out" "$log" "v2 transient EOF lost its diagnostic: $out"
+  [ "$(printf '%s\n' "$out" | grep -Fc -- "$log")" -eq 1 ] \
+    || fail "v2 transient EOF should log once, got: $out"
+  assert_contains "$out" "subscribe-count=2" \
+    "v2 transient EOF did not re-arm exactly once: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "a post-reconnect terminal event did not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "a post-reconnect terminal event must close the busy record, got '$out'"
+  pass "opencode v2 re-arms after a transient EOF and keeps terminal event handling"
+}
+
+test_opencode_v2_plugin_resubscribes_after_transient_rejection() {
+  local rec id=busy-oc-v2-reconnect-reject out state plugin log
+  rec=$(make_spawn_case oc-v2-reconnect-reject opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  log="OpenCode v2 event subscription failed: Error: transient rejection"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_STREAM_MODE=reject-once drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "v2 transient rejection drive failed: $out"
+  assert_contains "$out" "$log" "v2 transient rejection lost its diagnostic: $out"
+  [ "$(printf '%s\n' "$out" | grep -Fc -- "$log")" -eq 1 ] \
+    || fail "v2 transient rejection should log once, got: $out"
+  assert_contains "$out" "subscribe-count=2" \
+    "v2 transient rejection did not re-arm exactly once: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "a post-reconnect terminal event did not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "a post-reconnect terminal event must close the busy record, got '$out'"
+  pass "opencode v2 re-arms after a transient rejection and keeps terminal event handling"
+}
+
+test_opencode_v2_plugin_stops_after_bounded_eof_retries() {
+  local rec id=busy-oc-v2-reconnect-exhausted out state plugin log
+  rec=$(make_spawn_case oc-v2-reconnect-exhausted opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  log="OpenCode v2 event subscription ended unexpectedly"
+
+  out=$(FM_OC_V2_STREAM_MODE=eof-exhaustion drive_oc_v2_plugin "$plugin") \
+    || fail "v2 repeated EOF drive failed: $out"
+  [ "$(printf '%s\n' "$out" | grep -Fc -- "$log")" -eq 4 ] \
+    || fail "v2 repeated EOF should preserve four diagnostics, got: $out"
+  assert_contains "$out" "subscribe-count=4" \
+    "v2 repeated EOF exceeded the three-resubscription budget: $out"
+  pass "opencode v2 stops after three bounded resubscriptions"
+}
+
+test_opencode_v2_plugin_abort_during_backoff_does_not_resubscribe() {
+  local rec id=busy-oc-v2-reconnect-abort out state plugin
+  rec=$(make_spawn_case oc-v2-reconnect-abort opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+
+  out=$(FM_OC_V2_STREAM_MODE=abort-backoff drive_oc_v2_plugin "$plugin") \
+    || fail "v2 abort-backoff drive failed: $out"
+  assert_contains "$out" "subscribe-count=1" \
+    "an abort during backoff allowed a later v2 subscription: $out"
+  pass "opencode v2 disposal during backoff suppresses a new subscription"
+}
+
+test_opencode_v2_plugin_child_turn_end_keeps_the_worker_busy() {
+  local rec id=busy-oc-v2-2 out state plugin
+  rec=$(make_spawn_case oc-v2-latch opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+
+  # A child session's turn end alone must not clear the spawn seed.
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.succeeded ses_child)") \
+    || fail "v2 child-only drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "a child turn end must still touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a child turn end alone must not clear the worker, got '$out'"
+
+  # Once the worker's own session is latched, its child's turn end must not
+  # clear the worker's busy state.
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.started ses_child)" \
+    "$(oc_v2_event session.execution.succeeded ses_child)") \
+    || fail "v2 latched child drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] \
+    || fail "a child turn end must not clear the latched worker, got '$out'"
+
+  # The latched worker's own turn end still closes the record.
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.started ses_child)" \
+    "$(oc_v2_event session.execution.succeeded ses_child)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "v2 latched turn-end drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "the latched session's own turn end must close the record, got '$out'"
+  pass "opencode v2: child turn ends never clear the worker's latched busy state"
+}
+
+# The v2 plugin event stream is server-wide on OpenCode 2.0.28 (verified
+# live): sessions from other locations publish into the same subscription,
+# and the session.execution.* bracket carries no location. Only the worker's
+# own location may drive the busy record and the notification marker, and
+# tool/step/text activity must never touch the marker - only a finished turn.
+test_opencode_v2_plugin_scopes_to_the_workers_own_location() {
+  local rec id=busy-oc-v2-3 out state plugin
+  rec=$(make_spawn_case oc-v2-scope opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_REPORT_RESOLVER_CALLS=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.tool.called ses_main)") \
+    || fail "unsupported-event drive failed: $out"
+  assert_contains "$out" "resolver-calls=0" \
+    "an unsupported unlocated event must not call ctx.session.get: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "an unsupported unlocated event must not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "an unsupported unlocated event must not change the busy record, got '$out'"
+
+  # A foreign location's execution bracket is dropped: no latch, no busy
+  # write, no marker touch, and the spawn seed stands.
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_FOREIGN_SESSIONS=ses_foreign drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_foreign)" \
+    "$(oc_v2_event session.execution.succeeded ses_foreign)") \
+    || fail "foreign execution drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a foreign session's turn end must not touch the worker's marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a foreign session must not change the busy record, got '$out'"
+
+  # A located foreign event is filtered by its own envelope location.
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_FOREIGN_SESSIONS=ses_foreign drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_located_event session.idle ses_foreign "$OC_V2_FOREIGN_LOCATION")") \
+    || fail "foreign located drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a located foreign session event must not touch the worker's marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a located foreign session event must not change the busy record, got '$out'"
+
+  # A foreign session that starts first must not steal the latch, and its
+  # turn end must not close the worker's own latched busy state.
+  out=$(FM_OC_V2_FOREIGN_SESSIONS=ses_foreign drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_foreign)" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_foreign)") \
+    || fail "foreign-first lifecycle drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] \
+    || fail "the worker's own execution must stay latched busy through a foreign turn end, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a foreign turn end must not touch the worker's marker"
+
+  # Tool, step, and text activity never touches the marker; only a genuine
+  # finished turn does.
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_located_event session.tool.called ses_main "$OC_V2_OWN_LOCATION")" \
+    "$(oc_v2_located_event session.tool.success ses_main "$OC_V2_OWN_LOCATION")" \
+    "$(oc_v2_located_event session.step.started ses_main "$OC_V2_OWN_LOCATION")" \
+    "$(oc_v2_located_event session.text.delta ses_main "$OC_V2_OWN_LOCATION")") \
+    || fail "mid-turn activity drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "tool, step, and text activity must not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "mid-turn activity must keep the worker busy, got '$out'"
+
+  # The worker's own finished turn still closes the record and notifies.
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "own finished-turn drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "the worker's own turn end must touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the worker's own turn end must close the record, got '$out'"
+  pass "opencode v2: only the worker's own location drives busy state and the notification marker"
+}
+
+test_opencode_v2_plugin_refreshes_locationless_session_location() {
+  local rec id=busy-oc-v2-5 out state plugin
+  rec=$(make_spawn_case oc-v2-movement opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_REPORT_RESOLVER_CALLS=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_move)" \
+    "$(oc_v2_located_event session.execution.started ses_move "$OC_V2_FOREIGN_LOCATION")" \
+    "$(oc_v2_event session.execution.succeeded ses_move)") \
+    || fail "own-to-foreign movement drive failed: $out"
+  assert_contains "$out" "resolver-calls=2" \
+    "own-to-foreign movement must re-resolve the locationless terminal: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "a moved-away session's locationless terminal must not touch the marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] \
+    || fail "a moved-away session's locationless terminal must stay busy, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_FOREIGN_SESSIONS=ses_move FM_OC_V2_REPORT_RESOLVER_CALLS=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_move)" \
+    "$(oc_v2_located_event session.execution.started ses_move "$OC_V2_OWN_LOCATION")" \
+    "$(oc_v2_event session.execution.succeeded ses_move)") \
+    || fail "foreign-to-own movement drive failed: $out"
+  assert_contains "$out" "resolver-calls=2" \
+    "foreign-to-own movement must re-resolve the locationless terminal: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "a moved-in session's locationless terminal must touch the marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "a moved-in session's locationless terminal must close busy, got '$out'"
+  pass "opencode v2 refreshes locationless ownership after located session movement"
+}
+
+test_opencode_v2_plugin_requires_location_identity_and_resolver() {
+  local rec id=busy-oc-v2-4 out state plugin
+  rec=$(make_spawn_case oc-v2-rejections opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_MISSING_LOCATION=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "missing-location drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "a plugin without a location must not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a plugin without a location must not change the busy record, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_NO_RESOLVER=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event_with_ids session.execution.started ses_main ses_main)" \
+    "$(oc_v2_event_with_ids session.execution.succeeded ses_main ses_main)") \
+    || fail "unlocated-without-resolver drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "an unlocated event without a resolver must not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "an unlocated event without a resolver must not change the busy record, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event_without_identity session.execution.started)" \
+    "$(oc_v2_event_without_identity session.execution.succeeded)") \
+    || fail "missing-identity drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "an event without a session identity must not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "an event without a session identity must not change the busy record, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(FM_OC_V2_NO_RESOLVER=1 drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_located_event session.execution.started ses_main "$OC_V2_OWN_LOCATION")" \
+    "$(oc_v2_located_event session.execution.succeeded ses_main "$OC_V2_OWN_LOCATION")") \
+    || fail "located-without-resolver drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "a located event with matching ownership must touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "a located event with matching ownership must close the busy record, got '$out'"
+  pass "opencode v2 drops unscoped events and accepts matching located events without a resolver"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>
@@ -756,6 +1281,18 @@ test_secondmate_opencode_plugin_closes_without_a_parent_turnend() {
   [ ! -e "$state/$id.turn-ended" ] || fail "opencode secondmate session.idle touched the parent's turn-ended marker"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "idle opencode-plugin" ] || fail "opencode secondmate idle must classify idle, got '$out'"
+
+  # The same v2 contract: the terminal execution event closes the mate's busy
+  # record through the default export and stays off the parent's marker.
+  out=$(drive_oc_v2_plugin "$plugin" \
+    "$(oc_v2_event session.execution.started ses_main)" \
+    "$(oc_v2_event session.execution.succeeded ses_main)") \
+    || fail "opencode secondmate v2 drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "opencode secondmate v2 turn end touched the parent's turn-ended marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] \
+    || fail "opencode secondmate v2 turn end must classify idle, got '$out'"
   pass "an opencode secondmate plugin closes the parent busy record without a parent turn-end"
 }
 
@@ -850,6 +1387,15 @@ test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
+test_opencode_v2_plugin_finished_turn_reports_idle_and_turn_end
+test_opencode_v2_plugin_resubscribes_after_transient_eof
+test_opencode_v2_plugin_resubscribes_after_transient_rejection
+test_opencode_v2_plugin_stops_after_bounded_eof_retries
+test_opencode_v2_plugin_abort_during_backoff_does_not_resubscribe
+test_opencode_v2_plugin_child_turn_end_keeps_the_worker_busy
+test_opencode_v2_plugin_scopes_to_the_workers_own_location
+test_opencode_v2_plugin_refreshes_locationless_session_location
+test_opencode_v2_plugin_requires_location_identity_and_resolver
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle

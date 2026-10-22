@@ -6,7 +6,7 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The Firstmate-owned plugin's semantic session lifecycle, latched to the worker's own session: on the v1 plugin API `session.status`, where `busy` and `retry` are active and `idle` is inactive; on v2 the `session.execution.*` bracket, where `started` is active and terminal `succeeded`, `failed`, or non-shutdown `interrupted` events are inactive, while `interrupted` with `data.reason === "shutdown"` remains active. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
