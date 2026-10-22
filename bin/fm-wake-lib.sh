@@ -2308,6 +2308,21 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# fm_wake_queued_carries_locked: 0 iff an unacknowledged queued row of <kind>
+# for exactly <key> carries <needle> in its payload. The payload-shaped twin of
+# fm_wake_queued_keys_locked, for a publisher that must write one wake of a
+# given shape at most once: the durable queue stays the authority, so a row
+# matches only while the supervisor has not consumed it, and no separate
+# duplicate ledger can drift from what was actually published.
+# <kind> <key> <needle>
+fm_wake_queued_carries_locked() {
+  local kind=$1 key=$2 needle=$3
+  [ -n "$needle" ] || return 1
+  awk -F '\t' -v kind="$kind" -v key="$key" -v needle="$needle" \
+    'NF >= 5 && $3 == kind && $4 == key && index($5, needle) { found = 1; exit }
+     END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null
+}
+
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
   local task=$1 observed_at=$2 oldest_row_key=$3 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac

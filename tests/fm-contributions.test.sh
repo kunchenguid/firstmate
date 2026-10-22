@@ -116,6 +116,7 @@ forge_home() {
   printf '[]\n' > "$home/forge/comments.json"
   printf '[]\n' > "$home/forge/reviews.json"
   printf '[]\n' > "$home/forge/inline.json"
+  printf '[]\n' > "$home/forge/threads.json"
   printf '[]\n' > "$home/forge/labels.json"
   printf '[]\n' > "$home/forge/events.json"
   cat > "$home/fakebin/gh" <<'SH'
@@ -137,6 +138,8 @@ case "$*" in
   'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
   'api repos/o/r/pulls/'*'/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
   'api repos/o/r/pulls/'*'/comments?'*) jq -s . "$FORGE/inline.json" ;;
+  'api graphql '*)
+    jq '[{data:{repository:{pullRequest:{reviewThreads:{nodes:.,pageInfo:{hasNextPage:false,endCursor:null}}}}}}]' "$FORGE/threads.json" ;;
   'api repos/o/r/commits/'*'/check-runs?'*)
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
@@ -1643,8 +1646,210 @@ test_many_reviews_stay_readable() {
   pass 'a many-review PR stores only classified review fields and stays readable'
 }
 
+# The 19-hour incident: a reviewer's inline comment was acknowledged while the
+# delivery sat on a captain hold, and nothing raised the thread again.
+unanswered_home() { # name: delivery on a captain hold with one unanswered inline comment
+  local home
+  home=$(new_home "$1")
+  forge_home "$home"
+  sed -i.bak '/ delivery /s/$/ (hold: wait for the scope decision) (hold-kind: captain)/' "$home/data/backlog.md" \
+    && rm -f "$home/data/backlog.md.bak"
+  jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Why is this retried?",html_url:"https://github.com/o/r/pull/8#discussion_r31",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/inline.json"
+  printf '%s\n' "$home"
+}
+
+poll_at() { with_home "$1" env FM_CONTRIBUTIONS_REPLY_AGE=86400 FM_CONTRIBUTIONS_NOW="$2" "$ROOT/bin/fm-contributions.sh" poll; }
+
+ack_pending() { # home: acknowledge the one pending signal
+  local home=$1 token
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'first | .token') || fail 'no pending signal to acknowledge'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+}
+
+test_unanswered_thread_is_raised_again_under_hold() {
+  local home out
+  home=$(unanswered_home unanswered-hold)
+  out=$(poll_at "$home" 2026-09-16T08:01:00Z) || fail 'first poll failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64}$' \
+    || fail "the arriving comment did not raise its ordinary wake: $out"
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-17T03:00:00Z) || fail 'poll 19 hours after the comment failed'
+  [ -z "$out" ] || fail "a thread 19 hours old was raised again before the bound: $out"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail 'an acknowledged signal came back before the bound'
+  out=$(poll_at "$home" 2026-09-17T09:00:00Z) || fail 'poll 25 hours after the comment failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64} unanswered https://github.com/o/r/pull/8#discussion_r31 25h$' \
+    || fail "an unanswered thread under a hold was not raised with its URL and age: $out"
+  grep -Fq 'unanswered https://github.com/o/r/pull/8#discussion_r31 25h' "$home/state/.wake-queue" \
+    || fail 'the re-raise never reached the durable wake queue'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending \
+    | jq -e 'length == 1 and .[0].type == "unanswered" and .[0].source == "https://github.com/o/r/pull/8#discussion_r31"
+      and .[0].age == "25h" and .[0].author == "maintainer"' >/dev/null \
+    || fail 'the re-raise is not one pending signal naming the thread'
+  jq -e '.records[0].threads | length == 1 and .[0].raised == "2026-09-17T09:00:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the re-raise did not record when the thread was raised'
+  # An acknowledged re-raise is raised again one reply age later, not at every poll.
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll 24 hours after the re-raise failed'
+  [ -z "$out" ] || fail "the thread was raised again before a day passed: $out"
+  out=$(poll_at "$home" 2026-09-18T09:00:00Z) || fail 'poll a day after the re-raise failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 49h$' \
+    || fail "the thread was not raised again a day later: $out"
+  jq -e '[.records[0].notified[] | select(startswith("unanswered:"))] | length == 1' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'acknowledged re-raises stayed in the notified list'
+  # A reply from the contribution author in the thread ends the tracking and
+  # withdraws the signal nobody had acknowledged yet.
+  jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
+      body:"Why is this retried?",html_url:"https://github.com/o/r/pull/8#discussion_r31",
+      created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z",commit_id:$head},
+    {id:32,in_reply_to_id:31,user:{login:"author"},author_association:"NONE",body:"Fixed in the next push",
+      html_url:"https://github.com/o/r/pull/8#discussion_r32",created_at:"2026-09-18T10:00:00Z",updated_at:"2026-09-18T10:00:00Z",commit_id:$head}]' \
+    > "$home/forge/inline.json"
+  for at in 2026-09-18T10:05:00Z 2026-09-20T10:00:00Z; do
+    out=$(poll_at "$home" "$at") || fail "poll at $at failed"
+    [ -z "$out" ] || fail "an answered thread was raised at $at: $out"
+  done
+  jq -e '.records[0] | (.threads | length) == 0 and (.pending | length) == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an author reply did not clear the tracked thread and its signal'
+  pass 'an acknowledged unanswered thread under a hold is raised again after a day, daily, until the author replies'
+}
+
+test_resolved_thread_is_answered() {
+  local home out
+  home=$(unanswered_home resolved-thread)
+  printf '[{"isResolved":false,"comments":{"nodes":[{"databaseId":40}]}},{"isResolved":true,"comments":{"nodes":[{"databaseId":31}]}}]\n' \
+    > "$home/forge/threads.json"
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll two days later failed'
+  [ -z "$out" ] || fail "a resolved thread was raised as unanswered: $out"
+  jq -e '.records[0].threads | length == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a resolved thread stayed tracked'
+  pass 'a resolved thread with no reply counts as answered'
+}
+
+test_reply_rules() {
+  local home out
+  home=$(new_home reply-rules)
+  forge_home "$home"
+  jq -n --arg head "$HEAD_A" '[
+    {id:50,user:{login:"maintainer"},author_association:"OWNER",body:"Please explain",html_url:"https://github.com/o/r/pull/8#issuecomment-50",created_at:"2026-09-16T06:00:00Z",updated_at:"2026-09-16T06:00:00Z"},
+    {id:51,user:{login:"maintainer"},author_association:"OWNER",body:"Thanks, merging soon",html_url:"https://github.com/o/r/pull/8#issuecomment-51",created_at:"2026-09-16T07:00:00Z",updated_at:"2026-09-16T07:00:00Z"},
+    {id:52,user:{login:"author"},author_association:"NONE",body:"Explained above",html_url:"https://github.com/o/r/pull/8#issuecomment-52",created_at:"2026-09-16T06:30:00Z",updated_at:"2026-09-16T06:30:00Z"}]' \
+    > "$home/forge/comments.json"
+  jq -n --arg head "$HEAD_A" '[
+    {id:60,user:{login:"maintainer"},author_association:"MEMBER",state:"APPROVED",body:"LGTM",html_url:"https://github.com/o/r/pull/8#pullrequestreview-60",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
+    {id:61,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-61",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
+    {id:62,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Needs a test",html_url:"https://github.com/o/r/pull/8#pullrequestreview-62",submitted_at:"2026-09-16T06:45:00Z",commit_id:$head},
+    {id:63,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-63",submitted_at:"2026-09-16T07:30:00Z",commit_id:$head},
+    {id:64,user:{login:"reviewer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Rename this",html_url:"https://github.com/o/r/pull/8#pullrequestreview-64",submitted_at:"2026-09-16T07:00:00Z",commit_id:$head},
+    {id:65,user:{login:"reviewer"},author_association:"MEMBER",state:"APPROVED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-65",submitted_at:"2026-09-16T07:40:00Z",commit_id:$head}]' \
+    > "$home/forge/reviews.json"
+  jq -n --arg head "$HEAD_A" '[
+    {id:70,user:{login:"maintainer"},author_association:"OWNER",body:"Root",html_url:"https://github.com/o/r/pull/8#discussion_r70",created_at:"2026-09-16T04:00:00Z",updated_at:"2026-09-16T04:00:00Z",commit_id:$head},
+    {id:71,in_reply_to_id:70,user:{login:"stranger"},author_association:"NONE",body:"Same here",html_url:"https://github.com/o/r/pull/8#discussion_r71",created_at:"2026-09-16T04:30:00Z",updated_at:"2026-09-16T04:30:00Z",commit_id:$head},
+    {id:72,user:{login:"maintainer"},author_association:"OWNER",body:"Other thread",html_url:"https://github.com/o/r/pull/8#discussion_r72",created_at:"2026-09-16T04:00:00Z",updated_at:"2026-09-16T04:00:00Z",commit_id:$head},
+    {id:73,in_reply_to_id:72,user:{login:"author"},author_association:"NONE",body:"Done",html_url:"https://github.com/o/r/pull/8#discussion_r73",created_at:"2026-09-16T04:30:00Z",updated_at:"2026-09-16T04:30:00Z",commit_id:$head},
+    {id:74,in_reply_to_id:72,user:{login:"maintainer"},author_association:"OWNER",body:"Still wrong",html_url:"https://github.com/o/r/pull/8#discussion_r74",created_at:"2026-09-16T05:00:00Z",updated_at:"2026-09-16T05:00:00Z",commit_id:$head}]' \
+    > "$home/forge/inline.json"
+  poll_at "$home" 2026-09-16T08:00:00Z >/dev/null || fail 'poll failed'
+  jq -e '[.records[0].threads[].key] | sort == ["review-comment:70","review-comment:74","review:62"]' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "wrong threads tracked: $(jq -c '[.records[0].threads[].key]' "$home/data/delivery/contributions.json")"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll two days later failed'
+  [ "$(printf '%s\n' "$out" | grep -o 'unanswered https://[^ ]*' | sort)" = "$(printf '%s\n' \
+    'unanswered https://github.com/o/r/pull/8#discussion_r70' 'unanswered https://github.com/o/r/pull/8#discussion_r74' \
+    'unanswered https://github.com/o/r/pull/8#pullrequestreview-62')" ] \
+    || fail "a plain comment was raised again, or a tracked thread was not: $out"
+  pass 'only inline threads and reviews requesting changes with text, no author reply, resolution or later verdict are tracked as unanswered'
+}
+
+test_reply_age_is_configurable_and_validated() {
+  local home out bad
+  home=$(unanswered_home reply-age)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll with a one-hour reply age failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
+    || fail "a one-hour reply age did not raise the thread: $out"
+  for bad in soon -5 1.5 0 00 000; do
+    with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE="$bad" "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
+      && fail "the reply age '$bad' was accepted"
+  done
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z FM_CONTRIBUTIONS_REPLY_AGE=03600 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 || fail 'a zero-padded positive reply age was refused'
+  pass 'the reply age is a validated seconds setting'
+}
+
+test_closed_pull_request_drops_its_threads() {
+  local home
+  home=$(unanswered_home closed-threads)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  printf 'merged\n' > "$home/forge/state"
+  poll_at "$home" 2026-09-18T08:00:00Z >/dev/null || fail 'poll after the merge failed'
+  jq -e '.records[0] | .observation.state == "merged" and (.threads | length) == 0
+    and all(.pending[]; .type != "unanswered")' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a merged pull request kept unanswered threads'
+  pass 'a closed pull request stops raising its threads'
+}
+
+test_unanswered_reraise_is_off_unless_configured() {
+  local home out at
+  home=$(unanswered_home reraise-off)
+  wrap_forge "$home"
+  poll_off() { with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll; }
+  out=$(poll_off 2026-09-16T08:01:00Z) || fail 'first poll without a reply age failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64}$' \
+    || fail "the arriving comment lost its ordinary wake: $out"
+  ack_pending "$home"
+  for at in 2026-09-17T09:00:00Z 2026-09-18T09:00:00Z 2026-09-25T09:00:00Z; do
+    out=$(poll_off "$at") || fail "poll at $at without a reply age failed"
+    [ -z "$out" ] || fail "an unconfigured install raised a thread at $at: $out"
+  done
+  ! grep -Fq 'api graphql' "$home/forge/calls" || fail 'an unconfigured install read review threads'
+  jq -e '.records[0] | has("threads") == false and (.pending | length) == 0
+    and all(.observation.events[]; has("unanswered") == false and has("at") == false)' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'an unconfigured install recorded thread tracking'
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE= FM_CONTRIBUTIONS_NOW=2026-09-26T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll with an empty reply age failed'
+  [ -z "$out" ] || fail "an empty reply age raised a thread: $out"
+  # Turning the setting on tracks the thread, and turning it off again withdraws it.
+  out=$(poll_at "$home" 2026-09-27T09:00:00Z) || fail 'poll with the setting on failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 ' \
+    || fail "a configured install did not raise the thread: $out"
+  grep -Fq 'api graphql' "$home/forge/calls" || fail 'a configured install never read review threads'
+  out=$(poll_off 2026-09-27T10:00:00Z) || fail 'poll with the setting off again failed'
+  [ -z "$out" ] || fail "switching the setting off printed a wake: $out"
+  jq -e '.records[0] | has("threads") == false and all(.pending[]; .type != "unanswered")
+    and all(.notified[]; startswith("unanswered:") | not)' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'switching the setting off left thread tracking behind'
+  pass 'the unanswered re-raise and the review-thread read stay off unless a reply age is configured'
+}
+
+test_arm_plumbs_the_reply_age_into_the_check_shim() {
+  local home out
+  home=$(unanswered_home arm-reply-age)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE=3600 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+    || fail 'arm with a reply age failed'
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z bash "$home/state/contributions.check.sh") \
+    || fail 'configured check shim failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
+    || fail "the generated check ignored the configured reply age: $out"
+  with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+    || fail 'arm without a reply age failed'
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW=2026-09-18T09:30:00Z bash "$home/state/contributions.check.sh") \
+    || fail 'unconfigured check shim failed'
+  [ -z "$out" ] || fail "a check armed without a reply age raised a thread: $out"
+  pass 'arm copies a configured reply age into the generated check'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_many_reviews_stay_readable; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
