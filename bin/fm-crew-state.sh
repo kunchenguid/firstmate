@@ -441,6 +441,46 @@ change_read_record_bounded() {  # <host> <number>
   FM_PR_RECORD_MERGED=$merged
 }
 
+pr_checks_state_bounded() {  # <owner> <repo> <number>
+  local checks
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  if ! checks=$(fm_run_timed 5 bash -c '
+    . "$1"
+    fm_pr_github_checks_state "$2" "$3" "$4" || true
+    printf "%s\n" "$FM_PR_CHECKS_STATE"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+    return 1
+  fi
+  [ -n "$checks" ] || return 1
+  printf '%s\n' "$checks"
+}
+
+nm_forge_checks_not_ready() {
+  [ "${FM_CREW_STATE_NO_FORGE:-0}" = 1 ] && return 1
+  local raw_pr provider path number owner repo checks
+  raw_pr=$(strip_quotes "$(nm_field pr)")
+  if fm_pr_url_parse "$raw_pr"; then
+    provider=$FM_PR_PROVIDER
+    path=$FM_PR_PATH
+    number=$FM_PR_NUMBER
+  elif [ -n "${META:-}" ] && fm_pr_metadata_identity_parse "$META"; then
+    provider=$FM_PR_META_PROVIDER
+    path=$FM_PR_META_PATH
+    number=$FM_PR_META_NUMBER
+  else
+    return 1
+  fi
+  case "$provider" in
+    github)
+      owner=${path%%/*}
+      repo=${path#*/}
+      checks=$(pr_checks_state_bounded "$owner" "$repo" "$number") || return 1
+      [ "$checks" = not-ready ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 passed_pr_detail() {
   local provider url host path number owner repo raw_pr state_lc
   raw_pr=$(strip_quotes "$(nm_field pr)")
@@ -771,7 +811,11 @@ nm_run_activity_is_recent() {
 # orphaned-CI-monitor gap (2026-09-05 jr-voice): a run held for a captain
 # merge decision polls until the shared daemon restarts under it and marks
 # the run failed, although GitHub's own check state - the actual shippability
-# authority - is green and every substantive step completed.
+# authority - is green and every substantive step completed. When main
+# advanced after that green marker, reachable forge checks must not read
+# not-ready before a terminal run counts as held for merge; if the forge is
+# unreachable, non-GitHub, or suppressed via NO_FORGE, it falls back to the
+# log's green marker.
 nm_failed_run_is_green_held_ci() {
   local rows row rest step status saw_ci_failed
   rows=$(nm_steps_rows)
@@ -799,7 +843,9 @@ nm_failed_run_is_green_held_ci() {
 $rows
 EOF
   [ "$saw_ci_failed" = 1 ] || return 1
-  [ "$(nm_ci_checks_state)" = green ]
+  [ "$(nm_ci_checks_state)" = green ] || return 1
+  nm_ci_rearmed_after_green || return 0
+  ! nm_forge_checks_not_ready
 }
 
 # Apply the header's terminal-delivery safeguard. The earlier green log cannot
@@ -928,6 +974,18 @@ nm_ci_checks_state() {
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# 0 when a base-advance re-arm line follows the ci log's last green marker.
+nm_ci_rearmed_after_green() {
+  local run_id
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 1
+  nm_run axi logs --step ci --run "$run_id" --full 2>/dev/null | awk '
+    /CI checks passed|no CI checks reported - still monitoring/ { rearmed = 0; next }
+    /base branch advanced.*re-arming CI monitor timeout/ { rearmed = 1 }
+    END { exit !rearmed }
+  '
 }
 # Coarse fallback when the bare `axi status` answer is not this branch's own
 # matching run: either it names another branch (routine once several crews

@@ -153,11 +153,32 @@ case "${1:-} ${2:-}" in
     case "$number" in *[!0-9]*|'') number=1 ;; esac
     state=${FM_FAKE_PR_STATE:-MERGED}
     merged=${FM_FAKE_PR_MERGED:-true}
+    checks=${FM_FAKE_PR_CHECKS:-SUCCESS}
     eval "state=\${FM_FAKE_PR_${number}_STATE:-\$state}"
     eval "merged=\${FM_FAKE_PR_${number}_MERGED:-\$merged}"
+    eval "checks=\${FM_FAKE_PR_${number}_CHECKS:-\$checks}"
     [ "${FM_FAKE_PR_READ_FAIL:-0}" = 1 ] && exit 1
+    query=$(printf '%s ' "$@")
+    if [[ "$query" == *"statusCheckRollup"* ]]; then
+      [ "${FM_FAKE_GH_CHECKS_UNAVAILABLE:-0}" = 1 ] && exit 1
+      [ -n "$checks" ] || exit 1
+      printf '%s\n' "$checks"
+      exit 0
+    fi
     printf 'state=%s\nmerged=%s\n' "$state" "$merged"
     exit 0 ;;
+  "pr checks"*)
+    [ -z "${FM_FAKE_PR_READ_LOG:-}" ] || printf 'gh\n' >> "$FM_FAKE_PR_READ_LOG"
+    [ "${FM_FAKE_PR_READ_FAIL:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_GH_CHECKS_UNAVAILABLE:-0}" = 1 ] && exit 1
+    checks=${FM_FAKE_PR_CHECKS:-SUCCESS}
+    if [ "$checks" = SUCCESS ] || [ "$checks" = green ]; then
+      printf '[{"name":"ci","bucket":"pass","state":"SUCCESS"}]\n'
+      exit 0
+    else
+      printf '[{"name":"ci","bucket":"fail","state":"FAILURE"}]\n'
+      exit 1
+    fi ;;
 esac
 exit 1
 SH
@@ -170,6 +191,20 @@ case "${1:-} ${2:-}" in
     [ "${FM_FAKE_PR_READ_FAIL:-0}" = 1 ] && exit 1
     printf 'pull_request:\n  number: %s\n  state: %s\n' "${3:-1}" "${FM_FAKE_PR_STATE_AXI:-merged}"
     exit 0 ;;
+  "pr checks"*)
+    [ -z "${FM_FAKE_PR_READ_LOG:-}" ] || printf 'gh-axi\n' >> "$FM_FAKE_PR_READ_LOG"
+    [ "${FM_FAKE_PR_READ_FAIL:-0}" = 1 ] && exit 1
+    checks=${FM_FAKE_PR_CHECKS:-SUCCESS}
+    if [ "$checks" = SUCCESS ] || [ "$checks" = green ]; then
+      printf 'summary: "1 passed, 0 failed, 1 total"\nchecks[1]{name,conclusion}:\n  ci,pass\n'
+      exit 0
+    elif [ "$checks" = PENDING ]; then
+      printf 'summary: "0 passed, 0 failed, 1 pending, 1 total"\nchecks[1]{name,conclusion}:\n  ci,pending\n'
+      exit 0
+    else
+      printf 'summary: "0 passed, 1 failed, 1 total"\nchecks[1]{name,conclusion}:\n  ci,fail\n'
+      exit 1
+    fi ;;
 esac
 exit 1
 SH
@@ -370,6 +405,8 @@ reset_fakes() {
   FM_FAKE_PR_READ_FAIL=0
   FM_FAKE_PR_READ_LOG=
   FM_FAKE_PR_STATE_AXI=merged
+  FM_FAKE_PR_CHECKS=""
+  FM_FAKE_GH_CHECKS_UNAVAILABLE=0
   FM_FAKE_GLAB_STATE=merged
   FM_FAKE_GLAB_READ_FAIL=0
   FM_FAKE_GLAB_READ_LOG=
@@ -388,7 +425,7 @@ reset_fakes() {
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_DAEMON_OUTPUT
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
-  export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
+  export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI FM_FAKE_PR_CHECKS FM_FAKE_GH_CHECKS_UNAVAILABLE
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
@@ -1277,6 +1314,10 @@ EOF
   assert_contains "$out" "checks green: PR ready for review" "re-armed green monitoring reads held for merge"
   assert_contains "$out" "https://github.com/o/r/pull/2" "the held-for-merge reading names the run's PR"
   assert_not_contains "$out" "state: working" "a re-arm line must not read as checks not ready"
+  out=$(FM_FAKE_PR_CHECKS=FAILURE run_crew_state "$d" feat-cirearm)
+  assert_contains "$out" "state: done" "live re-armed green reads the log verdict, not the forge: $out"
+  out=$(FM_CREW_STATE_NO_FORGE=1 run_crew_state "$d" feat-cirearm)
+  assert_contains "$out" "state: done" "live re-armed green stays green with the forge off: $out"
   pass "base-advance re-arm after green stays checks green"
 }
 
@@ -2067,6 +2108,270 @@ daemon shutting down"
   assert_contains "$out" "state: failed" "a second failed step keeps the run failed"
   assert_not_contains "$out" "state: done" "a second failed step must not reclassify to done"
   pass "a second failed step disqualifies the orphaned-monitor reclassification"
+}
+
+# When a terminal run's ci log has an authoritative passed marker followed by
+# a base-branch advance re-arm marker, verify against forge checks.
+# If forge checks are green, reclassify as done held-for-merge.
+# If forge checks fail or are pending, do not reclassify; an unreachable,
+# non-GitHub, or disabled forge falls back to the green log and reclassifies.
+test_rearm_after_green_resolves_against_forge_green() {
+  local route failures=0
+  for route in cancelled-outcome cancelled-status failed-outcome failed-status; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "rearm-forge-$route")
+      make_repo_on_branch "$d/wt" fm/rearm-forge
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/rearm.meta" "window=fm:fm-rearm" "worktree=$d/wt" "kind=ship"
+      FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-forge)"
+      case "$route" in
+        cancelled-*) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled} ;;
+      esac
+      case "$route" in
+        *-status) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d') ;;
+      esac
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      FM_FAKE_PR_CHECKS=SUCCESS
+      FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+base branch advanced (bbbbbbb..ccccccc), re-arming CI monitor timeout
+EOF
+)
+      out=$(FM_HOME="$d" run_crew_state "$d" rearm)
+      assert_contains "$out" "state: done" "$route with forge green reads done: $out"
+      assert_contains "$out" "held for merge" "$route with forge green reads held for merge"
+      assert_contains "$out" "https://github.com/o/r/pull/203" "$route names the PR url"
+      pass "$route: base-advance re-arm after green resolves against forge green"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures rearm forge green regressions"
+
+  # Negative control: failing forge checks must not reclassify to done
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-forge-red)
+    make_repo_on_branch "$d/wt" fm/rearm-red
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-red.meta" "window=fm:fm-rearm-red" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-red)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_PR_CHECKS=FAILURE
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-red)
+    assert_contains "$out" "state: failed" "red forge checks keep failed run failed: $out"
+    assert_not_contains "$out" "state: done" "red forge checks must not reclassify to done"
+    pass "red forge checks keep run failed"
+  ) || fail "rearm with red forge checks failed"
+
+  # Fallback: non-GitHub forge (GitLab) falls back to CI log green marker
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-gitlab)
+    make_repo_on_branch "$d/wt" fm/rearm-gitlab
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-gitlab.meta" "window=fm:fm-rearm-gitlab" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-gitlab)"
+    FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/203/https:\/\/gitlab.com\/o\/r\/-\/merge_requests\/203}
+    FM_FAKE_GLAB_STATE=opened
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-gitlab)
+    assert_contains "$out" "state: done" "GitLab falls back to green CI log: $out"
+    assert_contains "$out" "held for merge" "GitLab reads held for merge"
+    pass "GitLab falls back to green CI log"
+  ) || fail "rearm with GitLab failed"
+
+  # Fallback: forge check query unavailable falls back to CI log green marker
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-checks-unavailable)
+    make_repo_on_branch "$d/wt" fm/rearm-checks-unavailable
+    make_fakebin "$d" >/dev/null
+    rm "$d/fakebin/gh-axi"
+    fm_write_meta "$d/state/rearm-checks-unavailable.meta" "window=fm:fm-rearm-checks-unavailable" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-checks-unavailable)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_GH_CHECKS_UNAVAILABLE=1
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-checks-unavailable)
+    assert_contains "$out" "state: done" "unavailable check query falls back to green CI log: $out"
+    assert_contains "$out" "held for merge" "unavailable check query reads held for merge"
+    pass "unavailable check query falls back to green CI log"
+  ) || fail "rearm with unavailable check query failed"
+
+  # Negative control: gh unavailable and gh-axi reporting pending checks
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-axi-pending)
+    make_repo_on_branch "$d/wt" fm/rearm-axi-pending
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-axi-pending.meta" "window=fm:fm-rearm-axi-pending" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-axi-pending)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_PR_CHECKS=PENDING
+    FM_FAKE_GH_CHECKS_UNAVAILABLE=1
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-axi-pending)
+    assert_contains "$out" "state: failed" "gh-axi pending checks keep failed run failed: $out"
+    assert_not_contains "$out" "state: done" "gh-axi pending checks must not reclassify to done"
+    pass "gh-axi pending checks keep run failed"
+  ) || fail "rearm with gh-axi pending checks failed"
+
+  # Negative control: gh unavailable and gh-axi reporting failed checks with a non-zero exit
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-axi-failed)
+    make_repo_on_branch "$d/wt" fm/rearm-axi-failed
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-axi-failed.meta" "window=fm:fm-rearm-axi-failed" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-axi-failed)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_PR_CHECKS=FAILURE
+    FM_FAKE_GH_CHECKS_UNAVAILABLE=1
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-axi-failed)
+    assert_contains "$out" "state: failed" "gh-axi failed checks keep failed run failed: $out"
+    assert_not_contains "$out" "state: done" "gh-axi failed checks must not reclassify to done"
+    pass "gh-axi failed checks keep run failed"
+  ) || fail "rearm with gh-axi failed checks failed"
+
+  # Negative control: a definite gh pending answer must not fall through to gh-axi
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-gh-pending)
+    make_repo_on_branch "$d/wt" fm/rearm-gh-pending
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-gh-pending.meta" "window=fm:fm-rearm-gh-pending" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-gh-pending)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_PR_CHECKS=PENDING
+    FM_FAKE_PR_READ_LOG="$d/reads.log"
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-gh-pending)
+    assert_contains "$out" "state: failed" "gh pending checks keep failed run failed: $out"
+    assert_not_contains "$(cat "$d/reads.log" 2>/dev/null)" "gh-axi" "a definite gh answer must not fall through to gh-axi"
+    pass "gh pending checks keep run failed without gh-axi fallthrough"
+  ) || fail "rearm with gh pending checks failed"
+
+  # Negative control: genuine CI failure after green must not reclassify
+  (
+    reset_fakes
+    local d out
+    d=$(new_case rearm-relapse)
+    make_repo_on_branch "$d/wt" fm/rearm-relapse
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/rearm-relapse.meta" "window=fm:fm-rearm-relapse" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/rearm-relapse)"
+    FM_FAKE_PR_STATE=OPEN
+    FM_FAKE_PR_MERGED=false
+    FM_FAKE_PR_CHECKS=SUCCESS
+    FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+issues detected: 1 CI check failing
+EOF
+)
+    out=$(FM_HOME="$d" run_crew_state "$d" rearm-relapse)
+    assert_contains "$out" "state: failed" "genuine CI relapse keeps run failed: $out"
+    assert_not_contains "$out" "state: done" "genuine CI relapse must not reclassify to done"
+    pass "genuine CI relapse keeps run failed despite forge check"
+  ) || fail "rearm with genuine CI relapse failed"
+}
+
+# Mirrors real aborted run 01M403BYBXA688PB1F5Q1T70W5 on fm/fm-house-stream-pr.
+# Substantive steps (intent through pr) completed, ci failed on abort,
+# outcome cancelled, PR #6460 checks green on GitHub.
+test_example_aborted_run_shape_reads_held_for_merge() {
+  reset_fakes
+  local d out
+  d=$(new_case example-aborted-run)
+  make_repo_on_branch "$d/wt" fm/fm-house-stream-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/house-stream.meta" "window=fm:fm-house-stream-pr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=$(cat <<EOF
+run:
+  id: "01M403BYBXA688PB1F5Q1T70W5"
+  branch: fm/fm-house-stream-pr
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-6ae2e73a}"
+  pr: "https://github.com/kunchenguid/firstmate/pull/6460"
+  findings: none
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,300
+  rebase,completed,1,437
+  review,completed,0,1080445
+  test,completed,2,188608
+  document,completed,0,23936
+  lint,completed,0,33790
+  push,completed,0,2192
+  pr,completed,0,17545
+  ci,failed,1,18495681
+outcome: cancelled
+error: "cancelled: aborted by user"
+EOF
+)
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
+  FM_FAKE_PR_CHECKS=SUCCESS
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+CI checks running, waiting for results...
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (e31bc6e620ca..1f3e769616fd), re-arming CI monitor timeout
+error: context canceled
+EOF
+)
+  out=$(FM_HOME="$d" run_crew_state "$d" house-stream)
+  assert_contains "$out" "state: done" "example aborted run reads done: $out"
+  assert_contains "$out" "source: run-step" "example aborted run is run-step sourced"
+  assert_contains "$out" "checks green: PR held for merge (ci monitor ended): https://github.com/kunchenguid/firstmate/pull/6460" "correct held-for-merge detail"
+  assert_not_contains "$out" "state: failed" "example aborted run must not read as failed"
+  assert_not_contains "$out" "state: unknown" "example aborted run must not read as unknown"
+  pass "example aborted run reads held-for-merge done"
+
+  # Counterpart: if forge checks are red after the re-arm, the aborted run stays unknown
+  FM_FAKE_PR_CHECKS=FAILURE
+  out=$(FM_HOME="$d" run_crew_state "$d" house-stream)
+  assert_contains "$out" "state: unknown" "aborted run with red forge checks reads unknown: $out"
+  assert_not_contains "$out" "state: done" "aborted run with red forge checks must not read as done"
+  pass "example aborted run with red forge checks stays unknown"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -5826,6 +6131,8 @@ test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
 test_terminal_failed_ci_genuine_red_stays_failed
 test_terminal_failed_ci_orphan_second_failed_step_stays_failed
+test_rearm_after_green_resolves_against_forge_green
+test_example_aborted_run_shape_reads_held_for_merge
 test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown
