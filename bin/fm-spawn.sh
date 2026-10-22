@@ -1671,7 +1671,6 @@ spawn_remote_secondmate() {
     recorded_model=${model#-}
     if fm_sol_cap_has_owned_occupancy "$id" "$STATE"; then
       cap_owned=1
-      recorded_model=$remote_model
     fi
   fi
   tmp="$meta.tmp.$$"

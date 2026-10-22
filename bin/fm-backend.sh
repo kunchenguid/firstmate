@@ -1380,6 +1380,7 @@ fm_backend_kill_confirmed() {  # <backend> <target>
     orca) fm_backend_orca_kill_confirmed "$@" ;;
     cmux) fm_backend_cmux_kill_confirmed "$@" ;;
     paseo) fm_backend_paseo_kill_confirmed "$@" ;;
+    rex) fm_backend_rex_kill "$@" ;;
     *) echo "error: no confirmed kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }

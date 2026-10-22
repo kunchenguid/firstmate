@@ -285,6 +285,15 @@ assert_equals gpt-6.1-sol "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.me
   "a declaration covering the endpoint's report did not retain its actual model"
 assert_equals gpt-6.1-sol "$(awk -F '\t' '$1 == "model-probe" {print $2; exit}' "$PARENT/state/sol-sessions.tsv")" \
   "the Sol occupancy registry did not reconcile the endpoint's reported model"
+printf 'max=1\nmodels=gpt-5.6-luna\n' > "$PARENT/config/sol-cap"
+remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-5.6-luna >/dev/null 2>&1 \
+  || fail "owned occupancy with an uncovered endpoint model failed"
+assert_equals gpt-5.6-luna "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.meta")" \
+  "owned occupancy overwrote the requested model with an uncovered endpoint model"
+assert_equals gpt-5.6-luna "$(awk -F '\t' '$1 == "model-probe" {print $2}' "$PARENT/state/sol-sessions.tsv")" \
+  "the admission registry and published task record disagree"
+assert_equals -1 "$(awk -F '\t' '$1 == "model-probe" {print $4}' "$PARENT/state/sol-sessions.tsv")" \
+  "the uncovered endpoint model did not release the admission reservation"
 rm -f -- "$PARENT/config/sol-cap" "$PARENT/state/sol-sessions.tsv"
 pass "remote task records keep the requested model unless a Sol declaration covers the endpoint's reported model"
 

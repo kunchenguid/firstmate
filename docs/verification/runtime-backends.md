@@ -400,6 +400,7 @@ It is deliberately NOT the ordinary teardown path: a task that holds no capped o
 | cmux | the workspace inventory of every window; a failed read, or a surviving workspace or title, is not proof |
 | orca | the close command's own answer: a failed command or an error JSON response is a refused close |
 | paseo | the live terminal inventory; a read that cannot run, or an inventory that still names the terminal, is not proof |
+| rex | the ordinary close's structured not-found proof for the recorded block; a surviving block or unreachable server refuses closure |
 | any other backend | no confirmed-close implementation exists, so the close is refused rather than assumed |
 
 A refused confirmed close means the endpoint could not be proven absent, so the caller keeps the session's occupancy instead of releasing it.
