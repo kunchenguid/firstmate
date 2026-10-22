@@ -17,9 +17,9 @@
 # line does not need to be reliable because ringing it again is free. A
 # duplicated doorbell is a no-op by construction (the worker finds the inbox
 # empty or already handled), and a swallowed doorbell is detected by the
-# absence of the worker's acknowledgement and re-rung on a bounded schedule.
+# absence of the worker's read receipt and re-rung on a bounded schedule.
 # A positively dead or missing endpoint bypasses that schedule without being
-# typed into, and its unhandled record surfaces through the ordinary stale wake
+# typed into, and its unread record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
@@ -62,7 +62,7 @@
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect another draft in a proven pending
 # composer; an unsubmitted copy of this doorbell is retried. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
+# FM_TASK_INBOX_RING_MAX attempts without a read receipt it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
 # by a busy pane consume a separate durable consecutive-poll budget,
 # FM_TASK_INBOX_BUSY_MAX. At that bound the same escalation path surfaces a
@@ -71,7 +71,7 @@
 # retries remain outside escalation. A positively dead or missing endpoint skips
 # delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
-# If delivery-attempt or busy-deferral bookkeeping fails while the record remains unhandled,
+# If delivery-attempt or busy-deferral bookkeeping fails while the record remains unread,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
 # writing the deduplication marker: normal polls surface a message once, while a
