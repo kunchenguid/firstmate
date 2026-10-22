@@ -3,7 +3,8 @@
 #
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
-# read from file descriptor 3, and answers with a canned typesafe.ai response.
+# read from file descriptor 3, and answers with a canned typesafe.ai or
+# OpenRouter response.
 # A fake quota-axi serves the selected schema-5 fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
@@ -110,7 +111,9 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
+   [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] ||
+   [ -n "${API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +141,9 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
+   [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] ||
+   [ -n "${API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -245,6 +250,58 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- OpenRouter backend: selection, precedence, secret handling ---------------
+OR_KEY='or-key-5b7e1a0c-never-on-argv'
+OR_RESPONSE="$TMP_ROOT/openrouter-response.json"
+cat > "$OR_RESPONSE" <<'JSON'
+{ "id": "gen-decision-0001", "provider": "TypeSafe", "model": "typesafe/jev-1.13",
+  "answers": { "rule": { "type": "choice", "choice": "rule_4", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60, "cost": 0.0000021 } }
+JSON
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+API_KEY_PRIVATE=stale-caller-export OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE="$OR_RESPONSE" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "OpenRouter-only exits 0"
+assert_contains "$out" '  status: clear' "an OpenRouter-shaped response with extra fields resolves clear"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "OpenRouter resolves to the same profile as typesafe"
+assert_contains "$out" '  model: typesafe/jev-1.13 backend=openrouter   latency_ms: ' "the model line carries the backend=openrouter word"
+assert_contains "$out" '   tokens: 812/60' "OpenRouter usage tokens are reported"
+argv=$(cat "$LOG/argv")
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter-only uses the OpenRouter decisions endpoint"
+assert_not_contains "$argv" 'api.typesafe.ai' "OpenRouter-only never calls typesafe.ai"
+assert_not_contains "$argv" "$OR_KEY" "the OpenRouter key never appears on curl argv"
+assert_contains "$argv" '@/dev/fd/3' "the OpenRouter header is read from a file descriptor"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key and an exported caller API_KEY_PRIVATE are absent from every child environment"
+assert_equals 'typesafe/jev-1.13' "$(jq -r .model "$LOG/body")" "OpenRouter-only sends model typesafe/jev-1.13"
+TS_BODY=$(jq -cS 'del(.model)' <<<"$body")
+assert_equals "$TS_BODY" "$(jq -cS 'del(.model)' "$LOG/body")" "OpenRouter reuses the typesafe request body except for the model"
+TS_RESOLUTION=$(grep -v '^  model: ' <<<"$out")
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_equals "$TS_RESOLUTION" "$(grep -v '^  model: ' <<<"$out")" "OpenRouter and typesafe responses resolve to the same result"
+
+printf '%s\n' "OPENROUTER_API_KEY=$OR_KEY" > "$HOME_DIR/.env"
+reset_log
+FAKE_CURL_RESPONSE="$OR_RESPONSE" run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' ".env OpenRouter key resolves"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' ".env OpenRouter key selects the OpenRouter endpoint"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" ".env OpenRouter key reaches curl on the fd header"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "an environment typesafe key wins over an .env OpenRouter key"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "only the typesafe key reaches curl when both are present"
+printf '%s\n' "TYPESAFE_API_KEY=$KEY" > "$HOME_DIR/.env"
+reset_log
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "an .env typesafe key wins over an environment OpenRouter key"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "the OpenRouter key never reaches curl when typesafe wins"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "neither key reaches a child environment when both are present"
+rm -f "$HOME_DIR/.env"
+pass "OPENROUTER_API_KEY selects the OpenRouter decisions endpoint; a typesafe key always wins"
 
 # --- never-send list: a match or a bad list withholds the request -------------
 NEVER_SEND="$HOME_DIR/config/dispatch-never-send"

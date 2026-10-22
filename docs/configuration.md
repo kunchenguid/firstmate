@@ -1442,7 +1442,21 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+It is off unless `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a matching line; for each key the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+
+**Backend selection**
+
+The key selects which service answers; the request body, response checks, and every later step are the same for both.
+
+| Key present | Backend | Endpoint | Model |
+| --- | --- | --- | --- |
+| `TYPESAFE_API_KEY` | typesafe | `https://api.typesafe.ai/v1/systemone` | `jev-latest` |
+| `OPENROUTER_API_KEY` only | openrouter | `https://openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` |
+
+A `TYPESAFE_API_KEY` from either source always wins, so a home holding both keys keeps using typesafe.ai and never sends the OpenRouter key.
+OpenRouter serves Jev only through its decisions endpoint, not chat completions, and returns the same answer shape plus extra fields such as `id`, `provider`, and `usage.cost`, which the resolver ignores.
+One OpenRouter decision costs a few thousandths of a cent (about 800 input and 100 output tokens, $0.00003, in the live runs recorded in [the verification record](verification/dispatch-resolve.md)); OpenRouter's model page owns current pricing.
+The output's `model:` line carries one `backend=<name>` word naming the backend that answered.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
@@ -1546,9 +1560,9 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Key handling and fixed settings**
 
-- The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-- The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+- The resolver and bootstrap copy each environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes, so neither secret is present in child environments.
+- The resolver keeps only the selected key, sends it to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
+- The resolver fixes each backend's endpoint and model as listed under "Backend selection", the default confidence floor at 0.6, and the request timeout at 5 seconds; `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` are its only resolver-specific environment settings.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
@@ -2700,6 +2714,7 @@ FMX_ENV_FILE=           # optional alternate .env file for direct Relay client i
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+OPENROUTER_API_KEY=     # typed dispatch resolution through OpenRouter when TYPESAFE_API_KEY is absent (docs/configuration.md "Typed dispatch resolution")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
