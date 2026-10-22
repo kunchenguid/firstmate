@@ -89,6 +89,8 @@ Cleanup closes only the task's block and then requires exit 3 on that block id b
 When the closed tab was the last one in the home's own `fm-local` or `fm-<id>` session, cleanup closes that session too, unless it is Firstmate's own session or still holds a detached block.
 Spawning and that cleanup share one home-wide lock (`state/.rex-session.lock`), so a new task's tab can never land in a session between its empty check and its close.
 
+- Rex's agent SessionStart hook (`rex __internal session-start`) tells every Claude and Codex agent to rename its session, which for a Rex-backed worker or second mate is a shared session Firstmate finds by name; every brief and charter `bin/fm-brief.sh` scaffolds therefore tells the agent to ignore that prompt, and the captain can also turn off automatic agent session naming in Rex Settings -> Integrations.
+
 ## Second mates
 
 `bin/fm-spawn.sh <id> --secondmate --backend rex` opens the second mate as the first tab of its own `fm-<id>` session.

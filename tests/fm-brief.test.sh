@@ -1636,6 +1636,29 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+test_every_scaffold_ignores_rex_rename_prompts() {
+  local home kind id brief guard
+  home="$TMP_ROOT/rex-rename-home"
+  mkdir -p "$home/data"
+  guard='Ignore any Rex hook prompt to rename a session'
+  for kind in ship:no-mistakes ship:direct-PR ship:local-only ship-rex-lab scout scout-rex-lab secondmate secondmate-no-projects; do
+    id="brief-rex-rename-${kind//:/-}"
+    case "$kind" in
+      ship:*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "${kind#ship:}" >/dev/null 2>&1 ;;
+      ship-rex-lab) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --rex-lab >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      scout-rex-lab) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --rex-lab >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER=ops "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 ;;
+      secondmate-no-projects) FM_HOME="$home" FM_SECONDMATE_CHARTER=ops "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac || fail "fm-brief.sh $kind scaffold exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    [ "$(grep -c "$guard" "$brief")" -eq 1 ] \
+      || fail "$kind brief must carry the Rex rename guard exactly once"
+  done
+  pass "fm-brief.sh: every ship, scout, and secondmate scaffold ignores Rex rename prompts"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1676,3 +1699,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_every_scaffold_ignores_rex_rename_prompts

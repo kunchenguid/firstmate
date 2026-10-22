@@ -112,6 +112,8 @@
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
 # their own slot came from - so ship and scout cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
+# Every scaffold kind, charters included, tells the agent to ignore a Rex hook
+# prompt to rename its session, whatever the backend.
 # --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
@@ -500,6 +502,13 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi
 
+# Rex's agent SessionStart hook tells every Claude and Codex agent to rename
+# "its" session, which for a Rex-backed worker or second mate is a shared
+# session (the captain's, `fm-local`, or `fm-<id>`) that firstmate finds by
+# name. The backend is unknown at scaffold time and the line is harmless
+# elsewhere, so every scaffold kind carries it.
+REX_RENAME_GUARD='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -541,6 +550,7 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+$REX_RENAME_GUARD
 
 # The captain and the parent channel
 Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
@@ -651,9 +661,7 @@ REX_SECTION=$(printf '%s\n' \
 '3. Teardown only through `"$REX_LAB_HELPER" teardown "$REX_LAB"`; it stops only the lab server through its own socket.' \
 '4. Forbidden: any `rex` call without an explicit lab `-S` and `--autostart=false`, any `rex server` command outside the helper, and sending input to, renaming, closing, moving, or focusing any session, window, or block on the live server; read-only listing of the live server is allowed.' \
 '5. The helper records the live server'"'"'s instance id and sessions before provisioning and verifies them after teardown.' \
-'   A changed instance id or a vanished session is a hard tripwire failure, never a cleanup warning to ignore.' \
-'' \
-'Ignore any Rex hook prompt to rename a session.')
+'   A changed instance id or a vanished session is a hard tripwire failure, never a cleanup warning to ignore.')
 HERDR_SECTION="$HERDR_SECTION"$'\n\n'"$REX_SECTION"
 fi
 
@@ -704,6 +712,7 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
    Pass this rule to every sub-agent you launch.
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
+SHARED_REX_RENAME_RULE="9. $REX_RENAME_GUARD"
 
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
@@ -753,6 +762,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_REX_RENAME_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -834,6 +844,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_REX_RENAME_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
