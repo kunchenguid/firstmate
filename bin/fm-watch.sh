@@ -3386,11 +3386,12 @@ while :; do
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
-  # Rex attention marks (docs/rex-backend.md "Attention marks"): display and
-  # desktop notification only, never a wake. Runs only while a task records
-  # the rex backend or a mark is still cached, so a home without Rex pays one
-  # grep.
-  if grep -qsx 'backend=rex' "$STATE"/*.meta || compgen -G "$STATE/.rex-mark-*" >/dev/null; then
+  # Rex attention marks, validation progress, and tint (docs/rex-backend.md
+  # "Attention marks"): display and desktop notification only, never a wake.
+  # Runs only while a task records the rex backend or one of them is still
+  # cached, so a home without Rex pays one grep.
+  if grep -qsx 'backend=rex' "$STATE"/*.meta || compgen -G "$STATE/.rex-mark-*" >/dev/null \
+    || compgen -G "$STATE/.rex-progress-*" >/dev/null || compgen -G "$STATE/.rex-tint-*" >/dev/null; then
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 || true
   fi
 

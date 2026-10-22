@@ -885,7 +885,40 @@ test_mark_is_one_status_record_plus_optional_notification() {
   : >"$tty"
   fm_backend_rex_mark "$T" blocked question "x" fm-other && fail "a block carrying another task's label must be refused"
   [ ! -s "$tty" ] || fail "a refused mark must write nothing"
-  pass "rex: a mark is one id=fm program-status record (optionally with one OSC 777 notification), cleared alone, never on a foreign block"
+  fm_backend_rex_mark "$T" "done" "" "PR ready" fm-t1 "P3 · Rex" "P3 · Rex" || fail "titled mark failed"
+  want=$(printf '\033]7501;state=done:app=firstmate:id=fm:title=%s:msg=%s\033\134' "$(printf 'P3 · Rex' | base64)" "$(printf 'PR ready' | base64)")
+  want="$want"$'\033]777;notify;P3 · Rex;PR ready\a'
+  [ "$(cat "$tty")" = "$want" ] || fail "a titled mark must carry the tab label as its record title and notification title: $(od -c "$tty" | head -5)"
+  pass "rex: a mark is one id=fm program-status record titled with the tab label (optionally with one OSC 777 notification), cleared alone, never on a foreign block"
+}
+
+test_progress_and_tint_sequences() {
+  local tty want
+  mark_case progress-tint
+  tty="$CASE/dev/ttys999"
+  fm_backend_rex_progress "$T" 44 $'Validating: review\t4/9' fm-t1 "P4 · Progress" || fail "progress failed"
+  want=$(printf '\033]7501;state=working:app=firstmate:id=fm/validate:progress=44:title=%s:msg=%s\033\134' \
+    "$(printf 'P4 · Progress' | base64)" "$(printf 'Validating: review 4/9' | base64)")
+  [ "$(cat "$tty")" = "$want" ] || fail "progress must be one working id=fm/validate record with its percentage: $(od -c "$tty" | head -5)"
+  : >"$tty"
+  fm_backend_rex_progress "$T" "" "Validating" fm-t1 || fail "indeterminate progress failed"
+  grep -q 'progress=' "$tty" && fail "an empty percentage must be indeterminate (no progress key)"
+  : >"$tty"
+  fm_backend_rex_progress "$T" clear "" fm-t1 || fail "progress clear failed"
+  [ "$(cat "$tty")" = $'\033]7501;state=clear:app=firstmate:id=fm/validate\033\\' ] || fail "clear must remove only the progress record: $(od -c "$tty")"
+  [ "$(fm_backend_rex_status_sequence "done" fm "" "" "" 50)" = $'\033]7501;state=done:app=firstmate:id=fm\033\\' ] || fail "progress is kept only for working and blocked"
+  : >"$tty"
+  fm_backend_rex_tint "$T" '#2b2614' fm-t1 || fail "tint failed"
+  [ "$(cat "$tty")" = $'\033]11;#2b2614\033\\' ] || fail "a tint must be one OSC 11 set: $(od -c "$tty")"
+  : >"$tty"
+  fm_backend_rex_tint "$T" reset fm-t1 || fail "tint reset failed"
+  [ "$(cat "$tty")" = $'\033]111\033\\' ] || fail "a reset must be one OSC 111: $(od -c "$tty")"
+  : >"$tty"
+  fm_backend_rex_tint "$T" '?' fm-t1 && fail "a query or any value other than #rrggbb must be refused"
+  fm_backend_rex_tint "$T" '#2b2614' fm-other && fail "a tint for another task's label must be refused"
+  fm_backend_rex_progress "$T" 10 x fm-other && fail "progress for another task's label must be refused"
+  [ ! -s "$tty" ] || fail "a refused tint or progress must write nothing"
+  pass "rex: progress is one id=fm/validate working record, a tint is one OSC 11 or OSC 111, neither queries nor lands on a foreign block"
 }
 
 test_mark_read_and_tab_rename() {
@@ -894,9 +927,12 @@ test_mark_read_and_tab_rename() {
   printf '{"records":[{"state":"working","app":"claude-code"},{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs it"}]}' \
     >"$FAKE/call/block_$BID.program_status.json"
   out=$(fm_backend_rex_mark_read "$T") || fail "mark_read failed"
-  [ "$out" = $'blocked\tquestion\tNeeds it' ] || fail "mark_read must report only Firstmate's record, got '$out'"
+  [ "$out" = $'blocked\tquestion\tNeeds it\t\t' ] || fail "mark_read must report only Firstmate's record, got '$out'"
+  printf '{"records":[{"state":"working","app":"claude-code"},{"id":"fm/validate","state":"working","app":"firstmate","progress":55,"title":"P4","msg":"Validating"}]}' \
+    >"$FAKE/call/block_$BID.program_status.json"
+  [ "$(fm_backend_rex_mark_read "$T" fm/validate)" = $'working\t\tValidating\tP4\t55' ] || fail "mark_read must read a named Firstmate record with title and progress"
   printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  [ "$(fm_backend_rex_mark_read "$T")" = $'clear\t\t' ] || fail "no Firstmate record reads as clear"
+  [ "$(fm_backend_rex_mark_read "$T")" = $'clear\t\t\t\t' ] || fail "no Firstmate record reads as clear"
   rm -f "$FAKE/call/block_$BID.program_status.json"
   fm_backend_rex_mark_read "$T" >/dev/null && fail "an unreadable pane must fail, never read as clear"
   printf '{"windows":[{"window_id":"window:%s","label":"P3 · Rex"}]}' "$WID" >"$FAKE/window-ls.json"
@@ -1029,15 +1065,15 @@ test_marks_producer_converges_and_notifies_once() {
   [ "$out" = $'t1\tblocked\tquestion\tNeeds your decision: pick a database' ] || fail "needs-decision must plan a blocked question mark, got '$out'"
   printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
   FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
-  grep -q 'id=fm:msg=' "$tty" || fail "sync must write the mark: $(od -c "$tty" | head -3)"
-  grep -q $'777;notify;Firstmate: P3 · Rex;Needs your decision: pick a database' "$tty" || fail "a new mark must notify once, titled with the tab label"
+  grep -q "id=fm:title=$(printf 'P3 · Rex' | base64):msg=" "$tty" || fail "sync must write the mark titled with the tab label: $(od -c "$tty" | head -3)"
+  grep -q $'777;notify;P3 · Rex;Needs your decision: pick a database' "$tty" || fail "a new mark must notify once, titled with the tab label"
   : >"$tty"
-  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs your decision: pick a database"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","title":"P3 · Rex","msg":"Needs your decision: pick a database"}]}' >"$FAKE/call/block_$BID.program_status.json"
   FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
   [ ! -s "$tty" ] || fail "an unchanged live mark must not be rewritten"
   printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
   FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
-  grep -q 'id=fm:msg=' "$tty" || fail "a dropped record must be repaired"
+  grep -q 'id=fm:title=' "$tty" || fail "a dropped record must be repaired"
   grep -q '777;notify' "$tty" && fail "a repair must not notify again"
   : >"$tty"
   marks_status t1 "working [at=1700000100]: back on it"
@@ -1063,7 +1099,7 @@ test_marks_producer_converges_and_notifies_once() {
   printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
   : >"$tty"
   FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
-  grep -q 'id=fm:msg=' "$tty" || fail "sync must write the second mark"
+  grep -q 'id=fm:title=' "$tty" || fail "sync must write the second mark"
   [ -e "$STATE/.rex-mark-t1" ] || fail "a written mark must be cached"
   printf 'off\n' >"$FM_HOME/config/rex-status-marks"
   : >"$tty"
@@ -1078,8 +1114,137 @@ test_marks_producer_converges_and_notifies_once() {
   printf 'labels\n' >"$FM_HOME/config/rex-status-marks"
   out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync 2>&1) || fail "sync with an unknown value failed"
   assert_contains "$out" "unknown value; using on" "a value other than on or off must warn and read as on"
-  grep -q 'id=fm:msg=' "$tty" || fail "an unknown value must read as on"
+  grep -q 'id=fm:title=' "$tty" || fail "an unknown value must read as on"
   pass "rex: the marks producer plans from status, writes once, repairs without re-notifying, clears on resolve, and honors off"
+}
+
+test_nm_run_progress_reads_captured_status() {
+  local out caps="$ROOT/tests/captures/no-mistakes-v1.70.1"
+  out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/replacement.toon")
+  [ "$out" = $'88\t9\t9\tci\tstarting' ] || fail "a run at its ci step must read 8 of 9 steps done with ci active, got '$out'"
+  out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/parked.toon")
+  [ "$(printf '%s' "$out" | cut -f2-4)" = $'4\t9\ttest' ] || fail "a parked run must name its first unfinished step, got '$out'"
+  out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_table_column "$2" active_steps last_activity' _ "$ROOT" "$(cat "$caps/replacement.toon")")
+  assert_contains "$out" "quiet 2h58m ago: log: all CI checks passed" "a quoted cell must be read whole by column name"
+  bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/overview.toon" >/dev/null \
+    && fail "output with no steps table must fail"
+  pass "rex: validation progress reads captured no-mistakes status by column name"
+}
+
+# nm_status_fake: a `no-mistakes` on PATH whose `axi status` prints
+# $CASE/nm-status.toon and logs each call to $CASE/nm.log.
+nm_status_fake() {
+  cat >"$CASE/psbin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FM_NM_FAKE_DIR:?}/nm.log"
+[ "$1 $2" = "axi status" ] && cat "$FM_NM_FAKE_DIR/nm-status.toon"
+exit 0
+SH
+  chmod +x "$CASE/psbin/no-mistakes"
+  export FM_NM_FAKE_DIR=$CASE
+}
+
+nm_run_toon() { # <branch> <status> <active-step> <round>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: $2
+  head: abc1234
+  steps[5]{step,status,findings,duration_ms}:
+    intent,completed,0,10
+    rebase,skipped,0,10
+    review,$2,0,0
+    test,pending,0,0
+    push,pending,0,0
+  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    $3,$2,1m,1m,"8s ago: log: reviewing, still going",4242,"$4"
+EOF
+}
+
+test_marks_producer_shows_validation_progress_and_tint() {
+  local tty out
+  mark_case progress
+  tty="$CASE/dev/ttys999"
+  nm_status_fake
+  mkdir -p "$FM_HOME/config" "$CASE/wt"
+  printf '%s\n' "window=$T" "backend=rex" "kind=ship" "mode=no-mistakes" "branch=fm/t1" "worktree=$CASE/wt" \
+    "rex_server=$SERVER" "rex_session_id=$SID" "rex_block_id=$BID" "rex_tab_label=P4 · Progress" >"$STATE/t1.meta"
+  marks_status t1 "paused [at=1700000000]: waiting on my validation run"
+  nm_run_toon fm/t1 running review "auto-fix 1/3" >"$CASE/nm-status.toon"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q "state=working:app=firstmate:id=fm/validate:progress=40:title=$(printf 'P4 · Progress' | base64):msg=$(printf 'Validating: review 3/5, auto-fix 1/3' | base64)" "$tty" \
+    || fail "a running validation must show its progress, active step, and round under the tab label: $(od -c "$tty" | head -5)"
+  grep -q '777;notify' "$tty" && fail "progress must never notify"
+  : >"$tty"
+  printf '{"records":[{"id":"fm/validate","state":"working","app":"firstmate","progress":40,"title":"P4 · Progress","msg":"Validating: review 3/5, auto-fix 1/3"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  : >"$CASE/nm.log"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ ! -s "$tty" ] || fail "an unchanged progress record must not be rewritten"
+  [ ! -s "$CASE/nm.log" ] || fail "a fresh progress plan must not re-read the run within the interval"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'id=fm/validate:progress=40' "$tty" || fail "a dropped progress record must be repaired from the fresh plan"
+  : >"$tty"
+  nm_run_toon fm/other running review "" >"$CASE/nm-status.toon"
+  printf '{"records":[{"id":"fm/validate","state":"working","app":"firstmate","progress":40}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_REX_PROGRESS_INTERVAL=0 FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ "$(cat "$tty")" = $'\033]7501;state=clear:app=firstmate:id=fm/validate\033\\' ] || fail "a run on another branch must remove the progress record: $(od -c "$tty" | head -3)"
+  : >"$tty"
+  nm_run_toon fm/t1 completed review "" >"$CASE/nm-status.toon"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_REX_PROGRESS_INTERVAL=0 FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ ! -s "$tty" ] || fail "a finished run must show no progress"
+
+  nm_run_toon fm/t1 running review "" >"$CASE/nm-status.toon"
+  FM_REX_PROGRESS_INTERVAL=0 FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'id=fm/validate:progress=40' "$tty" || fail "a run back in flight must show progress again"
+  : >"$tty"
+  marks_status t1 "needs-decision [at=1700000100] [key=k]: pick one"
+  printf '{"records":[{"id":"fm/validate","state":"working","app":"firstmate","progress":40}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_REX_PROGRESS_INTERVAL=0 FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'state=clear:app=firstmate:id=fm/validate' "$tty" || fail "a task with a mark must not also show progress: $(od -c "$tty" | head -5)"
+  grep -q '\]11;' "$tty" && fail "the tint is off unless config/rex-tint turns it on"
+
+  printf 'subtle\n' >"$FM_HOME/config/rex-tint"
+  : >"$tty"
+  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","title":"P4 · Progress","msg":"Needs your decision: pick one"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ "$(cat "$tty")" = $'\033]11;#2b2614\033\\' ] || fail "a waiting task must get exactly the subtle waiting tint: $(od -c "$tty" | head -3)"
+  : >"$tty"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ ! -s "$tty" ] || fail "an unchanged tint must not be rewritten"
+  marks_status t1 "failed [at=1700000200]: build broke"
+  printf '{"records":[{"id":"fm","state":"error","app":"firstmate","title":"P4 · Progress","msg":"Failed: build broke"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ "$(cat "$tty")" = $'\033]11;#301a1c\033\\' ] || fail "a failed task must get the subtle failed tint: $(od -c "$tty" | head -3)"
+  : >"$tty"
+  marks_status t1 "working [at=1700000300]: back on it"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_REX_PROGRESS_INTERVAL=0 FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -qF $'\033]111\033\\' "$tty" || fail "a running task must have its tint reset: $(od -c "$tty" | head -3)"
+  [ ! -e "$STATE/.rex-tint-t1" ] || fail "a reset tint must drop its cache"
+
+  marks_status t1 "blocked [at=1700000400]: stuck"
+  : >"$tty"
+  printf 'subtle-light\n' >"$FM_HOME/config/rex-tint"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -qF $'\033]11;#fbf4dd\033\\' "$tty" || fail "subtle-light must use the light-theme waiting tint"
+  printf 'loud\n' >"$FM_HOME/config/rex-tint"
+  : >"$tty"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync 2>&1) || fail "sync failed"
+  assert_contains "$out" "unknown value; using off" "an unknown tint value must warn and read as off"
+  grep -qF $'\033]111\033\\' "$tty" || fail "a tint read as off must reset the shown tint"
+  printf 'subtle\n' >"$FM_HOME/config/rex-tint"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ -e "$STATE/.rex-tint-t1" ] || fail "a written tint must be cached"
+  : >"$tty"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" clear t1 || fail "clear failed"
+  grep -q $'state=clear:app=firstmate:id=fm\033' "$tty" || fail "clear must remove the mark (and the progress beneath it): $(od -c "$tty" | head -3)"
+  grep -qF $'\033]111\033\\' "$tty" || fail "clear must reset the tint"
+  [ ! -e "$STATE/.rex-tint-t1" ] && [ ! -e "$STATE/.rex-mark-t1" ] && [ ! -e "$STATE/.rex-progress-t1" ] || fail "clear must drop every cache"
+  pass "rex: the producer shows a no-mistakes run's progress only while no mark is set, re-reads the run at most once per interval, and tints waiting and failed tasks only when config/rex-tint opts in"
 }
 
 test_every_call_pins_server_and_never_autostarts
@@ -1112,7 +1277,10 @@ test_remote_control_rex_arm
 test_tab_label_is_sidebar_sized
 test_mark_is_one_status_record_plus_optional_notification
 test_mark_read_and_tab_rename
+test_progress_and_tint_sequences
 test_busy_state_trusts_only_proven_program_status
 test_submit_confirms_from_a_working_edge
 test_wait_transition_reads_rex_events
 test_marks_producer_converges_and_notifies_once
+test_nm_run_progress_reads_captured_status
+test_marks_producer_shows_validation_progress_and_tint

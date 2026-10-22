@@ -4,9 +4,9 @@
 # through bin/fm-rex-lab.sh (never the live server; the lab's tripwire checks
 # the live server is untouched) and drives the adapter against it: session and
 # tab creation, labels, focus, live cwd, send and keys, capture, agent state
-# from real processes, Firstmate's attention marks and notifications, the
-# real `rex events` push wait, close, exit 3 and exit 4, and the autostart
-# refusal.
+# from real processes, Firstmate's attention marks, notifications, validation
+# progress, and state tint, the real `rex events` push wait, close, exit 3 and
+# exit 4, and the autostart refusal.
 # Runs by default where rex and jq are installed; FM_REX_SMOKE=0 disables it.
 set -u
 
@@ -119,30 +119,85 @@ printf '%s\n' "$LIVE" | grep -qx "$TA"$'\t'fm-smoke-a || smoke_fail "list_live d
 printf '%s\n' "$LIVE" | grep -qx "$TB"$'\t'fm-smoke-b || smoke_fail "list_live did not list task b"
 pass "rex smoke: list_live finds this home's tabs"
 
-# Attention marks: one tty write lands Firstmate's own id=fm record and an OSC
-# 777 notification that Rex streams as desktop_notification.
+# Attention marks: one tty write lands Firstmate's own id=fm record, titled
+# with the tab label, and an OSC 777 notification that Rex streams as
+# desktop_notification. A root record standing in for the harness's own report
+# (which is what the app's sounds and notifications follow) must survive every
+# Firstmate write untouched, and the whole mark, progress, and clear sequence
+# must stream exactly one desktop notification.
 EVENTS="$TMP_ROOT/events.jsonl"
 env -u REX_SESSION -u REX_BLOCK -u REX_CLIENT -u REX_SERVER "$(fm_backend_rex_bin)" -S "$FM_REX_SERVER" --autostart=false \
   events -s "session:$SID" --json >"$EVENTS" 2>/dev/null &
 EVENTS_PID=$!
 sleep 1
-fm_backend_rex_mark "$TB" blocked question "Needs your decision" fm-smoke-b "Firstmate: smoke" || smoke_fail "the mark could not be written"
+fm_backend_rex_tty_write "$TB" "$(printf '\033]7501;state=done:app=smoke-harness:msg=%s\033\134' "$(printf 'turn finished' | base64)")" \
+  || smoke_fail "the stand-in harness root record could not be written"
+fm_backend_rex_mark "$TB" blocked question "Needs your decision" fm-smoke-b "Smoke · tab" "Smoke · tab" || smoke_fail "the mark could not be written"
 for _ in $(seq 1 40); do grep -q desktop_notification "$EVENTS" && break; sleep 0.1; done
-[ "$(fm_backend_rex_mark_read "$TB")" = $'blocked\tquestion\tNeeds your decision' ] || smoke_fail "the id=fm record did not read back: $(fm_backend_rex_block_call "$TB" program_status)"
+[ "$(fm_backend_rex_mark_read "$TB")" = $'blocked\tquestion\tNeeds your decision\tSmoke · tab\t' ] || smoke_fail "the id=fm record did not read back: $(fm_backend_rex_block_call "$TB" program_status)"
 jq -e --arg b "block:$BID_B" 'select(.payload.event.payload.block_id == $b and .payload.event.payload.name == "program_status_changed" and .payload.event.payload.payload.id == "fm")' "$EVENTS" >/dev/null \
   || smoke_fail "the mark did not stream as program_status_changed id=fm"
 jq -e --arg b "block:$BID_B" 'select(.payload.event.payload.block_id == $b and .payload.event.payload.name == "desktop_notification")' "$EVENTS" >/dev/null \
   || smoke_fail "the OSC 777 notification did not stream as desktop_notification: $(grep -c . "$EVENTS") events"
 NOTE=$(jq -c --arg b "block:$BID_B" 'select(.payload.event.payload.name == "desktop_notification") | .payload.event.payload.payload' "$EVENTS" | head -1)
+[ "$(printf '%s' "$NOTE" | jq -r .title)" = "Smoke · tab" ] || smoke_fail "the notification title is not the tab label: $NOTE"
+fm_backend_rex_progress "$TB" 33 "Validating: review 3/9" fm-smoke-b "Smoke · tab" || smoke_fail "the progress record could not be written"
+[ "$(fm_backend_rex_mark_read "$TB" fm/validate)" = $'working\t\tValidating: review 3/9\tSmoke · tab\t33' ] \
+  || smoke_fail "the id=fm/validate record did not read back with its progress: $(fm_backend_rex_block_call "$TB" program_status)"
+fm_backend_rex_progress "$TB" 44 "Validating: review 4/9" fm-smoke-b "Smoke · tab" || smoke_fail "the progress record could not be updated"
+fm_backend_rex_mark "$TB" clear "" "" fm-smoke-b || smoke_fail "the mark could not be cleared"
+[ "$(fm_backend_rex_mark_read "$TB")" = $'clear\t\t\t\t' ] || smoke_fail "clearing left Firstmate's record behind"
+[ "$(fm_backend_rex_mark_read "$TB" fm/validate)" = $'clear\t\t\t\t' ] || smoke_fail "clearing the mark left the progress record beneath it"
+ROOT_REC=$(fm_backend_rex_status_records "$TB" | jq -c '[.[] | select((.id // "") == "")] | first | {state, app, msg}')
+[ "$ROOT_REC" = '{"state":"done","app":"smoke-harness","msg":"turn finished"}' ] \
+  || smoke_fail "a Firstmate write touched the harness's root record: $ROOT_REC"
+sleep 1
 kill "$EVENTS_PID" 2>/dev/null || true
 wait "$EVENTS_PID" 2>/dev/null || true
-fm_backend_rex_mark "$TB" clear "" "" fm-smoke-b || smoke_fail "the mark could not be cleared"
-[ "$(fm_backend_rex_mark_read "$TB")" = $'clear\t\t' ] || smoke_fail "clearing left Firstmate's record behind"
+NOTES=$(jq -s --arg b "block:$BID_B" '[.[] | select(.payload.event.payload.block_id == $b and .payload.event.payload.name == "desktop_notification")] | length' "$EVENTS")
+[ "$NOTES" = 1 ] || smoke_fail "the mark, progress, and clear sequence must stream exactly one desktop notification, got $NOTES"
+jq -e -s --arg b "block:$BID_B" '[.[] | .payload.event.payload | select(.block_id == $b and .name == "program_status_changed" and .payload.record.app == "firstmate" and (.payload.id // "") == "")] | length == 0' "$EVENTS" >/dev/null \
+  || smoke_fail "Firstmate wrote a root program-status record"
 fm_backend_rex_capture "$TB" 50 fm-smoke-b | grep -q '7501\|777' && smoke_fail "a mark's bytes showed on the screen"
 fm_backend_rex_tab_rename "$TB" "Ship · renamed" fm-smoke-b || smoke_fail "the tab could not be renamed"
 VIEW=$(fm_backend_rex_cli window ls -s "session:$SID" --json)
 [ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_B" '.windows[] | select(.window_id == $w) | .label')" = "Ship · renamed" ] || smoke_fail "the tab rename did not take"
-pass "rex smoke: a mark is an invisible id=fm record plus a streamed desktop notification ($NOTE), cleared alone; a tab rename takes"
+pass "rex smoke: a mark is an invisible id=fm record titled with the tab label plus a streamed desktop notification ($NOTE), a progress record carries its percentage, clearing the mark removes both, the harness's root record is untouched and the sequence streams exactly one notification; a tab rename takes"
+
+# State tint: OSC 11 written to the pane's terminal changes the background a
+# program in the pane reads back with its own OSC 11 query, and OSC 111
+# restores it. A headless server with no client theme leaves the default
+# background undefined and does not answer the query, which reads as none.
+cat >"$TMP_ROOT/bg-probe" <<'PROBE'
+#!/usr/bin/env bash
+old=$(stty -g)
+stty raw -echo min 0 time 10
+printf '\033]11;?\033\\' >/dev/tty
+reply=$(dd bs=1 count=64 </dev/tty 2>/dev/null)
+stty "$old"
+bg=$(printf '%s' "$reply" | sed -n 's/.*\(rgb:[0-9a-fA-F/]*\).*/\1/p')
+printf 'BG=%s=\n' "${bg:-none}"
+PROBE
+chmod +x "$TMP_ROOT/bg-probe"
+probe_bg() { # <target> <label> -> the background the pane's program reads
+  local i
+  fm_backend_rex_send_text_line "$1" "clear; '$TMP_ROOT/bg-probe'" "$2" || return 1
+  for i in $(seq 1 40); do
+    fm_backend_rex_capture "$1" 50 "$2" 2>/dev/null | sed -n 's/.*BG=\([^=]*\)=.*/\1/p' | tail -1 | grep . && return 0
+    sleep 0.1
+  done
+  return 1
+}
+BG0=$(probe_bg "$TB" fm-smoke-b) || smoke_fail "the pane's program could not read its background"
+fm_backend_rex_tint "$TB" '#2b2614' fm-smoke-b || smoke_fail "the tint could not be written"
+BG1=$(probe_bg "$TB" fm-smoke-b) || smoke_fail "the tinted background could not be read"
+[ "$BG1" = rgb:2b2b/2626/1414 ] || smoke_fail "the tint did not reach the pane: read $BG1"
+fm_backend_rex_tint "$TB" reset fm-smoke-b || smoke_fail "the tint could not be reset"
+BG2=$(probe_bg "$TB" fm-smoke-b) || smoke_fail "the reset background could not be read"
+[ "$BG2" = "$BG0" ] || smoke_fail "the reset did not restore the background: read $BG2, was $BG0"
+fm_backend_rex_tint "$TB" 'red' fm-smoke-b && smoke_fail "a tint that is not #rrggbb must be refused"
+fm_backend_rex_tint "$TB" '#2b2614' fm-smoke-other && smoke_fail "a tint for another task's label must be refused"
+pass "rex smoke: a tint reaches the pane's own background query ($BG1) and a reset restores it ($BG2)"
 
 # The push wait over a real stream: a root blocked report from inside the pane
 # is the actionable edge, and the pane's program exiting is dead.

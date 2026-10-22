@@ -2313,25 +2313,32 @@ On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers
 | --- | --- | --- |
 | Child record | `printf '\033]7501;state=blocked:kind=question:app=firstmate:id=fm:msg=<b64>\033\\'` written to the pane's tty | `block call ... com.superlogical.terminal.program_status` lists it beside the root record, and nothing appears in `capture`. |
 | Record lifetime | an OSC 133 `A` prompt mark, then a process exit | Rex streams `program_status_removed` with reason `prompt` for both the root and `id=fm` records; `working` and `blocked` drop at the next prompt or exit, while `done` and `error` persist. |
-| Notification | `printf '\033]777;notify;<title>;<body>\a'` on the pane | `rex events` streams a `desktop_notification` block event carrying that title and body. |
+| Notification | `printf '\033]777;notify;<title>;<body>\a'` on the pane | `rex events` streams a `desktop_notification` block event carrying that title and body, and no other field. |
+| Record title | `title=<b64 tab label>` on the `id=fm` record | `program_status` and the `program_status_changed` event carry `"title":"<tab label>"`. |
+| Progress record | `printf '\033]7501;state=working:app=firstmate:id=fm/validate:progress=33:title=<b64>:msg=<b64>\033\\'` | `program_status` lists it with `"progress":33`; a later `state=clear:id=fm` streams `program_status_removed` with `ids` `["fm","fm/validate"]` and reason `clear`. |
+| One notification | a stand-in harness root record (`state=done:app=smoke-harness`), then a mark with its OSC 777, two progress reports, and a mark clear, all while `rex events` streams | The stream carries exactly one `desktop_notification`, no `app=firstmate` record without an id, and the root record still reads `done`, `app=smoke-harness` afterwards. |
+| Tint | `printf '\033]11;#2b2614\033\\'`, then `printf '\033]111\033\\'`, each followed by an OSC 11 query from a program in the pane | The query answers `rgb:2b2b/2626/1414` after the set; on a headless lab server with no client theme it gets no answer before the set and again after the reset. |
 | Event shapes | `rex events -s <session> --json` | Prints nothing on subscribe and replays nothing; any CLI client touching the session streams `client_connected`, and blocks stream `program_status_changed` (`payload.id`, `payload.record`), `child_exited`, `process_changed`, and `window_label_changed`, while a closed block streams `block_closed`. |
 | Unreachable server | `rex events` against a dead socket | Exits 4; the wait returns to polling and never reads it as a dead worker. |
 | Root status | real Claude Code 2.1.308 in a lab pane | Publishes root records with `app=claude-code` and `state=working` while it runs. |
 
-Rex sounds and notifications follow each pane's root program status, not a child record such as `id=fm`, so every new attention mark also carries the OSC 777 notification above.
+Rex sounds and notifications follow each pane's root program status, not a child record such as `id=fm` ("Sounds and notifications now follow the main program's status instead of each sub-agent's", Rex preview.16 release notes), so every new attention mark also carries the OSC 777 notification above.
+Firstmate never writes a root record, because Claude Code publishes its own root record on every turn and offers no switch to stop it: a second root report for the same turn produced a duplicate macOS notification about 60 ms after Claude's own in a home-local experiment on 2026-10-22.
+Firstmate's child records, including validation progress, therefore add no app notification, and its only notification is the one OSC 777 per mark change.
 Whether the Rex app then shows a banner could not be observed headless: attaching the app to a lab server would change the captain's own app, and a screen capture was refused, so the proven boundary is that the notification reaches Rex's event stream.
 
 A read-only listing of the captain's own server shows the sidebar's tab entry is the window label, set by `window rename` and the tab label at creation; the block label is a separate field, and the terminal title is the agent's own title, read through the `title` method.
 Firstmate therefore puts the short display label on the window and keeps the block label `fm-<home-label>-<id>` as the identity check.
 
-The real smoke on a lab server passed (the first line is shown without its clause for a since-removed tab-label fallback):
+The real smoke on a lab server passed:
 
 ```text
-ok - rex smoke: a mark is an invisible id=fm record plus a streamed desktop notification ({"title":"Firstmate: smoke","body":"Needs your decision"}), cleared alone
+ok - rex smoke: a mark is an invisible id=fm record titled with the tab label plus a streamed desktop notification ({"title":"Smoke · tab","body":"Needs your decision"}), a progress record carries its percentage, clearing the mark removes both, the harness's root record is untouched and the sequence streams exactly one notification; a tab rename takes
+ok - rex smoke: a tint reaches the pane's own background query (rgb:2b2b/2626/1414) and a reset restores it (none)
 ok - rex smoke: the event wait returns a real blocked report and a real exit as dead, and an unreachable server is unusable, never dead
 ```
 
-The smoke's tab-rename assertion (`fm_backend_rex_tab_rename`, behind `fm-spawn.sh --title` on relaunch) was added after that dated run and has no recorded real-server run yet.
+Whether the app shows the record title in hover cards and notifications, and how the tint looks against a theme, could not be observed headless for the same reason.
 
 The opt-in per-harness guard records which root program states each installed harness publishes on Rex; only harnesses it proves are trusted for busy state and submit confirmation:
 

@@ -171,14 +171,32 @@ The captain sees which worker needs them from Rex itself.
 | other `done` | `done` | `Done: <note>` |
 | anything else | removed | |
 
-Each new record that needs the captain also carries an OSC 777 desktop notification titled `Firstmate: <tab label>`, because Rex sounds and notifications follow each pane's root program status, not a child record.
+Each record's title is the task's tab label, so Rex labels it with the name Firstmate gave the tab rather than a branch or the agent's terminal title.
+Each new record that needs the captain also carries an OSC 777 desktop notification titled with the tab label, because Rex sounds and notifications follow each pane's root program status, not a child record.
+Firstmate never writes the root record: the harness owns it, and a second root report for the same turn makes Rex notify twice.
 The notification fires once per change, never on a repeated sync.
 Rex has no API to set a record, so the mark is one small write to the pane's terminal device; a `working` or `blocked` record is dropped when the agent's shell prints its next prompt or exits, and the next sync writes it again.
 The watcher runs `fm-rex-marks.sh sync` once per poll while any Rex task or cached mark exists, and cleanup clears the mark before closing the pane.
 Every write first checks the block label, so a mark never lands on a pane that no longer belongs to the task.
 
-`config/rex-status-marks` turns the marks `on` (the default when the file is absent) or `off`; turning them off clears every mark already shown.
+`config/rex-status-marks` turns the marks `on` (the default when the file is absent) or `off`; turning them off clears every mark and progress record already shown.
 `state/.rex-mark-<id>` caches the last mark so a sync writes only on change.
+
+### Validation progress
+
+While a ship validates through no-mistakes and has no mark, its pane carries a second record, `id=fm/validate` in state `working`, whose progress is the share of pipeline steps done and whose message names the active step, for example `Validating: review 3/9, auto-fix 1/3`.
+Rex shows it in the tab and pane hover cards, so the captain can see how far each validation is without opening the worker.
+The sync reads the run on the task's branch with one bounded `no-mistakes axi status` at most every 30 seconds per task (`FM_REX_PROGRESS_INTERVAL`), and removes the record when the run ends or the task gets a mark; clearing the mark also removes the record beneath it.
+`state/.rex-progress-<id>` caches the last plan.
+
+### State tint
+
+`config/rex-tint` opts in to a subtle background tint on a worker that waits on the captain or on help (a `blocked` mark) or has failed (an `error` mark): `off` (the default when the file is absent), `subtle` for a dark theme, or `subtle-light` for a light theme.
+A running or finished worker is never tinted, and the tint is reset when the mark leaves that state, at cleanup, and when the tint is turned off.
+Rex applies a theme set through its API only to a pane no client owns, and the app owns every pane it shows, so the tint is an in-band OSC 11 written to the pane's terminal and the reset is OSC 111.
+It changes only cells the program leaves at the default background, a harness that picked its colors from the background at startup keeps them, and a tint left by a stopped watcher stays until the next sync.
+Firstmate never sends an OSC 11 query, because the answer would arrive in the worker as typed text.
+`state/.rex-tint-<id>` records the tint written, since a tint cannot be read back.
 
 ## Event push
 
@@ -208,7 +226,7 @@ A steer is confirmed submitted when the composer reads empty, or when the root s
 - Rex has no viewport-only read: `rex capture` and the `format` block method both include scrollback and omit trailing blank rows, so the visible screen cannot be located. Rex is therefore not a visible-capture backend: Kimi spawns and devin and Command Code armed interrupts are refused, and the composer classifier runs without a cursor row.
 - A Pi composer on Rex reads as unknown, because the classifier runs without a cursor row and Pi's prompt carries no identifying border; the composer gate then defers rather than types.
 - Only harnesses proven to publish a root program status get the native busy signal; the others use capture/hash polling and each harness adapter's semantic lifecycle for worker state.
-- An attention mark is a terminal write, so a `blocked` mark disappears at the agent's next shell prompt until the next watcher poll writes it again.
+- An attention mark or progress record is a terminal write, so a `blocked` or `working` record disappears at the agent's next shell prompt until the next watcher poll writes it again.
 
 ## Lab helper
 

@@ -980,9 +980,11 @@ fm_backend_rex_block_close() { # <target>
 # notifications, and streams every change as `program_status_changed`. A
 # record is `ESC ] 7501 ; state=<s>[:kind=<k>][:app=<a>][:id=<i>][:msg=<b64>]
 # ESC \`; a record with an id is independent of the pane's root record, so
-# Firstmate's own records (app=firstmate, id=fm on a worker pane, id=fm-wedge
-# on the supervisor pane) never overwrite a harness's report and a harness
-# never overwrites them. Rex drops a `working` or `blocked` record when its
+# Firstmate's own records (app=firstmate, id=fm and its validation-progress
+# child id=fm/validate on a worker pane, id=fm-wedge on the supervisor pane)
+# never overwrite a harness's report and a harness never overwrites them.
+# Clearing id=fm also removes id=fm/validate. A worker record's title is the
+# task's tab label, which Rex shows as the record's label. Rex drops a `working` or `blocked` record when its
 # owning process exits or at the next OSC 133 prompt mark, while `done` and
 # `error` persist, so bin/fm-rex-marks.sh re-reads and repairs rather than
 # writing once. Since Rex preview.16 the app's sounds and notifications follow
@@ -994,8 +996,10 @@ fm_backend_rex_block_close() { # <target>
 # write, so it cannot split inside the program's own output.
 FM_BACKEND_REX_MARK_APP=firstmate
 FM_BACKEND_REX_MARK_ID=fm
+FM_BACKEND_REX_PROGRESS_ID=fm/validate
 FM_BACKEND_REX_ALERT_ID=fm-wedge
 FM_BACKEND_REX_MSG_MAX=120
+FM_BACKEND_REX_TITLE_MAX=64
 FM_BACKEND_REX_DEV_DIR=${FM_BACKEND_REX_DEV_DIR:-/dev}
 
 # fm_backend_rex_tty: the device path of <target>'s terminal, from its
@@ -1010,16 +1014,36 @@ fm_backend_rex_tty() { # <target>
   printf '%s/%s' "$FM_BACKEND_REX_DEV_DIR" "${tty#/dev/}"
 }
 
-# fm_backend_rex_status_sequence: one OSC 7501 report. <msg> is clipped to
-# FM_BACKEND_REX_MSG_MAX characters and base64-encoded on one line.
-fm_backend_rex_status_sequence() { # <state> <id> [kind] [msg]
-  local fields="state=$1" msg=${4:-}
+# fm_backend_rex_status_text: <text> as one record line: control characters
+# become spaces and the result is clipped to <max> characters.
+fm_backend_rex_status_text() { # <text> <max>
+  local text
+  text=$(printf '%s' "$1" | tr '\000-\037\177' ' ')
+  printf '%s' "${text:0:$2}"
+}
+
+# fm_backend_rex_status_sequence: one OSC 7501 report. <msg> and <title> are
+# clipped to FM_BACKEND_REX_MSG_MAX and FM_BACKEND_REX_TITLE_MAX characters
+# and base64-encoded on one line; <progress> (0-100) is kept only for
+# working and blocked.
+fm_backend_rex_status_sequence() { # <state> <id> [kind] [msg] [title] [progress]
+  local fields="state=$1" msg=${4:-} title=${5:-} progress=${6:-}
   [ -z "${3:-}" ] || fields="$fields:kind=$3"
   fields="$fields:app=$FM_BACKEND_REX_MARK_APP:id=$2"
-  if [ -n "$msg" ] && [ "$1" != clear ]; then
-    msg=$(printf '%s' "$msg" | tr '\t\r\n' '   ')
-    msg=${msg:0:$FM_BACKEND_REX_MSG_MAX}
-    fields="$fields:msg=$(printf '%s' "$msg" | base64 | tr -d '\n')"
+  if [ "$1" != clear ]; then
+    case "$1:$progress" in
+      working:[0-9] | working:[1-9][0-9] | working:100 | blocked:[0-9] | blocked:[1-9][0-9] | blocked:100)
+        fields="$fields:progress=$progress"
+        ;;
+    esac
+    if [ -n "$title" ]; then
+      title=$(fm_backend_rex_status_text "$title" "$FM_BACKEND_REX_TITLE_MAX")
+      fields="$fields:title=$(printf '%s' "$title" | base64 | tr -d '\n')"
+    fi
+    if [ -n "$msg" ]; then
+      msg=$(fm_backend_rex_status_text "$msg" "$FM_BACKEND_REX_MSG_MAX")
+      fields="$fields:msg=$(printf '%s' "$msg" | base64 | tr -d '\n')"
+    fi
   fi
   printf '\033]7501;%s\033\134' "$fields"
 }
@@ -1035,25 +1059,70 @@ fm_backend_rex_notify_sequence() { # <title> <body>
   printf '\033]777;notify;%s;%s\a' "$title" "$body"
 }
 
-# fm_backend_rex_tty_write: write <bytes> to <target>'s tty in one write.
+# fm_backend_rex_tty_write: write <bytes> to <target>'s tty in one write. The
+# device is opened for append, which a tty ignores, so a regular file standing
+# in for it keeps every write.
 fm_backend_rex_tty_write() { # <target> <bytes>
   local dev
   dev=$(fm_backend_rex_tty "$1") || return 1
   [ -w "$dev" ] || return 1
-  { printf '%s' "$2" >"$dev"; } 2>/dev/null
+  { printf '%s' "$2" >>"$dev"; } 2>/dev/null
 }
 
 # fm_backend_rex_mark: set (or with state `clear`, remove) Firstmate's own
 # attention record on a task pane. <state> is blocked|error|done|clear; <kind>
-# is permission|question|auth for blocked. Refuses a block that does not carry
-# the task's scoped label, so a mark can never land on another pane. With
-# <notify-title>, the same write raises a desktop notification whose body is
-# <msg>.
-fm_backend_rex_mark() { # <target> <state> [kind] [msg] [expected-label] [notify-title]
+# is permission|question|auth for blocked; <title> is the record's label (the
+# task's tab label). Refuses a block that does not carry the task's scoped
+# label, so a mark can never land on another pane. With <notify-title>, the
+# same write raises a desktop notification whose body is <msg>.
+fm_backend_rex_mark() { # <target> <state> [kind] [msg] [expected-label] [notify-title] [title]
   local bytes
   fm_backend_rex_target_ready "$1" "${5:-}" || return 1
-  bytes=$(fm_backend_rex_status_sequence "$2" "$FM_BACKEND_REX_MARK_ID" "${3:-}" "${4:-}")
+  bytes=$(fm_backend_rex_status_sequence "$2" "$FM_BACKEND_REX_MARK_ID" "${3:-}" "${4:-}" "${7:-}")
   [ -z "${6:-}" ] || bytes="$bytes$(fm_backend_rex_notify_sequence "$6" "${4:-}")"
+  fm_backend_rex_tty_write "$1" "$bytes"
+}
+
+# fm_backend_rex_progress: set Firstmate's validation-progress record
+# (id=fm/validate, state working) on a task pane, or with <percent> `clear`
+# remove it. An empty <percent> is indeterminate. Rex shows the record's
+# progress and message in the tab and pane hover cards. Same label check as
+# fm_backend_rex_mark.
+fm_backend_rex_progress() { # <target> <percent|clear> [msg] [expected-label] [title]
+  local bytes
+  fm_backend_rex_target_ready "$1" "${4:-}" || return 1
+  if [ "$2" = clear ]; then
+    bytes=$(fm_backend_rex_status_sequence clear "$FM_BACKEND_REX_PROGRESS_ID")
+  else
+    bytes=$(fm_backend_rex_status_sequence working "$FM_BACKEND_REX_PROGRESS_ID" "" "${3:-}" "${5:-}" "$2")
+  fi
+  fm_backend_rex_tty_write "$1" "$bytes"
+}
+
+# --- state tint -----------------------------------------------------------------
+# Rex's set_theme is not applied while a client owns the pane, and the app owns
+# every pane it shows, so the only tint that works is in-band: OSC 11 sets the
+# pane's default background and OSC 111 restores the theme's. The tint only
+# changes cells the program leaves at the default background, a harness that
+# chose its theme from the background at startup keeps that theme, and it
+# persists until reset. Firstmate never sends an OSC 11 query: the terminal
+# answers it on the pane's input, which the harness would read as typed text.
+
+# fm_backend_rex_tint_sequence: OSC 11 for <#rrggbb>, or OSC 111 for `reset`.
+fm_backend_rex_tint_sequence() { # <#rrggbb|reset>
+  case "$1" in
+    reset) printf '\033]111\033\134' ;;
+    \#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) printf '\033]11;%s\033\134' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_rex_tint: tint a task pane's background, or with `reset` restore
+# it. Same label check as fm_backend_rex_mark.
+fm_backend_rex_tint() { # <target> <#rrggbb|reset> [expected-label]
+  local bytes
+  bytes=$(fm_backend_rex_tint_sequence "$2") || return 1
+  fm_backend_rex_target_ready "$1" "${3:-}" || return 1
   fm_backend_rex_tty_write "$1" "$bytes"
 }
 
@@ -1065,15 +1134,17 @@ fm_backend_rex_status_records() { # <target>
   printf '%s' "$out" | jq -ce '.records | if type == "array" then . else error("no records") end' 2>/dev/null
 }
 
-# fm_backend_rex_mark_read: "<state>\t<kind>\t<msg>" of Firstmate's own record
-# on the pane (empty fields when it has none, which reads as `clear`); fails
-# when the pane cannot be read.
-fm_backend_rex_mark_read() { # <target>
+# fm_backend_rex_mark_read: "<state>\t<kind>\t<msg>\t<title>\t<progress>" of
+# Firstmate's own record <id> (default the attention mark, id=fm) on the pane
+# (empty fields when it has none, which reads as `clear`); fails when the pane
+# cannot be read.
+fm_backend_rex_mark_read() { # <target> [id]
   local records
   records=$(fm_backend_rex_status_records "$1") || return 1
-  printf '%s' "$records" | jq -r --arg app "$FM_BACKEND_REX_MARK_APP" --arg id "$FM_BACKEND_REX_MARK_ID" '
+  printf '%s' "$records" | jq -r --arg app "$FM_BACKEND_REX_MARK_APP" --arg id "${2:-$FM_BACKEND_REX_MARK_ID}" '
     ([.[] | select(.id == $id and .app == $app)] | first) as $r
-    | if $r == null then "clear\t\t" else "\($r.state // "")\t\($r.kind // "")\t\($r.msg // "")" end' 2>/dev/null
+    | if $r == null then "clear\t\t\t\t"
+      else "\($r.state // "")\t\($r.kind // "")\t\($r.msg // "")\t\($r.title // "")\t\($r.progress // "")" end' 2>/dev/null
 }
 
 # fm_backend_rex_tab_rename: set the task tab's label to <label>, renaming
