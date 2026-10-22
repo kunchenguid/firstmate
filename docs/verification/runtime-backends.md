@@ -6,6 +6,40 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Windows session-lock identity
+
+Verified on 2026-10-17 on Windows 11 build 26200, Git for Windows Bash 5.2.37, Node 24.19.0, and Pi 1.2.0.
+This evidence covers session-lock ownership under a real npm-installed Pi primary, not complete Windows backend or secondmate support.
+The Windows process access and identity boundary is owned by `bin/fm-session-lock-lib.sh`; acquisition refusal is owned by `bin/fm-lock.sh`, and native symlink capability handling by `bin/fm-wake-lib.sh`.
+
+Run the portable regressions on either host:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-session-lock-ancestry.test.sh
+```
+
+The suite covers native npm entrypoints, incidental-argument rejection, MSYS parent translation, recycled parent ids, refreshed ownership after process exit, MSYS mutex recovery despite a colliding native PID, native session-owner liveness, and query failures before and after the claim mutex.
+Its session-bound lease regression exercises conflicting main-actor mutation refusal, lease preservation during native query failure, confirmed-absent holder recovery, and unchanged POSIX liveness; `bin/fm-lease-lib.sh` owns the lease contract.
+Its POSIX executable-tree integration runs on Linux/macOS and explicitly skips on MSYS, which cannot execute those symlinked `/bin/bash` fixtures.
+`tests/fm-watcher-lock.test.sh` additionally exercises symlink capability failure and a competing lock disappearing before the next observation.
+Its POSIX signal and `ps -o` integrations likewise run on Linux/macOS, while MSYS retains its native `/proc` identity check.
+
+From a real Windows primary's tool shell, refresh the token-free live proof with:
+
+```sh
+FM_WINDOWS_SESSION_LOCK_LIVE=1 bash bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Observed result:
+
+```text
+ok - real Windows primary acquires, inspects and recognizes its own disposable session lock
+```
+
+The live guard touches only a disposable home and submits no prompt.
+Pi was the only installed primary CLI on this host; Claude, Codex, OpenCode, pi-signed, omp, Grok, Kimi, and Cursor remain unverified on Windows by this run.
+The Linux/macOS tmux drift guard remains unchanged.
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.

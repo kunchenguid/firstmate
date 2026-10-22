@@ -12,6 +12,11 @@
 # fixture and can never escape into the session running this suite.
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fixture child
 set -u
+# The existing process fixtures describe POSIX, even when run from Git Bash.
+export FM_PROC_PLATFORM_OVERRIDE=posix
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ;;
+esac
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -1215,6 +1220,249 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
 }
 
+# Windows tables carry native pid, parent pid, creation ticks, executable and
+# command line. The fake replaces only the OS query; ownership runs real code.
+install_windows_process_fixture() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  cat > "$fakebin/powershell" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_TEST_WIN_TABLE.count" ] || read -r count < "$FM_TEST_WIN_TABLE.count"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_WIN_TABLE.count"
+if [ "$count" -gt "${FM_TEST_WIN_FAIL_AFTER:-9999}" ]; then exit 2; fi
+cat "$FM_TEST_WIN_TABLE"
+[ "${FM_TEST_WIN_PARTIAL:-0}" = 0 ] && printf '__FM_PROCESS_TABLE_END__\n'
+exit 0
+SH
+  chmod +x "$fakebin/ps" "$fakebin/powershell"
+  mkdir -p "$dir/state"
+  cat > "$dir/table" <<'SH'
+5072	23040	300	C:\Program Files\Git\usr\bin\bash.exe	"C:\Program Files\Git\usr\bin\bash.exe" -c tool
+23040	29720	200	C:\Program Files\nodejs\node.exe	"C:\Program Files\nodejs\node.exe" "C:\Program Files\nodejs\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js" --session example
+29720	0	100	C:\Windows\powershell.exe	powershell.exe
+SH
+  printf '%s\n' "$fakebin"
+}
+
+windows_eval() {  # <dir> <expression>
+  FM_PROC_PLATFORM_OVERRIDE=windows FM_PROC_SELF_PID_OVERRIDE=5072 \
+    FM_TEST_WIN_TABLE="$1/table" lib_eval "$1/fakebin" "$2"
+}
+
+test_windows_native_ancestry_and_fresh_ownership() {
+  local dir got
+  dir="$TMP_ROOT/windows-native"
+  install_windows_process_fixture "$dir" >/dev/null
+  got=$(windows_eval "$dir" 'fm_harness_ancestry_pid') \
+    || fail "a Windows npm Pi session was not reached through native ancestry"
+  [ "$got" = 23040 ] || fail "Windows ancestry returned '$got', expected 23040"
+  printf '23040\n' > "$dir/state/.lock"
+  windows_eval "$dir" '
+    fm_session_lock_owned_by_self "${FM_TEST_WIN_TABLE%/*}/state" || exit 11
+    # A parked guard must not reuse its earlier successful process snapshot.
+    printf "5072\t29720\t300\tbash.exe\tbash.exe\n29720\t0\t100\tpowershell.exe\tpowershell.exe\n" > "$FM_TEST_WIN_TABLE"
+    ! fm_session_lock_owned_by_self "${FM_TEST_WIN_TABLE%/*}/state"
+  ' || fail "a second ownership check retained a departed Windows harness"
+  pass "Windows ancestry recognizes npm Pi and ownership refreshes after its exit"
+}
+
+test_windows_msys_boundary_and_recycled_parent() {
+  local dir got
+  dir="$TMP_ROOT/windows-boundary"
+  install_windows_process_fixture "$dir" >/dev/null
+  mkdir -p "$dir/proc/42" "$dir/proc/41"
+  printf '41\n' > "$dir/proc/42/ppid"
+  printf '9998\n' > "$dir/proc/42/winpid"
+  printf '1\n' > "$dir/proc/41/ppid"
+  printf '5072\n' > "$dir/proc/41/winpid"
+  got=$(FM_PROC_MSYS_PROC_ROOT="$dir/proc" windows_eval "$dir" 'fm_windows_msys_root_winpid 42') \
+    || fail "the MSYS parent map did not reach its native boundary"
+  [ "$got" = 5072 ] || fail "the MSYS boundary resolved '$got' instead of 5072"
+  # A direct native walk from 9998 is broken, unlike the MSYS bridge above.
+  if FM_PROC_SELF_PID_OVERRIDE=9998 FM_PROC_PLATFORM_OVERRIDE=windows \
+    FM_TEST_WIN_TABLE="$dir/table" lib_eval "$dir/fakebin" 'fm_harness_ancestry_pid'; then
+    fail "the fixture unexpectedly resolves without the MSYS boundary"
+  fi
+  cat > "$dir/table" <<'SH'
+5072	23040	300	bash.exe	bash.exe
+23040	0	400	node.exe	node.exe C:\node_modules\@earendil-works\pi-coding-agent\dist\cli.js
+SH
+  if windows_eval "$dir" 'fm_harness_ancestry_pid'; then
+    fail "a recycled parent created after its child was accepted"
+  fi
+  pass "Windows ancestry bridges MSYS and rejects recycled parent ids"
+}
+
+test_windows_identity_uses_executable_and_entrypoint_only() {
+  local dir
+  dir="$TMP_ROOT/windows-entrypoint"
+  install_windows_process_fixture "$dir" >/dev/null
+  windows_eval "$dir" '
+    fm_windows_harness_process_matches "C:\apps\pi.exe" "C:\apps\pi.exe" || exit 11
+    fm_windows_harness_process_matches "C:\apps\omp.exe" "C:\apps\omp.exe" || exit 12
+    fm_windows_harness_process_matches node.exe "node.exe C:\node_modules\@earendil-works\pi-coding-agent\dist\cli.js" || exit 13
+    ! fm_windows_harness_process_matches node.exe "node.exe C:\apps\server.js --log=C:\tmp\pi-coding-agent\dist\cli.js" || exit 14
+    ! fm_windows_harness_process_matches node.exe "node.exe C:\apps\pi-coding-agentx\dist\cli.js" || exit 15
+    ! fm_windows_harness_process_matches node.exe "node.exe C:\apps\pi-coding-agent\server.js" || exit 16
+    ! fm_windows_harness_process_matches pipeline.exe "pipeline.exe" || exit 17
+    ! fm_windows_harness_process_matches agent.exe "agent.exe" || exit 18
+  ' || fail "Windows harness identity accepted an argument/lookalike or rejected an executable entrypoint"
+  pass "Windows identity accepts native harnesses and npm entrypoints, not incidental arguments"
+}
+
+test_windows_inspection_and_query_errors_never_allow_takeover() {
+  local dir fakebin rc fail_after
+  dir="$TMP_ROOT/windows-uncertain"
+  fakebin=$(install_windows_process_fixture "$dir")
+  printf '23040\n' > "$dir/state/.lock"
+  windows_eval "$dir" 'fm_session_lock_inspect "${FM_TEST_WIN_TABLE%/*}/state"; [ "$FM_LOCK_INSPECT_STATE" = held ]' \
+    || fail "Windows inspection did not recognize the live native owner"
+  printf '99999\n' > "$dir/state/.lock"
+  windows_eval "$dir" 'fm_session_lock_inspect "${FM_TEST_WIN_TABLE%/*}/state"; [ "$FM_LOCK_INSPECT_STATE" = stale ]' \
+    || fail "Windows inspection did not distinguish a confirmed absent process"
+  FM_TEST_WIN_PARTIAL=1 windows_eval "$dir" '
+    fm_session_lock_inspect "${FM_TEST_WIN_TABLE%/*}/state"
+    [ "$FM_LOCK_INSPECT_STATE" = unknown ]
+  ' || fail "an incomplete process query was mistaken for proof of a stale lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  # Fail both before and after acquiring the claim mutex. Neither uncertainty
+  # boundary may publish a new pid or session sidecar.
+  for fail_after in 1 3; do
+    rm -f "$dir/table.count"
+    rc=0
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID PATH="$fakebin:$PATH" \
+      FM_HOME="$dir" FM_PROC_PLATFORM_OVERRIDE=windows FM_PROC_SELF_PID_OVERRIDE=5072 \
+      FM_TEST_WIN_TABLE="$dir/table" FM_TEST_WIN_FAIL_AFTER="$fail_after" \
+      bash "$ROOT/bin/fm-lock.sh" > "$dir/acquire.out" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "an unreadable process table allowed a Windows lock takeover"
+    [ "$(cat "$dir/state/.lock")" = 99999 ] || fail "uncertain acquisition changed the recorded owner"
+    [ "$(cat "$dir/state/.lock-session")" = S1 ] || fail "uncertain acquisition changed the session sidecar"
+    grep -q 'cannot verify.*Windows.*owner' "$dir/acquire.out" \
+      || fail "uncertain acquisition did not explain its refusal: $(cat "$dir/acquire.out")"
+  done
+  pass "Windows inspection distinguishes absence from query failure and refuses uncertain takeover"
+}
+
+test_windows_wake_liveness_respects_pid_namespaces() {
+  local dir
+  dir="$TMP_ROOT/windows-wake-pid"
+  install_windows_process_fixture "$dir" >/dev/null
+  windows_eval "$dir" '
+    FM_STATE_OVERRIDE="${FM_TEST_WIN_TABLE%/*}/state"
+    . "${0%/*}/fm-wake-lib.sh"
+    _FM_UNAME=MINGW64_NT
+    kill() { return 1; }
+    lock="$STATE/collision.lock"
+    mkdir -p "$lock"
+    printf "23040\n" > "$lock/pid"
+    fm_lock_try_acquire "$lock" || exit 10
+    [ "$FM_LOCK_RECOVERED_PID" = 23040 ] || exit 11
+    fm_lock_release "$lock"
+    ! fm_pid_alive 23040 || exit 12
+    fm_session_owner_alive 23040 || exit 13
+    ! fm_session_owner_alive 99999 || exit 14
+    kill() { return 0; }
+    ! fm_session_owner_alive 99999 || exit 15
+    export FM_TEST_WIN_PARTIAL=1
+    fm_session_owner_alive 23040 || exit 16
+    fm_session_owner_alive 99999 || exit 17
+    _FM_UNAME=Linux
+    fm_pid_alive 23040 && fm_session_owner_alive 23040 || exit 18
+    kill() { return 1; }
+    ! fm_pid_alive 23040 && ! fm_session_owner_alive 23040 || exit 19
+  ' || fail "wake liveness mixed PID namespaces or inferred native death from query failure"
+  pass "dead MSYS mutexes recover independently of native session-owner liveness"
+}
+
+test_windows_native_session_lease_guard() {
+  local dir
+  dir="$TMP_ROOT/windows-lease"
+  install_windows_process_fixture "$dir" >/dev/null
+  windows_eval "$dir" '
+    FM_STATE_OVERRIDE="${FM_TEST_WIN_TABLE%/*}/state"
+    STATE=$FM_STATE_OVERRIDE
+    . "${0%/*}/fm-lease-lib.sh"
+    fm_lease_lock_helpers
+    _FM_UNAME=MINGW64_NT
+    FM_SUPERVISION_ACTOR=main
+    kill() { [ "${2:-}" != 23040 ] && builtin kill "$@"; }
+    printf "23040\n" > "$STATE/.lock"
+    printf "branch\t23040\t1\n" > "$STATE/.lease-task"
+    for query in readable unavailable; do
+      if [ "$query" = unavailable ]; then export FM_TEST_WIN_PARTIAL=1; fi
+      rc=0
+      ( fm_lease_guard task mutate; touch "$STATE/mutated" ) || rc=$?
+      [ "$rc" = "$FM_LEASE_REFUSE_EXIT" ] || exit 11
+      [ ! -e "$STATE/mutated" ] || exit 12
+      [ "$(cat "$STATE/.lease-task")" = "$(printf "branch\t23040\t1")" ] || exit 13
+    done
+    unset FM_TEST_WIN_PARTIAL
+    printf "99999\n" > "$STATE/.lock"
+    printf "branch\t99999\t1\n" > "$STATE/.lease-task"
+    ( fm_lease_guard task mutate; touch "$STATE/recovered"; fm_lease_guard_release ) || exit 14
+    [ -e "$STATE/recovered" ] && [ ! -e "$STATE/.lease-task" ] || exit 15
+    printf "branch\t23040\t1\n" > "$STATE/.lease-task"
+    ! fm_lease_live task || exit 16
+    _FM_UNAME=Linux
+    printf "%s\n" "$$" > "$STATE/.lock"
+    printf "branch\t%s\t1\n" "$$" > "$STATE/.lease-task"
+    fm_lease_live task || exit 17
+    rc=0
+    ( fm_lease_guard task mutate; touch "$STATE/mutated" ) || rc=$?
+    [ "$rc" = "$FM_LEASE_REFUSE_EXIT" ] && [ ! -e "$STATE/mutated" ] || exit 18
+    kill() { return 1; }
+    ! fm_lease_live task || exit 19
+    fm_lease_clear_stale task
+    [ ! -e "$STATE/.lease-task" ] || exit 20
+  ' || fail "session-bound leases allowed conflicting mutation or failed stale recovery"
+  pass "native leases refuse main mutation and preserve uncertain owners with POSIX behavior unchanged"
+}
+
+test_platform_identity_is_sampled_once_per_shell() {
+  local dir fakebin probes
+  dir="$TMP_ROOT/platform-probes"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'probe\n' >> "$FM_TEST_UNAME_LOG"
+printf 'Linux\n'
+SH
+  chmod +x "$fakebin/uname"
+  FM_TEST_UNAME_LOG="$dir/probes" lib_eval "$fakebin" '
+    unset FM_PROC_PLATFORM_OVERRIDE _FM_UNAME
+    for attempt in 1 2 3; do
+      if fm_windows_process_host; then exit 11; fi
+    done
+    FM_PROC_PLATFORM_OVERRIDE=windows fm_windows_process_host || exit 12
+    if FM_PROC_PLATFORM_OVERRIDE=posix fm_windows_process_host; then exit 13; fi
+  ' || fail "cached platform identity ignored a POSIX host or an explicit test override"
+  probes=$(wc -l < "$dir/probes" | tr -d '[:space:]')
+  [ "$probes" = 1 ] || fail "platform identity spawned uname $probes times, expected one source-time probe"
+  pass "platform identity is sampled once while process ownership stays freshly queried"
+}
+
+test_platform_identity_is_sampled_once_per_shell
+
+# Run independent Windows regressions in subshells so a missing implementation
+# reports every failing behavior instead of hiding all but the first failure.
+windows_failed=0
+for windows_test in \
+  test_windows_native_ancestry_and_fresh_ownership \
+  test_windows_msys_boundary_and_recycled_parent \
+  test_windows_identity_uses_executable_and_entrypoint_only \
+  test_windows_inspection_and_query_errors_never_allow_takeover \
+  test_windows_wake_liveness_respects_pid_namespaces \
+  test_windows_native_session_lease_guard; do
+  ( "$windows_test" ) || windows_failed=1
+done
+[ "$windows_failed" -eq 0 ] || exit 1
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1222,14 +1470,21 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
-test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
-test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
-test_same_session_confirmation_does_not_steal_after_wait
-test_failed_lock_write_restores_previous_sidecar
-test_failed_lock_write_removes_new_sidecar_when_none_existed
-test_verified_reclaim_keeps_new_sidecar
-test_reanchor_keeps_task_leases_live
-test_reanchor_keeps_autoarm_midturn_healthy
+# Git Bash cannot execute the POSIX fixtures' symlinked /bin/bash binaries.
+# Run those real process-tree integrations on Linux/macOS, not simulated Windows.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) echo 'skip: POSIX harness-process integration requires Linux or macOS' ;;
+  *)
+    test_e2e_version_named_session_claims_the_home
+    test_e2e_daemon_parented_session_claims_the_home
+    test_e2e_daemon_parented_version_named_session_keeps_its_lock
+    test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
+    test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
+    test_same_session_confirmation_does_not_steal_after_wait
+    test_failed_lock_write_restores_previous_sidecar
+    test_failed_lock_write_removes_new_sidecar_when_none_existed
+    test_verified_reclaim_keeps_new_sidecar
+    test_reanchor_keeps_task_leases_live
+    test_reanchor_keeps_autoarm_midturn_healthy
+    ;;
+esac

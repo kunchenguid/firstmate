@@ -51,11 +51,32 @@ wait_gone() { # <pid> <seconds>
   ! alive "$pid"
 }
 
-# Wait up to <seconds> for <pid> to have a live child; 0 when it does.
+# The abandoned-state reproduction below only requires a live descendant:
+# after its state root is deleted, startup/backoff helpers also prove the leak.
 wait_child() { # <pid> <seconds>
   local pid=$1 deadline=$(( $(date +%s) + $2 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -n "$(pgrep -P "$pid" 2>/dev/null || true)" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# Return the live --serve child, not an arbitrary short-lived startup helper.
+# Process-group membership is deliberately asserted separately by the caller.
+wait_serving_child() { # <pid> <seconds> <worker-script>
+  local pid=$1 script=$3 child command deadline=$(( $(date +%s) + $2 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+      command=$(ps -p "$child" -o args= 2>/dev/null) || continue
+      case "$command" in
+        "$script --serve"|*" $script --serve")
+          alive "$child" || continue
+          printf '%s\n' "$child"
+          return 0
+          ;;
+      esac
+    done
     sleep 0.1
   done
   return 1
@@ -133,14 +154,59 @@ start_worker() {
   printf '%s\n' "$pid"
 }
 
+# A supervisor can have a short-lived startup helper before its serving child.
+# Readiness must not select that helper and race its exit in the PGID assertion.
+READINESS="$TMP_ROOT/readiness"
+mkdir -p "$READINESS"
+cat > "$READINESS/worker.sh" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = --serve ]; then
+  printf '%s\n' "$$" > "${0%/*}/serve-pid"
+  while :; do sleep 0.1; done
+fi
+sleep 30 &
+printf '%s\n' "$!" > "${0%/*}/startup-pid"
+while [ ! -e "${0%/*}/start-serving" ]; do sleep 0.1; done
+"$0" --serve &
+wait
+SH
+chmod +x "$READINESS/worker.sh"
+set -m
+"$READINESS/worker.sh" >/dev/null 2>&1 &
+READINESS_WORKER=$!
+set +m
+track "$READINESS_WORKER"
+for ((attempt = 0; attempt < 50; attempt++)); do
+  [ -s "$READINESS/startup-pid" ] && break
+  sleep 0.1
+done
+[ -s "$READINESS/startup-pid" ] || fail "the readiness fixture did not start its helper"
+if wait_serving_child "$READINESS_WORKER" 1 "$READINESS/worker.sh" >/dev/null; then
+  fail "a non-serving startup child was mistaken for worker readiness"
+fi
+alive "$(cat "$READINESS/startup-pid")" || fail "the readiness fixture's startup child exited too early"
+: > "$READINESS/start-serving"
+READY_SERVE=$(wait_serving_child "$READINESS_WORKER" 5 "$READINESS/worker.sh") \
+  || fail "the actual serving child was not recognized"
+for ((attempt = 0; attempt < 50; attempt++)); do
+  [ -s "$READINESS/serve-pid" ] && break
+  sleep 0.1
+done
+[ -s "$READINESS/serve-pid" ] && [ "$READY_SERVE" = "$(cat "$READINESS/serve-pid")" ] \
+  || fail "readiness did not return the actual serving process"
+kill -TERM -- "-$READINESS_WORKER" 2>/dev/null || true
+wait "$READINESS_WORKER" 2>/dev/null || true
+TRACKED_PIDS=()
+pass "worker readiness ignores startup helpers and identifies the serving child"
+
 CASE1="$TMP_ROOT/case1"
 mkdir -p "$CASE1/account"
 build_remote_root "$CASE1/remote-root"
 WORKER=$(start_worker "$CASE1/remote-root" "$CASE1/account" "$CASE1/remote-jobs") ||
   fail "could not start the fixture remote job worker"
 track "$WORKER"
-wait_child "$WORKER" 10 || fail "the fixture worker never started its serving child"
-SERVE=$(pgrep -P "$WORKER" | head -n 1)
+SERVE=$(wait_serving_child "$WORKER" 10 "$CASE1/remote-root/bin/fm-remote-job-worker.sh") \
+  || fail "the fixture worker never started its serving child"
 
 [ "$(pgid_of "$WORKER")" = "$WORKER" ] ||
   fail "the started worker is not its own process group leader, so its tree cannot be signalled as one group"
@@ -208,8 +274,8 @@ set -m
 STALE=$!
 set +m
 track "$STALE"
-wait_child "$STALE" 10 || fail "the stand-in worker never started its serving child"
-STALE_SERVE=$(pgrep -P "$STALE" | head -n 1)
+STALE_SERVE=$(wait_serving_child "$STALE" 10 "$CASE2/remote-root/bin/fm-remote-job-worker.sh") \
+  || fail "the stand-in worker never started its serving child"
 
 rm -rf "$CASE2/remote-root"
 

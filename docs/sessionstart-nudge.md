@@ -101,6 +101,9 @@ So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 
 So a proven `clear` or `compact` re-emit re-verifies ownership and proceeds.
 A lock another live session took meanwhile still produces the ordinary read-only digest.
+On Windows/MSYS, startup requires PowerShell with access to `Get-CimInstance Win32_Process` and native symlink support (enable Windows Developer Mode or use a symlink-capable filesystem if the capability diagnostic appears).
+An unverifiable Windows owner also leaves startup read-only; do not remove its lock to bypass the refusal.
+`bin/fm-lock.sh` owns status and acquisition diagnostics; [Windows session-lock verification](verification/runtime-backends.md#windows-session-lock-identity) records the tested support boundary.
 
 ### Nudge wrapper on a run-tier harness
 

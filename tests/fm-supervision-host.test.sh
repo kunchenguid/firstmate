@@ -160,40 +160,68 @@ unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_A
 # Homes are registered in a file: make_home runs in a command substitution,
 # whose variables never reach this shell.
 HOMES_FILE="$TMP_ROOT/homes"
-# Stop whatever a case left running, by the exact pids its home recorded.
+# Stop only exact fixture-owned pids, bounding both normal exit and escalation.
+stop_owned_process() {  # <pid> [graceful]
+  local pid=$1 rc=0 diagnostic
+  [ -n "$pid" ] || return 0
+  case "$pid" in *[!0-9]*|0|1) fail "invalid fixture-owned pid: $pid" ;; esac
+  diagnostic="$TMP_ROOT/cleanup-$pid.err"
+  if [ "${2:-}" != graceful ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  # Descendants need not be children of this shell; wait can return 127 after
+  # their exit. Keep that noise private, but always surface deadline evidence.
+  wait_for_exit "$pid" 50 2> "$diagnostic" || rc=$?
+  if [ "$rc" -eq 124 ] || is_live_non_zombie "$pid"; then
+    cat "$diagnostic" >&2
+    printf 'fixture cleanup timed out for owned pid %s\n' "$pid" >&2
+    return 1
+  fi
+  rm -f "$diagnostic"
+}
+
+# Snapshot records before stopping the host, which may remove those records.
 stop_home_processes() {  # <home>
-  local home=$1 pid arms='' i=0
+  local home=$1 pid host='' arms='' watcher='' rc=0
   if [ -f "$home/state/.supervision-host" ]; then
     arms=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
-    pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
-    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
-    while [ "$i" -lt 50 ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do
-      sleep 0.1
-      i=$((i + 1))
-    done
+    host=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   fi
+  watcher=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+  stop_owned_process "$host" || rc=1
   for pid in $arms; do
-    kill -TERM "$pid" 2>/dev/null || true
+    stop_owned_process "$pid" || rc=1
   done
-  pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
-  [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  stop_owned_process "$watcher" || rc=1
   while IFS= read -r pid; do
     if [ -e "$home/session.stop" ]; then
-      wait "$pid" 2>/dev/null || true
+      stop_owned_process "$pid" graceful || rc=1
     else
-      kill -TERM "$pid" 2>/dev/null || true
+      stop_owned_process "$pid" || rc=1
     fi
   done < <(cat "$home/claude-pids" 2>/dev/null)
   while IFS= read -r pid; do
-    kill -TERM "$pid" 2>/dev/null || true
+    stop_owned_process "$pid" || rc=1
   done < <(cat "$home/orphan-pid" 2>/dev/null)
+  return "$rc"
+}
+cleanup_case_homes() {
+  local home rc=0
+  while IFS= read -r home; do
+    [ -z "$home" ] || stop_home_processes "$home" || rc=1
+  done < <(cat "$HOMES_FILE" 2>/dev/null)
+  [ "$rc" -eq 0 ] || return "$rc"
+  : > "$HOMES_FILE"
+}
+run_case() {  # <test function>
+  "$@" || fail "case failed: $*"
+  cleanup_case_homes || fail "case cleanup failed: $*"
 }
 suite_cleanup() {
-  local home
-  while IFS= read -r home; do
-    [ -n "$home" ] && stop_home_processes "$home"
-  done < <(cat "$HOMES_FILE" 2>/dev/null)
+  local rc=0
+  cleanup_case_homes || rc=1
   fm_test_cleanup
+  return "$rc"
 }
 trap suite_cleanup EXIT
 
@@ -1022,7 +1050,7 @@ test_off_written_while_parked_passes_the_next_attended_close_to_main() {
   [ "$(engine_calls "$home")" -eq 0 ] || fail "off while parked: the engine ran after the home opted out"
   assert_re '	pass-through	attended	the home does not run the supervision host	signal:' "$home/state/.supervision-host.log" \
     "the ledger must name the opt-out as why the close went to main"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "off while parked: fixture cleanup failed"
   pass "host: an off written while the host is parked sends the next attended close to main, naming the opt-out"
 }
 
@@ -1387,7 +1415,7 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out() {
   [ ! -s "$home/hook.rc" ] || fail "a routine attended wake on a Claude home without the file reached main: $(cat "$home/hook.err")"
   watcher_live "$home" || fail "default-on: the host is not parked on a live successor"
   : > "$home/session.stop"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "default-on: fixture cleanup failed"
 
   home=$(make_primary_home hook-opted-out)
   : > "$home/config/supervision-host-off"
@@ -1403,7 +1431,7 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out() {
   assert_absent "$home/state/.host-mirror.jsonl" "a home opted out by config/supervision-host-off must mirror nothing"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "a home opted out by config/supervision-host-off ran an engine turn"
   : > "$home/session.stop"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "opted-out: fixture cleanup failed"
   pass "host+hook: a Claude home without config/supervision-host runs the host at the default engine, and an off file restores the plain arm"
 }
 
@@ -1441,7 +1469,7 @@ test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
   kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
   sleep 2
   kill -0 "$watcher" 2>/dev/null || fail "at-turn teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "at-turn teardown: fixture cleanup failed"
   pass "host+hook: the successor a close that turns main-only at its turn leaves for main survives the hook's process group teardown"
 }
 
@@ -1526,7 +1554,7 @@ test_pass_through_successor_survives_the_hook_process_group_teardown() {
   sleep 2
   kill -0 "$watcher" 2>/dev/null || fail "group teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$watcher" ] || fail "group teardown: the watcher lock moved"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "group teardown: fixture cleanup failed"
   pass "host+hook: the successor a pass-through leaves for main survives the hook's process group teardown"
 }
 
@@ -2405,7 +2433,7 @@ SH
   printf '%s\n' "$host_pid" > "$home/probe-host"
   wait_until 100 test -s "$home/park-sleeps" || fail "park-cadence: no child sleep observed"
   [ "$(sort -u "$home/park-sleeps")" = 0.5 ] || fail "park-cadence: exit probing did not use half-second sleeps"
-  stop_home_processes "$home"
+  stop_home_processes "$home" || fail "park-cadence: fixture cleanup failed"
   pass "host: parked child-exit sampling uses ordinary half-second sleeps"
 }
 
@@ -2967,78 +2995,146 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
-test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
-test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
-test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
-test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
-test_park_exit_probe_uses_half_second_child_sleeps
-test_report_surface_enforces_actor_turn_and_scope
-test_report_after_the_return_is_queued_for_main
-test_dispatch_entry_scopes_rows_and_renders_the_away_tail
-test_branch_outcomes_only_on_a_host_home_off_pi
-test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
-test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
-test_branch_outcomes_present_a_long_away_window_once
-test_branch_outcomes_budgets_count_bytes
-test_branch_outcomes_stay_unread_when_a_projection_fails
-test_branch_outcomes_stay_unread_without_jq
-test_branch_outcomes_stay_unread_when_the_drain_cannot_print
-test_branch_outcomes_date_a_legacy_backlog_without_adopting_it
-test_branch_ack_keeps_older_keyed_decision_open
-test_branch_outcomes_date_an_outcome_carried_across_a_switch_off_pi
-test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
-test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
-test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
-test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
-test_attended_captain_outcome_reaches_main_through_branch_outcomes
-test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
-test_quiet_record_without_its_daemon_is_a_present_captain
-test_attended_main_only_close_passes_straight_to_main
-test_off_written_while_parked_passes_the_next_attended_close_to_main
-test_main_only_pass_through_leaves_the_successor_watcher_running
-test_attended_close_with_unidentified_main_session_passes_to_main
-test_close_accepted_away_that_turns_attended_passes_to_main
-test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
-test_claude_stop_hook_delivers_a_main_only_pass_through
-test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
-test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
-test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
-test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
-test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
-test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
-test_pass_through_successor_survives_the_hook_process_group_teardown
-test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
-test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
-test_unrecorded_successor_is_stopped_rather_than_left_for_main
-test_primary_without_a_verified_mirror_runs_away_only
-test_attended_wake_carries_the_dialog_mirror
-test_dialog_bearing_files_are_owner_only
-test_undelivered_dialog_is_fed_again_on_the_next_turn
-test_attended_wake_with_an_unreadable_mirror_reaches_main
-test_away_wake_is_handled_on_the_engine_and_never_reaches_main
-test_away_turn_without_a_report_hands_the_wake_to_main
-test_return_during_an_engine_turn_hands_its_outcomes_to_main
-test_silent_outcomes_are_not_relayed_when_the_captain_returns
-test_large_turn_relays_an_early_visible_outcome
-test_outcome_lookup_failure_is_not_treated_as_silence
-test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end
-test_next_host_clears_a_turn_its_killed_predecessor_left
-test_report_without_acknowledgement_hands_the_wake_to_main
-test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
-test_incomplete_engine_result_hands_the_wake_to_main
-test_latch_trips_after_two_engine_errors_then_probes_and_recovers
-test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
-test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
-test_engine_turn_is_bounded_and_its_descendants_reaped
-test_restarted_host_stops_what_a_killed_predecessor_left
-test_park_boundary_ends_the_park_before_the_hook_timeout
-test_park_boundary_holds_under_back_to_back_closes
-test_park_boundary_rechecked_just_before_the_engine_turn
-test_park_test_clock_requires_the_marker
-test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
-test_park_limit_lets_a_turn_outlive_the_boundary
-test_first_cycle_status_streams_and_owner_options_reach_it
-test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
-test_unverified_engine_hands_every_away_wake_to_main
-test_host_outside_the_lock_owner_stands_down
-test_superseded_host_leaves_the_owner_untouched
+# These consecutive cases pin the case boundary, not just the stop helper:
+# every recorded role must survive its own assertions and be reaped before
+# the next case, while a child with no home registration stays untouched.
+test_case_cleanup_leaves_owned_children_until_assertions_finish() {
+  local home role pid
+  home=$(make_home case-cleanup away)
+  mkdir -p "$home/state/.watch.lock"
+  for role in host arm watcher session orphan; do
+    sleep 120 &
+    pid=$!
+    printf '%s\n' "$pid" >> "$TMP_ROOT/case-cleanup.pids"
+    case "$role" in
+      host|arm) printf '%s\t%s\n' "$role" "$pid" >> "$home/state/.supervision-host" ;;
+      watcher) printf '%s\n' "$pid" > "$home/state/.watch.lock/pid" ;;
+      session) printf '%s\n' "$pid" > "$home/claude-pids" ;;
+      orphan) printf '%s\n' "$pid" > "$home/orphan-pid" ;;
+    esac
+  done
+  sleep 120 &
+  printf '%s\n' "$!" > "$TMP_ROOT/case-cleanup.unrelated"
+  while IFS= read -r pid; do
+    kill -0 "$pid" 2>/dev/null || fail "case cleanup ran before the final assertions"
+  done < "$TMP_ROOT/case-cleanup.pids"
+  pass "case cleanup: owned children survive through the case's final assertions"
+}
+
+test_case_cleanup_reaps_previous_children_without_touching_unrelated_child() {
+  local pid unrelated leaked='' unreaped='' jobs
+  unrelated=$(cat "$TMP_ROOT/case-cleanup.unrelated")
+  jobs=$(jobs -p)
+  while IFS= read -r pid; do
+    if kill -0 "$pid" 2>/dev/null; then leaked="$leaked $pid"; fi
+    if printf '%s\n' "$jobs" | grep -qx "$pid"; then unreaped="$unreaped $pid"; fi
+  done < "$TMP_ROOT/case-cleanup.pids"
+  kill -0 "$unrelated" 2>/dev/null || fail "case cleanup killed an unrelated child"
+  kill -TERM "$unrelated"
+  wait "$unrelated" 2>/dev/null || true
+  [ -z "$leaked" ] || fail "previous case-owned processes are still alive:$leaked"
+  [ -z "$unreaped" ] || fail "previous case-owned children were not waited:$unreaped"
+  [ ! -s "$HOMES_FILE" ] || fail "completed case homes remain registered"
+  pass "case cleanup: previous children are gone and reaped; unrelated child survives"
+}
+
+test_case_cleanup_reports_timeout_and_keeps_home_registered() {
+  local home pid rc=0 jobs
+  home=$(make_home case-cleanup-timeout away)
+  sleep 120 &
+  pid=$!
+  printf '%s\n' "$pid" > "$home/claude-pids"
+  # Even a session.stop marker must not turn a stopped child's wait unbounded.
+  : > "$home/session.stop"
+  kill -STOP "$pid"
+  cleanup_case_homes > "$home/cleanup.out" 2>&1 || rc=$?
+  expect_code 1 "$rc" "a fixture cleanup deadline must fail the cleanup"
+  assert_grep "fixture cleanup timed out for owned pid $pid" "$home/cleanup.out" \
+    "a cleanup timeout must identify the owned process"
+  kill -0 "$pid" 2>/dev/null && fail "a cleanup timeout left the owned child alive"
+  jobs=$(jobs -p)
+  if printf '%s\n' "$jobs" | grep -qx "$pid"; then
+    fail "a cleanup timeout did not reap the owned child"
+  fi
+  assert_grep "$home" "$HOMES_FILE" "failed cleanup cleared the home registration"
+  pass "case cleanup: a stopped session is bounded and reaped; timeout fails without clearing registration"
+}
+
+run_case test_case_cleanup_leaves_owned_children_until_assertions_finish
+run_case test_case_cleanup_reaps_previous_children_without_touching_unrelated_child
+run_case test_case_cleanup_reports_timeout_and_keeps_home_registered
+run_case test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
+run_case test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
+run_case test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
+run_case test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
+run_case test_park_exit_probe_uses_half_second_child_sleeps
+run_case test_report_surface_enforces_actor_turn_and_scope
+run_case test_report_after_the_return_is_queued_for_main
+run_case test_dispatch_entry_scopes_rows_and_renders_the_away_tail
+run_case test_branch_outcomes_only_on_a_host_home_off_pi
+run_case test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
+run_case test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
+run_case test_branch_outcomes_present_a_long_away_window_once
+run_case test_branch_outcomes_budgets_count_bytes
+run_case test_branch_outcomes_stay_unread_when_a_projection_fails
+run_case test_branch_outcomes_stay_unread_without_jq
+run_case test_branch_outcomes_stay_unread_when_the_drain_cannot_print
+run_case test_branch_outcomes_date_a_legacy_backlog_without_adopting_it
+run_case test_branch_ack_keeps_older_keyed_decision_open
+run_case test_branch_outcomes_date_an_outcome_carried_across_a_switch_off_pi
+run_case test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
+run_case test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
+run_case test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
+run_case test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
+run_case test_attended_captain_outcome_reaches_main_through_branch_outcomes
+run_case test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
+run_case test_quiet_record_without_its_daemon_is_a_present_captain
+run_case test_attended_main_only_close_passes_straight_to_main
+run_case test_off_written_while_parked_passes_the_next_attended_close_to_main
+run_case test_main_only_pass_through_leaves_the_successor_watcher_running
+run_case test_attended_close_with_unidentified_main_session_passes_to_main
+run_case test_close_accepted_away_that_turns_attended_passes_to_main
+run_case test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
+run_case test_claude_stop_hook_delivers_a_main_only_pass_through
+run_case test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
+run_case test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
+run_case test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
+run_case test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
+run_case test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
+run_case test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
+run_case test_pass_through_successor_survives_the_hook_process_group_teardown
+run_case test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
+run_case test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
+run_case test_unrecorded_successor_is_stopped_rather_than_left_for_main
+run_case test_primary_without_a_verified_mirror_runs_away_only
+run_case test_attended_wake_carries_the_dialog_mirror
+run_case test_dialog_bearing_files_are_owner_only
+run_case test_undelivered_dialog_is_fed_again_on_the_next_turn
+run_case test_attended_wake_with_an_unreadable_mirror_reaches_main
+run_case test_away_wake_is_handled_on_the_engine_and_never_reaches_main
+run_case test_away_turn_without_a_report_hands_the_wake_to_main
+run_case test_return_during_an_engine_turn_hands_its_outcomes_to_main
+run_case test_silent_outcomes_are_not_relayed_when_the_captain_returns
+run_case test_large_turn_relays_an_early_visible_outcome
+run_case test_outcome_lookup_failure_is_not_treated_as_silence
+run_case test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end
+run_case test_next_host_clears_a_turn_its_killed_predecessor_left
+run_case test_report_without_acknowledgement_hands_the_wake_to_main
+run_case test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
+run_case test_incomplete_engine_result_hands_the_wake_to_main
+run_case test_latch_trips_after_two_engine_errors_then_probes_and_recovers
+run_case test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
+run_case test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
+run_case test_engine_turn_is_bounded_and_its_descendants_reaped
+run_case test_restarted_host_stops_what_a_killed_predecessor_left
+run_case test_park_boundary_ends_the_park_before_the_hook_timeout
+run_case test_park_boundary_holds_under_back_to_back_closes
+run_case test_park_boundary_rechecked_just_before_the_engine_turn
+run_case test_park_test_clock_requires_the_marker
+run_case test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
+run_case test_park_limit_lets_a_turn_outlive_the_boundary
+run_case test_first_cycle_status_streams_and_owner_options_reach_it
+run_case test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
+run_case test_unverified_engine_hands_every_away_wake_to_main
+run_case test_host_outside_the_lock_owner_stands_down
+run_case test_superseded_host_leaves_the_owner_untouched

@@ -98,6 +98,198 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Windows process access is deliberately separate from the POSIX path below.
+# Each decision loads a fresh, complete snapshot: a parked hook must never keep
+# granting ownership from a table captured before its harness exited.
+# The FM_PROC_* overrides are portable-test seams; no production caller sets them.
+# Cache only the immutable OS identity. Repeated ownership checks must not fork
+# uname on POSIX; process snapshots and liveness remain uncached below.
+FM_SESSION_LOCK_PLATFORM=${_FM_UNAME:-$(uname -s 2>/dev/null || printf '%s' unknown)}
+fm_windows_process_host() {
+  case "${FM_PROC_PLATFORM_OVERRIDE:-${_FM_UNAME:-$FM_SESSION_LOCK_PLATFORM}}" in
+    windows|MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
+# Publish a fresh pid/parent/creation-ticks/executable/command-line TSV snapshot.
+# Return 2 for an unavailable or partial query, never absence. The end marker
+# proves completion even if a wrapper swallows the PowerShell exit status.
+FM_WIN_PROC_TABLE=
+fm_windows_process_snapshot() {
+  local exe
+  FM_WIN_PROC_TABLE=
+  exe=$(command -v powershell 2>/dev/null || command -v powershell.exe 2>/dev/null \
+    || command -v pwsh 2>/dev/null || command -v pwsh.exe 2>/dev/null) || return 2
+  # shellcheck disable=SC2016 # PowerShell, not Bash, expands this script.
+  FM_WIN_PROC_TABLE=$(fm_cursor_run_timed 10 "$exe" -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "Stop"
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    try {
+      $rows = @(Get-CimInstance Win32_Process)
+      foreach ($p in $rows) {
+        $exe = $p.ExecutablePath
+        if ([string]::IsNullOrEmpty($exe)) { $exe = $p.Name }
+        $start = 0
+        if ($null -ne $p.CreationDate) { $start = $p.CreationDate.Ticks }
+        $exe = $exe -replace "[\t\r\n]", " "
+        $args = ([string]$p.CommandLine) -replace "[\t\r\n]", " "
+        Write-Output ([string]$p.ProcessId + "`t" + [string]$p.ParentProcessId + "`t" + [string]$start + "`t" + $exe + "`t" + $args)
+      }
+      Write-Output "__FM_PROCESS_TABLE_END__"
+    } catch { exit 2 }
+  ' 2>/dev/null) || { FM_WIN_PROC_TABLE=; return 2; }
+  FM_WIN_PROC_TABLE=${FM_WIN_PROC_TABLE//$'\r'/}
+  case "$FM_WIN_PROC_TABLE" in
+    *$'\n'__FM_PROCESS_TABLE_END__) return 0 ;;
+  esac
+  FM_WIN_PROC_TABLE=
+  return 2
+}
+
+# Read one row of the current snapshot. Only a successful complete snapshot can
+# prove absence (1); malformed metadata is uncertainty (2).
+FM_WIN_PROC_PARENT='' FM_WIN_PROC_START='' FM_WIN_PROC_COMM='' FM_WIN_PROC_ARGS=''
+fm_windows_process_read() {  # <native-pid>
+  local line rest
+  FM_WIN_PROC_PARENT='' FM_WIN_PROC_START='' FM_WIN_PROC_COMM='' FM_WIN_PROC_ARGS=''
+  case "$1" in ''|*[!0-9]*) return 2 ;; esac
+  [ -n "$FM_WIN_PROC_TABLE" ] || return 2
+  while IFS= read -r line; do
+    [ "${line%%$'\t'*}" = "$1" ] || continue
+    rest=${line#*$'\t'}
+    FM_WIN_PROC_PARENT=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    FM_WIN_PROC_START=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    FM_WIN_PROC_COMM=${rest%%$'\t'*}; FM_WIN_PROC_ARGS=${rest#*$'\t'}
+    case "$FM_WIN_PROC_PARENT:$FM_WIN_PROC_START" in *[!0-9:]*|:*|*:) return 2 ;; esac
+    [ -n "$FM_WIN_PROC_COMM" ] || return 2
+    return 0
+  done <<EOF
+$FM_WIN_PROC_TABLE
+EOF
+  return 1
+}
+
+# Bridge MSYS exec's short-lived native parents with MSYS's own parent map.
+# Only the outermost MSYS shell has a trustworthy native parent to walk from.
+fm_windows_msys_root_winpid() {  # <msys-pid>
+  local current=$1 root=${FM_PROC_MSYS_PROC_ROOT:-/proc} parent winpid hop
+  for ((hop = 0; hop < 16; hop++)); do
+    IFS= read -r parent < "$root/$current/ppid" 2>/dev/null || return 1
+    IFS= read -r winpid < "$root/$current/winpid" 2>/dev/null || return 1
+    case "$parent:$winpid" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    case "$parent" in
+      0|1) printf '%s\n' "$winpid"; return 0 ;;
+    esac
+    current=$parent
+  done
+  return 1
+}
+
+# Consume a quoted or bare Windows command-line token without eval. Only the
+# executable and its script entrypoint are identity evidence, never later args.
+FM_WIN_ARG='' FM_WIN_ARGS_REST=''
+fm_windows_command_arg() {  # <remaining-command-line>
+  local text=$1 char quoted=0
+  FM_WIN_ARG='' FM_WIN_ARGS_REST=''
+  while [ -n "$text" ]; do
+    char=${text%"${text#?}"}; text=${text#?}
+    case "$char" in
+      '"') quoted=$((1 - quoted)) ;;
+      ' '|$'\t')
+        if [ "$quoted" -eq 1 ]; then
+          FM_WIN_ARG=$FM_WIN_ARG$char
+        elif [ -n "$FM_WIN_ARG" ]; then
+          FM_WIN_ARGS_REST=$text
+          return 0
+        fi
+        ;;
+      *) FM_WIN_ARG=$FM_WIN_ARG$char ;;
+    esac
+  done
+  [ "$quoted" -eq 0 ] && [ -n "$FM_WIN_ARG" ]
+}
+
+fm_windows_harness_process_matches() {  # <executable> <command-line>
+  local comm=${1//\\//} base script name
+  FM_HARNESS_IS_CLAUDE=0
+  base=${comm##*/}; base=${base%.[eE][xX][eE]}
+  case "$base" in
+    claude) FM_HARNESS_IS_CLAUDE=1; return 0 ;;
+    codex|opencode|grok|kimi|pi|pi-signed|omp|cursor-agent) return 0 ;;
+  esac
+  case "$base" in
+    node|python|python3|pythonw)
+      fm_windows_command_arg "$2" || return 1
+      fm_windows_command_arg "$FM_WIN_ARGS_REST" || return 1
+      script=${FM_WIN_ARG//\\//}
+      case "$script" in
+        */node_modules/@earendil-works/pi-coding-agent/dist/cli.js|*/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js|\
+        */node_modules/@mariozechner/pi-coding-agent/dist/cli.js|*/node_modules/@mariozechner/pi-coding-agent/dist/bundle/cli.js|\
+        */node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js|*/node_modules/@oh-my-pi/pi-coding-agent/dist/bundle/cli.js) return 0 ;;
+      esac
+      case "$script" in
+        */node_modules/@anthropic-ai/claude-code/cli.js) FM_HARNESS_IS_CLAUDE=1; return 0 ;;
+      esac
+      if name=$(fm_harness_path_name "$script"); then
+        [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+        return 0
+      fi
+      fm_cursor_process_matches "$comm" "$script" "$script"
+      return $?
+      ;;
+  esac
+  # Version-named native installs keep their structural path identity without
+  # widening Windows executable names to arbitrary substring matches.
+  if name=$(fm_harness_path_name "$comm"); then
+    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+    return 0
+  fi
+  fm_cursor_process_matches "${comm%.[eE][xX][eE]}" "$2" "$comm"
+}
+
+fm_windows_ancestry_pids() {
+  local pid child_start=0 extending=0 printed=0 hop
+  if [ -n "${FM_PROC_SELF_PID_OVERRIDE:-}" ]; then
+    pid=$FM_PROC_SELF_PID_OVERRIDE
+  else
+    pid=$(fm_windows_msys_root_winpid "$$") || return 1
+  fi
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_windows_process_snapshot || return 1
+  for ((hop = 0; hop < 16; hop++)); do
+    fm_windows_process_read "$pid" || break
+    [ "$FM_WIN_PROC_START" -gt 0 ] || return 1
+    if [ "$child_start" -gt 0 ] && [ "$FM_WIN_PROC_START" -gt "$child_start" ]; then
+      return 1
+    fi
+    if fm_windows_harness_process_matches "$FM_WIN_PROC_COMM" "$FM_WIN_PROC_ARGS"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+    child_start=$FM_WIN_PROC_START
+    pid=$FM_WIN_PROC_PARENT
+    [ "$pid" -gt 0 ] || break
+  done
+  [ "$printed" -eq 1 ]
+}
+
+# Public Windows liveness predicates always refresh; no snapshot survives a
+# decision boundary. Return 2 when the OS cannot prove presence or absence.
+fm_windows_pid_exists() {  # <native-pid>
+  fm_windows_process_snapshot || return 2
+  fm_windows_process_read "$1"
+}
+
+fm_windows_pid_harness_alive() {  # <native-pid>
+  fm_windows_pid_exists "$1" || return $?
+  fm_windows_harness_process_matches "$FM_WIN_PROC_COMM" "$FM_WIN_PROC_ARGS"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -117,6 +309,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
+  if fm_windows_process_host; then
+    fm_windows_ancestry_pids
+    return $?
+  fi
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -177,6 +373,10 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  if fm_windows_process_host; then
+    fm_windows_pid_harness_alive "$pid"
+    return $?
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -219,9 +419,13 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    if fm_windows_process_host; then
+      fm_windows_pid_harness_alive "$pid" || return 1
+    else
+      comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      fm_harness_process_matches "$comm" "$args" || return 1
+    fi
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -369,6 +573,22 @@ fm_session_lock_inspect() {  # <state>
       return 0
       ;;
   esac
+  if fm_windows_process_host; then
+    local rc=0
+    fm_windows_pid_exists "$pid" || rc=$?
+    case "$rc" in
+      0)
+        if fm_windows_harness_process_matches "$FM_WIN_PROC_COMM" "$FM_WIN_PROC_ARGS"; then
+          FM_LOCK_INSPECT_STATE=held
+          FM_LOCK_INSPECT_LIVE_HARNESS=true
+        else
+          FM_LOCK_INSPECT_LIVE_HARNESS=false
+        fi
+        ;;
+      1) FM_LOCK_INSPECT_STATE=stale; FM_LOCK_INSPECT_LIVE_HARNESS=false ;;
+    esac
+    return 0
+  fi
   if kill -0 "$pid" 2>/dev/null; then
     if fm_harness_pid_alive "$pid"; then
       FM_LOCK_INSPECT_STATE=held
