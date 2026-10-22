@@ -383,7 +383,11 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   # for the other live session that holds the fleet lock. The executable name
   # is not what identifies it - the path component in its argv[0] is, exactly
   # as a real harness session presents itself.
-  bash -c 'exec -a /fm-fleet-lock-other-session/claude /bin/bash -c "sleep 30; true"' &
+  # The bash executable is resolved through PATH: /bin/bash is absent on a
+  # NixOS host, and a holder that cannot start would silently turn every
+  # live-owner case into a no-op.
+  holder_bash=$(command -v bash) || holder_bash=bash
+  "$holder_bash" -c "exec -a /fm-fleet-lock-other-session/claude '$holder_bash' -c 'sleep 30; true'" &
   holder_pid=$!
   sleep 0.3
   printf '%s\n' "$holder_pid" > "$st/state/.lock"

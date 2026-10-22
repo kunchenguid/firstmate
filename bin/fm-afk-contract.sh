@@ -3,7 +3,21 @@
 # captain's away words recorded verbatim, the read-back rendering, the entry
 # announcement, and the archive at return.
 #
-# POSTURE. Away mode is a posture of the one supervision session, recorded in
+# FM_AFK_CONTRACT_ENTER_GUARD names a command the `enter` path runs under this
+# script's own mutation lock, just before it writes the record. The command
+# receives the resolved entry mode in FM_AFK_CONTRACT_ENTRY_MODE and refuses
+# the write by exiting non-zero. The guard exists so a check that authorises
+# the write is evaluated under the SAME lock as the write itself: a check made
+# outside it can be overtaken by a concurrent writer.
+#
+# POSTURE.
+#
+# FM_AFK_CONTRACT_ENTER_GUARD names a command the `enter` path runs under this
+# script's own mutation lock, just before it writes the record. The command
+# receives the resolved entry mode in FM_AFK_CONTRACT_ENTRY_MODE and refuses
+# the write by exiting non-zero. The guard exists so a check that authorises
+# the write is evaluated under the SAME lock as the write itself: a check made
+# outside it can be overtaken by a concurrent writer. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While an away record exists
 # the home is afk; the captain's first unmarked message archives it (the return
 # path in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
@@ -556,6 +570,15 @@ fm_afk_contract_cmd_enter() {
     fm_afk_contract_validate "$record" || return 1
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
+  fi
+  # The record write and the guard that authorises it happen under the SAME
+  # mutation lock, so a check made outside it cannot be overtaken by a
+  # concurrent writer between the check and the write. The guard receives the
+  # resolved entry mode in the environment and refuses the write by exiting
+  # non-zero.
+  if [ -n "${FM_AFK_CONTRACT_ENTER_GUARD:-}" ]; then
+    export FM_AFK_CONTRACT_ENTRY_MODE
+    sh -c "$FM_AFK_CONTRACT_ENTER_GUARD" || return 1
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then
