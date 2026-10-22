@@ -710,6 +710,49 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
 pass "provider-wide and exact quota rows combine into one limiting candidate"
 
+# --- a pinned model id reads the window quota-axi names for its family ----------
+reset_log
+FAMILY_RULE="$TMP_ROOT/family-rule.json"
+printf '%s\n' '{"rules":[{"when":"Audit work.","use":[
+  {"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"},
+  {"harness":"claude","model":"opus","effort":"xhigh"}]}]}' > "$FAMILY_RULE"
+cp "$FAMILY_RULE" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.99,"probabilities":{"rule_1":0.99,"default":0.01}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: claude:claude-fable-5-1  provider=claude  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=projected_exhaustion  bounds=all_models:79%/projected_exhaustion,model:fable:15%/projected_exhaustion  -> eligible' "a pinned Fable id is bounded by model:fable, the more limiting of its two bounds"
+assert_contains "$out" 'candidate: claude:opus  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "a model with no window of its own keeps the provider-wide bound"
+assert_contains "$out" '  status: clear' "the family bound breaks what was a false provider-wide tie"
+assert_contains "$out" "  profile: --harness 'claude' --model 'opus' --effort 'xhigh'" "the candidate with more runway is selected"
+
+FAMILY_EXHAUSTED="$TMP_ROOT/family-exhausted.json"
+jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "model:fable")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$QUOTA" > "$FAMILY_EXHAUSTED"
+printf '%s\n' '{"rules":[{"when":"Audit work.","use":[
+  {"harness":"claude","model":"claude-fable-5-1","effort":"xhigh"},
+  {"harness":"pi","model":"anthropic/claude-fable-5-1[1m]","provider":"claude"}]}]}' > "$RULES"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FAMILY_EXHAUSTED" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: claude:claude-fable-5-1  provider=claude  scope=model:fable  remaining=0%' "an exhausted family window is the pinned id's evidence"
+assert_contains "$out" 'candidate: pi:anthropic/claude-fable-5-1[1m]  provider=claude  scope=model:fable  remaining=0%' "a provider prefix and context tag do not hide the family window"
+assert_contains "$out" '-> not eligible: runway exhausted_now at model:fable' "a healthy provider window cannot carry a pinned id past its exhausted family window"
+assert_contains "$out" '  status: escalate' "an exhausted family window is never selected"
+assert_not_contains "$out" '  profile:' "an exhausted family window emits no profile"
+
+AGY_GROUPS="$TMP_ROOT/agy-groups.json"
+jq '(.providers[] | select(.provider == "agy") | .quotaSemantics.effectiveAvailability) = [
+  {"scope":"gemini","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}},
+  {"scope":"claude_gpt","status":"known","effectivePercentRemaining":100,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.9}}
+]' "$QUOTA" > "$AGY_GROUPS"
+printf '%s\n' '{"rules":[{"when":"Agy work.","use":[
+  {"harness":"agy","model":"gemini-3.1-pro-high","effort":"high"},
+  {"harness":"agy","model":"claude-sonnet-4-5","effort":"high"}]}]}' > "$RULES"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$AGY_GROUPS" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:gemini-3.1-pro-high  provider=agy  scope=gemini  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at gemini' "an Antigravity Gemini model reads the gemini group"
+assert_contains "$out" 'candidate: agy:claude-sonnet-4-5  provider=agy  scope=claude_gpt  remaining=100%  spendPriority=0.9' "an Antigravity Claude model reads the claude_gpt group"
+assert_contains "$out" "  profile: --harness 'agy' --model 'claude-sonnet-4-5' --effort 'high'" "each Antigravity group bounds only its own models"
+cp "$BASE_RULES" "$RULES"
+pass "a pinned model id is bounded by the window quota-axi names for its family or group"
+
 # --- default choice ------------------------------------------------------------
 reset_log
 write_response "$RESPONSE" default 0.88
