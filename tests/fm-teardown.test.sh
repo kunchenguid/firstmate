@@ -2659,7 +2659,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
 # the checks-green report for that exact PR; without the flag it publishes at
 # registration as before.
 test_secondmate_pr_ready_line_waits_for_green_when_opted_in() {
-  local case_dir channel url other pr_head run
+  local case_dir channel url other pr_head
   url=https://github.com/example/repo/pull/7
   other=https://github.com/example/repo/pull/8
   case_dir=$(make_case mate-pr-ready-green)
@@ -2708,7 +2708,7 @@ test_secondmate_pr_ready_line_waits_for_green_when_opted_in() {
 # with text around the report, while one naming a PR whose number merely
 # starts with this PR's number does not.
 test_secondmate_pr_ready_line_follows_green_report_with_trailing_text() {
-  local case_dir channel url pr_head run
+  local case_dir channel url pr_head
   url=https://github.com/example/repo/pull/7
   case_dir=$(make_case mate-pr-ready-green-text)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
