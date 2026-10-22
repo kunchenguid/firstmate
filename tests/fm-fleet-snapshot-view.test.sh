@@ -470,6 +470,52 @@ EOF
   pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
+test_archived_done_blocker_resolves() {
+  local home fakebin out
+  home=$(make_home archived-blocker)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] dependent - Dependent work blocked-by: pruned blocked-by: missing (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  cat > "$home/data/done-archive.md" <<'EOF'
+## Archived 2026-07-01
+- [x] pruned - Pruned blocker (repo: alpha) (kind: ship) (done 2026-06-30)
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dependent")
+    | .blocked_by_ids == ["pruned", "missing"] and .unresolved_blocker_ids == ["missing"]
+  ' >/dev/null || fail "a blocker in the default Done archive stayed unresolved: $out"
+
+  printf '[markdown]\narchive = "data/old-done.md"\n' > "$home/.tasks.toml"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dependent")
+    | .unresolved_blocker_ids == ["pruned", "missing"]
+  ' >/dev/null || fail "an unconfigured archive file resolved a blocker: $out"
+  mv "$home/data/done-archive.md" "$home/data/old-done.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dependent")
+    | .unresolved_blocker_ids == ["missing"]
+  ' >/dev/null || fail "a blocker in the configured Done archive stayed unresolved: $out"
+
+  sed 's/^## Queued$/## Queued\
+- [ ] pruned - Reopened blocker (repo: alpha) (kind: ship)/' "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dependent")
+    | .unresolved_blocker_ids == ["pruned", "missing"]
+  ' >/dev/null || fail "an archived blocker reopened in the live backlog read as resolved: $out"
+  pass "a completed blocker pruned to the configured Done archive resolves unless reopened"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -1159,6 +1205,7 @@ test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
+test_archived_done_blocker_resolves
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

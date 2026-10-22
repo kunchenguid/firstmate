@@ -24,7 +24,8 @@
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
 #     and hold_bucket fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
-#     structured record is Done, and missing ids stay open.
+#     structured record is Done or, absent an open live row, it is a completed
+#     row in the tasks-axi Done archive; missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
@@ -231,6 +232,8 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"  # fm_tasks_axi_markdown_archive_resolve
 
 usage() {
   cat <<'EOF'
@@ -384,16 +387,21 @@ first_pr_url_in_file() {  # <file>
 }
 
 backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
+  local backlog=${1:-$BACKLOG} archive
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
+  # The data directory's parent is the tasks-axi addressing root, as in
+  # bin/fm-backlog-transition-lib.sh, so the archive matches where prune wrote.
+  archive=$(fm_tasks_axi_markdown_archive_resolve "$(dirname "$(dirname "$backlog")")" "$backlog")
+  { [ -f "$archive" ] && [ -r "$archive" ]; } || archive=/dev/null
 
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
+    --rawfile archive "$archive" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -545,7 +553,10 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
+    | (reduce ($records[] | select(.structured)) as $record
+         (reduce ($archive | split("\n")[]
+             | capture("^[-*][[:space:]]+\\[[xX]\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+")
+             | .id) as $id ({}; .[$id] = true);
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
     | .records |= map(
         if .structured then

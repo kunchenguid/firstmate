@@ -107,26 +107,29 @@ fm_tasks_axi_mv_has_multi_id() {
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
 }
 
-fm_tasks_axi_backend_from_toml() {  # <toml-path>
+# Print one quoted string value from a tasks-axi TOML file: <table> is empty for
+# a root key, else the name of the [table] that holds <key>.
+fm_tasks_axi_toml_string() {  # <toml-path> <table> <key>
   local toml=$1
   [ -f "$toml" ] || return 1
-  LC_ALL=C awk '
+  LC_ALL=C awk -v want_table="$2" -v want_key="$3" '
     function trim(value) {
       sub(/^[[:space:]]+/, "", value)
       sub(/[[:space:]]+$/, "", value)
       return value
     }
-    BEGIN { root=1; found=0; single=sprintf("%c", 39) }
+    BEGIN { table=""; found=0; single=sprintf("%c", 39) }
     {
       line=$0
       sub(/[[:space:]]*#.*/, "", line)
       line=trim(line)
       if (line ~ /^\[[^]]+\]$/) {
-        root=0
+        table=trim(substr(line, 2, length(line) - 2))
         next
       }
-      if (root && line ~ /^backend[[:space:]]*=/) {
-        sub(/^backend[[:space:]]*=[[:space:]]*/, "", line)
+      if (table == want_table && index(line, want_key) == 1 &&
+          substr(line, length(want_key) + 1) ~ /^[[:space:]]*=/) {
+        sub(/^[^=]*=[[:space:]]*/, "", line)
         line=trim(line)
         if ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
             (substr(line, 1, 1) == single && substr(line, length(line), 1) == single)) {
@@ -138,6 +141,29 @@ fm_tasks_axi_backend_from_toml() {  # <toml-path>
     }
     END { if (!found) exit 1 }
   ' "$toml"
+}
+
+fm_tasks_axi_backend_from_toml() {  # <toml-path>
+  fm_tasks_axi_toml_string "$1" "" backend
+}
+
+# Resolve the markdown Done archive with tasks-axi's own precedence for a call
+# run from <root> on <backlog-path>: [markdown] archive in <root>/.tasks.toml,
+# then in $HOME/.tasks-axi/config.toml, each relative to <root> unless absolute,
+# else done-archive.md beside the backlog. An unreadable configuration file reads
+# as absent here; fm_tasks_axi_backend_resolve owns reporting it.
+fm_tasks_axi_markdown_archive_resolve() {  # <tasks-axi-working-directory> <backlog-path>
+  local root=$1 backlog=$2 archive
+  if ! archive=$(fm_tasks_axi_toml_string "$root/.tasks.toml" markdown archive 2>/dev/null) &&
+    { [ -z "${HOME:-}" ] ||
+      ! archive=$(fm_tasks_axi_toml_string "$HOME/.tasks-axi/config.toml" markdown archive 2>/dev/null); }; then
+    printf '%s/done-archive.md\n' "$(dirname "$backlog")"
+    return 0
+  fi
+  case "$archive" in
+    /*) printf '%s\n' "$archive" ;;
+    *) printf '%s/%s\n' "$root" "$archive" ;;
+  esac
 }
 
 # Resolve the active tasks-axi backend with the same precedence as tasks-axi.
