@@ -3920,9 +3920,13 @@ SH
 chmod +x "$REUSED_GROUP_BIN/ps"
 pe_register "$HREUSED_GROUP" lavish reused-runner-group-src -- \
   "$BLOCKER" "$REUSED_GROUP_TRIGGER" "reused group payload" >/dev/null
+# This case tests identity ambiguity after startup, so allow a loaded host
+# time to confirm the detached runner before introducing that ambiguity.
 PATH="$REUSED_GROUP_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-reused-group-proc" \
   FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
-  pe "$HREUSED_GROUP" reconcile >/dev/null
+  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=30 \
+  pe "$HREUSED_GROUP" reconcile > "$TMP_ROOT/reused-runner-group.reconcile.out" \
+  || fail "the reused-group fixture did not confirm startup: $(cat "$TMP_ROOT/reused-runner-group.reconcile.out")"
 wait_for "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner" \
   || fail "the reused-group fixture runner did not start"
 REUSED_GROUP_RUNNER=$(cat "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner")

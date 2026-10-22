@@ -32,7 +32,9 @@ test_concurrent_append_and_drain() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" &
+  # This case tests losslessness, not the presentation deadline. Forty lock
+  # contenders can exhaust the ordinary interactive wait on a loaded host.
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=300 "$DRAIN" > "$out1" &
   pids="$pids $!"
   for pid in $pids; do
     wait "$pid" || fail "concurrent append/drain subprocess failed"
