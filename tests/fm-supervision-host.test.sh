@@ -59,12 +59,15 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #               error the latch counts)
 #   hang        before anything else, start a descendant in a process group of
 #               its own, then block
+# A $FM_HOME/stub-tz file sets the engine's TZ, as a wrapper launching the
+# real engine binary may, independent of the host's own TZ.
 STUB="$TMP_ROOT/engine-stub"
 cat > "$STUB" <<'SH'
 #!/usr/bin/env bash
 set -u
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 mode=$(cat "$FM_HOME/stub-mode" 2>/dev/null || echo handle)
+[ ! -s "$FM_HOME/stub-tz" ] || { TZ=$(cat "$FM_HOME/stub-tz"); export TZ; }
 n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
 {
   printf 'mode=%s\nactor=%s\nholder=%s\nprimary=%s\nturn=%s\n' "$mode" "${FM_SUPERVISION_ACTOR:-}" \
@@ -903,6 +906,31 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_not_contains "$drained" "[seq 1]" "a routine outcome must be listed only once"
   pass "host: an attended wake the branch may take is handled on the engine, and its routine outcome never wakes main"
+}
+
+# A wrapper may launch the engine in another time zone than the host's (one
+# observed wrapper exports a TZ the main session's hooks never see). The
+# process-table identity that ties the branch grant to the host must read the
+# same from both, or the engine's drain discards the grant as stale, refuses,
+# and leaves every granted row for main. The proc root is hidden so Linux takes
+# the same process-table path as macOS.
+test_engine_in_another_time_zone_handles_its_granted_rows() {
+  local home no_proc
+  home=$(make_home engine-tz attended)
+  no_proc="$TMP_ROOT/engine-tz-no-proc"
+  [ "$(TZ=UTC0 LC_ALL=C ps -p $$ -o lstart=)" != "$(TZ=ENG-9 LC_ALL=C ps -p $$ -o lstart=)" ] \
+    || fail "fixture: ps renders the same start time in both time zones, so the case would prove nothing"
+  printf 'ENG-9\n' > "$home/stub-tz"
+  TZ=UTC0 FM_PROC_ROOT_OVERRIDE="$no_proc" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "engine tz: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "engine tz: the turn did not end handled: $(cat "$home/state/.supervision-host.log"; cat "$home"/engine-drain.* 2>/dev/null)"
+  assert_no_re '	failed	' "$home/state/.supervision-host.log" "engine tz: a turn that reported for its granted rows must not fail"
+  assert_no_grep 'no branch-eligible row snapshot' "$home/engine-drain.1" "engine tz: the engine's drain discarded the host's grant"
+  assert_no_grep 'demo.status' "$home/state/.wake-queue" "engine tz: the engine's acknowledgement did not consume the wake"
+  [ ! -s "$home/host.rc" ] || fail "engine tz: the handled wake reached main: $(cat "$home/host.out")"
+  pass "host: an engine in another time zone than the host drains, reports, and acknowledges its granted rows"
 }
 
 test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
@@ -3124,6 +3152,7 @@ test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
 test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
 test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
+test_engine_in_another_time_zone_handles_its_granted_rows
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_quiet_record_without_its_daemon_is_a_present_captain
