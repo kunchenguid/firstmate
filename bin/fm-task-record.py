@@ -564,6 +564,7 @@ def parser() -> argparse.ArgumentParser:
         if command == "archive":
             item.add_argument("--expect-updated-at")
             item.add_argument("--expect-state", choices=("queued", "in_flight"))
+            item.add_argument("--stop-local-generation")
     update = sub.add_parser("update"); update.add_argument("id")
     for name in ("title", "body", "body_file", "kind", "repo", "priority", "pr", "report", "note"):
         update.add_argument("--" + name.replace("_", "-"))
@@ -624,6 +625,18 @@ def main() -> int:
                 return 0
             if record["updated_at"] != args.expect_updated_at or record["state"] != args.expect_state:
                 raise Refusal(f"task {args.id} changed since the dashboard snapshot")
+            if args.stop_local_generation is not None:
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.stop_local_generation):
+                    raise Refusal("local execution generation is invalid")
+                environment = dict(os.environ)
+                environment["FM_SUPERVISION_ACTOR"] = "main"
+                stopped = subprocess.run(
+                    [str(Path(__file__).with_name("fm-control.sh")), args.id, "exit", "--expect-spawn-gen",
+                     args.stop_local_generation, "--allow-missing-endpoint"],
+                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                )
+                if stopped.returncode:
+                    raise Refusal(stopped.stderr.strip() or f"cannot stop exact worker for task {args.id}")
         if args.command == "show": show(record); return 0
         if args.command == "progress":
             print(json.dumps(record, ensure_ascii=False, separators=(",", ":"))); return 0

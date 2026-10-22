@@ -105,77 +105,88 @@ if [ -e "$meta" ] || [ -L "$meta" ]; then
     exit 75
   }
   initial_executor=$(meta_value executor)
+  [ -n "$initial_executor" ] || initial_executor=local-agent
   initial_provider=$(meta_value provider)
   initial_meta_present=1
 fi
 
-# Local automatic progress stops through the exact generation-bound lifecycle
-# owner before archival. Cleanup may still retain the copy or remain pending.
-if [ "$initial_meta_present" = 1 ] && [ "${initial_executor:-local-agent}" = local-agent ] \
-  && [ "$expected_generation" != none ]; then
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_SUPERVISION_ACTOR=main \
-    "$SCRIPT_DIR/fm-control.sh" "$id" exit --expect-spawn-gen "$expected_generation" >/dev/null || exit 75
-fi
-
-fm_lease_guard "$id" 'Dashboard task archive' || exit $?
-control_lock="$STATE/.control-$id.lock"
-fm_lock_acquire_wait "$control_lock" || exit 75
-spawn_lock="$STATE/.spawn-$id.lock"
-fm_lock_acquire_wait "$spawn_lock" || exit 75
-case "${initial_executor:-local-agent}:$initial_provider" in
-  cloud-worker:aime|remote-agent:aime)
-    # shellcheck source=bin/fm-aime-cloud-lib.sh
-    . "$SCRIPT_DIR/fm-aime-cloud-lib.sh"
-    provider_lock=$(fm_aime_task_lock_path "$id") || exit 75
-    fm_lock_acquire_wait "$provider_lock" || exit 75
-    ;;
-  remote-agent:ida)
-    # shellcheck source=bin/fm-remote-agent-lib.sh
-    . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
-    provider_lock=$(fm_remote_task_lock_path "$id") || exit 75
-    fm_lock_acquire_wait "$provider_lock" || exit 75
-    ;;
-esac
-meta_lock=$(fm_meta_lock_path "$meta") || exit 75
-fm_lock_acquire_wait "$meta_lock" || exit 75
-
-record=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" progress "$id") || exit $?
-current_state=$(printf '%s' "$record" | jq -r '.state // empty') || exit 1
-current_generation=none
+local_transaction=0
 executor=
-if [ -e "$meta" ] || [ -L "$meta" ]; then
-  [ -f "$meta" ] && [ ! -L "$meta" ] || exit 75
-  executor=$(meta_value executor)
-  provider=$(meta_value provider)
-  [ "${executor:-local-agent}" = "${initial_executor:-local-agent}" ] && [ "$provider" = "$initial_provider" ] || {
-    printf 'REFUSED: task %s execution owner changed since the dashboard snapshot\n' "$id" >&2; exit 75;
-  }
-  case "${executor:-local-agent}:$provider" in
-    local-agent:*) current_generation=$(meta_value spawn_gen) ;;
-    cloud-worker:aime|remote-agent:aime)
-      fm_aime_state_load "$id" || exit 75
-      current_generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
-      ;;
-    remote-agent:ida)
-      fm_remote_state_load "$id" || exit 75
-      current_generation=$(jq -r '(.generation // 1) | tostring' "$REMOTE_STATE_FILE")
-      ;;
-    *) printf 'REFUSED: task %s has an unsupported executor\n' "$id" >&2; exit 75 ;;
-  esac
-  [ -n "$current_generation" ] || exit 75
-elif [ "$expected_generation" != none ]; then
-  if [ "$current_state" != archived ]; then
-    printf 'REFUSED: task %s has no execution matching the dashboard generation\n' "$id" >&2
-    exit 75
-  fi
+current_generation=none
+if [ "$initial_meta_present" = 1 ] && [ "$initial_executor" = local-agent ] \
+  && [ "$expected_generation" != none ]; then
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-tasks-axi.sh" archive "$id" --expect-state "$expected_state" \
+      --expect-updated-at "$expected_updated_at" --stop-local-generation "$expected_generation" || exit $?
+  local_transaction=1
+  executor=local-agent
   current_generation=$expected_generation
 fi
-[ "$current_generation" = "$expected_generation" ] || {
-  printf 'REFUSED: task %s execution generation changed since the dashboard snapshot\n' "$id" >&2
-  exit 75
-}
 
-case "$current_state" in
+if [ "$local_transaction" = 0 ]; then
+  fm_lease_guard "$id" 'Dashboard task archive' || exit $?
+  control_lock="$STATE/.control-$id.lock"
+  fm_lock_acquire_wait "$control_lock" || exit 75
+  spawn_lock="$STATE/.spawn-$id.lock"
+  fm_lock_acquire_wait "$spawn_lock" || exit 75
+  case "${initial_executor:-local-agent}:$initial_provider" in
+    cloud-worker:aime|remote-agent:aime)
+      # shellcheck source=bin/fm-aime-cloud-lib.sh
+      . "$SCRIPT_DIR/fm-aime-cloud-lib.sh"
+      provider_lock=$(fm_aime_task_lock_path "$id") || exit 75
+      fm_lock_acquire_wait "$provider_lock" || exit 75
+      ;;
+    remote-agent:ida)
+      # shellcheck source=bin/fm-remote-agent-lib.sh
+      . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
+      meta_lock=$(fm_meta_lock_path "$meta") || exit 75
+      fm_lock_acquire_wait "$meta_lock" || exit 75
+      provider_lock=$(fm_remote_task_lock_path "$id") || exit 75
+      fm_lock_acquire_wait "$provider_lock" || exit 75
+      ;;
+  esac
+  if [ -z "$meta_lock" ]; then
+    meta_lock=$(fm_meta_lock_path "$meta") || exit 75
+    fm_lock_acquire_wait "$meta_lock" || exit 75
+  fi
+
+  record=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" progress "$id") || exit $?
+  current_state=$(printf '%s' "$record" | jq -r '.state // empty') || exit 1
+  meta_present_after=0
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    meta_present_after=1
+    [ -f "$meta" ] && [ ! -L "$meta" ] || exit 75
+    executor=$(meta_value executor)
+    provider=$(meta_value provider)
+    [ "${executor:-local-agent}" = "${initial_executor:-local-agent}" ] && [ "$provider" = "$initial_provider" ] || {
+      printf 'REFUSED: task %s execution owner changed since the dashboard snapshot\n' "$id" >&2; exit 75;
+    }
+    case "${executor:-local-agent}:$provider" in
+      local-agent:*) current_generation=$(meta_value spawn_gen) ;;
+      cloud-worker:aime|remote-agent:aime)
+        fm_aime_state_load "$id" || exit 75
+        current_generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
+        ;;
+      remote-agent:ida)
+        fm_remote_state_load "$id" || exit 75
+        current_generation="remote-$(jq -r '(.generation // 1) | tostring' "$REMOTE_STATE_FILE")"
+        ;;
+      *) printf 'REFUSED: task %s has an unsupported executor\n' "$id" >&2; exit 75 ;;
+    esac
+    [ -n "$current_generation" ] || exit 75
+  elif [ "$expected_generation" != none ]; then
+    if [ "$current_state" != archived ]; then
+      printf 'REFUSED: task %s has no execution matching the dashboard generation\n' "$id" >&2
+      exit 75
+    fi
+    current_generation=$expected_generation
+  fi
+  [ "$current_generation" = "$expected_generation" ] || {
+    printf 'REFUSED: task %s execution generation changed since the dashboard snapshot\n' "$id" >&2
+    exit 75
+  }
+
+  case "$current_state" in
   queued|in_flight)
     FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" archive "$id" \
       --expect-state "$expected_state" --expect-updated-at "$expected_updated_at" || exit $?
@@ -185,11 +196,12 @@ case "$current_state" in
     printf 'REFUSED: task %s is no longer Waiting or Processing\n' "$id" >&2
     exit 75
     ;;
-esac
+  esac
 
-release_operation_locks
+  release_operation_locks
+fi
 
-if [ -z "$executor" ] && [ "$current_generation" != none ]; then
+if [ "${meta_present_after:-1}" = 0 ] && [ "$current_generation" != none ]; then
   receipt_result "$current_generation" 'no active execution metadata remains'
   exit 0
 fi
@@ -198,6 +210,7 @@ if [ "$current_generation" = none ]; then
     '{taskId:$id,archive:"archived",cleanup:"completed",message:"Archived; no task resources were recorded."}'
   exit 0
 fi
+cleanup_generation=$current_generation
 
 retire_out=$(mktemp)
 retire_err=$(mktemp)
@@ -219,10 +232,10 @@ FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   >"$retire_out" 2>"$retire_err" || retire_rc=$?
 if [ "$retire_rc" -ne 0 ]; then
   detail=$(tail -n 1 "$retire_err")
-  receipt_result "$current_generation" "$detail"
+  receipt_result "$cleanup_generation" "$detail"
   rm -f "$retire_out" "$retire_err"
   exit 0
 fi
 
-receipt_result "$current_generation"
+receipt_result "$cleanup_generation"
 rm -f "$retire_out" "$retire_err"

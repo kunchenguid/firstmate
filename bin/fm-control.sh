@@ -10,6 +10,9 @@
 #
 # --expect-spawn-gen GEN binds an exact interrupt/exit or relaunch to the
 # current executor generation, including independent endpoint cleanup.
+# --allow-missing-endpoint is an exit-only owner option for a caller that has
+# already bound the exact generation and treats a positively absent endpoint
+# as an idempotent stop; ambiguous and unattributed states still refuse.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane for conversational text. This script is the control plane:
@@ -186,6 +189,7 @@ EFFORT_SET=0
 NOTE=
 NOTE_SET=0
 EXPECT_SPAWN_GEN=
+ALLOW_MISSING_ENDPOINT=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -210,6 +214,7 @@ for control_arg in "$@"; do
   case "$control_arg" in
     --harness) control_want_value=harness ;;
     --expect-spawn-gen) control_want_value=expect_spawn_gen ;;
+    --allow-missing-endpoint) ALLOW_MISSING_ENDPOINT=1 ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
     --model) control_want_value=model ;;
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
@@ -235,6 +240,8 @@ if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
 fi
+[ "$ALLOW_MISSING_ENDPOINT" = 0 ] || [ "$VERB" = exit ] \
+  || die "--allow-missing-endpoint applies to 'exit' only"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -418,7 +425,11 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing)
+      [ "$ALLOW_MISSING_ENDPOINT" = 1 ] || die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action"
+      printf 'already-absent'
+      return 0
+      ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.

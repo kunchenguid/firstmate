@@ -156,7 +156,8 @@ function sameOrigin(req) {
   const host = req.headers.host || "";
   const origin = req.headers.origin || "";
   if (!host || !origin) return false;
-  try { return new URL(origin).host === host; }
+  const expected = process.env.FM_JSONL_VIEWER_PUBLIC_ORIGIN || `http://${host}`;
+  try { return new URL(origin).origin === new URL(expected).origin; }
   catch { return false; }
 }
 

@@ -479,6 +479,11 @@ status=$(curl -sS -o "$TMP_ROOT/archive-cross-origin.json" -w '%{http_code}' -X 
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Origin: https://other.invalid' \
   --data "$processing_body" "$BASE/api/task-archive")
 [ "$status" = 403 ] || fail "cross-origin archive returned HTTP $status"
+same_host_https=$(printf '%s' "$BASE" | sed 's/^http:/https:/')
+status=$(curl -sS -o "$TMP_ROOT/archive-cross-scheme.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Origin: $same_host_https" \
+  --data "$processing_body" "$BASE/api/task-archive")
+[ "$status" = 403 ] || fail "cross-scheme archive returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/archive-missing-origin.json" -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   --data "$processing_body" "$BASE/api/task-archive")

@@ -7,7 +7,7 @@ set -eu
 
 fm_live_gate opt-in FM_DASHBOARD_ARCHIVE_HERDR_LIVE herdr jq treehouse git
 
-HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh}
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name add-dashboard-task-archive-button-20261022)
 ORIGINAL_PATH=$PATH
 TMP_ROOT=$(fm_test_tmproot fm-dashboard-archive-herdr-live)
@@ -59,7 +59,7 @@ write_task_meta() { # <id> <generation> <worktree> <workspace-json>
   tab=$(printf '%s' "$workspace_json" | jq -er '.result.tab.tab_id')
   pane=$(printf '%s' "$workspace_json" | jq -er '.result.root_pane.pane_id')
   {
-    printf 'backend=herdr\nexecutor=local-agent\nharness=traex\n'
+    printf 'backend=herdr\nharness=traex\n'
     printf 'window=%s:%s\nendpoint_task_id=%s\n' "$HERDR_LAB_SESSION" "$pane" "$id"
     printf 'herdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
       "$HERDR_LAB_SESSION" "$workspace" "$tab" "$pane"
@@ -121,5 +121,32 @@ retained_receipt=$(FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/stat
   _ "$ROOT" "$retained_id" "$retained_generation")
 printf '%s' "$retained_receipt" | jq -e '.facts.endpointConfirmedGone==true and (.facts.copyDisposition | startswith("retained-")) and .facts.bookkeepingComplete==true' >/dev/null \
   || fail 'retained archive receipt did not preserve its no-loss copy disposition'
+
+# A stale Dashboard revision refuses before the exact worker stop transaction.
+stale_id=archive-stale-revision
+stale_generation=archive-stale-g1
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$stale_id" 'Reject stale archive' --kind ship --start >/dev/null
+stale_workspace=$(lab workspace create --cwd "$ROOT" --label archive-stale --no-focus)
+IFS=$'\t' read -r _ _ stale_pane <<< "$(write_task_meta "$stale_id" "$stale_generation" "$ROOT" "$stale_workspace")"
+if PATH="$SHIM:$ORIGINAL_PATH" FM_HOME="$HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-dashboard-archive.sh" "$stale_id" --expect-state in_flight \
+    --expect-updated-at '2000-01-01T00:00:00Z' --expect-spawn-gen "$stale_generation" >/dev/null 2>&1; then
+  fail 'stale archive unexpectedly succeeded'
+fi
+lab pane get "$stale_pane" >/dev/null 2>&1 || fail 'stale archive stopped its worker before refusing'
+archive_task "$stale_id" "$stale_generation" | jq -e '.archive=="archived" and .cleanup=="retained"' >/dev/null \
+  || fail 'stale fixture cleanup did not preserve the primary copy'
+
+# A positively absent exact endpoint does not block canonical archive or safe
+# resource retirement.
+absent_id=archive-absent-endpoint
+absent_generation=archive-absent-g1
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$absent_id" 'Archive absent endpoint' --kind ship --start >/dev/null
+absent_workspace=$(lab workspace create --cwd "$ROOT" --label archive-absent --no-focus)
+IFS=$'\t' read -r _ _ absent_pane <<< "$(write_task_meta "$absent_id" "$absent_generation" "$ROOT" "$absent_workspace")"
+lab pane close "$absent_pane" >/dev/null
+absent_result=$(archive_task "$absent_id" "$absent_generation")
+printf '%s' "$absent_result" | jq -e '.archive=="archived" and .cleanup=="retained"' >/dev/null \
+  || fail "absent endpoint archive did not retain its protected copy: $absent_result"
 
 pass 'Dashboard archive closes exact lab panes, returns safe Treehouse copies and retains protected copies'

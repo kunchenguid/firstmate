@@ -26,6 +26,8 @@ The default listener is `0.0.0.0:17847`.
 Override it with `--host` and `--port`, or `FM_JSONL_VIEWER_HOST` and `FM_JSONL_VIEWER_PORT`.
 The server provides plain HTTP without TLS termination.
 Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
+Direct access accepts archive writes only from the viewer's exact `http://host:port` origin.
+An HTTPS reverse proxy must set `FM_JSONL_VIEWER_PUBLIC_ORIGIN` to its exact public origin, including scheme and any non-default port.
 
 Open `http://SERVER:17847/` and enter the token on the dedicated login page.
 After authentication, the Viewer keeps each reading task on a distinct route and layout:

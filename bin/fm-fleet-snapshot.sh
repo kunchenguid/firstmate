@@ -520,7 +520,7 @@ task_json_lines() {
       . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
       if fm_remote_state_load "$id"; then
         model=$(jq -r '.provider_state.model | select(type == "string")' "$REMOTE_STATE_FILE")
-        execution_generation=$(jq -r '(.generation // 1) | tostring' "$REMOTE_STATE_FILE")
+        execution_generation="remote-$(jq -r '(.generation // 1) | tostring' "$REMOTE_STATE_FILE")"
       fi
     elif { [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; } && [ "$provider" = aime ]; then
       # shellcheck source=bin/fm-aime-cloud-lib.sh
