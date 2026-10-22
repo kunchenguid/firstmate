@@ -363,6 +363,7 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
+A Herdr reclaim deliberately uses the flat container shape rather than presentation projection: projection is presentation-only and never endpoint or ownership authority, and flat is the documented fallback for every recovery it cannot bind exactly.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
@@ -460,8 +461,9 @@ Any of these preserves the candidate and lets session startup continue with at m
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat.
   So a Herdr create failure surfaces as a spawn failure in every Herdr home, rather than only in homes that opted in.
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
-- Recovery of an existing presentation journal refuses by default when the shared presentation lock is contended, rather than falling back flat.
-  Pass `fm-spawn.sh --herdr-resume-lock-wait` to opt that recovery into waiting for the lock instead, so concurrent recoveries can serialize.
+- Recovery of an existing presentation journal retries the shared presentation lock for up to 30 seconds of retry delay before refusing, rather than falling back flat.
+  This allows a concurrent spawn's legitimate lock hold to finish without making recovery wait indefinitely.
+  Pass `fm-spawn.sh --herdr-resume-lock-wait` to opt that recovery into waiting without a retry limit instead.
   The flag applies to a fresh ship or scout spawn that recovers a journal.
   The multi-task path forwards the flag to each per-pair spawn.
   `fm-spawn.sh --relaunch` and `--secondmate` take no exact-resume presentation-order lock, so the flag has no effect there.
