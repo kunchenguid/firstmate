@@ -415,6 +415,24 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
     fail "enter: the live lock holder blocked the quiet entry too (rc=$rc): $out"
   fi
   rm -rf "$st_quiet"
+  # A standing away record owns its own mode, so a quiet-mode caller on a home
+  # that already holds an away record still writes an away mandate. That write
+  # is the one the fleet-lock check has to stop.
+  st_away=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-away.XXXXXX")
+  mkdir -p "$st_away/state"
+  printf '%s\n' "$holder_pid" > "$st_away/state/.lock"
+  FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" enter >/dev/null 2>&1
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'replace the mandate' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null \
+    && [ "$(FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" words)" != 'replace the mandate' ]; then
+    pass "enter: a quiet-mode caller on a home holding an away record still writes an away mandate, so the live lock holder refuses that write too"
+  else
+    fail "enter: the quiet-mode exception let an away mandate through a live lock holder (rc=$rc): $out"
+  fi
+  rm -rf "$st_away"
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   # A lock whose recorded pid is gone is not a live holder: it never blocks an

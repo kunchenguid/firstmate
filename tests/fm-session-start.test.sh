@@ -267,6 +267,67 @@ SH
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
+# A variant of the harness ps stub whose parent-pid read resolves the real ps
+# portably. The shared stub hardcodes /bin/ps, which a NixOS host does not
+# have, so on such a host the bounded ancestry walk can never resolve and no
+# live lock holder can be staged. This stub keeps the real ps beside itself and
+# uses it, so the same scenario is drivable on every host.
+make_fake_ps_harness_portable() {
+  local fakebin=$1 harness=$2 real_ps
+  real_ps=$(command -v ps 2>/dev/null || true)
+  [ -n "$real_ps" ] || real_ps=/bin/ps
+  printf '%s\n' "$real_ps" > "$fakebin/.real-ps"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+harness=\${FM_FAKE_HARNESS:-$harness}
+SH
+  cat >> "$fakebin/ps" <<'SH'
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
+case "$*" in
+  *"comm="*)
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
+      printf '/usr/local/bin/%s\n' "$harness"
+    else
+      printf '/bin/bash\n'
+    fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
+      printf '%s\n' "$harness"
+    else
+      printf 'bash\n'
+    fi
+    exit 0
+    ;;
+  *"ppid="*)
+    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
+    real_ps=$(cat "${0%/*}/.real-ps" 2>/dev/null || true)
+    [ -n "$real_ps" ] || real_ps=/bin/ps
+    "$real_ps" -o ppid= -p "$pid"
+    ;;
+  *"lstart="*)
+    # The holder naming reads the live process's start time and age from the
+    # process itself. One read answers both, so the two describe the same
+    # observation of the same process.
+    printf 'Wed Oct 21 12:34:56 2026      01:02:03\n'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$harness" > "$fakebin/.harness-name"
+}
+
 make_fake_ps_pi_holder() {
   local fakebin=$1 holder_pid=$2 harness=${3:-pi}
   cat > "$fakebin/ps" <<SH
@@ -909,6 +970,7 @@ EOF
   assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
   assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
+  assert_not_contains "$out" "Another live firstmate session holds the fleet lock" "lock publication failure named a live lock holder it could not prove"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
   pass "session start stays read-only when lock ownership cannot be published"
@@ -2574,7 +2636,7 @@ test_read_only_session_names_the_live_lock_holder() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
-  make_fake_ps_harness "$fakebin" pi
+  make_fake_ps_harness_portable "$fakebin" pi
   sleep 300 &
   holder_pid=$!
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
@@ -2599,6 +2661,35 @@ EOF
     "the read-only banner did not say that nothing is stopped automatically"
 
   pass "a read-only session names the live lock holder with its pid, start time, and age, and offers the two choices"
+}
+
+# A held lock alone does not prove that another session owns it. This session's
+# own recorded lock can still be live when the refusal came from a failed
+# write probe, and the digest must not then tell the operator to stop their
+# own session.
+test_read_only_session_does_not_name_its_own_lock_as_another_session() {
+  local rec root home fakebin out
+  rec=$(new_world read-only-own-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness_portable "$fakebin" pi
+  # This session's own recorded lock, still live, and a state directory the
+  # lock cannot be republished into.
+  printf '%s\n' "$SESSION_START_TEST_HARNESS_PID" > "$home/state/.lock"
+  chmod 0500 "$home/state"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  chmod 0700 "$home/state"
+
+  assert_contains "$out" "READ-ONLY SESSION" "the failed lock publication did not force a read-only session"
+  assert_contains "$out" "cannot write session lock" "the failed lock publication was not surfaced"
+  assert_not_contains "$out" "Another live firstmate session holds the fleet lock" \
+    "the read-only banner named this session's own lock as another session's holder"
+  assert_not_contains "$out" "stop that session yourself" \
+    "the read-only banner told the operator to stop this session's own process"
+
+  pass "a read-only session does not name its own live lock as another session's holder"
 }
 
 test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
@@ -3199,6 +3290,7 @@ test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_session_names_the_live_lock_holder
+test_read_only_session_does_not_name_its_own_lock_as_another_session
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion

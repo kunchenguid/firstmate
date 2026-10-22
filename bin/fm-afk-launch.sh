@@ -206,6 +206,26 @@ fm_afk_launch_require_fleet_lock() {
   return 1
 }
 
+# Print the mode this entry actually writes: away or quiet.
+#
+# A standing record owns its own mode in one direction only: a standing AWAY
+# record keeps away mode, whatever the caller asked for, so the entry still
+# writes an away mandate. A standing quiet record does not force quiet mode -
+# the contract's own entry mode decides - so this mirrors that exactly, and
+# the fleet-lock check sees the mode the write will really use.
+fm_afk_launch_effective_mode() {
+  local record mode
+  record=$(fm_afk_contract_path "${FM_AFK_LAUNCH_STATE}")
+  if [ -f "$record" ]; then
+    mode=$(fm_afk_contract_record_mode "$record") || mode=away
+    if [ "$mode" = away ]; then
+      printf 'away\n'
+      return 0
+    fi
+  fi
+  [ "${FM_AFK_MODE:-}" = quiet ] && printf 'quiet\n' || printf 'away\n'
+}
+
 fm_afk_launch_lock_owned() {
   local pid expected actual
   [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
@@ -421,9 +441,13 @@ fm_afk_launch_enter() {
         fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
         return 3 ;;
     esac
-  else
-    # The quiet path is settled before this check on purpose: quiet mode
-    # spawns nothing, so a read-only session may still enter quiet mode.
+  fi
+  # The mode this entry actually writes decides whether the fleet lock is
+  # needed, and the quiet path above is settled first on purpose: quiet mode
+  # spawns nothing, so a read-only session may still enter quiet mode. A
+  # standing away record keeps away mode even for a quiet-mode caller, and
+  # that write is an away mandate, so the check applies to it too.
+  if [ "$(fm_afk_launch_effective_mode)" = away ]; then
     fm_afk_launch_require_fleet_lock || return 1
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
