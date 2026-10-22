@@ -119,7 +119,7 @@ For other harnesses, the operational prefix travels with the message text; neith
 
 The daemon never injects into an in-use pane. Two checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
-backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
+backend (tmux, herdr, or rex; see "Auto-discovered supervisor pane" below):
 
 - **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
@@ -239,15 +239,19 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 - **Dedupe across signal/stale/scan** - all three paths use the shared status presentation markers defined by `bin/fm-classify-lib.sh`, so a successfully classified span is not re-escalated by another path in the same digest.
   Never treat a reported unreadable state as classified; the shared library header owns that marker contract, and the marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
-  (tmux vs herdr) and TARGET independently, mirroring
+  (tmux, herdr, or rex) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
   override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
-  `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
-  `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
-  `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  `$HERDR_PANE_ID` present (herdr), then a Rex pane proven by ancestry
+  (rex), then a tmux fallback. Target:
+  `FM_SUPERVISOR_TARGET` override (a tmux target, a herdr
+  `"<session>:<pane-id>"` target, or a rex `"<session-uuid>:<block-uuid>"`
+  target), then `$TMUX_PANE`, then
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the proven
+  Rex pane, then a `firstmate:0` fallback with a warning. Both resolution
+  sources are logged at startup so a wrong-but-resolving fallback is
+  detectable. On rex the daemon runs in a detached block of the captain's
+  session, in no tab (docs/rex-backend.md "Away mode"). Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one

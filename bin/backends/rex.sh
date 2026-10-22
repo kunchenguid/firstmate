@@ -7,15 +7,27 @@
 # stays treehouse. Sourced only through bin/fm-backend.sh's fm_backend_source
 # in normal operation; the unit tests source it directly.
 #
-# Container shape: ONE Rex window (tab) PER TASK. When Firstmate itself runs
-# in a Rex pane on the selected server, proven structurally by
-# fm_backend_rex_launcher_identity, every task tab opens in Firstmate's own
-# session. Otherwise each home uses ONE session labeled `firstmate` (or
-# `2ndmate-<id>`), adopted only when exactly one live session carries that
-# label, else created once - both under a home-wide lock shared with the
-# retirement of that session once its last tab closes. Tabs are created with
-# `--focus=false`, so a spawn never moves the captain's view. The Rex server
-# is the shared container, and Firstmate never starts, stops, or restarts it.
+# Container shape: ONE Rex window (tab) PER TASK, in a per-home session that
+# fm_backend_rex_task_session_locked alone chooses and names:
+#
+#   - The primary home's ships and scouts open in ONE session labeled
+#     `fm-local`, never in the session Firstmate itself runs in.
+#   - Each secondmate home has ONE session labeled `fm-<secondmate-id>` on the
+#     Rex server of the machine it runs on. Its parent opens the secondmate
+#     pane as that session's FIRST tab, and the secondmate's own workers open
+#     there as further tabs.
+#
+# A session label is display plus an identity cross-check, never routing: a
+# relaunch or reclaim reuses the session its record names while that session
+# is live and still carries the label; otherwise the one live session with the
+# label is adopted, and one is created (its first tab is the task tab) when
+# none exists. Two or more sessions with the label refuse as ambiguous, and a
+# parent never adopts an unrecorded `fm-<id>` session for a new secondmate
+# pane (another parent home may own it). All of this runs under a home-wide
+# lock shared with the retirement of a session once it holds nothing. Tabs
+# are created with `--focus=false`, so a spawn never moves the captain's view.
+# The Rex server is the shared container, and Firstmate never starts, stops,
+# or restarts it.
 #
 # Target string shape: "<session-uuid>:<block-uuid>" - the bare UUIDs of the
 # typed `session:<uuid>` and `block:<uuid>` ids, so the target carries exactly
@@ -275,12 +287,16 @@ fm_backend_rex_scoped_name() { # <fm-task-label>
   printf 'fm-%s-%s' "$(fm_backend_rex_home_label)" "$rest"
 }
 
-# fm_backend_rex_session_label: the label of this home's own session when
-# Firstmate does not run in Rex - `firstmate` or `2ndmate-<id>`.
+# fm_backend_rex_session_label: the label of this home's worker session -
+# `fm-local` for the primary home, `fm-<secondmate-id>` for a secondmate home.
 fm_backend_rex_session_label() {
   local tag
   tag=$(fm_backend_rex_home_label)
-  printf '%s' "${tag%-*}"
+  tag=${tag%-*}
+  case "$tag" in
+    2ndmate-?*) printf 'fm-%s' "${tag#2ndmate-}" ;;
+    *) printf 'fm-local' ;;
+  esac
 }
 
 fm_backend_rex_uuid_valid() { # <uuid>
@@ -407,51 +423,6 @@ fm_backend_rex_session_unlock() {
   fm_lock_release "$(fm_backend_rex_session_lock_path)" || true
 }
 
-# fm_backend_rex_home_session_ensure_locked: the typed session id a task tab
-# goes into (caller holds the session lock). The launcher's own session first;
-# otherwise the one live session labeled fm_backend_rex_session_label, created
-# empty when none exists. Two or more such sessions are ambiguous and refuse.
-fm_backend_rex_home_session_ensure_locked() { # <cwd>
-  local cwd=$1 label list count sid out block
-  if fm_backend_rex_launcher_identity; then
-    printf '%s' "$FM_BACKEND_REX_LAUNCHER_SESSION"
-    return 0
-  fi
-  label=$(fm_backend_rex_session_label)
-  if ! list=$(fm_backend_rex_cli ls --json 2>/dev/null) ||
-    ! printf '%s' "$list" | jq -e '.sessions | type == "array"' >/dev/null 2>&1; then
-    echo "error: could not read the Rex session inventory; refusing to choose a session" >&2
-    return 1
-  fi
-  count=$(printf '%s' "$list" | jq -r --arg l "$label" '[.sessions[] | select(.label == $l)] | length')
-  case "$count" in
-    0) ;;
-    1)
-      printf '%s' "$list" | jq -r --arg l "$label" '.sessions[] | select(.label == $l) | .session_id'
-      return 0
-      ;;
-    *)
-      echo "error: $count Rex sessions are labeled '$label'; refusing to guess which one this home owns (close or rename the extras)" >&2
-      return 1
-      ;;
-  esac
-  out=$(fm_backend_rex_cli_json new "$label" -c "$cwd" --json) || {
-    echo "error: rex could not create session '$label'" >&2
-    return 1
-  }
-  sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
-  [ -n "$sid" ] || {
-    echo "error: could not parse a session id from rex new output: $out" >&2
-    return 1
-  }
-  # `rex new` always opens a shell tab; close it so the session holds only
-  # task tabs. A session with no windows stays alive.
-  for block in $(printf '%s' "$out" | jq -r '.initial_windows[]?.block_ids[]?' 2>/dev/null); do
-    fm_backend_rex_cli block close -s "$sid" "$block" >/dev/null 2>&1 || true
-  done
-  printf '%s' "$sid"
-}
-
 # fm_backend_rex_label_in_use: whether any live block on the server carries
 # <label>; fails when an inventory cannot be read, so a caller about to create
 # never mistakes an unreadable list for "none".
@@ -465,11 +436,91 @@ fm_backend_rex_label_in_use() { # <label>
   return 1
 }
 
+# fm_backend_rex_session_live: whether typed session <sid> is live on the
+# selected server, optionally carrying <label>. 0 live, 3 gone (or labeled
+# otherwise), anything else unreadable.
+fm_backend_rex_session_live() { # <typed-session-id> [label]
+  local sid=$1 label=${2:-} view rc
+  view=$(fm_backend_rex_cli session inspect "$sid" --json 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  [ -z "$label" ] || [ "$(printf '%s' "$view" | jq -r '.label // empty' 2>/dev/null)" = "$label" ] || return 3
+  return 0
+}
+
+# fm_backend_rex_task_session_locked: THE session placement and naming
+# decision (header "Container shape"; caller holds the session lock). For a
+# tab owned by <home> - a secondmate pane its parent opens when <pane> is 1 -
+# sets FM_BACKEND_REX_PLACE_LABEL to that home's session label and
+# FM_BACKEND_REX_PLACE_SESSION to the typed id of the live session to open the
+# tab in, or to empty when a new session must be created. In order: the
+# recorded <preferred> session while live and still labeled; for a secondmate
+# home's own worker, the proven session the secondmate runs in; the one live
+# session carrying the label. Refuses an unreadable inventory, two or more
+# labeled sessions, an unrecorded labeled session for a secondmate pane, and
+# the primary home's supervisor session.
+fm_backend_rex_task_session_locked() { # <home> <pane:0|1> [preferred-session-uuid]
+  local home=$1 pane=$2 preferred=${3:-} label rc list count
+  FM_BACKEND_REX_PLACE_SESSION=
+  label=$(FM_HOME=$home fm_backend_rex_session_label)
+  FM_BACKEND_REX_PLACE_LABEL=$label
+  if [ "$label" = fm-local ] && [ "$(tr -d '[:space:]' 2>/dev/null <"$home/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER")" = local ]; then
+    echo "error: secondmate id 'local' would share the primary home's Rex session label fm-local; refusing" >&2
+    return 1
+  fi
+  if [ -n "$preferred" ] && fm_backend_rex_uuid_valid "$preferred"; then
+    fm_backend_rex_session_live "session:$preferred" "$label"
+    rc=$?
+    case "$rc" in
+      0) FM_BACKEND_REX_PLACE_SESSION="session:$preferred" ;;
+      3) ;;
+      *)
+        echo "error: could not read the recorded Rex session session:$preferred; refusing to choose a session" >&2
+        return 1
+        ;;
+    esac
+  fi
+  if [ -z "$FM_BACKEND_REX_PLACE_SESSION" ] && [ "$pane" = 0 ] && [ "$label" != fm-local ] &&
+    fm_backend_rex_launcher_identity && fm_backend_rex_session_live "$FM_BACKEND_REX_LAUNCHER_SESSION" "$label"; then
+    FM_BACKEND_REX_PLACE_SESSION=$FM_BACKEND_REX_LAUNCHER_SESSION
+  fi
+  if [ -z "$FM_BACKEND_REX_PLACE_SESSION" ]; then
+    if ! list=$(fm_backend_rex_cli ls --json 2>/dev/null) ||
+      ! printf '%s' "$list" | jq -e '.sessions | type == "array"' >/dev/null 2>&1; then
+      echo "error: could not read the Rex session inventory; refusing to choose a session" >&2
+      return 1
+    fi
+    count=$(printf '%s' "$list" | jq -r --arg l "$label" '[.sessions[] | select(.label == $l)] | length')
+    case "$count" in
+      0) return 0 ;;
+      1)
+        if [ "$pane" = 1 ]; then
+          echo "error: a Rex session labeled '$label' already exists but is not the one this secondmate's record names; refusing to adopt it (close or rename it)" >&2
+          return 1
+        fi
+        FM_BACKEND_REX_PLACE_SESSION=$(printf '%s' "$list" | jq -r --arg l "$label" '.sessions[] | select(.label == $l) | .session_id')
+        ;;
+      *)
+        echo "error: $count Rex sessions are labeled '$label'; refusing to guess which one this home owns (close or rename the extras)" >&2
+        return 1
+        ;;
+    esac
+  fi
+  if [ "$label" = fm-local ] && fm_backend_rex_launcher_identity &&
+    [ "$FM_BACKEND_REX_LAUNCHER_SESSION" = "$FM_BACKEND_REX_PLACE_SESSION" ]; then
+    echo "error: Firstmate's own Rex session is labeled fm-local; workers never open in the supervisor's session (rename it)" >&2
+    return 1
+  fi
+  return 0
+}
+
 # fm_backend_rex_create_task: open the task's tab (`window new --focus=false
 # --keep-open`) in the home session, label its block with the scoped name,
 # and echo "<session-uuid> <window-uuid> <block-uuid>". Refuses a scoped name
-# already live anywhere on the server.
-fm_backend_rex_create_task() { # <label> <cwd>
+# already live anywhere on the server. With <home>, the tab is the secondmate
+# pane of that other home (header "Secondmates"); <preferred-session-uuid> is
+# the session a relaunch or reclaim record names, used while it is live.
+fm_backend_rex_create_task() { # <label> <cwd> [home] [preferred-session-uuid]
   local name rc
   name=$(fm_backend_rex_scoped_name "$1")
   fm_backend_rex_session_lock || {
@@ -482,8 +533,8 @@ fm_backend_rex_create_task() { # <label> <cwd>
   return "$rc"
 }
 
-fm_backend_rex_create_task_locked() { # <label> <cwd>
-  local label=$1 cwd=$2 name tab sid out wid bid rc
+fm_backend_rex_create_task_locked() { # <label> <cwd> [home] [preferred-session-uuid]
+  local label=$1 cwd=$2 home=${3:-} preferred=${4:-} name tab pane=0 sid out wid bid rc
   name=$(fm_backend_rex_scoped_name "$label")
   fm_backend_rex_label_in_use "$name"
   rc=$?
@@ -498,20 +549,42 @@ fm_backend_rex_create_task_locked() { # <label> <cwd>
       return 1
       ;;
   esac
-  tab="${cwd##*/}·${label#fm-}"
-  if ! sid=$(fm_backend_rex_home_session_ensure_locked "$cwd") ||
-    ! out=$(fm_backend_rex_cli_json window new -s "$sid" "$tab" -c "$cwd" --focus=false --keep-open --json); then
-    [ -z "${sid:-}" ] || echo "error: rex window new failed for '$name'" >&2
-    return 1
+  if [ -n "$home" ]; then
+    pane=1
+    tab="2ndmate·${label#fm-}"
+  else
+    home=$FM_HOME
+    tab="${cwd##*/}·${label#fm-}"
+  fi
+  fm_backend_rex_task_session_locked "$home" "$pane" "$preferred" || return 1
+  sid=$FM_BACKEND_REX_PLACE_SESSION
+  if [ -z "$sid" ]; then
+    # A new session: its own first tab becomes the task tab.
+    out=$(fm_backend_rex_cli_json new "$FM_BACKEND_REX_PLACE_LABEL" -c "$cwd" --window "$tab" --keep-open --json) || {
+      echo "error: rex could not create session '$FM_BACKEND_REX_PLACE_LABEL' for '$name'" >&2
+      return 1
+    }
+    sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
+    out=$(printf '%s' "$out" | jq -c '.initial_windows[0] // empty' 2>/dev/null)
+  else
+    out=$(fm_backend_rex_cli_json window new -s "$sid" "$tab" -c "$cwd" --focus=false --keep-open --json) || {
+      echo "error: rex window new failed for '$name'" >&2
+      return 1
+    }
+    # A secondmate pane is its session's first tab even in a reused session.
+    if [ "$pane" = 1 ]; then
+      fm_backend_rex_cli window move -s "$sid" "$(printf '%s' "$out" | jq -r '.window_id // empty' 2>/dev/null)" --index 1 >/dev/null 2>&1 || true
+    fi
   fi
   wid=$(printf '%s' "$out" | jq -r '.window_id // empty' 2>/dev/null)
   bid=$(printf '%s' "$out" | jq -r '.block_ids[0] // empty' 2>/dev/null)
-  if [ -z "$wid" ] || [ -z "$bid" ]; then
-    echo "error: could not parse window/block ids from rex window new output: $out" >&2
+  if [ -z "$sid" ] || [ -z "$wid" ] || [ -z "$bid" ]; then
+    echo "error: could not parse session/window/block ids from rex output: $out" >&2
     return 1
   fi
   if ! fm_backend_rex_cli block rename -s "$sid" "$bid" "$name" >/dev/null 2>&1; then
     fm_backend_rex_cli block close -s "$sid" "$bid" >/dev/null 2>&1 || true
+    fm_backend_rex_retire_session_locked "$sid" "$FM_BACKEND_REX_PLACE_LABEL"
     echo "error: rex could not label block $bid as '$name'; closed it" >&2
     return 1
   fi
@@ -740,7 +813,7 @@ fm_backend_rex_kill() { # <target> [unused] [expected-label]
   if ! fm_backend_rex_target_ready "$target" "$expected_label"; then
     case "$FM_BACKEND_REX_READY_RC" in
       3)
-        fm_backend_rex_retire_home_session "$FM_BACKEND_REX_SESSION_ID" "$target"
+        fm_backend_rex_retire_home_session "$FM_BACKEND_REX_SESSION_ID" "$target" "$expected_label"
         return 0
         ;;
       4)
@@ -759,26 +832,47 @@ fm_backend_rex_kill() { # <target> [unused] [expected-label]
     echo "error: the Rex block for $target is still present after close" >&2
     return 1
   fi
-  fm_backend_rex_retire_home_session "$FM_BACKEND_REX_SESSION_ID" "$target"
+  fm_backend_rex_retire_home_session "$FM_BACKEND_REX_SESSION_ID" "$target" "$expected_label"
   return 0
 }
 
-# fm_backend_rex_retire_home_session: after a task tab closes, kill this
-# home's own `firstmate`/`2ndmate-<id>` session once it holds no window. The
-# launcher's session and any session with another label are never touched,
-# and an unreadable inventory skips the cleanup. Runs under the session lock
-# so a concurrent spawn cannot open a tab between the empty check and the kill.
-fm_backend_rex_retire_home_session() { # <typed-session-id> <target>
-  local sid=$1 target=$2 view
+# fm_backend_rex_retire_home_session: after a task tab closes, kill the
+# session it lived in once that session holds nothing. Only two labels
+# qualify: this home's own `fm-local`/`fm-<id>` session, and - when the closed
+# task is secondmate <id> (expected label `fm-<id>`) - the `fm-<id>` session
+# its parent opened it in, which <sid> is because it came from that
+# secondmate's own record. The caller's own session and any
+# session with another label are never touched, and an unreadable inventory
+# skips the cleanup. Runs under the session lock so a concurrent spawn cannot
+# open a tab between the empty check and the kill.
+fm_backend_rex_retire_home_session() { # <typed-session-id> <target> [expected-label]
+  local sid=$1 target=$2 expected_label=${3:-} labels
   [ -n "$sid" ] || return 0
   [ "$sid" != "${REX_SESSION:-}" ] || return 0
+  labels=$(fm_backend_rex_session_label)
+  case "$expected_label" in
+    fm-?*) labels="$labels $expected_label" ;;
+  esac
   fm_backend_rex_session_lock || return 0
-  view=$(FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_cli session inspect "$sid" --json 2>/dev/null)
-  if [ -n "$view" ] &&
-    printf '%s' "$view" | jq -e --arg l "$(fm_backend_rex_session_label)" '.label == $l and ((.windows // []) | length) == 0' >/dev/null 2>&1; then
-    FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_cli kill "$sid" >/dev/null 2>&1 || true
-  fi
+  FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_retire_session_locked "$sid" "$labels"
   fm_backend_rex_session_unlock
+  return 0
+}
+
+# fm_backend_rex_retire_session_locked: kill typed session <sid> when its label
+# is one of <labels> and it holds no window and no block. `session inspect`
+# omits detached blocks (a hidden away daemon lives in one), so the block
+# inventory is read too. Caller holds the session lock.
+fm_backend_rex_retire_session_locked() { # <typed-session-id> <labels>
+  local sid=$1 labels=$2 view label blocks
+  view=$(fm_backend_rex_cli session inspect "$sid" --json 2>/dev/null) || return 0
+  label=$(printf '%s' "$view" | jq -r '.label // empty' 2>/dev/null)
+  [ -n "$label" ] || return 0
+  case " $labels " in *" $label "*) ;; *) return 0 ;; esac
+  printf '%s' "$view" | jq -e '((.windows // []) | length) == 0' >/dev/null 2>&1 || return 0
+  blocks=$(fm_backend_rex_cli block ls -s "$sid" --json 2>/dev/null) || return 0
+  printf '%s' "$blocks" | jq -e '(.blocks | type) == "array" and (.blocks | length) == 0' >/dev/null 2>&1 || return 0
+  fm_backend_rex_cli kill "$sid" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -796,4 +890,43 @@ fm_backend_rex_list_live() {
     done < <(fm_backend_rex_cli block ls -s "$sid" --json 2>/dev/null |
       jq -r --arg p "$prefix" '.blocks[]? | select(.label | startswith($p)) | "\(.block_id)\t\(.label)"' 2>/dev/null)
   done
+}
+
+# --- away mode ----------------------------------------------------------------
+# The away daemon (bin/fm-supervise-daemon.sh) injects into Firstmate's own
+# pane, and bin/fm-afk-launch.sh runs that daemon in a hidden terminal. Both
+# use these helpers; bin/fm-supervisor-target-lib.sh owns discovery order.
+
+# fm_backend_rex_supervisor_target: "<session-uuid>:<block-uuid>" of the Rex
+# pane this process runs in, only when fm_backend_rex_launcher_identity proves
+# it (an inherited REX_BLOCK names someone else's pane). 1 when not proven.
+fm_backend_rex_supervisor_target() {
+  fm_backend_rex_launcher_identity || return 1
+  printf '%s:%s' "${REX_SESSION#session:}" "${REX_BLOCK#block:}"
+}
+
+# fm_backend_rex_detached_create: a DETACHED block (running and addressable by
+# id, but in no tab, so the captain never sees it) in typed session <sid>,
+# whose login shell is handed <input> as typed input. Prints the block's
+# "<session-uuid>:<block-uuid>" target.
+fm_backend_rex_detached_create() { # <typed-session-id> <label> <cwd> <input>
+  local sid=$1 label=$2 cwd=$3 input=$4 payload out bid
+  payload=$(jq -nc --arg l "$label" --arg c "$cwd" --arg i "$input" \
+    '{flavor:"com.superlogical.terminal.shell",label:$l,options:{cwd:$c,initial_input:$i}}') || return 1
+  out=$(fm_backend_rex_cli_json api call -s "$sid" session.new_block "$payload") || return 1
+  bid=$(printf '%s' "$out" | jq -r '.block_id // empty' 2>/dev/null)
+  case "$bid" in block:*) ;; *) return 1 ;; esac
+  fm_backend_rex_uuid_valid "${bid#block:}" || return 1
+  printf '%s:%s' "${sid#session:}" "${bid#block:}"
+}
+
+# fm_backend_rex_block_close: close <target>'s block by full id; 0 once the
+# server answers exit 3 for it (already gone included), 1 otherwise.
+fm_backend_rex_block_close() { # <target>
+  fm_backend_rex_parse_target "$1" || return 1
+  fm_backend_rex_block_inspect "$1" >/dev/null
+  [ "$?" -ne 3 ] || return 0
+  FM_BACKEND_REX_TARGET_HINT=$1 fm_backend_rex_cli block close -s "$FM_BACKEND_REX_SESSION_ID" "$FM_BACKEND_REX_BLOCK_ID" >/dev/null 2>&1 || true
+  fm_backend_rex_block_inspect "$1" >/dev/null
+  [ "$?" -eq 3 ]
 }

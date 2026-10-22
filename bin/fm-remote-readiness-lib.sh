@@ -2,9 +2,10 @@
 # fm-remote-readiness-lib.sh - the remote second-mate readiness gate sequence.
 #
 # Source this file and call:
-#   fm_remote_readiness_ensure <bin-dir> <secondmate-id>
+#   fm_remote_readiness_ensure <bin-dir> <secondmate-id> [herdr|rex]
 #
-# It runs bin/fm-remote-doctor.sh on that route's configured host, and when the
+# It runs bin/fm-remote-doctor.sh on that route's configured host for the
+# second mate's backend (herdr when omitted), and when the
 # read-only run reports any gap it runs the doctor again with --fix and then a
 # third read-only time. That last read-only run is the verdict, so a repair is
 # never trusted on its own word. bin/fm-remote-doctor.sh remains the single
@@ -21,21 +22,24 @@
 # shellcheck disable=SC2034
 FM_REMOTE_READINESS_OUT=
 
-fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id>
+fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id> [herdr|rex]
   local bin_dir=$1 id=$2 out rc
+  local -a backend_args=()
+  # herdr keeps the historical argument-free call, which every host understands.
+  [ "${3:-herdr}" = herdr ] || backend_args=(--backend "$3")
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh ${backend_args[@]+"${backend_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 0 ] || return 0
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh --fix < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh --fix ${backend_args[@]+"${backend_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh ${backend_args[@]+"${backend_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255

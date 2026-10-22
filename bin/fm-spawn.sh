@@ -120,11 +120,14 @@
 #   paseo are never auto-detected (paseo's markers leak into every descendant
 #   process). codex-app is not a known backend yet; docs/codex-app-backend.md
 #   owns that blocked backend contract. Default tmux spawns do not write
-#   backend= to meta; absent backend= means tmux. cmux, paseo, and rex do not
-#   support --secondmate spawns yet. A rex task opens as a tab in firstmate's
-#   own Rex session (or this home's `firstmate` session outside Rex) with focus
-#   left alone, and its worker shell receives `export REX_SERVER=<recorded
-#   server>` before launch.
+#   backend= to meta; absent backend= means tmux. cmux and paseo do not
+#   support --secondmate spawns yet. A rex task opens as a tab in this home's
+#   worker session - `fm-local` for the primary home, never the session
+#   firstmate itself runs in; `fm-<id>` for a secondmate home - with focus left
+#   alone, and its worker shell receives `export REX_SERVER=<recorded server>`
+#   before launch. A rex --secondmate opens as the first tab of that home's own
+#   `fm-<id>` session (the live session its record names, else a new one);
+#   bin/backends/rex.sh "Container shape" owns the placement.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1187,16 +1190,23 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  # A remote second mate always runs on Herdr: its server belongs to the host's
-  # own GUI login session, so the endpoint outlives every SSH connection that
-  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
-  # requirement, and the remote home's config/backend never overrides it.
-  case "${BACKEND_ARG:--}" in
-  - | herdr) backend=herdr ;;
+  # A remote second mate runs on Herdr (the dedicated fm-remote session) or on
+  # Rex (a visible fm-<id> session on that host's Rex app server): either
+  # server belongs to the host's own GUI login session, so the endpoint
+  # outlives every SSH connection that supervises it. An explicit --backend
+  # wins, then the backend this route's record already names (so a liveness
+  # respawn stays put), then herdr. bin/fm-remote-doctor.sh gates that host on
+  # the chosen backend, and the remote home's config/backend never overrides it.
+  backend=${BACKEND_ARG:-}
+  if [ -z "$backend" ] && [ -f "$STATE/$id.meta" ]; then
+    backend=$(fm_meta_get "$STATE/$id.meta" remote_backend)
+  fi
+  case "${backend:-herdr}" in
+  herdr | rex) backend=${backend:-herdr} ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: a remote secondmate runs only on the herdr backend, not '$BACKEND_ARG'" >&2
+    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
     return 1
     ;;
   esac
@@ -1232,7 +1242,7 @@ spawn_remote_secondmate() {
   # through a launch. This is also the readiness gate every liveness relaunch
   # passes through, because recovery respawns through this same route.
   rc=0
-  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" "$backend" || rc=$?
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1325,11 +1335,11 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
-  if [ "$remote_backend" != herdr ]; then
+  if [ "$remote_backend" != "$backend" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
+    echo "error: remote launch returned backend '${remote_backend:-missing}', expected $backend; preserving the remote route for reconciliation" >&2
     return 1
   fi
   [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
@@ -1339,7 +1349,7 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
-  if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+  if [ "$backend" != rex ] && { [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; }; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1372,7 +1382,7 @@ spawn_remote_secondmate() {
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
-    echo "remote_herdr_session=$remote_herdr_session"
+    [ "$backend" = rex ] || echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
@@ -2031,10 +2041,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=paseo does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=rex supports ship and scout spawns only; secondmates on Rex are not supported yet (use --backend tmux or herdr for a secondmate)" >&2
-    exit 1
-  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
     ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
@@ -2126,12 +2132,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
+  # inferred from a failed read - and only HERDR and REX can prove it:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
+  #   rex   - the record names the server, and every read addresses it by full
+  #           block id with autostart off, so `missing` is that reachable server
+  #           answering "not found"; an unreachable one reads `unreadable`.
   #   tmux  - REFUSES, always. A task record carries no socket identity for its
   #           endpoint, and a server-wide inventory describes only the server
   #           this process addresses, so no read available here can tell "gone"
@@ -2216,12 +2225,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
   if [ "$BACKEND" = rex ]; then
-    # Reclaiming a destroyed Rex endpoint is not supported yet; only an
-    # agent-free endpoint that still exists is adopted.
-    if [ "$RELAUNCH_REBIND" -eq 1 ]; then
-      echo "error: task $ID's recorded Rex block is gone; re-creating a destroyed rex endpoint on relaunch is not supported yet" >&2
-      exit 1
-    fi
+    # The record pins the server every relaunch read and any reclaim uses, so a
+    # reclaim never moves the task to another Rex server.
     FM_BACKEND_REX_SERVER=$(fm_meta_get "$RELAUNCH_META" rex_server)
     FM_BACKEND_REX_SERVER_INSTANCE=$(fm_meta_get "$RELAUNCH_META" rex_server_instance)
     FM_REX_TASK_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" rex_session_id)
@@ -4182,6 +4187,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = rex ]; then
+    # The recorded Rex block is PROVEN gone (the relaunch gate above owns that
+    # proof), so mint one tab on the RECORDED server
+    # (FM_BACKEND_REX_SERVER, loaded from the record), in the session the record
+    # names while it is still live, else in this home's ordinary session there.
+    fm_backend_rex_container_ensure || exit 1
+    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" "" "$FM_REX_TASK_SESSION_ID") || exit 1
+    read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
+$REX_TASK_IDS
+EOF
+    if [ -z "$FM_REX_TASK_SESSION_ID" ] || [ -z "$FM_REX_TASK_BLOCK_ID" ]; then
+      echo "error: rex did not return a session/block id for $W" >&2
+      exit 1
+    fi
+    T="$FM_REX_TASK_SESSION_ID:$FM_REX_TASK_BLOCK_ID"
+    SES=$FM_REX_TASK_SESSION_ID
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -4189,11 +4211,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr is the ONLY backend that reaches here: the gate above rebinds only
-    # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
-    # every read is scoped to the session the record names
-    # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
-    # secondmate were already refused, so there is no dispatch left to make.
+    # Herdr is the only backend left here: the gate above rebinds only on a
+    # PROVEN-gone endpoint, and absence is provable only on herdr and rex,
+    # whose every read is scoped to the session or server the record names
+    # (fm_control_endpoint_absence_verdict owns that argument). rex took the
+    # branch above, and tmux and every secondmate were already refused.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4490,7 +4512,19 @@ EOF
     ;;
   rex)
     fm_backend_rex_container_ensure || exit 1
-    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$PROJ_ABS") || exit 1
+    # A --secondmate stands up that OTHER home's own session (PROJ_ABS is the
+    # validated secondmate home), reusing the session its previous record names
+    # on this same server while that session is live.
+    REX_OTHER_HOME=
+    REX_PREFERRED_SESSION=
+    if [ "$KIND" = secondmate ]; then
+      REX_OTHER_HOME=$PROJ_ABS
+      if [ -f "$STATE/$ID.meta" ] && [ "$(fm_meta_get "$STATE/$ID.meta" backend)" = rex ] &&
+        [ "$(fm_meta_get "$STATE/$ID.meta" rex_server)" = "$FM_BACKEND_REX_SERVER" ]; then
+        REX_PREFERRED_SESSION=$(fm_meta_get "$STATE/$ID.meta" rex_session_id)
+      fi
+    fi
+    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_OTHER_HOME" "$REX_PREFERRED_SESSION") || exit 1
     read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
 $REX_TASK_IDS
 EOF

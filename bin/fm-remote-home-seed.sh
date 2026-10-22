@@ -2,8 +2,11 @@
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
-#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+#   fm-remote-home-seed.sh [--backend herdr|rex] <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 #
+# --backend names the backend the second mate will run on (herdr by default),
+# so the readiness gate checks that backend's server; spawn it with the same
+# --backend afterwards.
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
 # remote host dimension in data/secondmates.md, gates the host on
@@ -46,7 +49,7 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
@@ -62,6 +65,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+BACKEND=herdr
+if [ "${1:-}" = --backend ]; then
+  BACKEND=${2:-}
+  shift 2 || usage
+fi
+case "$BACKEND" in herdr|rex) ;; *) die "a remote second mate runs on the herdr or rex backend, not '$BACKEND'" ;; esac
 [ "$#" -ge 5 ] || usage
 ID=$1
 HOST=$2
@@ -240,7 +249,7 @@ restore_registry_and_brief() {
 # created on that host. The doctor runs through the same fixed entrypoint as
 # every later call, so it sees the exact PATH the remote home will run under.
 set +e
-fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID"
+fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID" "$BACKEND"
 PREFLIGHT_RC=$?
 set -e
 if [ "$PREFLIGHT_RC" -ne 0 ]; then

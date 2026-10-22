@@ -74,14 +74,14 @@ $IDS
 EOF
 TB="$SID:$BID_B"
 VIEW=$(fm_backend_rex_cli session inspect "session:$SID" --json) || smoke_fail "session inspect failed"
-[ "$(printf '%s' "$VIEW" | jq -r .label)" = firstmate ] || smoke_fail "the home session is not labeled firstmate"
+[ "$(printf '%s' "$VIEW" | jq -r .label)" = fm-local ] || smoke_fail "the home session is not labeled fm-local"
 [ "$(printf '%s' "$VIEW" | jq '.windows | length')" = 2 ] || smoke_fail "the home session should hold exactly the two task tabs"
 [ "$(printf '%s' "$VIEW" | jq -r .active_window_id)" = "window:$WID" ] || smoke_fail "--focus=false let the second tab take focus"
 [ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_B" '.windows[] | select(.window_id == $w) | .label')" = "proj·smoke-b" ] \
   || smoke_fail "the tab label is not <project>·<id>"
 fm_backend_rex_create_task fm-smoke-a "$WORK" >/dev/null 2>&1 && smoke_fail "a duplicate scoped label was not refused"
 fm_backend_rex_target_ready "$TA" fm-smoke-a || smoke_fail "the new block is not ready under its scoped label"
-pass "rex smoke: one empty firstmate session, unfocused labeled tabs, and duplicate refusal"
+pass "rex smoke: one fm-local session holding exactly the task tabs, unfocused labeled tabs, and duplicate refusal"
 
 CWD=$(fm_backend_rex_current_path "$TA" fm-smoke-a)
 [ "$CWD" = "$WORK" ] || smoke_fail "current_path read '$CWD', expected '$WORK'"
@@ -127,6 +127,36 @@ fm_backend_rex_cli session inspect "session:$SID" --json >/dev/null 2>&1
 [ "$?" -eq 3 ] || smoke_fail "the emptied home session was not retired"
 fm_backend_kill rex "$TA" "" fm-smoke-a || smoke_fail "killing an already-gone block must succeed"
 pass "rex smoke: kill proves exit 3 and retires the emptied home session only after its last tab"
+
+# A secondmate pane opens as the first tab of its own fm-<id> session, and a
+# worker that secondmate spawns from inside that pane joins the same session.
+SM_HOME="$TMP_ROOT/sm-home"
+mkdir -p "$SM_HOME/state"
+printf 'smk\n' >"$SM_HOME/.fm-secondmate-home"
+IDS=$(fm_backend_rex_create_task fm-smk "$SM_HOME" "$SM_HOME" "") || smoke_fail "the secondmate pane create_task failed"
+read -r SM_SID SM_WID SM_BID <<EOF
+$IDS
+EOF
+TSM="$SM_SID:$SM_BID"
+[ "$(fm_backend_rex_cli session inspect "session:$SM_SID" --json | jq -r .label)" = fm-smk ] || smoke_fail "the secondmate session is not labeled fm-<id>"
+state=$(wait_state "$TSM" dead) || smoke_fail "the secondmate pane's shell read '$state', expected dead"
+PROBE="$TMP_ROOT/sm-worker.out"
+fm_backend_rex_send_text_line "$TSM" "FM_REX_SERVER='$FM_REX_SERVER' FM_HOME='$SM_HOME' FM_ROOT='$SM_HOME' STATE='$SM_HOME/state' bash -c '. \"$ROOT/bin/fm-backend.sh\"; fm_backend_source rex && fm_backend_rex_create_task fm-w1 \"$WORK\" > \"$PROBE.tmp\" 2>&1; mv \"$PROBE.tmp\" \"$PROBE\"'" fm-smk \
+  || smoke_fail "could not run the worker spawn inside the secondmate pane"
+for _ in $(seq 1 100); do [ -s "$PROBE" ] && break; sleep 0.1; done
+read -r W_SID _ W_BID <<EOF
+$(cat "$PROBE" 2>/dev/null)
+EOF
+[ -n "${W_BID:-}" ] || smoke_fail "the in-pane worker spawn printed no ids: $(cat "$PROBE" 2>/dev/null)"
+[ "$W_SID" = "$SM_SID" ] || smoke_fail "the secondmate's worker opened outside its fm-<id> session: $(cat "$PROBE")"
+VIEW=$(fm_backend_rex_cli session inspect "session:$SM_SID" --json)
+[ "$(printf '%s' "$VIEW" | jq -r '.windows[0].window_id')" = "window:$SM_WID" ] || smoke_fail "the worker tab displaced the secondmate pane from the first tab"
+[ "$(printf '%s' "$VIEW" | jq '.windows | length')" = 2 ] || smoke_fail "the secondmate session should hold its pane and one worker tab"
+fm_backend_rex_cli block close -s "session:$SM_SID" "block:$W_BID" >/dev/null 2>&1 || true
+fm_backend_kill rex "$TSM" "" fm-smk || smoke_fail "closing the secondmate pane failed"
+fm_backend_rex_cli session inspect "session:$SM_SID" --json >/dev/null 2>&1
+[ "$?" -eq 3 ] || smoke_fail "the emptied fm-<id> session was not retired with its secondmate"
+pass "rex smoke: a secondmate pane is the first tab of its fm-<id> session and its own worker joins that session"
 
 DEAD_SOCK="$TMP_ROOT/dead.sock"
 state=$(FM_BACKEND_REX_SERVER="unix://$DEAD_SOCK" fm_backend_rex_agent_state "$TA")

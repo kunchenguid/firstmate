@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr|rex [traceparent]
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -14,13 +14,19 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
-# Remote placement ends here, but the second-mate agent always runs on the
-# Herdr backend in the dedicated fm-remote session, so launch refuses any other
-# selection rather than reading this home's config/backend. The interactive
-# default session remains for the user's work.
+# Remote placement ends here. The parent names the second-mate agent's backend,
+# and launch refuses anything else rather than reading this home's
+# config/backend:
+#   herdr - a pane in the dedicated fm-remote Herdr session; the interactive
+#           default session remains for the user's work.
+#   rex   - the first tab of a visible `fm-<id>` session on this host's own Rex
+#           server (the Rex app's server, which a connected Rex client shows),
+#           placed by bin/backends/rex.sh; the secondmate's own workers open
+#           there as further tabs.
+# An endpoint recorded on one backend is never reached through the other.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
-# bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
+# bin/fm-remote-doctor.sh owns that host's readiness for either backend.
 # docs/remote-secondmates.md owns why.
 #
 # With <parent-commit>, sync follows the PARENT PRIMARY's default-branch commit,
@@ -60,6 +66,7 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+REMOTE_BACKENDS="herdr rex"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -97,10 +104,17 @@ remote_endpoint_load() {
   fi
   REMOTE_ENDPOINT_BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   REMOTE_ENDPOINT_TARGET=$FM_BACKEND_VALIDATED_TARGET
-  if [ "$REMOTE_ENDPOINT_BACKEND" != herdr ]; then
-    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected 'herdr'; refusing access until it is explicitly migrated"
-    return 1
-  fi
+  case " $REMOTE_BACKENDS " in
+    *" $REMOTE_ENDPOINT_BACKEND "*) ;;
+    *)
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected 'herdr' or 'rex'; refusing access until it is explicitly migrated"
+      return 1
+      ;;
+  esac
+  # A rex record's target is already bound to its recorded session and block
+  # by fm_backend_validate_task_endpoint; launch checks that session's label
+  # live (rex_session_check).
+  [ "$REMOTE_ENDPOINT_BACKEND" != rex ] || return 0
   herdr_session=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" herdr_session 2>/dev/null || true)
   if [ "$herdr_session" != "$REMOTE_HERDR_SESSION" ]; then
     REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
@@ -119,6 +133,18 @@ remote_endpoint_require() {
   remote_endpoint_load "$1" || die "$REMOTE_ENDPOINT_ERROR"
 }
 
+# endpoint_call <command...>: run an adapter call against the loaded endpoint.
+# A Rex block's scoped label is derived from the home that created it - the
+# code root fm-spawn ran as - and its recorded server from the parent-route
+# record, so a rex call runs as that home over that state.
+endpoint_call() {
+  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+    FM_HOME="$FM_ROOT" STATE="$CONTROL_STATE" "$@"
+  else
+    "$@"
+  fi
+}
+
 state_value() { # <id>; prints recovery-grade state
   local id=$1 meta
   meta=$(meta_path "$id")
@@ -128,7 +154,7 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
-  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+  endpoint_call fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
@@ -141,7 +167,11 @@ print_route() { # <id>
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
-  printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
+  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+    printf 'rex_session=fm-%s\n' "$id"
+  else
+    printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
+  fi
   printf 'harness=%s\n' "$harness"
   printf 'model=%s\n' "$model"
   printf 'effort=%s\n' "$effort"
@@ -159,9 +189,24 @@ cmd_route() {
   print_route "$id"
 }
 
+# rex_session_check <id>: the recorded rex endpoint's session is live on its
+# recorded server and still labeled fm-<id>, the visible session the parent
+# expects (bin/backends/rex.sh "Container shape").
+rex_session_check() {
+  local id=$1 meta sid rc
+  meta=$(meta_path "$id")
+  sid=$(fm_meta_get "$meta" rex_session_id)
+  fm_backend_source rex || return 1
+  FM_BACKEND_REX_SERVER=$(fm_meta_get "$meta" rex_server) fm_backend_rex_session_live "session:$sid" "fm-$id"
+  rc=$?
+  [ "$rc" -eq 0 ] || printf 'error: remote secondmate %s is not in a live Rex session labeled fm-%s (rex exit %s)\n' "$id" "$id" "$rc" >&2
+  return "$rc"
+}
+
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
   local current meta out herdr_session
+  local -a launch_env
 
   validate_id "$id"
   validate_home "$id"
@@ -173,23 +218,35 @@ cmd_launch() {
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
-  # Herdr is required on this host, not merely preferred: its server belongs to
-  # the GUI login session, so the endpoint survives every SSH disconnection that
-  # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
-  case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
+  # Either backend's server belongs to the GUI login session (Herdr through the
+  # Firstmate-owned launch agent, Rex through the Rex app), so the endpoint
+  # survives every SSH disconnection that a remote route depends on.
+  # bin/fm-remote-doctor.sh is the readiness owner.
+  case "$selected_backend" in
+    herdr) launch_env=(HERDR_SESSION="$REMOTE_HERDR_SESSION") ;;
+    rex) launch_env=(-u REX_SESSION -u REX_BLOCK -u REX_CLIENT) ;;
+    *) die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;;
+  esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
-    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
+    [ "$REMOTE_ENDPOINT_BACKEND" = "$selected_backend" ] \
+      || die "remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', not the requested '$selected_backend'; retire it before moving it to another backend"
+    current=$(endpoint_call fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
         print_route "$id"
         return 0
         ;;
       dead)
-        fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
-          || die "could not remove the confirmed agent-less endpoint"
+        if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+          endpoint_call fm_backend_kill rex "$REMOTE_ENDPOINT_TARGET" "" "fm-$id" 2>/dev/null \
+            || die "could not remove the confirmed agent-less endpoint"
+        else
+          fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+            || die "could not remove the confirmed agent-less endpoint"
+        fi
         ;;
       missing) ;;
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
@@ -203,7 +260,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
-  if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  if ! out=$(env "${launch_env[@]}" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
     FM_SKIP_SECONDMATE_SYNC=1 \
@@ -212,9 +269,15 @@ cmd_launch() {
     die "remote host-local secondmate launch failed"
   fi
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
-  herdr_session=$(fm_meta_get "$meta" herdr_session)
-  [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
-    || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  if [ "$selected_backend" = rex ]; then
+    remote_endpoint_require "$id"
+    [ "$REMOTE_ENDPOINT_BACKEND" = rex ] || die "remote launch recorded backend '$REMOTE_ENDPOINT_BACKEND', expected 'rex'"
+    rex_session_check "$id" || die "remote launch did not land in this host's fm-$id Rex session"
+  else
+    herdr_session=$(fm_meta_get "$meta" herdr_session)
+    [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
+      || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  fi
   print_route "$id"
 }
 
@@ -233,7 +296,7 @@ cmd_launch() {
 # explicitly clears an absent parent pin; `-` remains its compatibility spelling.
 cmd_relaunch() {
   local id=$1 harness=$2 model=$3 effort=$4
-  local -a control_args
+  local -a control_args launch_env
 
   validate_id "$id"
   validate_home "$id"
@@ -247,14 +310,19 @@ cmd_relaunch() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
   remote_endpoint_require "$id"
+  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+    launch_env=(-u REX_SESSION -u REX_BLOCK -u REX_CLIENT)
+  else
+    launch_env=(HERDR_SESSION="$REMOTE_HERDR_SESSION")
+  fi
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
-  # the dedicated fm-remote session, and the parent already owns both convergence
-  # legs, so the host-local spawn must not re-sync or re-inherit against this
-  # host's own Firstmate copy.
-  HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  # its backend's dedicated session, and the parent already owns both
+  # convergence legs, so the host-local spawn must not re-sync or re-inherit
+  # against this host's own Firstmate copy.
+  env "${launch_env[@]}" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
     FM_SKIP_SECONDMATE_SYNC=1 \
@@ -303,7 +371,7 @@ cmd_send() {
       return 0
       ;;
   esac
-  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  endpoint_call fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
   case "$ring_rc" in
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
@@ -316,6 +384,12 @@ cmd_key() {
   validate_id "$id"
   validate_home "$id"
   remote_endpoint_require "$id"
+  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+    # A bare Rex target carries no backend in its shape, so the key goes
+    # through the adapter by the recorded block and its scoped label.
+    endpoint_call fm_backend_send_key rex "$REMOTE_ENDPOINT_TARGET" "$key" "fm-$id"
+    return
+  fi
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key"
 }
@@ -327,7 +401,7 @@ cmd_capture() {
   case "$lines" in ''|*[!0-9]*|0) die "capture line count must be positive" ;; esac
   [ "$lines" -le 100 ] || die "capture line count exceeds 100"
   remote_endpoint_require "$id"
-  fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
+  endpoint_call fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
 cmd_observe() {
@@ -336,7 +410,7 @@ cmd_observe() {
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
+  endpoint_call fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
 }
 

@@ -1,6 +1,6 @@
 # Rex Backend
 
-Rex (`https://www.superlogical.com/rex`) is an EXPERIMENTAL Firstmate session provider for crewmates and scouts.
+Rex (`https://www.superlogical.com/rex`) is an EXPERIMENTAL Firstmate session provider for crewmates, scouts, and second mates, local or remote.
 Rex is a terminal multiplexer with a server > session > window (tab) > block (pane) hierarchy and a scriptable `rex` CLI.
 The adapter is `bin/backends/rex.sh`; worktrees still come from treehouse.
 
@@ -30,9 +30,22 @@ A detected selection prints a one-line notice naming the experimental backend an
 
 ## Task shape and metadata
 
-Each task is one Rex tab holding one block.
-When Firstmate itself runs in a Rex pane, proven the same way as detection, every task tab opens in Firstmate's own session.
-Otherwise each home uses one session labeled `firstmate` (or `2ndmate-<id>` for a secondmate home), adopted only when exactly one live session carries that label, and created once when none does; two or more refuse.
+Each task is one Rex tab holding one block, in its home's own worker session:
+
+| Home | Session label | What it holds |
+| --- | --- | --- |
+| The primary home | `fm-local` | Every ship and scout tab, never in the session Firstmate itself runs in |
+| A second mate's home | `fm-<secondmate-id>` | The second mate's own pane as the first tab, then its workers as further tabs |
+
+One adapter function, `fm_backend_rex_task_session_locked` in `bin/backends/rex.sh`, makes every placement and naming decision.
+A session label is display and an identity check, never routing:
+
+- A relaunch or reclaim reuses the session its record names while that session is live and still carries the label.
+- Otherwise the one live session with the label is adopted, and one is created, with the task as its first tab, when none exists.
+- Two or more sessions with the label refuse as ambiguous.
+- A second mate's own workers prefer the session the second mate is proven to run in.
+- A primary-home task never opens in Firstmate's own session; if that session is itself labeled `fm-local`, the spawn refuses.
+
 Tabs open with `--focus=false`, so a spawn never moves the captain's view.
 The tab label is `<project>·<id>` for display, and the block label `fm-<home-label>-<id>` is home-scoped so two homes sharing one server never cross-match.
 
@@ -44,9 +57,9 @@ backend=rex
 window=<session-uuid>:<block-uuid>
 rex_server=<server endpoint>
 rex_server_instance=<server instance id>
-rex_session_id=session:<uuid>
-rex_window_id=window:<uuid>
-rex_block_id=block:<uuid>
+rex_session_id=<session-uuid>
+rex_window_id=<window-uuid>
+rex_block_id=<block-uuid>
 ```
 
 `rex_server_instance` lets recovery tell a restarted server from a closed pane.
@@ -68,8 +81,34 @@ The live worktree path comes from the block's foreground process cwd, so spawn-t
 `fm_backend_agent_state` reads the block's foreground process, plus the terminal's foreground process group, through the same agent-process classifier tmux and herdr use: a recognized harness process is alive, a bare shell or a recorded exit is dead, anything else is ambiguous, and a closed block is missing.
 
 Cleanup closes only the task's block and then requires exit 3 on that block id before reporting success; an already-gone block stays quiet.
-When the closed tab was the last one in the home's own `firstmate` session, cleanup closes that session too, unless it is Firstmate's own session.
+When the closed tab was the last one in the home's own `fm-local` or `fm-<id>` session, cleanup closes that session too, unless it is Firstmate's own session or still holds a detached block.
 Spawning and that cleanup share one home-wide lock (`state/.rex-session.lock`), so a new task's tab can never land in a session between its empty check and its close.
+
+## Second mates
+
+`bin/fm-spawn.sh <id> --secondmate --backend rex` opens the second mate as the first tab of its own `fm-<id>` session.
+
+- The parent never adopts an unrecorded `fm-<id>` session for a new second mate pane, because another parent home on the same server may own it.
+- A respawn after the pane is proven gone (exit 3) reuses the session the record names while it is live, moving the new tab to the front.
+- An unreachable server (exit 4) leaves the second mate unproven and is never treated as dead.
+- The second mate's block keeps the parent home's scoped label, so the parent's sends, reads, and cleanup cross-check it.
+- Retiring the second mate closes its pane and, once nothing else is left in it, its `fm-<id>` session.
+- A forced child cleanup closes the second mate's own workers as that home, so each label check uses the home that created it.
+
+## Remote second mates
+
+A remote second mate on Rex runs in a visible `fm-<id>` session on that host's own Rex server, the one its Rex app runs, so a Rex client connected to that server shows it in its tree.
+[`remote-secondmates.md`](remote-secondmates.md) owns the route, the `--backend rex` choice, and the readiness checks; the host runs the same placement as a local second mate.
+
+## Away mode
+
+`/afk` works when Firstmate runs in a Rex pane.
+
+- Supervisor discovery accepts Firstmate's own pane only through the same structural proof as detection.
+  An inherited `REX_BLOCK` alone never names the pane to inject into.
+- The away daemon runs in a detached block of the captain's session: it is addressable by id but sits in no tab, so the captain's tab strip never changes.
+- The away record stores the block's target and its server, and closing it is verified by exit 3 on that block id.
+- Injects pass the shared composer gate, so an escalation never lands on text the captain is typing.
 
 ## Active limits
 
@@ -77,8 +116,7 @@ Spawning and that cleanup share one home-wide lock (`state/.rex-session.lock`), 
 - A server holds 64 sessions, 64 tabs per session, and 1024 blocks by default (`rex server start --help`), so one session holds at most 64 concurrent tasks.
 - A server restart ends every worker on it.
 - Rex has no viewport-only read: `rex capture` and the `format` block method both include scrollback and omit trailing blank rows, so the visible screen cannot be located. Rex is therefore not a visible-capture backend: Kimi spawns and devin and Command Code armed interrupts are refused, and the composer classifier runs without a cursor row.
-- Re-creating a destroyed endpoint on relaunch is not supported yet.
-- Secondmate spawns are refused; select `tmux` or `herdr` for a home that needs them.
+- A Pi composer on Rex reads as unknown, because the classifier runs without a cursor row and Pi's prompt carries no identifying border; the composer gate then defers rather than types.
 - There is no native busy signal yet, so supervision uses capture/hash polling and each harness adapter's semantic lifecycle for worker state.
 
 ## Lab helper
@@ -91,8 +129,14 @@ A brief scaffolded with `fm-brief.sh --rex-lab` carries the matching safety cont
 ```sh
 tests/fm-backend-rex.test.sh
 tests/fm-backend-rex-smoke.test.sh
+tests/fm-afk-inject-rex-e2e.test.sh
+tests/fm-remote-doctor-rex.test.sh
+FM_REX_SECONDMATE_E2E=1 tests/fm-rex-secondmate-e2e.test.sh
 FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
 ```
 
-The first uses a fake `rex`; the smoke test drives the real binary on a lab server without tokens; the last spawns a real Claude scout and submits prompts, so it only runs when opted in.
+- `fm-backend-rex.test.sh` and `fm-remote-doctor-rex.test.sh` use a fake `rex`.
+- The smoke and away-mode tests drive the real binary on a lab server without tokens.
+- The second mate test launches a real Pi second mate on a lab server, aborting before any model request, so it only runs when opted in.
+- The last spawns a real Claude scout and submits prompts, so it only runs when opted in.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#rex) records the active source and live evidence.

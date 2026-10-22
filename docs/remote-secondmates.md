@@ -21,15 +21,22 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
-Every path that provisions or launches one refuses a host that is not ready for it.
+The remote second-mate agent runs on one of two backends, chosen by the primary:
 
-- `fm-remote` is reserved for remote fleet work and must not be used for personal work.
-- The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
-- Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection.
-  As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
-- Local second mates are unaffected and keep their ordinary backend and session selection.
-  So do the workers a remote second mate supervises inside its own home.
+- **Herdr** (the default): the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
+  - `fm-remote` is reserved for remote fleet work and must not be used for personal work.
+  - The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
+- **Rex**: the [Rex backend](rex-backend.md), as the first tab of a visible session labeled `fm-<id>` on the host's own Rex server, the one the Rex app runs.
+  - Any Rex client connected to that server sees the session in its tree.
+  - The second mate's own workers open there as further tabs.
+  - Firstmate never starts, stops, or restarts that server.
+
+Either backend's server belongs to the host's own GUI login session rather than to the SSH connection.
+As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
+Every path that provisions or launches one refuses a host that is not ready for the chosen backend.
+
+Local second mates are unaffected and keep their ordinary backend and session selection.
+So do the workers a remote second mate supervises inside its own home.
 
 ## Prerequisites
 
@@ -58,6 +65,13 @@ ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-re
 
 The entrypoint accepts encoded argv for genuine executable `bin/fm-*.sh` files only.
 It never accepts a shell command string.
+
+### Choose the backend
+
+- Pass `--backend rex` to `bin/fm-remote-home-seed.sh` and to the first `bin/fm-spawn.sh <id> --secondmate` to run the second mate on Rex.
+- Without `--backend`, a route runs on Herdr.
+- Once launched, the parent record names the backend (`remote_backend=`), so recovery and later launches without `--backend` stay on it.
+- Moving a live second mate to the other backend is refused; retire it first.
 
 ### Doctor bootstrap over plain SSH
 
@@ -243,6 +257,10 @@ Every gap is followed by an `action:` line naming the exact step.
 Any remaining gap exits non-zero.
 The script's own header owns the full line protocol.
 
+For a Rex route, add `--backend rex`.
+The doctor then checks the `rex` CLI and that a running Rex server passes the [Rex backend's](rex-backend.md) version gate, instead of the Herdr checks.
+A missing, unreachable, or too-old Rex server is a `human:` gap: open or update the Rex app in that account's GUI login session.
+
 ### Repair with --fix
 
 `--fix` repairs only the automatable gaps and is safe to rerun:
@@ -254,7 +272,7 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 Over the plain SSH doctor bootstrap, it writes and reloads two Firstmate-owned launch agents on macOS:
 
 - `dev.firstmate.remote-job`.
-- `dev.firstmate.herdr.fm-remote`.
+- `dev.firstmate.herdr.fm-remote`, only for a Herdr route; a Rex route needs only the job worker.
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 
@@ -319,9 +337,11 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 
 | Requirement | Tools |
 | --- | --- |
-| Always required | `git`, `jq`, `herdr`, compatible `tasks-axi`, and `treehouse` |
+| Always required | `git`, `jq`, compatible `tasks-axi`, and `treehouse` |
+| On Herdr | `herdr` |
+| On Rex | `rex`, on `PATH` or inside the Rex app bundle |
 | At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi` |
-| Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
+| Additionally required on macOS for Herdr | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
 ## Provision a route
 
@@ -329,7 +349,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 2. Then run:
 
 ```sh
-bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+bin/fm-remote-home-seed.sh [--backend herdr|rex] <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
 
 | Argument | Meaning |
@@ -424,20 +444,24 @@ bin/fm-spawn.sh <id> --secondmate
 The primary then takes these steps:
 
 1. It resolves the verified secondmate harness and optional model and effort.
-2. It runs the same readiness gate the seed runs.
-3. It transfers the inherited-material allowlist.
-4. It asks the remote host to launch on Herdr in `fm-remote`.
+2. It resolves the backend: an explicit `--backend`, then the one the route's record names, then Herdr.
+3. It runs the same readiness gate the seed runs, for that backend.
+4. It transfers the inherited-material allowlist.
+5. It asks the remote host to launch on that backend.
 
-All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+On Herdr, all remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+On Rex, each remote secondmate gets its own `fm-<id>` session, whose first tab is its pane.
+The host checks that the launched pane really sits in a live session with that label before it reports the route.
 
 ### Refused and unsupported launches
 
-- An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched.
+- An explicit request for a backend other than Herdr or Rex is refused rather than honored, and the remote host refuses one too.
+- A launch that names the other backend than the one a live endpoint is recorded on is refused; retire that endpoint first.
+- An existing remote endpoint recorded in another Herdr session, including `default`, or a Rex endpoint whose record is inconsistent, is classified as unverified and left untouched.
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
-- Backends that already refuse secondmate launch, currently Orca, cmux, paseo, and rex, remain unsupported on the remote host.
+- Backends that already refuse secondmate launch, currently Orca, cmux, and paseo, remain unsupported on the remote host.
 
 ### Liveness recovery
 
@@ -669,8 +693,9 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
+On Herdr it closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
+On Rex it closes the secondmate's own pane, and its `fm-<id>` session once that session holds nothing else; it never stops the Rex server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 

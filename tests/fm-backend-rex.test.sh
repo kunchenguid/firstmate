@@ -33,7 +33,8 @@ SERVER=unix:///tmp/fm-rex-fake.sock
 #   methods              `api list -q`
 #   ls.json/.exit        `ls --json`
 #   new.json             `new ... --json`
-#   window-new.json      `window new ... --json`
+#   window-new.json      `window new ... --json` (also answers `window move`)
+#   api-call.json        `api call ...` (e.g. session.new_block); absent -> exit 1
 #   inspect/<id>.json    `block inspect <id> --json`; absent -> exit 3
 #   blocks/<sid>.json    `block ls -s <sid> --json`
 #   call/<bid>.<m>.json  `block call -s S -b <bid> <m>`; absent -> exit 3
@@ -74,7 +75,9 @@ case "$cmd" in
     [ "${1:-}" = status ] || exit 0
     [ -f "$F/status.json" ] || printf '{"endpoint":"unix:///tmp/fm-rex-fake.sock","instance_id":"inst-1","api_revision":4}' >"$F/status.json"
     emit "$F/status.json" ;;
-  api) [ -f "$F/methods" ] || printf '%s\n' block.close session.new_window session.set_block_label com.superlogical.terminal.process com.superlogical.terminal.format >"$F/methods"; cat "$F/methods" ;;
+  api)
+    if [ "${1:-}" = call ]; then emit "$F/api-call.json" 1; fi
+    [ -f "$F/methods" ] || printf '%s\n' block.close session.new_window session.set_block_label com.superlogical.terminal.process com.superlogical.terminal.format >"$F/methods"; cat "$F/methods" ;;
   ls) [ -f "$F/ls.json" ] || printf '{"sessions":[]}' >"$F/ls.json"; emit "$F/ls.json" ;;
   new) emit "$F/new.json" 1 ;;
   window) emit "$F/window-new.json" 1 ;;
@@ -210,45 +213,52 @@ window_new_json() {
   printf '{"window_id":"window:%s","block_ids":["block:%s"],"revision":2}' "$WID" "$BID" >"$FAKE/window-new.json"
 }
 
-test_create_task_outside_rex_creates_an_empty_home_session() {
+test_create_task_creates_the_fm_local_session_with_the_task_as_first_tab() {
   local out
   new_case create-new
-  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:x","block_ids":["block:%s"]}]}' "$SID" "$LBID" >"$FAKE/new.json"
-  window_new_json
+  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
   out=$(fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "create_task must print bare session/window/block uuids, got '$out'"
-  calls | grep -q " new firstmate -c /work/proj --json" || fail "the home session should be created with the firstmate label"
-  calls | grep -q " block close -s session:$SID block:$LBID" || fail "the session's initial shell tab should be closed"
-  calls | grep -q " window new -s session:$SID proj·t1 -c /work/proj --focus=false --keep-open --json" \
-    || fail "the task tab must be created with --focus=false --keep-open and a <project>·<id> label: $(calls)"
+  calls | grep -q " new fm-local -c /work/proj --window proj·t1 --keep-open --json" \
+    || fail "the fm-local session should be created with the task as its first, kept-open tab: $(calls)"
+  calls | grep -q " block close " && fail "the new session's first tab is the task tab and must not be closed"
+  calls | grep -q " window new " && fail "a new fm-local session needs no second tab"
   calls | grep -q " block rename -s session:$SID block:$BID $(fm_backend_rex_scoped_name fm-t1)" \
     || fail "the block must be labeled with the home-scoped name"
-  pass "rex: outside Rex, create_task makes one empty firstmate session and opens an unfocused kept-open tab"
+
+  new_case create-existing
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
+  calls | grep -q " window new -s session:$SID proj·t1 -c /work/proj --focus=false --keep-open --json" \
+    || fail "the task tab must be created with --focus=false --keep-open and a <project>·<id> label: $(calls)"
+  calls | grep -q " window move " && fail "an ordinary task tab is never reordered"
+  pass "rex: a primary-home task opens in the fm-local session (created with the task as its first tab), unfocused and kept open"
 }
 
 test_create_task_adopts_a_unique_home_session_and_refuses_duplicates() {
   local out
   new_case create-adopt
-  printf '{"sessions":[{"session_id":"session:%s","label":"firstmate"},{"session_id":"session:%s","label":"other"}]}' "$SID" "$LSID" >"$FAKE/ls.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"},{"session_id":"session:%s","label":"other"}]}' "$SID" "$LSID" >"$FAKE/ls.json"
   window_new_json
   out=$(fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "unexpected ids '$out'"
-  calls | grep -q -- "--autostart=false new " && fail "an existing unique firstmate session must be adopted, not duplicated"
+  calls | grep -q -- "--autostart=false new " && fail "an existing unique fm-local session must be adopted, not duplicated"
 
   new_case create-ambiguous
-  printf '{"sessions":[{"session_id":"session:%s","label":"firstmate"},{"session_id":"session:%s","label":"firstmate"}]}' "$SID" "$LSID" >"$FAKE/ls.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"},{"session_id":"session:%s","label":"fm-local"}]}' "$SID" "$LSID" >"$FAKE/ls.json"
   window_new_json
-  out=$(fm_backend_rex_create_task fm-t1 /work/proj 2>&1) && fail "two firstmate sessions must refuse"
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj 2>&1) && fail "two fm-local sessions must refuse"
   assert_contains "$out" "refusing to guess" "the ambiguity refusal should explain itself"
 
   new_case create-dup
-  printf '{"sessions":[{"session_id":"session:%s","label":"firstmate"}]}' "$SID" >"$FAKE/ls.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
   printf '{"blocks":[{"block_id":"block:%s","label":"%s"}]}' "$BID" "$(fm_backend_rex_scoped_name fm-t1)" >"$FAKE/blocks/session_$SID.json"
   out=$(fm_backend_rex_create_task fm-t1 /work/proj 2>&1) && fail "a live duplicate label must refuse"
   assert_contains "$out" "already exists" "the duplicate refusal should say so"
 
   new_case create-unreadable
-  printf '{"sessions":[{"session_id":"session:%s","label":"firstmate"}]}' "$SID" >"$FAKE/ls.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
   printf '{"blocks":[]}' >"$FAKE/blocks/session_$SID.json"
   printf '1' >"$FAKE/blocks/session_$SID.exit"
   out=$(fm_backend_rex_create_task fm-t1 /work/proj 2>&1) && fail "an unreadable block inventory must refuse"
@@ -256,16 +266,33 @@ test_create_task_adopts_a_unique_home_session_and_refuses_duplicates() {
   pass "rex: create_task adopts a unique home session, refuses two, and refuses a duplicate or unreadable inventory"
 }
 
-test_create_task_in_rex_uses_the_launcher_session() {
+test_create_task_in_rex_never_uses_the_supervisor_session() {
   local out
   new_case create-launcher
   inspect_json "$LBID" "$LSID"
   process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$,\"name\":\"bash\"},\"last_exit\":null}"
-  window_new_json
+  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
   out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
-  [ "$out" = "$LSID $WID $BID" ] || fail "the task tab should open in the launcher's session, got '$out'"
-  calls | grep -q -- "--autostart=false new " && fail "a proven launcher must never create a home session"
-  pass "rex: inside a proven Rex pane, the task tab opens in firstmate's own session"
+  [ "$out" = "$SID $WID $BID" ] || fail "the task tab should open in a new fm-local session, got '$out'"
+  calls | grep -q " window new -s session:$LSID" && fail "a task tab must never open in the supervisor's own session"
+  calls | grep -q " new fm-local " || fail "a proven launcher must still get the dedicated fm-local session: $(calls)"
+
+  new_case create-launcher-recorded
+  inspect_json "$LBID" "$LSID"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$,\"name\":\"bash\"},\"last_exit\":null}"
+  printf '{"session_id":"session:%s","label":"captain-work","windows":[]}' "$LSID" >"$FAKE/session/session_$LSID.json"
+  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-t1 /work/proj "" "$LSID") || fail "create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "a record naming the supervisor's session must not pull a reclaim into it, got '$out'"
+
+  new_case create-launcher-labeled
+  inspect_json "$LBID" "$LSID"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$,\"name\":\"bash\"},\"last_exit\":null}"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$LSID" >"$FAKE/ls.json"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-t1 /work/proj 2>&1) \
+    && fail "a supervisor session labeled fm-local must refuse rather than receive worker tabs"
+  assert_contains "$out" "supervisor's session" "the refusal should name the supervisor's session"
+  pass "rex: inside a proven Rex pane, task tabs open in fm-local and never in the supervisor's own session"
 }
 
 # --- targets, I/O ------------------------------------------------------------
@@ -392,10 +419,10 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   new_case kill
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
   : >"$FAKE/close-removes"
-  printf '{"session_id":"session:%s","label":"firstmate","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  printf '{"session_id":"session:%s","label":"fm-local","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
   fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
   calls | grep -q " block close -s session:$SID block:$BID" || fail "kill must close the exact block"
-  calls | grep -q " kill session:$SID" || fail "an emptied firstmate session should be retired"
+  calls | grep -q " kill session:$SID" || fail "an emptied fm-local session should be retired"
 
   new_case kill-keep
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
@@ -406,7 +433,7 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   : >"$FAKE/log"
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
   REX_SESSION=session:$SID fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
-  calls | grep -q " session inspect" && fail "firstmate's own launcher session must never be considered for retirement"
+  calls | grep -q " session inspect" && fail "Firstmate's own supervisor session must never be considered for retirement"
 
   new_case kill-gone
   fm_backend_kill rex "$T" "" fm-t1 || fail "an already-gone block is a successful kill"
@@ -432,7 +459,7 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
 test_list_live_filters_by_home_scope() {
   local out
   new_case list
-  printf '{"sessions":[{"session_id":"session:%s","label":"firstmate"}]}' "$SID" >"$FAKE/ls.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
   printf '{"blocks":[{"block_id":"block:%s","label":"%s"},{"block_id":"block:%s","label":"fm-other-home-t9"}]}' \
     "$BID" "$(fm_backend_rex_scoped_name fm-t1)" "$LBID" >"$FAKE/blocks/session_$SID.json"
   out=$(fm_backend_rex_list_live)
@@ -495,23 +522,295 @@ test_validate_task_endpoint_arm() {
   pass "rex: cleanup identity requires the server, both uuids, and window=<session>:<block>"
 }
 
-test_secondmate_spawn_is_refused() {
-  local dir out
-  dir="$TMP_ROOT/secondmate"
-  mkdir -p "$dir/state" "$dir/data" "$dir/config" "$dir/projects"
-  out=$(PATH="$ORIG_PATH" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
-    FM_PROJECTS_OVERRIDE="$dir/projects" "$ROOT/bin/fm-spawn.sh" sm-rex-test --secondmate --backend rex 2>&1)
-  assert_contains "$out" "backend=rex supports ship and scout spawns only" "fm-spawn.sh must refuse --secondmate on rex"
-  pass "fm-spawn.sh: --secondmate on rex is refused with a clear message"
+# --- secondmates, reclaim, and session retirement ------------------------------
+
+secondmate_home() { # <dir> <id> -> a secondmate home carrying its marker
+  mkdir -p "$1/state"
+  printf '%s\n' "$2" >"$1/.fm-secondmate-home"
+}
+
+test_secondmate_gets_its_own_session_as_first_tab() {
+  local out sm
+  new_case sm-new
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  # A proven launcher (the parent's own pane) must be ignored.
+  inspect_json "$LBID" "$LSID"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$,\"name\":\"bash\"},\"last_exit\":null}"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$LSID" >"$FAKE/ls.json"
+  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-sm1 "$sm" "$sm" "") || fail "secondmate create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "the secondmate pane should be the new session's first tab, got '$out'"
+  calls | grep -q " new fm-sm1 -c $sm --window 2ndmate·sm1 --keep-open --json" \
+    || fail "the secondmate session must be created as fm-<id> with its first tab: $(calls)"
+  calls | grep -q " window new " && fail "a new secondmate session needs no second tab"
+  calls | grep -q " block close " && fail "the new session's first tab is the secondmate pane and must not be closed"
+  calls | grep -q " block rename -s session:$SID block:$BID $(fm_backend_rex_scoped_name fm-sm1)" \
+    || fail "the secondmate block must carry the PARENT home's scoped name"
+
+  new_case sm-unrecorded
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-sm1"}]}' "$LSID" >"$FAKE/ls.json"
+  out=$(fm_backend_rex_create_task fm-sm1 "$sm" "$sm" "" 2>&1) && fail "an unrecorded fm-<id> session must not be adopted for a secondmate pane"
+  assert_contains "$out" "refusing to adopt" "the refusal should say it will not adopt the session"
+
+  new_case sm-local
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" local
+  out=$(fm_backend_rex_create_task fm-local "$sm" "$sm" "" 2>&1) && fail "secondmate id 'local' must refuse"
+  assert_contains "$out" "fm-local" "the refusal should name the colliding label"
+  pass "rex: a secondmate gets a new fm-<id> session whose first tab is its pane, never the parent's nor an unrecorded one"
+}
+
+test_secondmate_home_workers_join_its_session() {
+  local out sm
+  new_case sm-workers
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  inspect_json "$LBID" "$LSID"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$,\"name\":\"bash\"},\"last_exit\":null}"
+  printf '{"session_id":"session:%s","label":"fm-sm1","windows":[]}' "$LSID" >"$FAKE/session/session_$LSID.json"
+  # A second fm-sm1 session elsewhere: the proven session wins without a label lookup.
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-sm1"},{"session_id":"session:%s","label":"fm-sm1"}]}' "$LSID" "$SID" >"$FAKE/ls.json"
+  window_new_json
+  out=$(FM_HOME=$sm FM_ROOT=$sm STATE=$sm/state REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-w1 /work/proj) \
+    || fail "a secondmate's worker create_task failed"
+  [ "$out" = "$LSID $WID $BID" ] || fail "a secondmate's worker should open in the fm-<id> session it runs in, got '$out'"
+  calls | grep -q " window move " && fail "a secondmate's worker tab must not displace the secondmate pane"
+
+  new_case sm-workers-outside
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"},{"session_id":"session:%s","label":"fm-sm1"}]}' "$LSID" "$SID" >"$FAKE/ls.json"
+  window_new_json
+  out=$(FM_HOME=$sm FM_ROOT=$sm STATE=$sm/state fm_backend_rex_create_task fm-w1 /work/proj) || fail "create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "outside Rex a secondmate's worker should adopt its unique fm-<id> session, got '$out'"
+  pass "rex: a secondmate's own workers open as further tabs of its fm-<id> session"
+}
+
+test_secondmate_relaunch_reuses_its_recorded_live_session() {
+  local out sm
+  new_case sm-reuse
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  printf '{"session_id":"session:%s","label":"fm-sm1","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-sm1 "$sm" "$sm" "$SID") || fail "secondmate create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "the recorded live session should be reused, got '$out'"
+  calls | grep -q -- "--autostart=false new " && fail "a live recorded session must not be duplicated"
+  calls | grep -q " window new -s session:$SID 2ndmate·sm1 -c $sm --focus=false --keep-open --json" || fail "the tab must open unfocused in the recorded session"
+  calls | grep -q " window move -s session:$SID window:$WID --index 1" || fail "the secondmate tab must move to the front of a reused session"
+
+  new_case sm-relabeled
+  secondmate_home "$CASE/sm-home" sm1
+  printf '{"session_id":"session:%s","label":"captain-work","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$LSID" "$WID" "$BID" >"$FAKE/new.json"
+  out=$(fm_backend_rex_create_task fm-sm1 "$CASE/sm-home" "$CASE/sm-home" "$SID") || fail "create_task failed"
+  [ "$out" = "$LSID $WID $BID" ] || fail "a recorded session now labeled otherwise must not be reused, got '$out'"
+
+  new_case sm-unreadable
+  secondmate_home "$CASE/sm-home" sm1
+  printf '{}' >"$FAKE/session/session_$SID.json"
+  printf '4' >"$FAKE/session/session_$SID.exit"
+  out=$(fm_backend_rex_create_task fm-sm1 "$CASE/sm-home" "$CASE/sm-home" "$SID" 2>&1) && fail "an unreadable recorded session must refuse"
+  assert_contains "$out" "could not read the recorded Rex session" "the refusal should name the recorded session"
+  pass "rex: a secondmate relaunch reuses its live recorded session (tab moved first), never a relabeled one, and refuses an unreadable one"
+}
+
+test_reclaim_prefers_the_recorded_session() {
+  local out
+  new_case reclaim-live
+  printf '{"session_id":"session:%s","label":"fm-local","windows":[]}' "$LSID" >"$FAKE/session/session_$LSID.json"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "$LSID") || fail "reclaim create_task failed"
+  [ "$out" = "$LSID $WID $BID" ] || fail "a reclaim should mint its tab in the live recorded session, got '$out'"
+  calls | grep -q -- "--autostart=false new " && fail "a live recorded session needs no new home session"
+
+  new_case reclaim-gone
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "$LSID") || fail "reclaim create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "a gone recorded session should fall back to the home session, got '$out'"
+
+  new_case reclaim-relabeled
+  printf '{"session_id":"session:%s","label":"captain-work","windows":[]}' "$LSID" >"$FAKE/session/session_$LSID.json"
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "$LSID") || fail "reclaim create_task failed"
+  [ "$out" = "$SID $WID $BID" ] || fail "a recorded session no longer labeled fm-local must not be reused, got '$out'"
+  pass "rex: a reclaim mints its tab in the recorded session while live and labeled, else in this home's session"
+}
+
+test_retirement_covers_secondmate_sessions_and_detached_blocks() {
+  new_case retire-sm
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-sm1)"
+  : >"$FAKE/close-removes"
+  printf '{"session_id":"session:%s","label":"fm-sm1","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-sm1 || fail "kill should succeed"
+  calls | grep -q " kill session:$SID" || fail "an emptied fm-<id> session should retire with its secondmate"
+
+  new_case retire-sm-other
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  : >"$FAKE/close-removes"
+  printf '{"session_id":"session:%s","label":"fm-sm1","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
+  calls | grep -q " kill session:" && fail "another secondmate's session must never retire with an unrelated task"
+
+  new_case retire-detached
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  : >"$FAKE/close-removes"
+  printf '{"session_id":"session:%s","label":"fm-local","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  printf '{"blocks":[{"block_id":"block:%s","label":"fm-afk-daemon-x","placement":"detached"}]}' "$LBID" >"$FAKE/blocks/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
+  calls | grep -q " kill session:" && fail "a session holding a detached block must not be retired"
+  pass "rex: an emptied secondmate session retires with that secondmate only, and a detached block keeps any session alive"
+}
+
+test_child_teardown_scoping_as_the_child_home() {
+  local sm out
+  new_case child-scope
+  sm="$CASE/sm-home"
+  secondmate_home "$sm" sm1
+  out=$(FM_HOME=$sm FM_ROOT=$sm fm_backend_rex_scoped_name fm-w1)
+  [ "$out" != "$(fm_backend_rex_scoped_name fm-w1)" ] || fail "a child home's scoped name must differ from the parent's"
+  case "$out" in fm-2ndmate-sm1-*-w1) ;; *) fail "a child home's scoped name should carry its 2ndmate tag, got '$out'" ;; esac
+  [ "$(FM_HOME=$sm fm_backend_rex_session_label)" = fm-sm1 ] || fail "a child home's session label should be fm-<id>"
+  [ "$(fm_backend_rex_session_label)" = fm-local ] || fail "the primary home's session label should be fm-local"
+  pass "rex: a secondmate home scopes its workers' labels and its session label by its own tag"
+}
+
+# --- away mode -----------------------------------------------------------------
+
+test_supervisor_discovery_requires_proof() {
+  local out
+  new_case supervisor
+  # shellcheck source=bin/fm-supervisor-target-lib.sh
+  . "$ROOT/bin/fm-supervisor-target-lib.sh"
+  inspect_json "$LBID" "$LSID"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$},\"last_exit\":null}"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID discover_supervisor_target)
+  [ "$out" = "$LSID:$LBID" ] || fail "a proven Rex pane should be the supervisor target, got '$out'"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID discover_supervisor_backend)
+  [ "$out" = rex ] || fail "a proven Rex pane should select the rex supervisor backend, got '$out'"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID TMUX_PANE=%9 discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "tmux inside Rex must stay tmux, got '$out'"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID HERDR_ENV=1 HERDR_PANE_ID=p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "herdr inside Rex must stay herdr, got '$out'"
+  out=$(discover_supervisor_rex_server)
+  [ "$out" = "$SERVER" ] || fail "the supervisor's Rex server should resolve like the adapter's, got '$out'"
+  process_json "$LBID" '{"child":{"pid":999999},"foreground":{"pid":999999},"last_exit":null}'
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID discover_supervisor_target) && fail "an inherited REX_BLOCK without ancestry must not be a supervisor target ('$out')"
+  out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "an unproven Rex pane should fall back to tmux, got '$out'"
+  pass "rex: supervisor discovery takes a Rex pane only with ancestry proof, after tmux and herdr"
+}
+
+test_detached_block_create_and_close() {
+  local out payload
+  new_case detached
+  printf '{"block_id":"block:%s","revision":4}' "$BID" >"$FAKE/api-call.json"
+  out=$(fm_backend_rex_detached_create "session:$SID" fm-afk-daemon-x /home/fm $'exec daemon\n') || fail "detached_create failed"
+  [ "$out" = "$T" ] || fail "detached_create should print the block's target, got '$out'"
+  payload=$(grep $'\037session.new_block\037' "$FAKE/log" | tail -1 | awk -F '\037' '{print $NF}')
+  [ "$(printf '%s' "$payload" | jq -r .label)" = fm-afk-daemon-x ] || fail "the detached block should carry its label: $payload"
+  [ "$(printf '%s' "$payload" | jq -c .options.initial_input)" = '"exec daemon\n"' ] || fail "the daemon command should be typed into the block's login shell"
+  calls | grep -q " api call -s session:$SID session.new_block " || fail "the block must be created in the given session"
+  printf 'not-json' >"$FAKE/api-call.json"
+  fm_backend_rex_detached_create "session:$SID" l /h x >/dev/null 2>&1 && fail "an unparseable create must fail"
+  inspect_json "$BID" "$SID" fm-afk-daemon-x
+  : >"$FAKE/close-removes"
+  fm_backend_rex_block_close "$T" || fail "block_close should prove the block gone"
+  fm_backend_rex_block_close "$T" || fail "closing a gone block is success"
+  inspect_json "$BID" "$SID" fm-afk-daemon-x
+  rm -f "$FAKE/close-removes"
+  fm_backend_rex_block_close "$T" && fail "a block still present after close must fail"
+  printf '4' >"$FAKE/exit"
+  fm_backend_rex_block_close "$T" && fail "an unreachable server must never read as closed"
+  pass "rex: a detached daemon block is created in the captain's session and closes only on proven exit 3"
+}
+
+test_afk_launch_rex_terminal_lifecycle() {
+  local st out
+  new_case afk
+  st="$CASE/home/state"
+  inspect_json "$LBID" "$LSID"
+  printf '{"block_id":"block:%s","revision":4}' "$BID" >"$FAKE/api-call.json"
+  inspect_json "$BID" "$LSID" "fm-afk-daemon-x"
+  out=$(
+    FM_STATE_OVERRIDE=$st FM_AFK_LAUNCH_ENTRY=/bin/true
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-afk-launch.sh"
+    fm_afk_launch_create_rex "$LSID:$LBID" rex 2>&1 || echo "create-failed"
+    cat "$st/.afk-daemon-terminal"
+  )
+  assert_contains "$out" "rex"$'\t'"$LSID:$BID"$'\t'"$SERVER" "the record should hold rex, the exact block target, and the server: $out"
+  grep $'\037session.new_block\037' "$FAKE/log" | grep -q "FM_REX_SERVER=" || fail "the daemon command must carry FM_REX_SERVER"
+  grep $'\037session.new_block\037' "$FAKE/log" | grep -q "FM_SUPERVISOR_BACKEND=rex" || fail "the daemon command must name the rex supervisor backend"
+  : >"$FAKE/close-removes"
+  out=$(
+    FM_STATE_OVERRIDE=$st
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-afk-launch.sh"
+    fm_afk_launch_record_read && fm_afk_launch_close_recorded && echo closed
+  )
+  [ "$out" = closed ] || fail "the recorded rex daemon block should close by exact id, got '$out'"
+  [ ! -e "$st/.afk-daemon-terminal" ] || fail "a proven-closed daemon block should drop its record"
+  calls | grep -q " block close -s session:$LSID block:$BID" || fail "close must address the recorded block"
+
+  new_case afk-missing-captain
+  out=$(
+    FM_STATE_OVERRIDE="$CASE/home/state" FM_AFK_LAUNCH_ENTRY=/bin/true
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-afk-launch.sh"
+    fm_afk_launch_create_rex "$LSID:$LBID" rex 2>&1 && echo created
+  )
+  assert_not_contains "$out" created "a captain pane that is not live must refuse the daemon launch"
+  calls | grep -q "session.new_block" && fail "no daemon block may be created for a missing captain pane"
+  pass "rex: /afk runs the daemon in a recorded detached block on the captain's server and closes it by exact id"
+}
+
+# The host control for a remote second mate reads its parent-route record on
+# Rex: route names the visible fm-<id> session, an inconsistent record is
+# unverified, and a rex endpoint is never relaunched onto herdr.
+test_remote_control_rex_arm() {
+  local home meta out rc
+  new_case remote-control
+  home="$CASE/rsm-home"
+  mkdir -p "$home/bin" "$home/state/parent-route"
+  printf 'rsm\n' >"$home/.fm-secondmate-home"
+  : >"$home/AGENTS.md"
+  meta="$home/state/parent-route/rsm.meta"
+  write_route() { # <rex_session_id>
+    printf '%s\n' "window=$T" "endpoint_task_id=rsm" "worktree=$home" "project=$home" "backend=rex" \
+      "rex_server=$SERVER" "rex_session_id=$1" "rex_block_id=$BID" "harness=claude" "model=" "effort=" >"$meta"
+  }
+  write_route "$SID"
+  out=$(FM_HOME=$home "$ROOT/bin/fm-remote-secondmate-control.sh" route rsm 2>&1) || fail "route should print a rex record: $out"
+  assert_contains "$out" "backend=rex" "route should name the rex backend"
+  assert_contains "$out" "target=$T" "route should print the exact block target"
+  assert_contains "$out" "rex_session=fm-rsm" "route should name the visible fm-<id> session"
+  assert_not_contains "$out" "herdr_session" "a rex route must not name a Herdr session"
+  out=$(FM_HOME=$home "$ROOT/bin/fm-remote-secondmate-control.sh" state rsm 2>/dev/null)
+  [ "$out" = missing ] || fail "a closed remote block should read missing, got '$out'"
+  rc=0
+  out=$(FM_HOME=$home "$ROOT/bin/fm-remote-secondmate-control.sh" launch rsm claude - - herdr 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a rex endpoint must not be relaunched onto herdr"
+  assert_contains "$out" "recorded on backend 'rex'" "the refusal should name the recorded backend"
+  write_route "$LSID"
+  out=$(FM_HOME=$home "$ROOT/bin/fm-remote-secondmate-control.sh" state rsm 2>/dev/null)
+  [ "$out" = unverified ] || fail "a target outside the recorded session should be unverified, got '$out'"
+  calls | grep -q ' close \| send \| kill ' && fail "reading a remote record must never close, send, or kill"
+  pass "rex: the remote host control routes to fm-<id>, reads a gone block as missing, and refuses inconsistent or cross-backend records"
 }
 
 test_every_call_pins_server_and_never_autostarts
 test_server_resolution_prefers_the_task_record
 test_version_gate
 test_container_ensure_pins_server_and_instance
-test_create_task_outside_rex_creates_an_empty_home_session
+test_create_task_creates_the_fm_local_session_with_the_task_as_first_tab
 test_create_task_adopts_a_unique_home_session_and_refuses_duplicates
-test_create_task_in_rex_uses_the_launcher_session
+test_create_task_in_rex_never_uses_the_supervisor_session
 test_parse_target
 test_target_ready_checks_session_and_label
 test_capture_send_and_keys
@@ -522,4 +821,13 @@ test_kill_closes_proves_gone_and_retires_the_home_session
 test_list_live_filters_by_home_scope
 test_detection_requires_structural_proof
 test_validate_task_endpoint_arm
-test_secondmate_spawn_is_refused
+test_secondmate_gets_its_own_session_as_first_tab
+test_secondmate_home_workers_join_its_session
+test_secondmate_relaunch_reuses_its_recorded_live_session
+test_reclaim_prefers_the_recorded_session
+test_retirement_covers_secondmate_sessions_and_detached_blocks
+test_child_teardown_scoping_as_the_child_home
+test_supervisor_discovery_requires_proof
+test_detached_block_create_and_close
+test_afk_launch_rex_terminal_lifecycle
+test_remote_control_rex_arm

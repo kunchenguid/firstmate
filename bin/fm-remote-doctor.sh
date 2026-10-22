@@ -2,17 +2,19 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix] [--backend herdr|rex]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
 # PATH used by worker jobs while retaining authority to inspect and repair the
 # worker itself.
 #
-# A remote second mate always runs on the Herdr backend in the dedicated
-# fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
-# agent plus the sibling dev.firstmate.remote-job worker that runs normal fm-on
-# commands through the Aqua or Linux job-worker path. On darwin, that Herdr
+# --backend names the backend the second mate runs on (herdr by default).
+#
+# On Herdr, a remote second mate runs in the dedicated fm-remote session. Its
+# account therefore needs the Firstmate-owned Aqua Herdr agent plus the sibling
+# dev.firstmate.remote-job worker that runs normal fm-on commands through the
+# Aqua or Linux job-worker path. On darwin, that Herdr
 # agent runs bin/fm-remote-herdr-guard.sh through the remote account's login
 # shell (`-l -c`) so the server inherits the account's own environment; the
 # gui/<uid> launchd domain it is bootstrapped into, not the shell, is what
@@ -25,6 +27,13 @@
 # invokable over the plain-SSH bootstrap path to inspect and repair that worker.
 # SSH cannot create an Aqua session, so a host with no GUI login is a human
 # gap rather than something --fix attempts to bypass.
+#
+# On Rex, the second mate runs in a visible fm-<id> session on the account's
+# own Rex server, which the Rex app owns in the GUI login session. Firstmate
+# never starts, stops, or restarts that server, so a missing or unreachable one
+# is a human gap; the account needs the rex CLI (on PATH or inside the app
+# bundle, bin/backends/rex.sh fm_backend_rex_bin), a server passing the
+# adapter's version gate, and the same remote job worker.
 #
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
@@ -84,8 +93,9 @@ ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 MODE=check
+BACKEND=herdr
 case "${1:-}" in
-  '') ;;
+  '' | --backend) ;;
   --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
@@ -94,7 +104,17 @@ case "${1:-}" in
     ;;
   *) usage ;;
 esac
+if [ "${1:-}" = --backend ]; then
+  [ "$#" -ge 2 ] || usage
+  BACKEND=$2
+  shift 2
+fi
 [ "$#" -eq 0 ] || usage
+case "$BACKEND" in
+  herdr) ;;
+  rex) REQUIRED_TOOLS=(git jq rex tasks-axi treehouse) ;;
+  *) usage ;;
+esac
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -426,6 +446,7 @@ report_required_tools() {
   MISSING=()
   for tool in "${REQUIRED_TOOLS[@]}"; do
     resolved=$(command -v "$tool" 2>/dev/null || true)
+    [ "$tool" != rex ] || [ -n "$resolved" ] || resolved=$(rex_cli_path 2>/dev/null || true)
     if [ -n "$resolved" ] && [ -x "$resolved" ]; then
       if [ "$tool" = tasks-axi ] && ! fm_tasks_axi_compatible; then
         printf 'required tasks-axi=MISSING (incompatible)\n'
@@ -453,7 +474,7 @@ report_required_tools_from_worker() {
   local job_id probe_stdout probe_stderr probe_exit line fact name value
   local expected=6 count=0 valid=1 seen=' '
   if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
-    fm-remote-doctor.sh --worker-tool-probe </dev/null); then
+    fm-remote-doctor.sh --worker-tool-probe --backend "$BACKEND" </dev/null); then
     set_check remote-job-probe "fixable: the remote job worker could not accept the required-tool probe" \
       "rerun this command with --fix to restart the worker"
     report_required_tools
@@ -475,7 +496,7 @@ report_required_tools_from_worker() {
     fact=${line#required }
     name=${fact%%=*}
     value=${fact#*=}
-    case "$name" in git|jq|herdr|tasks-axi|treehouse|harness) ;; *) valid=0; continue ;; esac
+    case "$name" in git|jq|herdr|rex|tasks-axi|treehouse|harness) ;; *) valid=0; continue ;; esac
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
@@ -578,6 +599,56 @@ check_herdr() {
   fi
   record herdr "human: the herdr CLI does not resolve on the remote runtime PATH" \
     "install herdr from https://herdr.dev on that account, or add a ~/.local/bin wrapper for it; a remote second mate always runs on the Herdr backend"
+}
+
+# The rex adapter is the single owner of locating the rex CLI, reaching a
+# server without autostart, and the version gate, so read through it.
+rex_adapter_load() {
+  [ -z "${FM_REMOTE_DOCTOR_REX_LOADED:-}" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -f "$SCRIPT_DIR/fm-backend.sh" ] && [ -f "$SCRIPT_DIR/backends/rex.sh" ] || return 1
+  # shellcheck source=bin/fm-backend.sh
+  . "$SCRIPT_DIR/fm-backend.sh" || return 1
+  fm_backend_source rex || return 1
+  FM_REMOTE_DOCTOR_REX_LOADED=1
+}
+
+rex_cli_path() {
+  local bin
+  rex_adapter_load || return 1
+  bin=$(fm_backend_rex_bin) || return 1
+  [ "$bin" != rex ] || bin=$(command -v rex) || return 1
+  printf '%s' "$bin"
+}
+
+check_rex() {
+  local resolved
+  if resolved=$(rex_cli_path) && [ -x "$resolved" ]; then
+    record rex "ok: $resolved"
+    return 0
+  fi
+  record rex "human: the rex CLI does not resolve on the remote runtime PATH or inside the Rex app bundle" \
+    "install the Rex app on that account (https://www.superlogical.com/rex/docs/installation); a remote second mate on the rex backend needs it"
+}
+
+check_rex_server() {
+  local server out
+  if ! rex_adapter_load || ! rex_cli_path >/dev/null; then
+    record rex-server "human: the Rex server cannot be read without both rex and jq" \
+      "install the missing tool reported above, then rerun this command"
+    return 0
+  fi
+  if ! server=$(fm_backend_rex_server 2>/dev/null) || [ -z "$server" ]; then
+    record rex-server "human: no running Rex server answers on this account" \
+      "open the Rex app in that account's GUI login session; Firstmate never starts a Rex server"
+    return 0
+  fi
+  if ! out=$(FM_BACKEND_REX_SERVER=$server fm_backend_rex_version_check 2>&1); then
+    record rex-server "human: the Rex server at $server does not pass the adapter's version gate: ${out:-no diagnostic}" \
+      "update the Rex app on that account, then rerun this command"
+    return 0
+  fi
+  record rex-server "ok: $server"
 }
 
 check_gui_session() {
@@ -723,11 +794,18 @@ run_checks() { # <resolved-login-shell>
   CHECK_NAMES=()
   CHECK_VALUES=()
   CHECK_ACTIONS=()
-  check_herdr
-  check_gui_session
-  check_remote_job_worker
-  check_launch_agent "$shell"
-  check_herdr_server
+  if [ "$BACKEND" = rex ]; then
+    check_rex
+    check_gui_session
+    check_remote_job_worker
+    check_rex_server
+  else
+    check_herdr
+    check_gui_session
+    check_remote_job_worker
+    check_launch_agent "$shell"
+    check_herdr_server
+  fi
   check_entrypoint_link
 }
 

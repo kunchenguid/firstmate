@@ -77,8 +77,8 @@ fm_secondmate_restart_capable() {  # <meta-file>
     FM_SECONDMATE_RESTART_PLACEMENT=remote
     FM_SECONDMATE_RESTART_HOST=$remote_host
     # A remote mate's endpoint record lives on its host; the parent's own record
-    # names the backend that launch established there, and the remote route
-    # accepts nothing but herdr.
+    # names the backend that launch established there (herdr or rex), and a
+    # record from before that field existed is herdr.
     backend=$(fm_meta_get "$meta" remote_backend)
     [ -n "$backend" ] || backend=herdr
   else

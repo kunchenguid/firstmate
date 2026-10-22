@@ -56,7 +56,8 @@
 # native background mechanism (pi) has to manufacture a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
+# workspace with --no-focus, a detached tmux session, or a DETACHED Rex block -
+# running and addressable by id but placed in no tab) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
@@ -98,8 +99,11 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
-# non-visible-launch primitive here yet and refuse loudly.
+# Supported backends: herdr, tmux, rex. Others (zellij, orca, cmux, paseo) have
+# no verified non-visible-launch primitive here yet and refuse loudly. A rex
+# record keeps the Rex server address as its third field, and the daemon is
+# handed that same address as FM_REX_SERVER, so every close, absence, and
+# liveness read addresses the recorded server by full block id.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
@@ -393,9 +397,11 @@ fm_afk_launch_entry_cmd() {
 # captain's process tree, so the daemon cannot detect the captain's harness
 # itself; the launcher names it here (bin/fm-supervise-daemon.sh
 # fm_daemon_primary_harness).
-fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
-  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
-    "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend> [rex-server]
+  local server_env=
+  [ -z "${3:-}" ] || printf -v server_env 'FM_REX_SERVER=%q ' "$3"
+  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %s%q' \
+    "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$server_env" "$(fm_afk_launch_entry_cmd)"
 }
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
@@ -412,12 +418,13 @@ fm_afk_launch_flag_write() {
   fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" "$(fm_afk_launch_requested_mode)"
 }
 
-# Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
-# field (a herdr workspace id, kept for the record's own documentation) is not
-# needed to close by id, so it is discarded. Returns 1 when no record exists.
+# Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET and the
+# third field into FM_AFK_REC_EXTRA: a herdr workspace id (kept for the record's
+# own documentation; closing by pane id does not need it) or the Rex server
+# every rex read must address. Returns 1 when no record exists.
 fm_afk_launch_record_read() {
   local extra record
-  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; extra=""
+  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; FM_AFK_REC_EXTRA=""; extra=""
   [ -f "$FM_AFK_LAUNCH_RECORD" ] || return 1
   record=$(cat "$FM_AFK_LAUNCH_RECORD" 2>/dev/null) || record=""
   IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra \
@@ -427,8 +434,9 @@ fm_afk_launch_record_read() {
     fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
     return 2
   fi
+  FM_AFK_REC_EXTRA=$extra
   case "$FM_AFK_REC_BACKEND" in
-    herdr) [ -n "$extra" ] ;;
+    herdr | rex) [ -n "$extra" ] ;;
     tmux) : ;;
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
@@ -445,9 +453,14 @@ fm_afk_launch_record_validate_if_present() {
 # Close a recorded terminal by EXACT id (never a broad sweep). The
 # recorded workspace id (herdr) needs no separate close: closing the pane takes
 # its single-tab dedicated workspace with it.
-fm_afk_launch_close_terminal() {  # <backend> <target>
+fm_afk_launch_close_terminal() {  # <backend> <target> [rex-server]
   local backend=$1 target=$2
   case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ -n "${3:-}" ] || return 1
+      FM_BACKEND_REX_SERVER=$3 fm_backend_rex_block_close "$target"
+      ;;
     herdr)
       fm_backend_source herdr || return 1
       local session=${target%%:*} pane=${target#*:}
@@ -468,9 +481,17 @@ fm_afk_launch_close_terminal() {  # <backend> <target>
   esac
 }
 
-fm_afk_launch_terminal_absent() {  # <backend> <target>
+fm_afk_launch_terminal_absent() {  # <backend> <target> [rex-server]
   local backend=$1 target=$2 session pane out result code
   case "$backend" in
+    rex)
+      # Exit 3 on the full block id from the recorded server is the structural
+      # absence proof; an unreachable server (exit 4) is never absence.
+      fm_backend_source rex || return 1
+      [ -n "${3:-}" ] || return 1
+      FM_BACKEND_REX_SERVER=$3 fm_backend_rex_block_inspect "$target" >/dev/null
+      [ "$?" -eq 3 ]
+      ;;
     herdr)
       session=${target%%:*}
       pane=${target#*:}
@@ -496,8 +517,8 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
 
 fm_afk_launch_close_recorded() {
   local close_result=0
-  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || close_result=$?
-  if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" "${FM_AFK_REC_EXTRA:-}" || close_result=$?
+  if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" "${FM_AFK_REC_EXTRA:-}"; then
     rm -f "$FM_AFK_LAUNCH_RECORD" || return 1
     [ "$close_result" -eq 0 ] || fm_afk_launch_log "terminal close command failed, but exact absence was confirmed"
     return 0
@@ -506,9 +527,14 @@ fm_afk_launch_close_recorded() {
   return 1
 }
 
-fm_afk_launch_terminal_alive() {  # <backend> <target>
+fm_afk_launch_terminal_alive() {  # <backend> <target> [rex-server]
   local backend=$1 target=$2 session pane
   case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ -n "${3:-}" ] || return 1
+      FM_BACKEND_REX_SERVER=$3 fm_backend_rex_block_inspect "$target" >/dev/null
+      ;;
     herdr)
       session=${target%%:*}
       pane=${target#*:}
@@ -522,16 +548,16 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
   esac
 }
 
-fm_afk_launch_wait_ready() {  # <backend> <target>
-  local backend=$1 target=$2 attempt=0
+fm_afk_launch_wait_ready() {  # <backend> <target> [rex-server]
+  local backend=$1 target=$2 extra=${3:-} attempt=0
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
-    fm_afk_launch_terminal_alive "$backend" "$target"
+    fm_afk_launch_terminal_alive "$backend" "$target" "$extra"
     return
   fi
   while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
     daemon_lock_held_by_live_daemon && return 0
-    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
+    fm_afk_launch_terminal_alive "$backend" "$target" "$extra" || return 1
     sleep 0.05
   done
   return 1
@@ -541,13 +567,14 @@ fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorde
   local backend=$1 target=$2 extra=$3 already_recorded=${4:-0}
   if [ "$already_recorded" -ne 1 ] && ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
     fm_afk_launch_log "failed to persist daemon terminal record; closing $backend:$target"
-    fm_afk_launch_close_terminal "$backend" "$target"
+    fm_afk_launch_close_terminal "$backend" "$target" "$extra"
     return 1
   fi
-  if ! fm_afk_launch_wait_ready "$backend" "$target"; then
+  if ! fm_afk_launch_wait_ready "$backend" "$target" "$extra"; then
     fm_afk_launch_log "daemon did not become ready; closing $backend:$target"
     FM_AFK_REC_BACKEND=$backend
     FM_AFK_REC_TARGET=$target
+    FM_AFK_REC_EXTRA=$extra
     fm_afk_launch_close_recorded
     return 1
   fi
@@ -676,6 +703,39 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
+# Launch the daemon in a DETACHED Rex block (running and addressable by its
+# full id, placed in no tab, so the captain's tab strip never changes) inside
+# the captain's own session on the captain's server. Its login shell receives
+# the daemon command as typed input, so the daemon gets the user's login
+# environment rather than the Rex server's. The block id exists only once Rex
+# returns it, so the record is written right after creation and an
+# unpersistable record closes the block by that id.
+fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 server target cmd label
+  fm_backend_source rex || return 1
+  server=$(discover_supervisor_rex_server) || {
+    fm_afk_launch_log "cannot name the Rex server holding captain pane '$captain_target'"
+    return 1
+  }
+  FM_BACKEND_REX_SERVER=$server fm_backend_rex_target_ready "$captain_target" || {
+    fm_afk_launch_log "captain pane '$captain_target' is not a live block on Rex server $server"
+    return 1
+  }
+  label="fm-afk-daemon-$(fm_backend_rex_home_label)"
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend" "$server")
+  target=$(FM_BACKEND_REX_SERVER=$server fm_backend_rex_detached_create "session:${captain_target%%:*}" "$label" "$FM_HOME" "$cmd"$'\n') || {
+    fm_afk_launch_log "rex could not create a detached daemon block in session:${captain_target%%:*}"
+    return 1
+  }
+  if ! fm_afk_launch_record_write rex "$target" "$server"; then
+    fm_afk_launch_log "failed to persist rex daemon terminal record; closing $target"
+    fm_afk_launch_close_terminal rex "$target" "$server"
+    return 1
+  fi
+  fm_afk_launch_commit_terminal rex "$target" "$server" 1 || return 1
+  fm_afk_launch_log "daemon launched in detached Rex block $target on $server, supervising $captain_target"
+}
+
 # Launch the daemon in a detached tmux session (never a split-window in the
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
@@ -756,8 +816,9 @@ fm_afk_launch_start() {
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
       tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      rex)   fm_afk_launch_create_rex "$captain_target" "$captain_backend"; result=$? ;;
       *)
-        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, rex)"
         result=1
         ;;
     esac
