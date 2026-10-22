@@ -464,7 +464,7 @@ When a terminal message says an instruction is waiting there - and at any natura
 Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
 Immediately after reading each message, before acting, record that you read it: \`$(shell_quote "$FM_ROOT/bin/fm-task-inbox-read.sh") $INBOX_DIR/NNN.msg\`.
 Do not record a read before actually reading the message.
-If the command fails or cannot run, use your file tools to create $INBOX_DIR/.read/ if needed, then create the empty receipt $INBOX_DIR/.read/NNN.msg for the message you just read.
+If the command fails or cannot run, use your file tools to create $STATE/$ID.inbox/.read/ if needed, then create the empty receipt $STATE/$ID.inbox/.read/NNN.msg for the message you just read.
 Report a read-acknowledgement failure only if the file-tool fallback also fails; never assume a failed write acknowledged the message.
 Then act on the message and acknowledge completed handling by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
 The read receipt stops unread-instruction alarms while you work; it does not mean the work is complete or replace the handled/ move.
