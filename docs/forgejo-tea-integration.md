@@ -196,13 +196,40 @@ $ curl .../repos/fixture/fixture-repo/commits/<sha>/status
 {"state":"","sha":"","total_count":0,"statuses":null,...}
 ```
 
-This is read as `none`, the same way GitLab's null `head_pipeline` is read as `none` in `docs/gitlab-merge-watch.md`, and refuses the merge rather than treating an absent check as nothing to verify:
+This is read as `none`, which on its own cannot tell a repository with no CI from CI that has not reported yet.
+The header of `bin/fm-pr-merge.sh` owns how a `none` head is decided: it passes only when neither the head nor the base tip carries an Actions workflow directory, read through the git trees API, and an attended `--allow-no-pipeline` waives the remaining case.
+
+### No-CI evidence
+
+Collected on 2026-10-22 against a real private instance reporting `{"version":"16.0.3"}` from `/version`, with `tea` 0.14.0 (nixpkgs build), on a repository that has never had CI and on repositories that carry `.forgejo/workflows`.
+
+The trees API returns a commit's root tree when given the commit sha, and a whole listing carries a `total_count` equal to its entry count:
 
 ```
-$ fm-pr-merge.sh task-f2 https://localhost/fixture/fixture-repo/pulls/<open-mergeable-pr>
-error: refusing to merge ...
-  - the combined commit status is "none", not success
+$ tea api --login <login> --repo <owner>/<no-ci-repo> '/repos/{owner}/{repo}/git/trees/<head sha>' -i
+HTTP/1.1 200 OK
+{"sha":"<head sha>","tree":[{"path":".claude","mode":"040000","type":"tree",...},...],"truncated":false,"page":1,"total_count":28}
 ```
+
+A dot directory is a `tree` entry whose `sha` lists its children through the same endpoint:
+
+```
+$ tea api --login <login> --repo <owner>/<ci-repo> '/repos/{owner}/{repo}/git/trees/<.forgejo tree sha>'
+{"tree":[{"path":"actionlint.yaml","type":"blob"},{"path":"actions","type":"tree"},{"path":"workflows","type":"tree"}],"truncated":false,...}
+```
+
+The endpoint pages a large tree, and `truncated` does not mark the last page reliably: with `per_page=2` on a 19-entry tree, page 10 returned one entry with `truncated: true`, and page 11 returned none with `truncated: false`.
+A listing whose length matches `total_count` is therefore the only accepted proof that the whole tree was read.
+An unknown sha is an error body, which `tea api` again reports with exit status 0:
+
+```
+$ tea api --login <login> --repo <owner>/<repo> '/repos/{owner}/{repo}/git/trees/0000000000000000000000000000000000000001' -i
+HTTP/1.1 400 Bad Request
+{"message":"sha not found [0000000000000000000000000000000000000001]",...}
+```
+
+The repository's `has_actions` field is not a usable signal: the repository that has never had CI reports `{"has_actions":true}`.
+The contents API was not chosen either, because a missing path and a missing ref both read as `404` with the same `GetContentsOrList` body shape, so absence there cannot be told from a bad read without parsing prose.
 
 **Not verified here:** the shape of a populated (non-empty) combined-status response from a real Forgejo Actions run, its pagination, and the pull request `draft` field.
 Standing up a Forgejo Actions runner was out of scope for this pass; the merge gate requires the combined status's `state` field to read exactly `success`, matching GitHub's and GitLab's own state enums, and refuses on anything else including an unrecognized value - the same fail-safe-refuse posture as every other condition here.
