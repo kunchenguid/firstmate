@@ -37,7 +37,7 @@ if [ "${1:-}" = "--version" ]; then
   if [ "${QUOTA_AXI_VERSION_FAIL:-0}" = 1 ]; then
     exit 42
   fi
-  printf 'quota-axi %s\n' "${QUOTA_AXI_VERSION:-0.1.51}"
+  printf 'quota-axi %s\n' "${QUOTA_AXI_VERSION:-0.1.55}"
   exit 0
 fi
 case "${QUOTA_AXI_MALFORMED:-}" in
