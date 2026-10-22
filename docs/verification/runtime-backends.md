@@ -2268,9 +2268,11 @@ ok - real Pi/Rex: --secondmate opens the first tab of its own fm-<id> session, l
 ok - real Pi/Rex: an exact-id fm-send stores the request and rings the secondmate with its inbox doorbell
 ok - real Pi/Rex: a destroyed secondmate endpoint is proven gone and respawns into its recorded session
 ok - real Pi/Rex: closing the secondmate retires its emptied session
+ok - real Pi/Rex: a single fm-teardown retires the secondmate, its session, home, route, and records
 ```
 
 One of four consecutive runs of that guard missed the doorbell wait before passing on rerun; the other three passed.
+On 2026-10-22 the last case passed on a lab server with `rex 0.0.1792607779-g171246` and `pi 1.3.0`, leaving nothing for a second teardown run.
 A Pi composer on Rex reads `unknown`, because the classifier runs without a cursor row and Pi's prompt carries no identifying border, so an away-mode inject into a Pi supervisor defers rather than types.
 
 ### Remote second mate on a real host

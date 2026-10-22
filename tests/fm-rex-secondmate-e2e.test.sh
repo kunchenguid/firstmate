@@ -77,9 +77,9 @@ EOF
 printf '#!/usr/bin/env bash\nexec %q -e %q "$@"\n' "$REAL_PI" "$CAPTURE_EXTENSION" >"$FAKEBIN/pi"
 chmod +x "$FAKEBIN/pi"
 
-spawn_secondmate() {
+spawn_secondmate() { # [id] [home]
   PATH="$FAKEBIN:$PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" \
-    "$ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend rex >/dev/null
+    "$ROOT/bin/fm-spawn.sh" "${1:-$ID}" "${2:-$SECOND_HOME}" --secondmate --harness pi --backend rex >/dev/null
 }
 
 wait_for_prompt() { # <needle>
@@ -157,3 +157,32 @@ fm_backend_kill rex "$TARGET2" "" "fm-$ID" || e2e_fail "closing the secondmate e
 fm_backend_rex_cli session inspect "session:$SID" --json >/dev/null 2>&1
 [ "$?" -eq 3 ] || e2e_fail "the emptied fm-$ID session was not retired with its secondmate"
 pass "real Pi/Rex: closing the secondmate retires its emptied session"
+
+# One fm-teardown run must retire a Rex secondmate completely: its pane, its
+# fm-<id> session, its home, its registry route, and every record naming it, so
+# no cleanup is left that needs a second teardown. A fresh secondmate is used so
+# the exact-id request above leaves no unresolved routed reply to refuse it.
+RETIRE_ID='rex-sm-retire'
+RETIRE_HOME="$TMP_ROOT/secondmate-home-retire"
+git clone -q --no-hardlinks "$ROOT" "$RETIRE_HOME"
+git -C "$RETIRE_HOME" checkout -q --detach HEAD
+mkdir -p "$RETIRE_HOME/state" "$RETIRE_HOME/data" "$RETIRE_HOME/config" "$RETIRE_HOME/projects"
+printf '%s\n' "$RETIRE_ID" >"$RETIRE_HOME/.fm-secondmate-home"
+cp "$SECOND_HOME/data/charter.md" "$RETIRE_HOME/data/charter.md" 2>/dev/null \
+  || printf '# Isolated Rex secondmate\n\nStay idle and do not initiate work.\n' >"$RETIRE_HOME/data/charter.md"
+printf -- '- %s - Rex retire regression (home: %s; scope: retire; projects: none; added 2026-10-22)\n' \
+  "$RETIRE_ID" "$RETIRE_HOME" >>"$SENDER_HOME/data/secondmates.md"
+spawn_secondmate "$RETIRE_ID" "$RETIRE_HOME" || e2e_fail "the second rex secondmate did not launch"
+RETIRE_TARGET=$(fm_backend_target_of_meta "$STATE/$RETIRE_ID.meta")
+RETIRE_SID=${RETIRE_TARGET%%:*}
+fm_backend_rex_cli session inspect "session:$RETIRE_SID" --json >/dev/null 2>&1 \
+  || e2e_fail "the second rex secondmate has no live fm-$RETIRE_ID session to retire"
+TEARDOWN_OUT=$(PATH="$FAKEBIN:$PATH" FM_GATE_REFUSE_BYPASS=1 "$ROOT/bin/fm-teardown.sh" "$RETIRE_ID" 2>&1) \
+  || e2e_fail "one fm-teardown run did not retire the rex secondmate: $TEARDOWN_OUT"
+fm_backend_rex_cli session inspect "session:$RETIRE_SID" --json >/dev/null 2>&1
+[ "$?" -eq 3 ] || e2e_fail "the retired secondmate's fm-$RETIRE_ID session survived its only teardown run"
+assert_absent "$RETIRE_HOME" "the retired secondmate home survived its only teardown run"
+assert_no_grep "^- $RETIRE_ID " "$SENDER_HOME/data/secondmates.md" "the retired secondmate route survived its only teardown run"
+LEFTOVERS=$(find "$STATE" -name "$RETIRE_ID*" 2>/dev/null)
+[ -z "$LEFTOVERS" ] || e2e_fail "records naming the retired secondmate survived its only teardown run: $LEFTOVERS"
+pass "real Pi/Rex: a single fm-teardown retires the secondmate, its session, home, route, and records"

@@ -704,6 +704,34 @@ fm_agent_standin() {  # <dir> -> echoes the stand-in path; nonzero when none sur
   printf '%s\n' "$dir/standin"
 }
 
+# fm_env_holder_bin <dir>: echo the path of a long-running executable that a
+# test starts as `env -i NAME=VALUE... <path> 600 &` to stand in for a process
+# whose environment another process reads (`ps -Eww` on macOS, /proc elsewhere).
+# macOS hides the environment of Apple platform binaries, and a system `jq`,
+# `sleep`, or shell is one on current releases, so a holder must be a binary
+# this host did not ship. Build it on fm_agent_standin (a compiled spinner when
+# a C compiler exists), then prove on this host that the environment is
+# readable and return nonzero when it is not, so a caller fails or skips with
+# that reason rather than running marker cases that cannot be observed.
+fm_env_holder_bin() {  # <dir> -> echoes the holder path; nonzero when no holder exposes its environment
+  local dir=$1 bin pid env_out
+  bin=$(fm_agent_standin "$dir") || return 1
+  env -i FM_ENV_HOLDER_PROBE=1 "$bin" 600 >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.2
+  if [ -r "/proc/$pid/environ" ]; then
+    env_out=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null || true)
+  else
+    env_out=$(ps -Eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' || true)
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  case "$env_out" in
+    *FM_ENV_HOLDER_PROBE=1*) printf '%s\n' "$bin" ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- portable file timestamps -----------------------------------------------
 
 # fm_touch_epoch <epoch> <path> [path...]: set each path's modification time to

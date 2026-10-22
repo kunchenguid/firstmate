@@ -14,14 +14,13 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the guard parses herdr's JSON, and jq is the holder process)"; exit 0; }
-command -v mkfifo >/dev/null 2>&1 || { echo "skip: mkfifo not found (holder processes block on a fifo)"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the guard parses herdr's JSON)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-herdr-guard)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 HOLDER_PIDS=()
-HOLDER_FD=5
+HOLDER_N=0
 trap 'if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
 
 GUARD="$ROOT/bin/fm-remote-herdr-guard.sh"
@@ -98,33 +97,30 @@ SH
 chmod +x "$FAKE/lsof" "$FAKE/launchctl" "$FAKE/herdr"
 cp "$FAKE/lsof" "$TMP_ROOT/lsof.fake"
 
-# hold <marker-env...> -> HOLDER_PID: a real non-platform process (jq blocked
-# on a fifo this test keeps open) whose environment is exactly the markers.
+# The holders are real processes this host did not ship: macOS hides the
+# environment of its own platform binaries, jq included (tests/lib.sh
+# fm_env_holder_bin owns the choice and proves it on this host).
+HOLDER_BIN=$(fm_env_holder_bin "$TMP_ROOT/holder") \
+  || fail "this host has no holder process whose environment ps can read (a C compiler gives one)"
+
+# hold <marker-env...> -> HOLDER_PID: a real non-platform process whose
+# environment is exactly the markers.
 hold() {
-  local fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo"
-  rm -f "$fifo"
-  mkfifo "$fifo"
-  # Open read-write so this never blocks on the reader; the holder sees EOF
-  # only when the descriptor closes at exit.
-  eval "exec ${HOLDER_FD}<>\"\$fifo\""
-  env -i "$@" "$JQ" . "$fifo" &
+  env -i "$@" "$HOLDER_BIN" 600 >/dev/null 2>&1 &
   HOLDER_PID=$!
   HOLDER_PIDS+=("$HOLDER_PID")
-  HOLDER_FD=$((HOLDER_FD + 1))
 }
 
 # hold_under <argv0> <arg...> -- : a marker-free holder whose PARENT process
 # carries the given argv[0] and arguments (the ancestry the guard inspects).
 hold_under() {
-  local argv0=$1 fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo" pidfile="$TMP_ROOT/holder-$HOLDER_FD.pid"
+  local argv0=$1 pidfile="$TMP_ROOT/holder-under-$HOLDER_N.pid"
   shift
-  rm -f "$fifo" "$pidfile"
-  mkfifo "$fifo"
-  eval "exec ${HOLDER_FD}<>\"\$fifo\""
-  ( export FM_HOLDER_JQ="$JQ" FM_HOLDER_FIFO="$fifo" FM_HOLDER_PIDFILE="$pidfile"
-    exec -a "$argv0" bash -c 'env -i FM_HOLDER=1 "$FM_HOLDER_JQ" . "$FM_HOLDER_FIFO" & printf "%s\n" "$!" > "$FM_HOLDER_PIDFILE"; wait' "$@" ) &
+  HOLDER_N=$((HOLDER_N + 1))
+  rm -f "$pidfile"
+  ( export FM_HOLDER_BIN="$HOLDER_BIN" FM_HOLDER_PIDFILE="$pidfile"
+    exec -a "$argv0" bash -c 'env -i FM_HOLDER=1 "$FM_HOLDER_BIN" 600 & printf "%s\n" "$!" > "$FM_HOLDER_PIDFILE"; wait' "$@" ) &
   HOLDER_PIDS+=("$!")
-  HOLDER_FD=$((HOLDER_FD + 1))
   local i=0
   while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   [ -s "$pidfile" ] || fail "holder under $argv0 did not report its pid"
@@ -160,7 +156,6 @@ guard() { # [extra env assignments...]
     env -i PATH="$CASE_PATH" HOME="$TMP_ROOT" \
       FM_FAKE_STATE="$CASE_STATE" FM_FAKE_HERDR_LOG="$CASE_LOG" FM_FAKE_HERDR_RUNNING="$CASE_RUNNING" \
       FM_FAKE_SOCKET_OWNER="$CASE_OWNER" FM_FAKE_HERDR_SOCKET="$CASE_SOCKET" \
-      FM_HOLDER_JQ="$JQ" \
       FM_REMOTE_HERDR_GUARD_STOP_WAIT_TENTHS=8 \
       "$@" "$GUARD" "$FAKE/herdr" "$SESSION" 2>&1
   )
@@ -184,8 +179,8 @@ assert_stop_before_start() {
   [ "$stop_line" -lt "$start_line" ] || fail "the guard started its server before stopping the foreign one"
 }
 
-# Prove the holder construction on this host: the environment of a jq holder
-# must be readable, or every marker case would be vacuous.
+# Prove the holder construction on this host: the environment of a holder must
+# be readable, or every marker case would be vacuous.
 hold FM_PROBE_MARKER=1
 PROBE_PID=$HOLDER_PID
 sleep 0.2
@@ -194,7 +189,7 @@ sleep 0.2
 probe_env=$(fm_remote_herdr_process_env "$PROBE_PID")
 case "$probe_env" in
   *FM_PROBE_MARKER=1*) ;;
-  *) fail "this host does not expose a holder's environment (macOS hides platform-binary environments; jq at $JQ must be a non-platform binary): $probe_env" ;;
+  *) fail "this host does not expose a holder's environment (macOS hides platform-binary environments; $HOLDER_BIN must be a non-platform binary): $probe_env" ;;
 esac
 pass "holder processes expose their environment to the owner library"
 

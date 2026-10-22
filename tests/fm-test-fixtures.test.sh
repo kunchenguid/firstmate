@@ -323,6 +323,33 @@ SH
   pass "agent stand-in: a multicall sleep is refused, and the compiled stand-in survives a harness name"
 )
 
+# macOS hides the environment of Apple platform binaries from other processes,
+# and a system jq, sleep, or shell is one on current releases, so a holder
+# process standing in for a socket owner must be a binary this host did not ship.
+# The case reads a holder's environment back through the production owner
+# library, the same reader the remote doctor and the launch-agent guard use.
+test_env_holder_exposes_its_environment() (
+  local dir="$TMP_ROOT/env-holder" holder pid env_out
+  # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
+  . "$ROOT/bin/fm-remote-herdr-owner-lib.sh"
+  if ! holder=$(fm_env_holder_bin "$dir"); then
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+      echo "skip: no C compiler and no host binary that exposes its environment, so no holder exists to prove"
+      pass "env holder: no holder on this host, so nothing to prove"
+      exit 0
+    fi
+    fail "fm_env_holder_bin found no holder although a C compiler exists"
+  fi
+  env -i FM_ENV_HOLDER_CASE=marker "$holder" 600 >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.3
+  env_out=$(fm_remote_herdr_process_env "$pid")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$env_out" "FM_ENV_HOLDER_CASE=marker" "the holder's environment was not readable through the owner library"
+  pass "env holder: the owner library reads the marker environment of a holder process"
+)
+
 # An inherited absolute GIT_DIR (a linked-worktree hook exports one) overrides
 # `git -C`, so fixture setup would commit, move refs, and register worktrees in
 # the caller's repository; GIT_INDEX_FILE and GIT_COMMON_DIR redirect the index
@@ -393,6 +420,7 @@ SH
 test_git_config_isolation || fail "Git fixture config isolation"
 test_inherited_git_location_isolation || fail "Git fixture location isolation"
 test_agent_standin_survives_a_multicall_sleep || fail "agent stand-in multicall case"
+test_env_holder_exposes_its_environment || fail "env holder case"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers

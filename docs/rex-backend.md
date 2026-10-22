@@ -273,6 +273,6 @@ FM_REX_STATUS_LIVE=1 tests/fm-rex-program-status-live-e2e.test.sh
 - `fm-backend-rex.test.sh`, `fm-remote-doctor-rex.test.sh`, and `fm-rex-palette.test.sh` use a fake `rex`.
 - The smoke, palette smoke, and away-mode tests drive the real binary on a lab server without tokens.
 - The program-status test spawns one trivial scout per installed harness and records which root states each publishes; it fails if Claude Code stops publishing `working`.
-- The second mate test launches a real Pi second mate on a lab server, aborting before any model request, so it only runs when opted in.
+- The second mate test launches a real Pi second mate on a lab server, aborting before any model request, and retires a second one with a single teardown, so it only runs when opted in.
 - The last spawns a real Claude scout and submits prompts, so it only runs when opted in.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#rex) records the active source and live evidence.
