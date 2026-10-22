@@ -2,9 +2,13 @@
 # tests/rex-test-safety.sh - private Rex server lifecycle and state-change
 # isolation shared by real-Rex suites. Each run uses its own Unix socket,
 # state directory, and empty config; no call can reach the user's server.
+# All clients explicitly select the private endpoint with autostart disabled.
 # Adapter calls pass through a forwarding guard which refuses state changes
-# outside the sessions created by the test.
-# The caller defines fail() and pass() before using these helpers.
+# outside the sessions created by the test; non-test sessions' ids and labels
+# must remain unchanged. Cleanup kills labeled test sessions, stops the owned
+# server PID, and removes the temporary data.
+# The caller defines fail() and pass(), and registers rex_test_cleanup on EXIT
+# before calling rex_test_prepare so interrupted startup is also cleaned up.
 set -u
 
 REX_TEST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -194,7 +198,7 @@ rex_test_assert_isolated() {
 }
 
 # rex_test_cleanup: kill exactly the sessions this test created, re-checking
-# each one's fm-test- label first, and remove the scratch directory.
+# each one's fm-test- label first, stop the private server, and remove its data.
 rex_test_cleanup() {
   local sid label
   [ -z "$REX_TEST_CLEANED" ] || return 0

@@ -2221,7 +2221,8 @@ $ rex --autostart=false api call server.status | jq .api_revision
 5
 ```
 
-This historical live evidence used scratch sessions labeled `fm-test-*` on the personal Rex server. Current live tests instead start a private server per run; the personal-server results below are retained as historical evidence, not as the current test procedure.
+The evidence below used scratch sessions labeled `fm-test-*` on the personal Rex server, before private-server isolation; its transcripts are not the current test procedure.
+[`tests/rex-test-safety.sh`](../../tests/rex-test-safety.sh) owns the current isolation contract.
 
 Current active CLI findings:
 
@@ -2346,9 +2347,7 @@ ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): the same idle screen read cursorl
 ok - real rex: no state-changing call left the test sessions and every other session is byte-identical
 ```
 
-The real-Rex suites skip only when the Rex CLI or `jq` is unavailable.
-Each starts a private server with a temporary Unix socket, state directory, and empty config, disables autostart, and removes the server and data on exit; server startup failures fail the test rather than falling back.
-Refresh this record from the private-server suites after a Rex upgrade, and from the live composer guard after any tool upgrade.
+Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
 
 ## Codex App host tools
 
