@@ -3192,6 +3192,12 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Queue sequence watermark for inbox_surface_queued: rows numbered above it were
+# appended after this cycle started.
+fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+WATCH_CYCLE_START_SEQ=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
+fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+case "$WATCH_CYCLE_START_SEQ" in ''|*[!0-9]*) WATCH_CYCLE_START_SEQ=0 ;; esac
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -3345,6 +3351,24 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# Deliver a captain inbox note queued after this cycle started. fm-inbox.sh
+# appends the row without signalling anyone, and a handling successor skips
+# resurface_after_downtime, so without this the note waits for an unrelated
+# close. Rows at or below the start watermark were already queued when the
+# predecessor closed, so the drain for that wake presents them, and each new
+# cycle's later watermark keeps an unacknowledged note from waking it again.
+inbox_surface_queued() {
+  local keys
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  keys=$(awk -F '\t' -v since="$WATCH_CYCLE_START_SEQ" \
+    'NF >= 5 && $3 == "check" && $4 ~ /^inbox:/ && $2 + 0 > since + 0 { printf "%s ", $4 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true)
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ -n "$keys" ] || return 0
+  wake "check: captain inbox note queued: ${keys% }"
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -3456,6 +3480,9 @@ while :; do
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+  # An ordinary watcher's recovery check above already closes on any append; a
+  # handling successor skips it, so it still needs to hear a new captain note.
+  inbox_surface_queued
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
