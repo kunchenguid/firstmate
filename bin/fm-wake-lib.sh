@@ -1804,11 +1804,10 @@ fm_failure_episode_reset() {
 #     whichever id the sidecar carries after lock recovery. An entry written by
 #     a build before these fields existed records neither and falls back to the
 #     descent signal alone.
-#   - Every firing DEFERS (exits 0) to an open claim; anything else - a
-#     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
-#     identityless entry, or no claim at all - lets the next firing take
-#     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
-#     reclaim: a steady-state predecessor is never signalled or revoked.
+#   - Every firing DEFERS (exits 0) to an open claim; fm_autoarm_claim_next
+#     below owns replacement eligibility for generation N+1. Taking a newer
+#     generation IS the reclaim: a steady-state predecessor is never signalled
+#     or revoked.
 #   - NO mutex is ever held across a blocking step. The owner lock
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
@@ -2149,8 +2148,7 @@ fm_autoarm_rekey_session() {  # <state-dir> <old-pid> <new-pid>
 # LEGACY shim (see the contract comment above): the abandonment proof for a
 # lock-holding claim from a pre-generation build, recognizable by the role
 # file only such claims and the guard's short terminal-check hold publish.
-# A live legacy owner defers per this proof; a finished, identity-mismatched,
-# or stuck one is abandoned:
+# Abandonment requires the following proof:
 #
 #   1. the owner lock exists and carries the auto-arm role,
 #   2. its recorded pid is numeric,
@@ -2210,11 +2208,9 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # the process can never resume normal execution (delivery precedes any further
 # user code when it continues), so a short bounded wait for observed exit is a
 # courtesy, not a requirement. A pid is never signalled without a verified
-# matching identity; when the kill itself fails or the identity stops matching
-# mid-procedure (pid reuse), the reclaim refuses. Missing identity evidence
-# never blocks the reclaim of a proven-abandoned claim - it only disables the
-# TERM and the ledger graft below, keeping the documented bounded
-# upgrade-window residual instead of the deadlock.
+# matching identity, and a failed TERM refuses reclamation. A missing recorded
+# identity only disables TERM and the ledger graft once abandonment is proved;
+# fm_autoarm_claim_abandoned above owns the identity-related refusals.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
@@ -2234,10 +2230,9 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
     # A live pid still answering to the recorded identity IS the genuine
     # legacy owner (proven stuck or blocked after a terminal write): retire it
     # before removing its lock, because old-build code cannot re-check
-    # generations. A pid the recorded identity does NOT verify - reused,
-    # unverifiable, or never recorded - is NEVER signalled; those shapes are
-    # reclaimed as-is, which is safe exactly because the recorded owner is
-    # gone or was never provably this process.
+    # generations. A pid without a matching identity is NEVER signalled.
+    # Reclamation still requires the abandonment proof above; unverifiable
+    # live evidence at either proof blocks removal.
     if ! kill -TERM "$lock_pid" 2>/dev/null; then
       fm_lock_release "$steal"
       return 1

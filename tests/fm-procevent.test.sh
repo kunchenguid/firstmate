@@ -1527,16 +1527,18 @@ lavish_session "$DEFAULT_RATE_ART"
 DEFAULT_RATE_COUNT="$TMP_ROOT/default-rate-count"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRIPT=interrupt \
   FM_LAVISH_POLL_RETRY_DELAY='' \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" > "$TMP_ROOT/default-rate.out" 2>&1 &
 DEFAULT_RATE_PID=$!
-perl -MTime::HiRes=sleep -e 'sleep 6.2'
+# Leave startup and scheduler headroom beyond the five-second retry floor.
+# A third attempt still cannot start within this window under that floor.
+perl -MTime::HiRes=sleep -e 'sleep 9.2'
 kill -TERM "$DEFAULT_RATE_PID" 2>/dev/null || true
 wait "$DEFAULT_RATE_PID" 2>/dev/null || true
 default_rate_count=$(cat "$DEFAULT_RATE_COUNT" 2>/dev/null || echo 0)
 [ "$default_rate_count" -ge 2 ] \
-  || fail "the default poll governor stopped an instantly returning source from making progress"
+  || fail "the default poll governor stopped an instantly returning source from making progress (polls=$default_rate_count): $(cat "$TMP_ROOT/default-rate.out")"
 [ "$default_rate_count" -le 2 ] \
-  || fail "the shipped poll governor allowed $default_rate_count iterations in 6.2 seconds"
+  || fail "the shipped poll governor allowed $default_rate_count iterations in 9.2 seconds"
 pass "the shipped poll governor bounds an instantly returning source"
 
 # A bounded test override keeps the retry policy's real bound under test without
