@@ -483,7 +483,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 - A paseo task additionally records `paseo_terminal_id=` and `paseo_workspace_id=`, with the terminal NAME as routing authority (see [`docs/paseo-backend.md`](paseo-backend.md) "Task shape and metadata").
-- A rex task additionally records `rex_server=`, `rex_session_id=`, `rex_block_id=`, and, when known, `rex_server_instance=` and `rex_window_id=`, with the full block id as routing authority (see [`docs/rex-backend.md`](rex-backend.md) "Task shape and metadata").
+- A rex task additionally records `rex_server=`, `rex_session_id=`, `rex_block_id=`, `rex_tab_label=`, and, when known, `rex_server_instance=` and `rex_window_id=`, with the full block id as routing authority (see [`docs/rex-backend.md`](rex-backend.md) "Task shape and metadata").
 
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 
@@ -519,6 +519,11 @@ The local `config/herdr-project-groups` file opts a home in to display-only Herd
 
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
+
+### Rex attention marks
+
+The local `config/rex-status-marks` file chooses how a Rex worker that needs the captain shows up in Rex: `on` (the default when absent) sets a program-status badge and a notification on the worker's pane, and `off` shows neither.
+[Attention marks](rex-backend.md#attention-marks) owns the status mapping and its limits.
 
 ### Zellij sessions
 
@@ -562,7 +567,7 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 
-Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
+Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), `rex` (a badge and notification on Firstmate's own Rex pane, which `auto` adds when that pane is a Rex pane), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
 An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
 
 A missing or failing channel logs and falls through to the next, never crashing the daemon.

@@ -4,7 +4,9 @@
 # through bin/fm-rex-lab.sh (never the live server; the lab's tripwire checks
 # the live server is untouched) and drives the adapter against it: session and
 # tab creation, labels, focus, live cwd, send and keys, capture, agent state
-# from real processes, close, exit 3 and exit 4, and the autostart refusal.
+# from real processes, Firstmate's attention marks and notifications, the
+# real `rex events` push wait, close, exit 3 and exit 4, and the autostart
+# refusal.
 # Runs by default where rex and jq are installed; FM_REX_SMOKE=0 disables it.
 set -u
 
@@ -77,8 +79,8 @@ VIEW=$(fm_backend_rex_cli session inspect "session:$SID" --json) || smoke_fail "
 [ "$(printf '%s' "$VIEW" | jq -r .label)" = fm-local ] || smoke_fail "the home session is not labeled fm-local"
 [ "$(printf '%s' "$VIEW" | jq '.windows | length')" = 2 ] || smoke_fail "the home session should hold exactly the two task tabs"
 [ "$(printf '%s' "$VIEW" | jq -r .active_window_id)" = "window:$WID" ] || smoke_fail "--focus=false let the second tab take focus"
-[ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_B" '.windows[] | select(.window_id == $w) | .label')" = "proj·smoke-b" ] \
-  || smoke_fail "the tab label is not <project>·<id>"
+[ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_B" '.windows[] | select(.window_id == $w) | .label')" = "Ship · smoke-b" ] \
+  || smoke_fail "the tab label is not the sidebar-sized fallback"
 fm_backend_rex_create_task fm-smoke-a "$WORK" >/dev/null 2>&1 && smoke_fail "a duplicate scoped label was not refused"
 fm_backend_rex_target_ready "$TA" fm-smoke-a || smoke_fail "the new block is not ready under its scoped label"
 pass "rex smoke: one fm-local session holding exactly the task tabs, unfocused labeled tabs, and duplicate refusal"
@@ -116,6 +118,63 @@ LIVE=$(fm_backend_rex_list_live)
 printf '%s\n' "$LIVE" | grep -qx "$TA"$'\t'fm-smoke-a || smoke_fail "list_live did not list task a"
 printf '%s\n' "$LIVE" | grep -qx "$TB"$'\t'fm-smoke-b || smoke_fail "list_live did not list task b"
 pass "rex smoke: list_live finds this home's tabs"
+
+# Attention marks: one tty write lands Firstmate's own id=fm record and an OSC
+# 777 notification that Rex streams as desktop_notification.
+EVENTS="$TMP_ROOT/events.jsonl"
+env -u REX_SESSION -u REX_BLOCK -u REX_CLIENT -u REX_SERVER "$(fm_backend_rex_bin)" -S "$FM_REX_SERVER" --autostart=false \
+  events -s "session:$SID" --json >"$EVENTS" 2>/dev/null &
+EVENTS_PID=$!
+sleep 1
+fm_backend_rex_mark "$TB" blocked question "Needs your decision" fm-smoke-b "Firstmate: smoke" || smoke_fail "the mark could not be written"
+for _ in $(seq 1 40); do grep -q desktop_notification "$EVENTS" && break; sleep 0.1; done
+[ "$(fm_backend_rex_mark_read "$TB")" = $'blocked\tquestion\tNeeds your decision' ] || smoke_fail "the id=fm record did not read back: $(fm_backend_rex_block_call "$TB" program_status)"
+jq -e --arg b "block:$BID_B" 'select(.payload.event.payload.block_id == $b and .payload.event.payload.name == "program_status_changed" and .payload.event.payload.payload.id == "fm")' "$EVENTS" >/dev/null \
+  || smoke_fail "the mark did not stream as program_status_changed id=fm"
+jq -e --arg b "block:$BID_B" 'select(.payload.event.payload.block_id == $b and .payload.event.payload.name == "desktop_notification")' "$EVENTS" >/dev/null \
+  || smoke_fail "the OSC 777 notification did not stream as desktop_notification: $(grep -c . "$EVENTS") events"
+NOTE=$(jq -c --arg b "block:$BID_B" 'select(.payload.event.payload.name == "desktop_notification") | .payload.event.payload.payload' "$EVENTS" | head -1)
+kill "$EVENTS_PID" 2>/dev/null || true
+wait "$EVENTS_PID" 2>/dev/null || true
+fm_backend_rex_mark "$TB" clear "" "" fm-smoke-b || smoke_fail "the mark could not be cleared"
+[ "$(fm_backend_rex_mark_read "$TB")" = $'clear\t\t' ] || smoke_fail "clearing left Firstmate's record behind"
+fm_backend_rex_capture "$TB" 50 fm-smoke-b | grep -q '7501\|777' && smoke_fail "a mark's bytes showed on the screen"
+fm_backend_rex_tab_rename "$TB" "Ship · renamed" fm-smoke-b || smoke_fail "the tab could not be renamed"
+VIEW=$(fm_backend_rex_cli window ls -s "session:$SID" --json)
+[ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_B" '.windows[] | select(.window_id == $w) | .label')" = "Ship · renamed" ] || smoke_fail "the tab rename did not take"
+pass "rex smoke: a mark is an invisible id=fm record plus a streamed desktop notification ($NOTE), cleared alone; a tab rename takes"
+
+# The push wait over a real stream: a root blocked report from inside the pane
+# is the actionable edge, and the pane's program exiting is dead.
+IDS=$(fm_backend_rex_create_task fm-smoke-c "$WORK") || smoke_fail "third create_task failed"
+read -r _ _ BID_C <<EOF
+$IDS
+EOF
+TC="$SID:$BID_C"
+state=$(wait_state "$TC" dead) || smoke_fail "the third pane's shell read '$state', expected dead"
+WAIT_OUT="$TMP_ROOT/wait.out"
+( fm_backend_rex_wait_transition "$SID" 20 "$STATE" "$TC" >"$WAIT_OUT"; printf "\nrc=%s\n" "$?" >>"$WAIT_OUT" ) &
+WAIT_PID=$!
+sleep 3
+fm_backend_rex_send_text_line "$TC" "printf '\\033]7501;state=blocked:kind=permission:app=smoke-probe\\033\\\\'" fm-smoke-c || smoke_fail "could not report blocked from the pane"
+wait "$WAIT_PID"
+grep -q '^rc=0$' "$WAIT_OUT" || smoke_fail "the real stream's blocked report did not end the wait: $(cat "$WAIT_OUT")"
+[ "$(fm_transition_to_status "$(head -1 "$WAIT_OUT")")" = blocked ] || smoke_fail "the record is not blocked: $(cat "$WAIT_OUT")"
+[ "$(fm_transition_pane_id "$(head -1 "$WAIT_OUT")")" = "$BID_C" ] || smoke_fail "the record names another block: $(cat "$WAIT_OUT")"
+fm_backend_rex_commit_transition "$STATE" "$SID" "$(head -1 "$WAIT_OUT")"
+( fm_backend_rex_wait_transition "$SID" 20 "$STATE" "$TC" >"$WAIT_OUT"; printf "\nrc=%s\n" "$?" >>"$WAIT_OUT" ) &
+WAIT_PID=$!
+sleep 3
+fm_backend_rex_send_text_line "$TC" "exit" fm-smoke-c || smoke_fail "could not exit the third pane's shell"
+wait "$WAIT_PID"
+grep -q '^rc=0$' "$WAIT_OUT" || smoke_fail "the pane's program exiting did not end the wait: $(cat "$WAIT_OUT")"
+[ "$(fm_transition_to_status "$(head -1 "$WAIT_OUT")")" = dead ] || smoke_fail "an exited pane is not dead: $(cat "$WAIT_OUT")"
+fm_backend_kill rex "$TC" "" fm-smoke-c || smoke_fail "kill of task c failed"
+rc=0
+FM_BACKEND_REX_SERVER="unix://$TMP_ROOT/dead.sock" FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 \
+  fm_backend_rex_wait_transition "$SID" 3 "$STATE" "$TB" >/dev/null || rc=$?
+[ "$rc" -eq 2 ] || smoke_fail "an unreachable server's stream must make the wait unusable (2), got $rc"
+pass "rex smoke: the event wait returns a real blocked report and a real exit as dead, and an unreachable server is unusable, never dead"
 
 fm_backend_kill rex "$TA" "" fm-smoke-a || smoke_fail "kill of task a failed"
 fm_backend_rex_cli block inspect "block:$BID" --json >/dev/null 2>&1

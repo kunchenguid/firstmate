@@ -2,7 +2,7 @@
 # Shared, backend-neutral agent-state transition shape and supervision policy.
 #
 # This library owns TWO contracts, deliberately backend-independent so any
-# push-capable session backend (herdr today, others later) reuses them instead
+# push-capable session backend (herdr and rex) reuses them instead
 # of re-deriving a private, per-status escalation hack:
 #
 #   1. The NORMALIZED TRANSITION RECORD - the ONE shape every backend's event
@@ -18,7 +18,9 @@
 #      backends that DO report the prior state and for future edge diagnostics.
 #      Statuses use the shared agent-state vocabulary
 #      (idle|working|blocked|done|unknown), the same enum herdr's `agent get`
-#      and `pane.agent_status_changed` report.
+#      and `pane.agent_status_changed` report, plus `dead` for an endpoint
+#      whose program exited or whose pane closed (rex's `child_exited` and
+#      `block_closed`).
 #
 #   2. The STATUS -> ACTION POLICY TABLE (fm_transition_policy) - the SINGLE
 #      OWNER of the mapping from a normalized `to_status` to the supervision
@@ -72,10 +74,12 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 #
 #   actionable - escalate to the supervisor IMMEDIATELY (a fresh edge here is a
 #                durable wake now). `blocked` is the only immediately-actionable
-#                status today: herdr reports it precisely when a harness is
+#                status: herdr and rex report it precisely when a harness is
 #                waiting on the human (a permission/trust dialog, an interactive
 #                menu, a wedged prompt) - the cases that write no status file
-#                and otherwise sit until the stale-pane wedge timer.
+#                and otherwise sit until the stale-pane wedge timer. `dead` is
+#                the other: the endpoint's program is gone, which otherwise
+#                waits for the next liveness poll.
 #   absorb     - do NOT wake, but CLEAR this pane's per-pane escalation dedupe
 #                marker so a later `->blocked` edge re-escalates. `working`
 #                (a crew resumed/started a turn) is the clearing edge.
@@ -95,7 +99,7 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 # immediate action.
 fm_transition_policy() {  # <to_status> -> actionable|absorb|defer|fallback
   case "$1" in
-    blocked) printf 'actionable' ;;
+    blocked|dead) printf 'actionable' ;;
     working) printf 'absorb' ;;
     idle|done) printf 'defer' ;;
     *) printf 'fallback' ;;

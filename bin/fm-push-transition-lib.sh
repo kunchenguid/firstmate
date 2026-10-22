@@ -150,6 +150,11 @@ handle_push_transition() {  # <backend> <session> <record>
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
+  # A pane no task record names any more was retired by Firstmate itself.
+  if [ "$to" = dead ] && [ ! -f "$STATE/$task.meta" ]; then
+    triage_log "absorbed push dead (no task record): $window"
+    return
+  fi
   # A declared wait already names the human this transition would report: an
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation
@@ -164,7 +169,11 @@ handle_push_transition() {  # <backend> <session> <record>
   case $? in
     0|1) surface_end=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; surface_ident=${rest%%$'\t'*} ;;
   esac
-  reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+  if [ "$to" = dead ]; then
+    reason="stale: $window ($backend: agent exited or pane closed - escalated immediately, not via liveness poll)"
+  else
+    reason="stale: $window ($backend: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+  fi
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status" "$surface_end" "$surface_ident"

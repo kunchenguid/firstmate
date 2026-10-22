@@ -37,9 +37,9 @@
 # ROUTING AUTHORITY: the recorded full block id on the recorded server. Rex
 # labels are NOT unique (two sessions or blocks may share one, and a
 # label-addressed command then refuses as ambiguous), so the block label
-# `fm-<hometag>-<id>` is only an identity cross-check and the tab label
-# `<project>·<id>` is only display. The window id is advisory: moving a block
-# rewrites its tab while the block id survives.
+# `fm-<hometag>-<id>` is only an identity cross-check and the sidebar-sized
+# tab label (fm_backend_rex_tab_label) is only display. The window id is
+# advisory: moving a block rewrites its tab while the block id survives.
 #
 # Hazards this adapter enforces (docs/verification/runtime-backends.md#rex
 # owns the dated evidence):
@@ -91,6 +91,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_REX_ROOT/bin/fm-composer-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_REX_ROOT/bin/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-transition-lib.sh
+. "$FM_BACKEND_REX_ROOT/bin/fm-transition-lib.sh"
 
 # Verified floor: the server API revision and the methods this adapter calls.
 FM_BACKEND_REX_MIN_API=4
@@ -285,6 +287,38 @@ fm_backend_rex_scoped_name() { # <fm-task-label>
     *) rest=$label ;;
   esac
   printf 'fm-%s-%s' "$(fm_backend_rex_home_label)" "$rest"
+}
+
+# fm_backend_rex_tab_label: the display-only tab label, sized for the Rex
+# sidebar (at most FM_BACKEND_REX_TAB_LABEL_MAX visible characters, clipped
+# with an ellipsis). An explicit display title is used as given; otherwise a
+# kind marker (`Ship`, `Scout`, `Mate`) plus a condensed backlog title - the
+# text after its first ": ", cut at the first ", ", " - ", or " (" - and
+# otherwise the task id. jq does the slicing so multi-byte characters count
+# once.
+FM_BACKEND_REX_TAB_LABEL_MAX=24
+fm_backend_rex_tab_label() { # <kind> <task-id> [display-title] [backlog-title]
+  local marker
+  case "$1" in
+    scout) marker=Scout ;;
+    secondmate) marker=Mate ;;
+    *) marker=Ship ;;
+  esac
+  jq -rn --arg marker "$marker" --arg id "${2#fm-}" --arg title "${3:-}" --arg backlog "${4:-}" \
+    --argjson max "$FM_BACKEND_REX_TAB_LABEL_MAX" '
+    def squash: gsub("[\\s]+"; " ") | sub("^ "; "") | sub(" $"; "");
+    def condense: squash
+      | (if test(": .") then sub("^[^:]*: "; "") else . end)
+      | (split(", ")[0] // "") | (split(" - ")[0] // "") | sub(" \\(.*$"; "") | squash;
+    def clip: if length <= $max then .
+      else .[0:$max - 1] as $head
+        | ($head | sub(" [^ ]*$"; "")) as $word
+        | (if ($word | length) >= ($max / 2) then $word else $head end)
+        | sub("[ ·,:;-]+$"; "") + "…" end;
+    ($title | squash) as $t
+    | if $t != "" then $t | clip
+      else (($backlog | condense) as $b | if $b != "" then $b else $id end) as $s
+        | "\($marker) · \($s)" | clip end' 2>/dev/null
 }
 
 # fm_backend_rex_session_label: the label of this home's worker session -
@@ -520,7 +554,9 @@ fm_backend_rex_task_session_locked() { # <home> <pane:0|1> [preferred-session-uu
 # already live anywhere on the server. With <home>, the tab is the secondmate
 # pane of that other home (header "Secondmates"); <preferred-session-uuid> is
 # the session a relaunch or reclaim record names, used while it is live.
-fm_backend_rex_create_task() { # <label> <cwd> [home] [preferred-session-uuid]
+# <tab-label> is the display label (fm_backend_rex_tab_label); without one the
+# task id stands in under its kind marker.
+fm_backend_rex_create_task() { # <label> <cwd> [home] [preferred-session-uuid] [tab-label]
   local name rc
   name=$(fm_backend_rex_scoped_name "$1")
   fm_backend_rex_session_lock || {
@@ -533,8 +569,8 @@ fm_backend_rex_create_task() { # <label> <cwd> [home] [preferred-session-uuid]
   return "$rc"
 }
 
-fm_backend_rex_create_task_locked() { # <label> <cwd> [home] [preferred-session-uuid]
-  local label=$1 cwd=$2 home=${3:-} preferred=${4:-} name tab pane=0 sid out wid bid rc
+fm_backend_rex_create_task_locked() { # <label> <cwd> [home] [preferred-session-uuid] [tab-label]
+  local label=$1 cwd=$2 home=${3:-} preferred=${4:-} tab=${5:-} name pane=0 sid out wid bid rc
   name=$(fm_backend_rex_scoped_name "$label")
   fm_backend_rex_label_in_use "$name"
   rc=$?
@@ -551,10 +587,10 @@ fm_backend_rex_create_task_locked() { # <label> <cwd> [home] [preferred-session-
   esac
   if [ -n "$home" ]; then
     pane=1
-    tab="2ndmate·${label#fm-}"
+    [ -n "$tab" ] || tab=$(fm_backend_rex_tab_label secondmate "$label")
   else
     home=$FM_HOME
-    tab="${cwd##*/}·${label#fm-}"
+    [ -n "$tab" ] || tab=$(fm_backend_rex_tab_label ship "$label")
   fi
   fm_backend_rex_task_session_locked "$home" "$pane" "$preferred" || return 1
   sid=$FM_BACKEND_REX_PLACE_SESSION
@@ -679,19 +715,22 @@ fm_backend_rex_composer_state() { # <target> [expected-label] -> empty|pending|p
 }
 
 # fm_backend_rex_send_text_submit: type once, then the shared verify-and-retry
-# Enter loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core).
+# Enter loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core), whose
+# verdict fm_backend_rex_submit_state also confirms from a proven harness's
+# program-status working edge.
 fm_backend_rex_send_text_submit() { # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} FM_BACKEND_REX_SUBMIT_BASELINE
   fm_backend_rex_parse_target "$target" || {
     printf 'unknown'
     return 0
   }
+  FM_BACKEND_REX_SUBMIT_BASELINE=$(fm_backend_rex_root_status "$target" 2>/dev/null) || FM_BACKEND_REX_SUBMIT_BASELINE=unreadable
   fm_backend_rex_send_literal "$target" "$text" "$expected_label" || {
     printf 'send-failed'
     return 0
   }
   sleep "$settle"
-  fm_composer_submit_retry_core fm_backend_rex_send_key fm_backend_rex_composer_state \
+  fm_composer_submit_retry_core fm_backend_rex_send_key fm_backend_rex_submit_state \
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
@@ -807,9 +846,10 @@ fm_backend_rex_endpoint_absence_recheck() { # <target>
 # fm_backend_rex_kill: close the task's block, then prove it gone (exit 3) and
 # retire this home's own session if that was its last tab. 0 = closed or
 # already gone; 1 = the block may still be live (unreachable server, a label
-# that no longer matches, or a close that did not take).
+# that no longer matches, or a close that did not take). The deliberate close
+# pre-commits the block's `dead` edge, so an armed watcher never escalates it.
 fm_backend_rex_kill() { # <target> [unused] [expected-label]
-  local target=$1 expected_label=${3:-}
+  local target=$1 expected_label=${3:-} dead_marker
   if ! fm_backend_rex_target_ready "$target" "$expected_label"; then
     case "$FM_BACKEND_REX_READY_RC" in
       3)
@@ -826,9 +866,12 @@ fm_backend_rex_kill() { # <target> [unused] [expected-label]
         ;;
     esac
   fi
+  dead_marker=$(fm_backend_rex_escalation_marker "${STATE:-$FM_HOME/state}" "$target" dead)
+  { : >"$dead_marker"; } 2>/dev/null || true
   FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_cli block close -s "$FM_BACKEND_REX_SESSION_ID" "$FM_BACKEND_REX_BLOCK_ID" >/dev/null 2>&1 || true
   fm_backend_rex_block_inspect "$target" >/dev/null
   if [ "$?" -ne 3 ]; then
+    rm -f "$dead_marker" 2>/dev/null || true
     echo "error: the Rex block for $target is still present after close" >&2
     return 1
   fi
@@ -929,4 +972,423 @@ fm_backend_rex_block_close() { # <target>
   FM_BACKEND_REX_TARGET_HINT=$1 fm_backend_rex_cli block close -s "$FM_BACKEND_REX_SESSION_ID" "$FM_BACKEND_REX_BLOCK_ID" >/dev/null 2>&1 || true
   fm_backend_rex_block_inspect "$1" >/dev/null
   [ "$?" -eq 3 ]
+}
+
+# --- program status: attention records -----------------------------------------
+# Rex shows program status (OSC 7501) as tab spinners and blocked symbols,
+# session-picker indicators, the Activity sidebar, the Dock badge, sounds, and
+# notifications, and streams every change as `program_status_changed`. A
+# record is `ESC ] 7501 ; state=<s>[:kind=<k>][:app=<a>][:id=<i>][:msg=<b64>]
+# ESC \`; a record with an id is independent of the pane's root record, so
+# Firstmate's own records (app=firstmate, id=fm on a worker pane, id=fm-wedge
+# on the supervisor pane) never overwrite a harness's report and a harness
+# never overwrites them. Rex drops a `working` or `blocked` record when its
+# owning process exits or at the next OSC 133 prompt mark, while `done` and
+# `error` persist, so bin/fm-rex-marks.sh re-reads and repairs rather than
+# writing once. Since Rex preview.16 the app's sounds and notifications follow
+# a pane's main (root) program status only, so a child record badges the tab
+# and the Activity sidebar but does not notify; a new mark therefore carries
+# an OSC 777 desktop notification in the same write, which Rex streams as
+# `desktop_notification` and the app shows as a notification that returns to
+# the pane. No API sets a record: it is written to the pane's tty as one small
+# write, so it cannot split inside the program's own output.
+FM_BACKEND_REX_MARK_APP=firstmate
+FM_BACKEND_REX_MARK_ID=fm
+FM_BACKEND_REX_ALERT_ID=fm-wedge
+FM_BACKEND_REX_MSG_MAX=120
+FM_BACKEND_REX_DEV_DIR=${FM_BACKEND_REX_DEV_DIR:-/dev}
+
+# fm_backend_rex_tty: the device path of <target>'s terminal, from its
+# foreground process (else its child); fails when it cannot be named.
+fm_backend_rex_tty() { # <target>
+  local out pid tty
+  out=$(fm_backend_rex_block_call "$1" process) || return 1
+  pid=$(printf '%s' "$out" | jq -r '.foreground.pid // .child.pid // empty' 2>/dev/null)
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  case "$tty" in '' | '?' | '??') return 1 ;; esac
+  printf '%s/%s' "$FM_BACKEND_REX_DEV_DIR" "${tty#/dev/}"
+}
+
+# fm_backend_rex_status_sequence: one OSC 7501 report. <msg> is clipped to
+# FM_BACKEND_REX_MSG_MAX characters and base64-encoded on one line.
+fm_backend_rex_status_sequence() { # <state> <id> [kind] [msg]
+  local fields="state=$1" msg=${4:-}
+  [ -z "${3:-}" ] || fields="$fields:kind=$3"
+  fields="$fields:app=$FM_BACKEND_REX_MARK_APP:id=$2"
+  if [ -n "$msg" ] && [ "$1" != clear ]; then
+    msg=$(printf '%s' "$msg" | tr '\t\r\n' '   ')
+    msg=${msg:0:$FM_BACKEND_REX_MSG_MAX}
+    fields="$fields:msg=$(printf '%s' "$msg" | base64 | tr -d '\n')"
+  fi
+  printf '\033]7501;%s\033\134' "$fields"
+}
+
+# fm_backend_rex_notify_sequence: one OSC 777 desktop notification. The
+# sequence's own separators and control characters are removed from both
+# fields.
+fm_backend_rex_notify_sequence() { # <title> <body>
+  local title body
+  title=$(printf '%s' "$1" | tr ';\a\033\r\n' ',    ')
+  body=$(printf '%s' "$2" | tr ';\a\033\r\n' ',    ')
+  body=${body:0:$FM_BACKEND_REX_MSG_MAX}
+  printf '\033]777;notify;%s;%s\a' "$title" "$body"
+}
+
+# fm_backend_rex_tty_write: write <bytes> to <target>'s tty in one write.
+fm_backend_rex_tty_write() { # <target> <bytes>
+  local dev
+  dev=$(fm_backend_rex_tty "$1") || return 1
+  [ -w "$dev" ] || return 1
+  { printf '%s' "$2" >"$dev"; } 2>/dev/null
+}
+
+# fm_backend_rex_mark: set (or with state `clear`, remove) Firstmate's own
+# attention record on a task pane. <state> is blocked|error|done|clear; <kind>
+# is permission|question|auth for blocked. Refuses a block that does not carry
+# the task's scoped label, so a mark can never land on another pane. With
+# <notify-title>, the same write raises a desktop notification whose body is
+# <msg>.
+fm_backend_rex_mark() { # <target> <state> [kind] [msg] [expected-label] [notify-title]
+  local bytes
+  fm_backend_rex_target_ready "$1" "${5:-}" || return 1
+  bytes=$(fm_backend_rex_status_sequence "$2" "$FM_BACKEND_REX_MARK_ID" "${3:-}" "${4:-}")
+  [ -z "${6:-}" ] || bytes="$bytes$(fm_backend_rex_notify_sequence "$6" "${4:-}")"
+  fm_backend_rex_tty_write "$1" "$bytes"
+}
+
+# fm_backend_rex_status_records: the pane's program-status records as one JSON
+# array; fails when the pane cannot be read.
+fm_backend_rex_status_records() { # <target>
+  local out
+  out=$(fm_backend_rex_block_call "$1" program_status) || return 1
+  printf '%s' "$out" | jq -ce '.records | if type == "array" then . else error("no records") end' 2>/dev/null
+}
+
+# fm_backend_rex_mark_read: "<state>\t<kind>\t<msg>" of Firstmate's own record
+# on the pane (empty fields when it has none, which reads as `clear`); fails
+# when the pane cannot be read.
+fm_backend_rex_mark_read() { # <target>
+  local records
+  records=$(fm_backend_rex_status_records "$1") || return 1
+  printf '%s' "$records" | jq -r --arg app "$FM_BACKEND_REX_MARK_APP" --arg id "$FM_BACKEND_REX_MARK_ID" '
+    ([.[] | select(.id == $id and .app == $app)] | first) as $r
+    | if $r == null then "clear\t\t" else "\($r.state // "")\t\($r.kind // "")\t\($r.msg // "")" end' 2>/dev/null
+}
+
+# fm_backend_rex_tab_rename: set the task tab's label to <label>, renaming
+# only when the live label differs.
+fm_backend_rex_tab_rename() { # <target> <label> [expected-label]
+  local target=$1 want=$2 out wid view live
+  [ -n "$want" ] || return 1
+  fm_backend_rex_target_ready "$target" "${3:-}" || return 1
+  out=$(fm_backend_rex_block_inspect "$target") || return 1
+  wid=$(printf '%s' "$out" | jq -r '.block.window_id // empty' 2>/dev/null)
+  [ -n "$wid" ] || return 1
+  view=$(FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_cli window ls -s "$FM_BACKEND_REX_SESSION_ID" --json 2>/dev/null) || return 1
+  live=$(printf '%s' "$view" | jq -r --arg w "$wid" '.windows[]? | select(.window_id == $w) | .label // empty' 2>/dev/null)
+  [ "$live" != "$want" ] || return 0
+  FM_BACKEND_REX_TARGET_HINT=$target fm_backend_rex_cli window rename -s "$FM_BACKEND_REX_SESSION_ID" "$wid" "$want" >/dev/null 2>&1
+}
+
+# fm_backend_rex_alert: the away daemon's wedge alarm on Firstmate's own pane:
+# a blocked record (id=fm-wedge, kind permission) plus an OSC 777 desktop
+# notification, in one write. fm_backend_rex_alert_clear removes the record.
+fm_backend_rex_alert() { # <target> <title> <body>
+  fm_backend_rex_parse_target "$1" || return 1
+  fm_backend_rex_tty_write "$1" \
+    "$(fm_backend_rex_status_sequence blocked "$FM_BACKEND_REX_ALERT_ID" permission "$3")$(fm_backend_rex_notify_sequence "$2" "$3")"
+}
+fm_backend_rex_alert_clear() { # <target>
+  fm_backend_rex_parse_target "$1" || return 1
+  fm_backend_rex_tty_write "$1" "$(fm_backend_rex_status_sequence clear "$FM_BACKEND_REX_ALERT_ID")"
+}
+
+# --- program status: busy state and submit confirmation ------------------------
+# Only harnesses whose OSC 7501 root record a live guard proves
+# (tests/fm-rex-program-status-live-e2e.test.sh; the dated per-harness record is
+# docs/verification/runtime-backends.md#rex) are trusted, and the record must
+# name that harness's app itself, so a program that merely claims a status
+# cannot stand in for one. Every other harness keeps the rendered and
+# composer paths.
+FM_BACKEND_REX_STATUS_APPS=${FM_BACKEND_REX_STATUS_APPS:-claude-code}
+
+# fm_backend_rex_root_status: "<state>\t<updated_at>" of the pane's root record
+# when a proven app reported it, an empty line when there is none; fails when
+# the pane cannot be read.
+fm_backend_rex_root_status() { # <target>
+  local records
+  records=$(fm_backend_rex_status_records "$1") || return 1
+  printf '%s' "$records" | jq -r --arg apps " $FM_BACKEND_REX_STATUS_APPS " '
+    ([.[] | select((.id // "") == "" and ((.app // "") as $a | $a != "" and ($apps | contains(" \($a) "))))] | first) as $r
+    | if $r == null then "" else "\($r.state // "")\t\($r.updated_at // "")" end' 2>/dev/null
+}
+
+# fm_backend_rex_busy_state: busy|idle|unknown from a proven harness's root
+# record: working is busy; idle, done, and blocked (waiting on the human, not
+# grinding) are idle; no proven record is unknown. A busy verdict also needs
+# the pane's agent proven alive at process level, so a record left over a
+# shell is never read as working.
+fm_backend_rex_busy_state() { # <target>
+  local rec
+  fm_backend_rex_target_ready "$1" || {
+    printf 'unknown'
+    return 0
+  }
+  rec=$(fm_backend_rex_root_status "$1") || {
+    printf 'unknown'
+    return 0
+  }
+  case "${rec%%$'\t'*}" in
+    working)
+      if [ "$(fm_backend_rex_agent_state "$1")" = alive ]; then printf 'busy'; else printf 'unknown'; fi
+      ;;
+    idle | done | blocked) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_rex_submit_state: the state function behind send_text_submit's
+# Enter loop. The composer verdict stands unless it is not exact `empty` and
+# a proven harness's root record moved to `working` from the not-working
+# baseline captured before typing (FM_BACKEND_REX_SUBMIT_BASELINE) - a turn
+# started, so the submit landed.
+fm_backend_rex_submit_state() { # <target> [expected-label]
+  local verdict rec
+  verdict=$(fm_backend_rex_composer_state "$1" "${2:-}")
+  [ "$verdict" != empty ] || {
+    printf 'empty'
+    return 0
+  }
+  case "${FM_BACKEND_REX_SUBMIT_BASELINE:-}" in
+    working* | unreadable) ;;
+    *)
+      rec=$(fm_backend_rex_root_status "$1" 2>/dev/null) || rec=
+      if [ "${rec%%$'\t'*}" = working ]; then
+        printf 'empty'
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s' "$verdict"
+}
+
+# --- native event push ----------------------------------------------------------
+# The push half of the watcher's escalation (bin/fm-backend.sh "native event
+# push"): one `rex events -s <session> --json` reader per wait, projected by
+# one jq into short lines; the shared record shape and policy live in
+# bin/fm-transition-lib.sh. A root record's `blocked` is the actionable edge
+# and `working` clears the per-pane dedupe marker; `child_exited` and
+# `block_closed` normalize to `dead`. Firstmate's own records (app=firstmate,
+# or any id) never count. Rex prints nothing on subscribe and has no replay,
+# so the reader pokes the session until the stream answers (any CLI client
+# touching the session is itself streamed), and only then level-reconciles
+# with program_status and block inspect. The reader ending early - including
+# exit 4 when the server goes away - makes this wait unusable (return 2),
+# never a dead verdict.
+FM_BACKEND_REX_ESCALATED_PREFIX=".rex-escalated-"
+FM_BACKEND_REX_SUBSCRIBE_POKES=${FM_BACKEND_REX_SUBSCRIBE_POKES:-6}
+# shellcheck disable=SC2016 # a jq program, not shell
+FM_BACKEND_REX_EVENT_FILTER='
+  if .type == "session_event" then
+    (.payload.event // {}) as $e
+    | if $e.type == "block_event" then
+        ($e.payload // {}) as $b
+        | if $b.name == "program_status_changed" then
+            ($b.payload.record // {}) as $r
+            | "status\t\($b.block_id // "")\t\($r.state // "")\t\($r.app // "")\t\($b.payload.id // $r.id // "")"
+          elif $b.name == "child_exited" then "dead\t\($b.block_id // "")"
+          else "@" end
+      elif $e.type == "block_closed" then "dead\t\($e.payload.block_id // "")"
+      else "@" end
+  else "@" end'
+
+# fm_backend_rex_server_of_session: the `rex_server=` of a task recorded in
+# session <uuid>, or failure.
+fm_backend_rex_server_of_session() { # <session-uuid>
+  local meta
+  for meta in "${STATE:-$FM_HOME/state}"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(sed -n 's/^rex_session_id=//p' "$meta" 2>/dev/null | tail -1)" = "$1" ] || continue
+    sed -n 's/^rex_server=//p' "$meta" 2>/dev/null | tail -1
+    return 0
+  done
+  return 1
+}
+
+# fm_backend_rex_events_capable: the gate for the event fast path. Needs the
+# CLI and jq, a reachable server for <session> at the verified API floor, and
+# the program_status method. FM_BACKEND_REX_EVENTS_FORCE=1|0 overrides it.
+fm_backend_rex_events_capable() { # <session-uuid>
+  local server
+  case "${FM_BACKEND_REX_EVENTS_FORCE:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  server=$(fm_backend_rex_server_of_session "$1") || server=$(fm_backend_rex_server) || return 1
+  FM_BACKEND_REX_SERVER=$server fm_backend_rex_version_check >/dev/null 2>&1 || return 1
+  FM_BACKEND_REX_SERVER=$server fm_backend_rex_cli api list -q 2>/dev/null | grep -Fqx com.superlogical.terminal.program_status
+}
+
+# fm_backend_rex_escalation_marker: the per-pane dedupe marker, keyed like the
+# watcher's .stale-<key>. A `dead` edge has its own marker (".dead"), so a
+# pane that exits after its blocked edge was escalated still escalates once.
+fm_backend_rex_escalation_marker() { # <state_dir> <window> [to-status]
+  printf '%s/%s%s' "$1" "$FM_BACKEND_REX_ESCALATED_PREFIX" "$(printf '%s' "$2" | tr ':/.' '___')"
+  [ "${3:-}" != dead ] || printf '.dead'
+}
+
+# fm_backend_rex_apply_transition: the shared policy over one normalized record
+# (pane field = block uuid). Prints the record and returns 0 on a fresh
+# actionable edge; `absorb` clears the blocked marker; everything else
+# returns 1.
+fm_backend_rex_apply_transition() { # <state_dir> <session-uuid> <record>
+  local state=$1 session=$2 record=$3 bid marker to
+  bid=$(fm_transition_pane_id "$record")
+  [ -n "$bid" ] || return 1
+  to=$(fm_transition_to_status "$record")
+  marker=$(fm_backend_rex_escalation_marker "$state" "$session:$bid" "$to")
+  case "$(fm_transition_policy "$to")" in
+    actionable)
+      if [ ! -e "$marker" ]; then
+        printf '%s' "$record"
+        return 0
+      fi
+      ;;
+    absorb) rm -f "$marker" 2>/dev/null || true ;;
+  esac
+  return 1
+}
+
+fm_backend_rex_commit_transition() { # <state_dir> <session-uuid> <record>
+  local bid
+  bid=$(fm_transition_pane_id "$3")
+  [ -n "$bid" ] || return 1
+  : >"$(fm_backend_rex_escalation_marker "$1" "$2:$bid" "$(fm_transition_to_status "$3")")"
+}
+
+fm_backend_rex_clear_transition() { # <state_dir> <window>
+  [ -n "${2:-}" ] || return 0
+  rm -f "$(fm_backend_rex_escalation_marker "$1" "$2")" "$(fm_backend_rex_escalation_marker "$1" "$2" dead)" 2>/dev/null || true
+}
+
+# fm_backend_rex_event_record: one projected reader line -> a normalized record
+# for a watched block, or failure when the line is not one.
+fm_backend_rex_event_record() { # <session-uuid> <watched-block-uuids> <line>
+  local session=$1 watched=$2 line=$3 kind bid state app id
+  kind=$(printf '%s' "$line" | cut -f1)
+  bid=$(printf '%s' "$line" | cut -f2)
+  bid=${bid#block:}
+  case " $watched " in *" $bid "*) ;; *) return 1 ;; esac
+  case "$kind" in
+    status)
+      state=$(printf '%s' "$line" | cut -f3)
+      app=$(printf '%s' "$line" | cut -f4)
+      id=$(printf '%s' "$line" | cut -f5)
+      [ -z "$id" ] && [ "$app" != "$FM_BACKEND_REX_MARK_APP" ] && [ -n "$state" ] || return 1
+      fm_transition_record "$bid" "$session" "" "$state" "$app"
+      ;;
+    dead) fm_transition_record "$bid" "$session" "" dead "" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_rex_reconcile_record: the level read for one watched block after
+# subscribing: exit 3 is `dead`; a proven-or-not root record reports its
+# state; an unreadable pane or server reports nothing.
+fm_backend_rex_reconcile_record() { # <session-uuid> <block-uuid>
+  local target="$1:$2" records state app
+  fm_backend_rex_block_inspect "$target" >/dev/null
+  case "$?" in
+    0) ;;
+    3)
+      fm_transition_record "$2" "$1" "" dead ""
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+  records=$(fm_backend_rex_status_records "$target") || return 1
+  state=$(printf '%s' "$records" | jq -r --arg app "$FM_BACKEND_REX_MARK_APP" '([.[] | select((.id // "") == "" and (.app // "") != $app)] | first) // {} | .state // empty' 2>/dev/null)
+  app=$(printf '%s' "$records" | jq -r --arg app "$FM_BACKEND_REX_MARK_APP" '([.[] | select((.id // "") == "" and (.app // "") != $app)] | first) // {} | .app // empty' 2>/dev/null)
+  [ -n "$state" ] || return 1
+  fm_transition_record "$2" "$1" "" "$state" "$app"
+}
+
+# fm_backend_rex_wait_transition: the bounded event wait (contract in
+# bin/fm-backend.sh): 0 with the record on a fresh actionable edge, 1 on a
+# clean timeout, 2 when the event path is unusable.
+fm_backend_rex_wait_transition() { # <session-uuid> <timeout_secs> <state_dir> <window...>
+  local session=$1 timeout=$2 state=$3
+  shift 3
+  local w bid watched='' first='' server bin dir raw fifo rex_pid jq_pid line record hit rc=1 poke=0 deadline
+  for w in "$@"; do
+    fm_backend_rex_parse_target "$w" || continue
+    [ "${w%%:*}" = "$session" ] || continue
+    [ -n "$first" ] || first=$w
+    watched="$watched ${w#*:}"
+  done
+  [ -n "$first" ] || return 2
+  case "$timeout" in '' | *[!0-9]*) timeout=1 ;; esac
+  if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
+    fm_backend_rex_events_capable "$session" || return 2
+  fi
+  server=$(fm_backend_rex_server "$first") || return 2
+  bin=$(fm_backend_rex_bin) || return 2
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-rex-events.XXXXXX") || return 2
+  raw="$dir/raw"
+  fifo="$dir/events"
+  if ! mkfifo "$raw" "$fifo" 2>/dev/null; then
+    rm -rf "$dir"
+    return 2
+  fi
+  env -u REX_SESSION -u REX_BLOCK -u REX_CLIENT -u REX_SERVER \
+    "$bin" -S "$server" --autostart=false events -s "session:$session" --json >"$raw" 2>/dev/null &
+  rex_pid=$!
+  jq --unbuffered -r "$FM_BACKEND_REX_EVENT_FILTER" <"$raw" >"$fifo" 2>/dev/null &
+  jq_pid=$!
+  if ! exec 9<"$fifo"; then
+    kill "$rex_pid" "$jq_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 2
+  fi
+  # Subscription proof: poke until the stream answers.
+  rc=2
+  while [ "$poke" -lt "$FM_BACKEND_REX_SUBSCRIBE_POKES" ]; do
+    fm_backend_rex_block_call "$first" program_status >/dev/null 2>&1 || true
+    if IFS= read -r -t 1 -u 9 line; then
+      rc=1
+      break
+    fi
+    kill -0 "$rex_pid" 2>/dev/null || break
+    poke=$((poke + 1))
+  done
+  if [ "$rc" -eq 1 ]; then
+    for bid in $watched; do
+      record=$(fm_backend_rex_reconcile_record "$session" "$bid") || continue
+      if hit=$(fm_backend_rex_apply_transition "$state" "$session" "$record"); then
+        printf '%s' "$hit"
+        rc=0
+        break
+      fi
+    done
+  fi
+  deadline=$((SECONDS + timeout))
+  while [ "$rc" -eq 1 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    if IFS= read -r -t 1 -u 9 line; then
+      [ "$line" != @ ] || continue
+      record=$(fm_backend_rex_event_record "$session" "$watched" "$line") || continue
+      if hit=$(fm_backend_rex_apply_transition "$state" "$session" "$record"); then
+        printf '%s' "$hit"
+        rc=0
+      fi
+    elif ! kill -0 "$rex_pid" 2>/dev/null; then
+      # The stream ended (exit 4 when the server went away): unusable, never dead.
+      rc=2
+    fi
+  done
+  kill "$rex_pid" "$jq_pid" 2>/dev/null || true
+  wait "$rex_pid" "$jq_pid" 2>/dev/null || true
+  exec 9<&-
+  rm -rf "$dir"
+  return "$rc"
 }

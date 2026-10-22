@@ -68,6 +68,9 @@ FM_BACKLOG_ROW_ERROR=
 # the row is not held.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
+# Set by fm_backlog_row_probe on a found row: the item's title, unquoted.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_BACKLOG_ROW_TITLE=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -434,6 +437,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   FM_BACKLOG_ROW_RESULT=error
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
+  FM_BACKLOG_ROW_TITLE=
   FM_BACKLOG_ROW_ERROR=
   fm_backlog_source_present "$data" "$authorized_data"
   source_status=$?
@@ -473,6 +477,11 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     ''|'"-"'|-) FM_BACKLOG_ROW_HOLD_KIND= ;;
     *) FM_BACKLOG_ROW_HOLD_KIND=$hold_kind ;;
   esac
+  FM_BACKLOG_ROW_TITLE=$(printf '%s\n' "$out" | sed -n 's/^  title: *//p' | head -1)
+  case "$FM_BACKLOG_ROW_TITLE" in
+    \"*\") FM_BACKLOG_ROW_TITLE=${FM_BACKLOG_ROW_TITLE#\"}; FM_BACKLOG_ROW_TITLE=${FM_BACKLOG_ROW_TITLE%\"} ;;
+  esac
+  FM_BACKLOG_ROW_TITLE=${FM_BACKLOG_ROW_TITLE//\\\"/\"}
   return 0
 }
 

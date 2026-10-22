@@ -2775,6 +2775,32 @@ test_wedge_alarm_herdr_channel_selected() {
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+test_wedge_alarm_rex_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-rex); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=rex \
+    wedge_alarm_notify "away-mode escalations WEDGED 700s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'rex' "$log" >/dev/null || fail "rex channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 700s undelivered' "$log" >/dev/null || fail "rex channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "rex-only config also selected osascript"
+  pass "rex channel routes through the notifier seam with the summary (never a real pane write)"
+}
+
+# auto adds the rex channel only when the supervisor pane itself is a Rex pane.
+test_wedge_alarm_auto_adds_rex_for_a_rex_supervisor() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-rex); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    FM_SUPERVISOR_BACKEND=rex wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -q '^rex' "$log" || fail "auto with a Rex supervisor pane did not select rex: $(cat "$log")"
+  grep -q '^osascript' "$log" || fail "auto with a Rex supervisor pane dropped the OS banner: $(cat "$log")"
+  : >"$log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    FM_SUPERVISOR_BACKEND=tmux wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -q '^rex' "$log" && fail "auto selected rex for a tmux supervisor pane"
+  pass "auto adds the rex channel for a Rex supervisor pane, alongside the OS banner, and not otherwise"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -3379,6 +3405,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_rex_channel_selected
+test_wedge_alarm_auto_adds_rex_for_a_rex_supervisor
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive

@@ -47,7 +47,11 @@ A session label is display and an identity check, never routing:
 - A primary-home task never opens in Firstmate's own session; if that session is itself labeled `fm-local`, the spawn refuses.
 
 Tabs open with `--focus=false`, so a spawn never moves the captain's view.
-The tab label is `<project>·<id>` for display, and the block label `fm-<home-label>-<id>` is home-scoped so two homes sharing one server never cross-match.
+The tab label is short enough for the Rex sidebar, at most 24 visible characters and clipped with an ellipsis beyond that.
+An explicit `fm-spawn.sh --title <text>` is used as given; otherwise the label is a kind marker (`Ship`, `Scout`, or `Mate`) plus the backlog item's title condensed to its first clause, else the task id, for example `Ship · Rex-native status`.
+The label is recorded as `rex_tab_label=`.
+A relaunch keeps the recorded label unless it passes a new `--title`.
+The block label `fm-<home-label>-<id>` stays the identity cross-check; it is home-scoped so two homes sharing one server never cross-match.
 
 Rex labels are not unique, so the recorded full block id on the recorded server is the routing authority; the block label is only an identity check made before every send.
 The window id is advisory, because moving a block to another tab keeps its block id.
@@ -60,6 +64,7 @@ rex_server_instance=<server instance id>
 rex_session_id=<session-uuid>
 rex_window_id=<window-uuid>
 rex_block_id=<block-uuid>
+rex_tab_label=<sidebar label>
 ```
 
 `rex_server_instance` lets recovery tell a restarted server from a closed pane.
@@ -110,6 +115,50 @@ A remote second mate on Rex runs in a visible `fm-<id>` session on that host's o
 - The away record stores the block's target and its server, and closing it is verified by exit 3 on that block id.
 - Injects pass the shared composer gate, so an escalation never lands on text the captain is typing.
 
+## Attention marks
+
+The captain sees which worker needs them from Rex itself.
+`bin/fm-rex-marks.sh` turns each Rex task's latest status into one program-status record (OSC 7501, `app=firstmate`, `id=fm`) on that worker's pane, so Rex badges its tab, session, and Activity entry while the worker's own agent keeps the pane's root status.
+
+| Worker status | Record | Message |
+| --- | --- | --- |
+| `needs-decision`, or a captain hold | `blocked`, kind `question` | `Needs your decision: <note>` |
+| `blocked` naming a credential or login | `blocked`, kind `auth` | `Blocked: <note>` |
+| other `blocked` | `blocked`, kind `permission` | `Blocked: <note>` |
+| `failed` | `error` | `Failed: <note>` |
+| `done` with a PR URL | `done` | `PR ready: <note>` |
+| other `done` | `done` | `Done: <note>` |
+| anything else | removed | |
+
+Each new record that needs the captain also carries an OSC 777 desktop notification titled `Firstmate: <tab label>`, because Rex sounds and notifications follow each pane's root program status, not a child record.
+The notification fires once per change, never on a repeated sync.
+Rex has no API to set a record, so the mark is one small write to the pane's terminal device; a `working` or `blocked` record is dropped when the agent's shell prints its next prompt or exits, and the next sync writes it again.
+The watcher runs `fm-rex-marks.sh sync` once per poll while any Rex task or cached mark exists, and cleanup clears the mark before closing the pane.
+Every write first checks the block label, so a mark never lands on a pane that no longer belongs to the task.
+
+`config/rex-status-marks` turns the marks `on` (the default when the file is absent) or `off`; turning them off clears every mark already shown.
+`state/.rex-mark-<id>` caches the last mark so a sync writes only on change.
+
+## Event push
+
+On Rex the watcher wakes on Rex events instead of only polling.
+`fm_backend_rex_wait_transition` follows `rex events -s <session> --json` for the session holding the watched tasks and reacts to three events on a watched block:
+
+- `program_status_changed` to `blocked` on the root record is an agent waiting on a human; it escalates at once, and a later `working` re-arms it.
+- `child_exited` or `block_closed` is a worker that exited or a pane that closed; it escalates at once instead of waiting for the liveness poll.
+  A tab Firstmate closes itself, such as at teardown, never escalates: the close records the `dead` edge as already handled first, and a `dead` edge for a pane no task record names any more is dropped.
+- `idle` and `done` defer to the ordinary checks, and Firstmate's own records (`app=firstmate`, or any child `id`) are ignored.
+
+The stream replays nothing, so every subscribe pokes the session until a `client_connected` event proves it live and then reconciles each watched block by reading its current state.
+Exit 4, a closed stream, or a failed subscribe returns to plain polling for that cycle and is never read as a dead worker.
+`bin/fm-transition-lib.sh` owns the shared transition record and policy that herdr also uses.
+
+## Busy and submit signals
+
+Claude Code publishes a root program status on Rex, proven by `tests/fm-rex-program-status-live-e2e.test.sh`, which also fails if that record still reads `working` after the worker reports done; so for it `fm_backend_busy_state` reads `working` as busy (only while the agent process is alive) and `idle`, `done`, or `blocked` as idle.
+A steer is confirmed submitted when the composer reads empty, or when the root status moves to `working` from a baseline that was not already working.
+`FM_BACKEND_REX_STATUS_APPS` lists the harnesses trusted this way; every other harness keeps capture and hash polling.
+
 ## Active limits
 
 - Rex is a beta that changes often; the adapter gates on API revision 4 and the block methods it calls, and the dated verification record should be re-run after each Rex update.
@@ -117,7 +166,8 @@ A remote second mate on Rex runs in a visible `fm-<id>` session on that host's o
 - A server restart ends every worker on it.
 - Rex has no viewport-only read: `rex capture` and the `format` block method both include scrollback and omit trailing blank rows, so the visible screen cannot be located. Rex is therefore not a visible-capture backend: Kimi spawns and devin and Command Code armed interrupts are refused, and the composer classifier runs without a cursor row.
 - A Pi composer on Rex reads as unknown, because the classifier runs without a cursor row and Pi's prompt carries no identifying border; the composer gate then defers rather than types.
-- There is no native busy signal yet, so supervision uses capture/hash polling and each harness adapter's semantic lifecycle for worker state.
+- Only harnesses proven to publish a root program status get the native busy signal; the others use capture/hash polling and each harness adapter's semantic lifecycle for worker state.
+- An attention mark is a terminal write, so a `blocked` mark disappears at the agent's next shell prompt until the next watcher poll writes it again.
 
 ## Lab helper
 
@@ -133,10 +183,12 @@ tests/fm-afk-inject-rex-e2e.test.sh
 tests/fm-remote-doctor-rex.test.sh
 FM_REX_SECONDMATE_E2E=1 tests/fm-rex-secondmate-e2e.test.sh
 FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
+FM_REX_STATUS_LIVE=1 tests/fm-rex-program-status-live-e2e.test.sh
 ```
 
 - `fm-backend-rex.test.sh` and `fm-remote-doctor-rex.test.sh` use a fake `rex`.
 - The smoke and away-mode tests drive the real binary on a lab server without tokens.
+- The program-status test spawns one trivial scout per installed harness and records which root states each publishes; it fails if Claude Code stops publishing `working`.
 - The second mate test launches a real Pi second mate on a lab server, aborting before any model request, so it only runs when opted in.
 - The last spawns a real Claude scout and submits prompts, so it only runs when opted in.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#rex) records the active source and live evidence.

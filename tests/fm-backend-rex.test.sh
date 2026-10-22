@@ -34,6 +34,9 @@ SERVER=unix:///tmp/fm-rex-fake.sock
 #   ls.json/.exit        `ls --json`
 #   new.json             `new ... --json`
 #   window-new.json      `window new ... --json` (also answers `window move`)
+#   window-ls.json       `window ls -s S --json`; `window rename` only logs
+#   events.jsonl         `events ...` prints these lines, then holds the
+#                        stream open; events.exit makes it exit at once
 #   api-call.json        `api call ...` (e.g. session.new_block); absent -> exit 1
 #   inspect/<id>.json    `block inspect <id> --json`; absent -> exit 3
 #   blocks/<sid>.json    `block ls -s <sid> --json`
@@ -52,7 +55,9 @@ set -u
 F="${FM_REX_FAKE:?}"
 leak=clean
 [ -z "${REX_BLOCK:-}${REX_SESSION:-}${REX_CLIENT:-}${REX_SERVER:-}" ] || leak=leaked
-{ printf '%s' "$leak"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >>"$F/log"
+line=$leak
+for a in "$@"; do line="$line"$'\x1f'"$a"; done
+printf '%s\n' "$line" >>"$F/log"
 key() { printf '%s' "${1//:/_}"; }
 emit() { # <file> [missing-exit]
   if [ -f "$1" ]; then cat "$1"; [ -f "${1%.*}.exit" ] && exit "$(cat "${1%.*}.exit")"; exit 0; fi
@@ -80,7 +85,16 @@ case "$cmd" in
     [ -f "$F/methods" ] || printf '%s\n' block.close session.new_window session.set_block_label com.superlogical.terminal.process com.superlogical.terminal.format >"$F/methods"; cat "$F/methods" ;;
   ls) [ -f "$F/ls.json" ] || printf '{"sessions":[]}' >"$F/ls.json"; emit "$F/ls.json" ;;
   new) emit "$F/new.json" 1 ;;
-  window) emit "$F/window-new.json" 1 ;;
+  window)
+    case "${1:-}" in
+      ls) emit "$F/window-ls.json" 1 ;;
+      rename) exit 0 ;;
+    esac
+    emit "$F/window-new.json" 1 ;;
+  events)
+    [ -f "$F/events.exit" ] && exit "$(cat "$F/events.exit")"
+    cat "$F/events.jsonl" 2>/dev/null
+    exec sleep 30 ;;
   kill) exit "$(cat "$F/kill.exit" 2>/dev/null || echo 0)" ;;
   send) cat >>"$F/sent"; printf '\n' >>"$F/sent"; exit "$(cat "$F/send.exit" 2>/dev/null || echo 0)" ;;
   send-key) exit "$(cat "$F/send-key.exit" 2>/dev/null || echo 0)" ;;
@@ -219,7 +233,7 @@ test_create_task_creates_the_fm_local_session_with_the_task_as_first_tab() {
   printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
   out=$(fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "create_task must print bare session/window/block uuids, got '$out'"
-  calls | grep -q " new fm-local -c /work/proj --window proj·t1 --keep-open --json" \
+  calls | grep -q " new fm-local -c /work/proj --window Ship · t1 --keep-open --json" \
     || fail "the fm-local session should be created with the task as its first, kept-open tab: $(calls)"
   calls | grep -q " block close " && fail "the new session's first tab is the task tab and must not be closed"
   calls | grep -q " window new " && fail "a new fm-local session needs no second tab"
@@ -230,8 +244,14 @@ test_create_task_creates_the_fm_local_session_with_the_task_as_first_tab() {
   printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
   window_new_json
   out=$(fm_backend_rex_create_task fm-t1 /work/proj) || fail "create_task failed"
-  calls | grep -q " window new -s session:$SID proj·t1 -c /work/proj --focus=false --keep-open --json" \
-    || fail "the task tab must be created with --focus=false --keep-open and a <project>·<id> label: $(calls)"
+  calls | grep -q " window new -s session:$SID Ship · t1 -c /work/proj --focus=false --keep-open --json" \
+    || fail "the task tab must be created with --focus=false --keep-open and the fallback sidebar label: $(calls)"
+  new_case create-labeled
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  window_new_json
+  fm_backend_rex_create_task fm-t1 /work/proj "" "" "P3 · Rex status" >/dev/null || fail "create_task with a tab label failed"
+  calls | grep -q " window new -s session:$SID P3 · Rex status -c /work/proj " \
+    || fail "an explicit tab label must be used as given: $(calls)"
   calls | grep -q " window move " && fail "an ordinary task tab is never reordered"
   pass "rex: a primary-home task opens in the fm-local session (created with the task as its first tab), unfocused and kept open"
 }
@@ -423,6 +443,11 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
   calls | grep -q " block close -s session:$SID block:$BID" || fail "kill must close the exact block"
   calls | grep -q " kill session:$SID" || fail "an emptied fm-local session should be retired"
+  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
+    && fail "a block Firstmate closed itself must never escalate as dead"
+  fm_backend_clear_transition rex "$STATE" "$T"
+  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
+    || fail "clearing the transition must re-arm the dead edge"
 
   new_case kill-keep
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
@@ -453,7 +478,9 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
   out=$(fm_backend_kill rex "$T" "" fm-t1 2>&1) && fail "a block still present after close must fail"
   assert_contains "$out" "still present" "the stuck-close refusal should say so"
-  pass "rex: kill closes the exact block, proves exit 3, retires only this home's emptied session, and refuses blind outcomes"
+  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
+    || fail "a close that did not take must leave the block's dead edge armed"
+  pass "rex: kill closes the exact block, proves exit 3, pre-commits its dead edge, retires only this home's emptied session, and refuses blind outcomes"
 }
 
 test_list_live_filters_by_home_scope() {
@@ -541,7 +568,7 @@ test_secondmate_gets_its_own_session_as_first_tab() {
   printf '{"session_id":"session:%s","initial_windows":[{"window_id":"window:%s","block_ids":["block:%s"]}]}' "$SID" "$WID" "$BID" >"$FAKE/new.json"
   out=$(REX_BLOCK=block:$LBID REX_SESSION=session:$LSID fm_backend_rex_create_task fm-sm1 "$sm" "$sm" "") || fail "secondmate create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "the secondmate pane should be the new session's first tab, got '$out'"
-  calls | grep -q " new fm-sm1 -c $sm --window 2ndmate·sm1 --keep-open --json" \
+  calls | grep -q " new fm-sm1 -c $sm --window Mate · sm1 --keep-open --json" \
     || fail "the secondmate session must be created as fm-<id> with its first tab: $(calls)"
   calls | grep -q " window new " && fail "a new secondmate session needs no second tab"
   calls | grep -q " block close " && fail "the new session's first tab is the secondmate pane and must not be closed"
@@ -599,7 +626,7 @@ test_secondmate_relaunch_reuses_its_recorded_live_session() {
   out=$(fm_backend_rex_create_task fm-sm1 "$sm" "$sm" "$SID") || fail "secondmate create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "the recorded live session should be reused, got '$out'"
   calls | grep -q -- "--autostart=false new " && fail "a live recorded session must not be duplicated"
-  calls | grep -q " window new -s session:$SID 2ndmate·sm1 -c $sm --focus=false --keep-open --json" || fail "the tab must open unfocused in the recorded session"
+  calls | grep -q " window new -s session:$SID Mate · sm1 -c $sm --focus=false --keep-open --json" || fail "the tab must open unfocused in the recorded session"
   calls | grep -q " window move -s session:$SID window:$WID --index 1" || fail "the secondmate tab must move to the front of a reused session"
 
   new_case sm-relabeled
@@ -804,6 +831,257 @@ test_remote_control_rex_arm() {
   pass "rex: the remote host control routes to fm-<id>, reads a gone block as missing, and refuses inconsistent or cross-backend records"
 }
 
+# --- Phase 3: tab labels, attention marks, busy, submit, events -----------------
+
+test_tab_label_is_sidebar_sized() {
+  local out
+  out=$(fm_backend_rex_tab_label ship rex-backend-p3 "" "Rex backend phase 3: Rex-native status, events, notifications")
+  [ "$out" = "Ship · Rex-native status" ] || fail "a backlog title must condense to its subject, got '$out'"
+  out=$(fm_backend_rex_tab_label scout s1 "" "Prove extras (palette, web)")
+  [ "$out" = "Scout · Prove extras" ] || fail "a scout keeps its marker and drops a parenthetical, got '$out'"
+  out=$(fm_backend_rex_tab_label ship x "P3 · Rex status & events")
+  [ "$out" = "P3 · Rex status & events" ] || fail "an explicit title is used as given, got '$out'"
+  out=$(fm_backend_rex_tab_label ship x "A much longer explicit display title here")
+  [ "$out" = "A much longer explicit…" ] || fail "a long title must clip at a word with an ellipsis, got '$out'"
+  [ "$(printf '%s' "$out" | jq -Rr 'length')" -le "$FM_BACKEND_REX_TAB_LABEL_MAX" ] || fail "the clipped label is longer than the sidebar limit"
+  out=$(fm_backend_rex_tab_label secondmate fm-docs)
+  [ "$out" = "Mate · docs" ] || fail "a second mate without a title falls back to its id, got '$out'"
+  out=$(fm_backend_rex_tab_label ship no-title-task "" "")
+  [ "$out" = "Ship · no-title-task" ] || fail "with no title the task id stands in, got '$out'"
+  pass "rex: tab labels are sidebar sized - explicit title, else a condensed backlog title, else the id, under a kind marker"
+}
+
+# mark_case: a case whose block resolves to a writable stand-in tty file.
+mark_case() { # <name>
+  local psdir
+  new_case "$1"
+  psdir="$CASE/psbin"
+  mkdir -p "$psdir" "$CASE/dev"
+  cat >"$psdir/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *" -o tty= "*) echo ttys999; exit 0 ;; esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$psdir/ps"
+  export PATH="$psdir:$PATH" FM_BACKEND_REX_DEV_DIR="$CASE/dev"
+  : >"$CASE/dev/ttys999"
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":1,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"}}'
+}
+
+test_mark_is_one_status_record_plus_optional_notification() {
+  local tty want
+  mark_case mark
+  tty="$CASE/dev/ttys999"
+  fm_backend_rex_mark "$T" blocked question "Needs your decision" fm-t1 || fail "mark failed"
+  want=$(printf '\033]7501;state=blocked:kind=question:app=firstmate:id=fm:msg=%s\033\134' "$(printf 'Needs your decision' | base64)")
+  [ "$(cat "$tty")" = "$want" ] || fail "the mark must be exactly one OSC 7501 id=fm record: $(od -c "$tty" | head -3)"
+  : >"$tty"
+  fm_backend_rex_mark "$T" blocked question "Pick a db" fm-t1 "Firstmate: P3" || fail "mark with notification failed"
+  grep -q $'\033\\]777;notify;Firstmate: P3;Pick a db\a' "$tty" || fail "a notifying mark must carry one OSC 777 notification: $(od -c "$tty" | head -5)"
+  : >"$tty"
+  fm_backend_rex_mark "$T" clear "" "" fm-t1 || fail "clear failed"
+  [ "$(cat "$tty")" = $'\033]7501;state=clear:app=firstmate:id=fm\033\\' ] || fail "clear must remove only Firstmate's record: $(od -c "$tty")"
+  : >"$tty"
+  fm_backend_rex_mark "$T" blocked question "x" fm-other && fail "a block carrying another task's label must be refused"
+  [ ! -s "$tty" ] || fail "a refused mark must write nothing"
+  pass "rex: a mark is one id=fm program-status record (optionally with one OSC 777 notification), cleared alone, never on a foreign block"
+}
+
+test_mark_read_and_tab_rename() {
+  local out
+  mark_case mark-read
+  printf '{"records":[{"state":"working","app":"claude-code"},{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs it"}]}' \
+    >"$FAKE/call/block_$BID.program_status.json"
+  out=$(fm_backend_rex_mark_read "$T") || fail "mark_read failed"
+  [ "$out" = $'blocked\tquestion\tNeeds it' ] || fail "mark_read must report only Firstmate's record, got '$out'"
+  printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  [ "$(fm_backend_rex_mark_read "$T")" = $'clear\t\t' ] || fail "no Firstmate record reads as clear"
+  rm -f "$FAKE/call/block_$BID.program_status.json"
+  fm_backend_rex_mark_read "$T" >/dev/null && fail "an unreadable pane must fail, never read as clear"
+  printf '{"windows":[{"window_id":"window:%s","label":"P3 · Rex"}]}' "$WID" >"$FAKE/window-ls.json"
+  fm_backend_rex_tab_rename "$T" "Ship · New title" fm-t1 || fail "tab rename failed"
+  calls | grep -q " window rename -s session:$SID window:$WID Ship · New title" || fail "rename must set the tab label: $(calls)"
+  : >"$FAKE/log"
+  fm_backend_rex_tab_rename "$T" "P3 · Rex" fm-t1 || fail "tab rename failed"
+  calls | grep -q " window rename " && fail "a label that already matches must not be renamed"
+  fm_backend_rex_tab_rename "$T" "Ship · x" fm-other && fail "a block carrying another task's label must not be renamed"
+  calls | grep -q " window rename " && fail "a refused rename must not rename"
+  pass "rex: mark_read reports only Firstmate's record and fails on an unreadable pane; tab rename renames only on change"
+}
+
+test_busy_state_trusts_only_proven_program_status() {
+  mark_case busy
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":4242,"name":"2.1.308","path":"/Users/x/.local/share/claude/versions/2.1.308","argv0":"claude"}}'
+  printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  [ "$(fm_backend_rex_busy_state "$T")" = busy ] || fail "a proven harness's working record over a live agent is busy"
+  [ "$(fm_backend_busy_state rex "$T")" = busy ] || fail "the dispatcher must route rex busy_state"
+  printf '{"records":[{"state":"blocked","kind":"permission","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  [ "$(fm_backend_rex_busy_state "$T")" = idle ] || fail "blocked is waiting on the human, so idle"
+  printf '{"records":[{"state":"working","app":"some-tool"},{"id":"fm","state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "an unproven app or a child record must never read busy"
+  printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":1,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"}}'
+  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "a working record left over a shell must not read busy"
+  pass "rex: busy_state trusts only a proven harness's own root record, and busy also needs a live agent"
+}
+
+test_submit_confirms_from_a_working_edge() {
+  local out
+  mark_case submit
+  printf '{"records":[{"state":"working","app":"claude-code","updated_at":"t2"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  out=$(FM_BACKEND_REX_SUBMIT_BASELINE=$'done\tt1' fm_backend_rex_submit_state "$T" fm-t1)
+  [ "$out" = empty ] || fail "a done -> working edge after the submit confirms it, got '$out'"
+  out=$(FM_BACKEND_REX_SUBMIT_BASELINE='' fm_backend_rex_submit_state "$T" fm-t1)
+  [ "$out" = empty ] || fail "a first working record after the submit confirms it, got '$out'"
+  out=$(FM_BACKEND_REX_SUBMIT_BASELINE=$'working\tt1' fm_backend_rex_submit_state "$T" fm-t1)
+  [ "$out" = unknown ] || fail "an agent already working before the submit proves nothing, got '$out'"
+  printf '{"records":[{"state":"working","app":"some-tool"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  out=$(FM_BACKEND_REX_SUBMIT_BASELINE='' fm_backend_rex_submit_state "$T" fm-t1)
+  [ "$out" = unknown ] || fail "an unproven app's working record proves nothing, got '$out'"
+  pass "rex: submit confirmation accepts a proven harness's not-working -> working edge and nothing else"
+}
+
+events_line() { # <block-uuid> <state> <app> [id]
+  printf '{"type":"session_event","payload":{"session_id":"session:%s","event":{"type":"block_event","payload":{"block_id":"block:%s","name":"program_status_changed","payload":{"id":"%s","record":{"state":"%s","app":"%s"}}}}}}\n' \
+    "$SID" "$1" "${4:-}" "$2" "$3"
+}
+
+test_wait_transition_reads_rex_events() {
+  local out rc other=01a15f2e-c301-7b2b-a2fb-000000000001
+  new_case events
+  export FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
+  inspect_json "$BID" "$SID"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  {
+    printf '{"type":"session_event","payload":{"event":{"type":"client_connected"}}}\n'
+    events_line "$BID" blocked firstmate fm
+    events_line "$other" blocked claude-code
+    events_line "$BID" blocked claude-code
+  } >"$FAKE/events.jsonl"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a watched root blocked record must be actionable (rc=$rc)"
+  [ "$out" = "$BID"$'\t'"$SID"$'\t\t'"blocked"$'\t'"claude-code" ] || fail "unexpected record '$out'"
+  calls | grep -q " events -s session:$SID --json" || fail "the reader must stream exactly the task session: $(calls)"
+  fm_backend_rex_commit_transition "$STATE" "$SID" "$out" || fail "commit failed"
+  out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an escalated pane must not re-escalate before a working edge (rc=$rc, '$out')"
+  { printf '{"type":"x"}\n'; events_line "$BID" working claude-code; events_line "$BID" blocked claude-code; } >"$FAKE/events.jsonl"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a working edge must re-arm the next blocked edge"
+
+  new_case events-own
+  inspect_json "$BID" "$SID"
+  printf '{"records":[{"id":"fm","state":"blocked","app":"firstmate"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  { printf '{"type":"x"}\n'; events_line "$BID" blocked firstmate fm; events_line "$BID" blocked claude-code sub/agent; } >"$FAKE/events.jsonl"
+  out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "Firstmate's own marks and child records must never wake the watcher (rc=$rc, '$out')"
+
+  new_case events-reconcile
+  inspect_json "$BID" "$SID"
+  printf '{"records":[{"state":"blocked","kind":"permission","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  printf '{"type":"x"}\n' >"$FAKE/events.jsonl"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a pane already blocked at subscribe must be returned by the reconcile"
+  [ "$(fm_transition_to_status "$out")" = blocked ] || fail "reconcile must report the blocked state, got '$out'"
+
+  new_case events-dead
+  inspect_json "$BID" "$SID"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  { printf '{"type":"x"}\n'
+    printf '{"type":"session_event","payload":{"event":{"type":"block_event","payload":{"block_id":"block:%s","name":"child_exited","payload":{"exit_code":0}}}}}\n' "$BID"
+  } >"$FAKE/events.jsonl"
+  : >"$(fm_backend_rex_escalation_marker "$STATE" "$T")"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "child_exited on a watched block must be actionable, even after its blocked edge escalated"
+  [ "$(fm_transition_to_status "$out")" = dead ] || fail "child_exited must normalize to dead, got '$out'"
+
+  new_case events-gone
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  printf '{"type":"x"}\n' >"$FAKE/events.jsonl"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a block gone (exit 3) at subscribe must reconcile as dead"
+  [ "$(fm_transition_to_status "$out")" = dead ] || fail "exit 3 at reconcile must be dead, got '$out'"
+
+  new_case events-unreachable
+  inspect_json "$BID" "$SID"
+  printf '4' >"$FAKE/events.exit"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T")
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "a stream that exits 4 makes the wait unusable (2), never a verdict (rc=$rc, '$out')"
+  [ -z "$out" ] || fail "an unreachable server must never produce a record, got '$out'"
+  unset FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED
+  pass "rex: the event wait escalates a watched root blocked or dead edge once, ignores Firstmate's own marks, reconciles on subscribe, and treats exit 4 as unusable"
+}
+
+# marks_status: write <task>'s status log line.
+marks_status() { # <task> <line>
+  printf '%s\n' "$2" >"$STATE/$1.status"
+}
+
+test_marks_producer_converges_and_notifies_once() {
+  local out tty
+  mark_case marks
+  tty="$CASE/dev/ttys999"
+  mkdir -p "$FM_HOME/config"
+  printf '%s\n' "window=$T" "backend=rex" "kind=ship" "rex_server=$SERVER" "rex_session_id=$SID" "rex_block_id=$BID" "rex_tab_label=P3 · Rex" >"$STATE/t1.meta"
+  marks_status t1 "needs-decision [at=1700000000] [key=pick-db]: pick a database"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" plan)
+  [ "$out" = $'t1\tblocked\tquestion\tNeeds your decision: pick a database' ] || fail "needs-decision must plan a blocked question mark, got '$out'"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'id=fm:msg=' "$tty" || fail "sync must write the mark: $(od -c "$tty" | head -3)"
+  grep -q $'777;notify;Firstmate: P3 · Rex;Needs your decision: pick a database' "$tty" || fail "a new mark must notify once, titled with the tab label"
+  : >"$tty"
+  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs your decision: pick a database"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  [ ! -s "$tty" ] || fail "an unchanged live mark must not be rewritten"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'id=fm:msg=' "$tty" || fail "a dropped record must be repaired"
+  grep -q '777;notify' "$tty" && fail "a repair must not notify again"
+  : >"$tty"
+  marks_status t1 "working [at=1700000100]: back on it"
+  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs your decision: pick a database"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'state=clear:app=firstmate:id=fm' "$tty" || fail "a working task must clear its mark: $(od -c "$tty" | head -3)"
+  [ ! -e "$STATE/.rex-mark-t1" ] || fail "a cleared mark must drop its cache"
+  : >"$tty"
+  : >"$FAKE/log"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  calls | grep -q 'program_status' && fail "a clear task with no cache must cost no Rex call"
+  marks_status t1 "blocked [at=1700000200]: needs a GitHub login"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" plan t1)
+  [ "$(printf '%s' "$out" | cut -f3)" = auth ] || fail "a credential blocker must be kind auth, got '$out'"
+  marks_status t1 "done [at=1700000300]: PR https://github.com/o/r/pull/9 checks green"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" plan t1)
+  assert_contains "$out" $'done\t\tPR ready: PR https://' "a done line with a URL plans a PR-ready done mark"
+  marks_status t1 "failed [at=1700000400]: build broke"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" plan t1)
+  assert_contains "$out" $'error\t\tFailed: build broke' "failed plans an error mark"
+
+  marks_status t1 "needs-decision [at=1700000500] [key=k2]: second call"
+  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
+  : >"$tty"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "sync failed"
+  grep -q 'id=fm:msg=' "$tty" || fail "sync must write the second mark"
+  [ -e "$STATE/.rex-mark-t1" ] || fail "a written mark must be cached"
+  printf 'off\n' >"$FM_HOME/config/rex-status-marks"
+  : >"$tty"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "off sync failed"
+  grep -q 'state=clear:app=firstmate:id=fm' "$tty" || fail "turning marks off must clear the shown mark: $(od -c "$tty" | head -3)"
+  [ ! -e "$STATE/.rex-mark-t1" ] || fail "off must drop the cache"
+  : >"$tty"
+  : >"$FAKE/log"
+  FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync || fail "off sync failed"
+  [ ! -s "$tty" ] || fail "off with no cached mark must write nothing"
+  calls | grep -q 'program_status' && fail "off with no cached mark must cost no Rex call"
+  printf 'labels\n' >"$FM_HOME/config/rex-status-marks"
+  out=$(FM_STATE_OVERRIDE=$STATE "$ROOT/bin/fm-rex-marks.sh" sync 2>&1) || fail "sync with an unknown value failed"
+  assert_contains "$out" "unknown value; using on" "a value other than on or off must warn and read as on"
+  grep -q 'id=fm:msg=' "$tty" || fail "an unknown value must read as on"
+  pass "rex: the marks producer plans from status, writes once, repairs without re-notifying, clears on resolve, and honors off"
+}
+
 test_every_call_pins_server_and_never_autostarts
 test_server_resolution_prefers_the_task_record
 test_version_gate
@@ -831,3 +1109,10 @@ test_supervisor_discovery_requires_proof
 test_detached_block_create_and_close
 test_afk_launch_rex_terminal_lifecycle
 test_remote_control_rex_arm
+test_tab_label_is_sidebar_sized
+test_mark_is_one_status_record_plus_optional_notification
+test_mark_read_and_tab_rename
+test_busy_state_trusts_only_proven_program_status
+test_submit_confirms_from_a_working_edge
+test_wait_transition_reads_rex_events
+test_marks_producer_converges_and_notifies_once

@@ -10,6 +10,8 @@
 #                    no built-in OS channel (configure a command: line instead)
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
+#   rex              badge and notification on firstmate's own Rex pane (auto
+#                    adds it when firstmate runs in a Rex pane)
 #   command:<cmd>    run <cmd> via `sh -c`; the alarm summary is passed as $1 and
 #                    on stdin, so it can reach a phone/pager while you are away
 #

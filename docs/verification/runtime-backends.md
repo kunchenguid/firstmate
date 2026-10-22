@@ -2305,6 +2305,55 @@ ok - rex teardown closes the worker's block and proves it gone
 info - Claude program states observed on Rex: done,working (claude 2.1.306 (Claude Code); rex 0.0.1792519967-gd05acf)
 ```
 
+### Attention marks, events, and program status
+
+On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers, these probes back [Attention marks](../rex-backend.md#attention-marks), [Event push](../rex-backend.md#event-push), and [Busy and submit signals](../rex-backend.md#busy-and-submit-signals):
+
+| Guarantee | Probe | Result |
+| --- | --- | --- |
+| Child record | `printf '\033]7501;state=blocked:kind=question:app=firstmate:id=fm:msg=<b64>\033\\'` written to the pane's tty | `block call ... com.superlogical.terminal.program_status` lists it beside the root record, and nothing appears in `capture`. |
+| Record lifetime | an OSC 133 `A` prompt mark, then a process exit | Rex streams `program_status_removed` with reason `prompt` for both the root and `id=fm` records; `working` and `blocked` drop at the next prompt or exit, while `done` and `error` persist. |
+| Notification | `printf '\033]777;notify;<title>;<body>\a'` on the pane | `rex events` streams a `desktop_notification` block event carrying that title and body. |
+| Event shapes | `rex events -s <session> --json` | Prints nothing on subscribe and replays nothing; any CLI client touching the session streams `client_connected`, and blocks stream `program_status_changed` (`payload.id`, `payload.record`), `child_exited`, `process_changed`, and `window_label_changed`, while a closed block streams `block_closed`. |
+| Unreachable server | `rex events` against a dead socket | Exits 4; the wait returns to polling and never reads it as a dead worker. |
+| Root status | real Claude Code 2.1.308 in a lab pane | Publishes root records with `app=claude-code` and `state=working` while it runs. |
+
+Rex sounds and notifications follow each pane's root program status, not a child record such as `id=fm`, so every new attention mark also carries the OSC 777 notification above.
+Whether the Rex app then shows a banner could not be observed headless: attaching the app to a lab server would change the captain's own app, and a screen capture was refused, so the proven boundary is that the notification reaches Rex's event stream.
+
+A read-only listing of the captain's own server shows the sidebar's tab entry is the window label, set by `window rename` and the tab label at creation; the block label is a separate field, and the terminal title is the agent's own title, read through the `title` method.
+Firstmate therefore puts the short display label on the window and keeps the block label `fm-<home-label>-<id>` as the identity check.
+
+The real smoke on a lab server passed (the first line is shown without its clause for a since-removed tab-label fallback):
+
+```text
+ok - rex smoke: a mark is an invisible id=fm record plus a streamed desktop notification ({"title":"Firstmate: smoke","body":"Needs your decision"}), cleared alone
+ok - rex smoke: the event wait returns a real blocked report and a real exit as dead, and an unreachable server is unusable, never dead
+```
+
+The smoke's tab-rename assertion (`fm_backend_rex_tab_rename`, behind `fm-spawn.sh --title` on relaunch) was added after that dated run and has no recorded real-server run yet.
+
+The opt-in per-harness guard records which root program states each installed harness publishes on Rex; only harnesses it proves are trusted for busy state and submit confirmation:
+
+```sh
+FM_REX_STATUS_LIVE=1 tests/fm-rex-program-status-live-e2e.test.sh
+```
+
+On 2026-10-22, with the same Rex build:
+
+| Harness | Version | Root program states seen | Probe finished |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.308 | `working` (`app=claude-code`) | yes |
+| Codex | codex-cli 0.163.0 | `working`, `idle` (`app=codex`) | no, it stopped at a prompt within the 180-second window |
+| OpenCode | v2.0.15 | none | no, it stopped at a prompt within the 180-second window |
+| Pi | 1.3.0 | none | yes |
+| Grok | 1.0.41 | none | yes |
+| Kimi | 0.42.0 | not launched, because Rex refuses Kimi spawns (no viewport capture) | no |
+| Cursor Agent | 2026.09.23-86fc751 | none | yes |
+| omp | 18.12.4 | `idle` (`app=omp`) | yes |
+
+Only Claude Code is trusted for busy state and submit confirmation today; Codex and omp publish root records too and can join `FM_BACKEND_REX_STATUS_APPS` once a guard proves their `working` edge across a full prompt.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

@@ -356,7 +356,7 @@ family_for_basename() {
     fm-bearings-board-lavish-live-e2e.test.sh|\
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
-    fm-rex-claude-live-e2e.test.sh|fm-rex-secondmate-e2e.test.sh|\
+    fm-rex-claude-live-e2e.test.sh|fm-rex-program-status-live-e2e.test.sh|fm-rex-secondmate-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
@@ -1487,7 +1487,7 @@ families_for_changed_path() {
       printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/rex*|bin/fm-rex-lab.sh)
+    bin/backends/rex*|bin/fm-rex-lab.sh|bin/fm-rex-marks.sh)
       printf '%s\n' rex
       printf '%s\n' backend-dispatch
       ;;

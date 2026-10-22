@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--title <text>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--title <text>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--title <text>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -61,7 +61,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--title <text>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -132,6 +132,12 @@
 #   before launch. A rex --secondmate opens as the first tab of that home's own
 #   `fm-<id>` session (the live session its record names, else a new one);
 #   bin/backends/rex.sh "Container shape" owns the placement.
+#   --title <text> is an optional short display title for the task's tab on
+#   backends that show one (rex today); bin/backends/rex.sh
+#   fm_backend_rex_tab_label owns how it, else the backlog item's title, else
+#   the task id becomes a sidebar-sized label, recorded as rex_tab_label=. A
+#   relaunch keeps the recorded label unless --title names a new one. The title
+#   is display only and never routes.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -829,6 +835,8 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
+DISPLAY_TITLE=
+DISPLAY_TITLE_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
@@ -884,6 +892,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    title)
+      DISPLAY_TITLE=$a
+      DISPLAY_TITLE_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -950,6 +962,11 @@ for a in "$@"; do
     UPSTREAM_CONSENT_SET=1
     ;;
   --traceparent) want_value=traceparent ;;
+  --title) want_value=title ;;
+  --title=*)
+    DISPLAY_TITLE=${a#--title=}
+    DISPLAY_TITLE_SET=1
+    ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
@@ -991,6 +1008,10 @@ done
 }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
+  exit 1
+}
+[ "$DISPLAY_TITLE_SET" -eq 0 ] || [ -n "$DISPLAY_TITLE" ] || {
+  echo "error: --title requires a non-empty value" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -2236,6 +2257,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     FM_REX_TASK_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" rex_session_id)
     FM_REX_TASK_WINDOW_ID=$(fm_meta_get "$RELAUNCH_META" rex_window_id)
     FM_REX_TASK_BLOCK_ID=$(fm_meta_get "$RELAUNCH_META" rex_block_id)
+    FM_REX_TASK_TAB_LABEL=$(fm_meta_get "$RELAUNCH_META" rex_tab_label)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -4201,13 +4223,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    # A new --title renames the adopted tab; display only, so a failed rename
+    # never stops the relaunch.
+    if [ "$BACKEND" = rex ] && [ -n "$DISPLAY_TITLE" ]; then
+      FM_REX_TASK_TAB_LABEL=$(fm_backend_rex_tab_label "$KIND" "$ID" "$DISPLAY_TITLE")
+      fm_backend_rex_tab_rename "$T" "$FM_REX_TASK_TAB_LABEL" "$W" >/dev/null 2>&1 || true
+    fi
   elif [ "$BACKEND" = rex ]; then
     # The recorded Rex block is PROVEN gone (the relaunch gate above owns that
     # proof), so mint one tab on the RECORDED server
     # (FM_BACKEND_REX_SERVER, loaded from the record), in the session the record
     # names while it is still live, else in this home's ordinary session there.
     fm_backend_rex_container_ensure || exit 1
-    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" "" "$FM_REX_TASK_SESSION_ID") || exit 1
+    if [ -n "$DISPLAY_TITLE" ] || [ -z "${FM_REX_TASK_TAB_LABEL:-}" ]; then
+      FM_REX_TASK_TAB_LABEL=$(fm_backend_rex_tab_label "$KIND" "$ID" "$DISPLAY_TITLE" "${FM_BACKLOG_ROW_TITLE:-}")
+    fi
+    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" "" "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_TAB_LABEL") || exit 1
     read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
 $REX_TASK_IDS
 EOF
@@ -4538,7 +4569,8 @@ EOF
         REX_PREFERRED_SESSION=$(fm_meta_get "$STATE/$ID.meta" rex_session_id)
       fi
     fi
-    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_OTHER_HOME" "$REX_PREFERRED_SESSION") || exit 1
+    FM_REX_TASK_TAB_LABEL=$(fm_backend_rex_tab_label "$KIND" "$ID" "$DISPLAY_TITLE" "${FM_BACKLOG_ROW_TITLE:-}")
+    REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_OTHER_HOME" "$REX_PREFERRED_SESSION" "$FM_REX_TASK_TAB_LABEL") || exit 1
     read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
 $REX_TASK_IDS
 EOF
@@ -5905,7 +5937,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_server_instance rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_server_instance rex_session_id rex_window_id rex_block_id rex_tab_label home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5970,6 +6002,7 @@ preserve_relaunch_meta() {
     echo "rex_session_id=$FM_REX_TASK_SESSION_ID"
     [ -z "${FM_REX_TASK_WINDOW_ID:-}" ] || echo "rex_window_id=$FM_REX_TASK_WINDOW_ID"
     echo "rex_block_id=$FM_REX_TASK_BLOCK_ID"
+    [ -z "${FM_REX_TASK_TAB_LABEL:-}" ] || echo "rex_tab_label=$FM_REX_TASK_TAB_LABEL"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
