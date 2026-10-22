@@ -1241,6 +1241,32 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
+# Contract: ship and scout briefs route heavy phases through the host admission
+# check exactly when this home's config/heavy-admission turns the policy on.
+test_heavy_admission_rule_follows_policy() {
+  local home id brief
+  home="$TMP_ROOT/heavy-admission-home"
+  mkdir -p "$home/data" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-heavy-off some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  assert_no_grep "# Heavy phases" "$home/data/brief-heavy-off/brief.md" \
+    "a home without the admission policy still got the heavy-phase rule"
+  "$ROOT/bin/fm-heavy-admission.sh" defaults > "$home/config/heavy-admission"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-heavy-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-heavy-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  for id in brief-heavy-ship brief-heavy-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Heavy phases" "$brief" "$id: the heavy-phase rule is missing under the policy"
+    assert_grep "FM_HOME='$home' '$ROOT/bin/fm-heavy-admission.sh' wait" "$brief" \
+      "$id: the rule does not name this home's admission wait"
+    assert_grep "the start of a fresh no-mistakes run" "$brief" "$id: a fresh validation run is not gated"
+    assert_grep "Never skip, shrink, or split required checks" "$brief" "$id: coverage may be lowered to dodge a hold"
+  done
+  pass "fm-brief: the heavy-phase admission rule follows this home's policy"
+}
+
 # Without config/wait-no-turns the scaffold matches the pre-flag brief and drive text.
 test_wait_no_turns_absent_keeps_the_previous_brief() {
   local home brief
@@ -1667,6 +1693,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
+test_heavy_admission_rule_follows_policy
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
