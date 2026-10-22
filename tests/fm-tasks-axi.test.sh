@@ -13,6 +13,8 @@
 # reports any code-root copy that is not this home's own file while staying
 # silent for a link into the home, an absent copy, and the single-home layout.
 set -u
+# An installed task-priority add-on must not change unrelated cases.
+export FM_TASK_PRIORITY_CHECK=/nonexistent
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -300,6 +302,33 @@ EOF
   pass "fm-tasks-axi.sh keeps [captain-ask] items until answered or merged and leaves other items alone"
 }
 
+# The optional task-priority add-on check refuses an add before tasks-axi runs; absent, it does nothing.
+test_wrapper_runs_the_task_priority_check() {
+  local dir stub rc
+  dir=$(make_split priority-check)
+  stub="$dir/check.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *' --priority '*) exit 0 ;; esac
+echo "task-priority: this task has no priority" >&2
+exit 1
+SH
+  chmod +x "$stub"
+  rc=0
+  FM_TASK_PRIORITY_CHECK="$stub" wrapper_from_code "$dir" add pri-1 "no priority" >"$dir/out" 2>&1 || rc=$?
+  assert_equals 1 "$rc" "a refusing check must return its exit status"
+  assert_grep "task-priority: this task has no priority" "$dir/out" "the check's message was not shown"
+  assert_no_grep "pri-1" "$dir/home/data/backlog.md" "a refused add still reached the backlog"
+  FM_TASK_PRIORITY_CHECK="$stub" wrapper_from_code "$dir" add pri-2 "has priority" --priority 1 >/dev/null 2>&1 \
+    || fail "an add with a priority was refused"
+  assert_grep "pri-2" "$dir/home/data/backlog.md" "a passing add did not reach the backlog"
+  FM_TASK_PRIORITY_CHECK="$dir/not-installed" wrapper_from_code "$dir" add pri-3 "check absent" >/dev/null 2>&1 \
+    || fail "an add failed with the check absent"
+  assert_grep "pri-3" "$dir/home/data/backlog.md" "an absent check blocked the add"
+  FM_TASK_PRIORITY_CHECK="$stub" wrapper_from_code "$dir" list >/dev/null 2>&1 || fail "a non-add command was checked"
+  pass "fm-tasks-axi.sh add honors the installed task-priority check and ignores its absence"
+}
+
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
@@ -311,6 +340,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refuses_add_start
   test_wrapper_single_home
   test_wrapper_captain_ask_guard
+  test_wrapper_runs_the_task_priority_check
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi

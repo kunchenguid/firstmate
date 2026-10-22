@@ -21,7 +21,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--priority 0-3] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -46,10 +46,13 @@
 # adapter maps it to native issue type `task`. Captain holds have no due
 # semantics (`--until` is the optional hold deferral), so the create waives
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
-# date or registering a `types.custom` captain issue type. The command records
-# a UTC `Captain hold set:` timestamp in the task body: repeating an active
-# hold preserves the existing timestamp, while re-holding released work starts
-# a new lifecycle. A task already closed is refused rather than reopened.
+# date or registering a `types.custom` captain issue type. When the optional
+# task-priority add-on is installed, a created task needs `--priority 0-3`; the
+# add-on's refusal is returned as-is (bin/fm-tasks-axi.sh owns that hook).
+# The command records a UTC `Captain hold set:` timestamp in the task body:
+# repeating an active hold preserves the existing timestamp, while re-holding
+# released work starts a new lifecycle. A task already closed is refused rather
+# than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
@@ -916,7 +919,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} priority='' priority_check title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local signoff_script addon_signoff existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0 card_close=release
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -925,6 +928,7 @@ command_hold() {
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
+      --priority) shift; priority=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
       *) usage >&2; exit 2 ;;
@@ -977,14 +981,20 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
+    # Optional task-priority add-on: a created task must carry --priority. No-op when not installed.
+    priority_check=${FM_TASK_PRIORITY_CHECK:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/fm-task-priority/check.sh}
+    if [ -x "$priority_check" ]; then
+      "$priority_check" add "$id" "$title" --kind captain ${priority:+--priority "$priority"} >/dev/null \
+        || exit 1
+    fi
     # tasks-axi add never passes --due. Beads due.required would refuse this
     # create, and captain holds have no due semantics, so waive it for this
     # call only. --kind captain stays metadata; Beads native type is task.
     if [ -n "$body" ]; then
-      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" ${priority:+--priority "$priority"} --body "$body" >/dev/null \
         || fail "could not create task $id"
     else
-      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" >/dev/null \
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" ${priority:+--priority "$priority"} >/dev/null \
         || fail "could not create task $id"
     fi
   fi

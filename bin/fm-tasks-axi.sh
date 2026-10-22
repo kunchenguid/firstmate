@@ -57,6 +57,11 @@
 #     close, tasks-axi auto-prune of Done rows, `fm-tasks-axi.sh prune`, and
 #     direct tasks-axi calls. The automatic dispatch and teardown transitions
 #     use bin/fm-backlog-transition-lib.sh, not this wrapper.
+#   - `add` (or `create`) that the optional task-priority add-on check refuses,
+#     e.g. no `--priority 0-3`; its message and exit status are returned and
+#     nothing runs. The check is ${XDG_DATA_HOME:-~/.local/share}/fm-task-priority/check.sh
+#     (FM_TASK_PRIORITY_CHECK overrides the path); when it is not installed this
+#     does nothing.
 # Otherwise the exit status is tasks-axi's own, unless decoding a read fails;
 # in that case the decoder's nonzero status is returned.
 set -u
@@ -204,6 +209,15 @@ captain_guard() {  # <tasks-axi args>
       ;;
   esac
 }
+# Optional task-priority add-on: a new task must carry a priority. No-op when not installed.
+case "${1:-}" in
+  add|create)
+    PRIORITY_CHECK="${FM_TASK_PRIORITY_CHECK:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/fm-task-priority/check.sh}"
+    if [ -x "$PRIORITY_CHECK" ]; then
+      "$PRIORITY_CHECK" ${ARGS[@]+"${ARGS[@]}"} >/dev/null || exit $?
+    fi
+    ;;
+esac
 captain_guard ${ARGS[@]+"${ARGS[@]}"}
 case "${1:-}" in
   show|view|list)

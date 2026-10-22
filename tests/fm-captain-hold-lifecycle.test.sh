@@ -4,6 +4,8 @@
 # answers, the record-divergence guard over its two records, and the legacy
 # compatibility for pre-collapse decision identities.
 set -u
+# An installed task-priority add-on must not change unrelated cases.
+export FM_TASK_PRIORITY_CHECK=/nonexistent
 
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
@@ -661,6 +663,39 @@ signoff_hold() {  # <home> <task-id> <addons-dir> <log> <stub-status>
     SIGNOFF_LOG="$log" SIGNOFF_STATUS="$status" \
     "$ROOT/bin/fm-captain-hold.sh" hold "$id" --title "Route the card" \
     --reason "captain must decide" --repo sample
+}
+
+# A hold that creates a task runs the task-priority add-on check when installed:
+# its refusal stops the create, its pass lets the priority reach tasks-axi, absence is a no-op.
+test_hold_create_honors_the_task_priority_check() {
+  local home stub id=priority-hold rc=0
+  home=$(make_home priority-hold)
+  mkdir -p "$home/projects/sample"
+  stub="$home/check.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *' --priority '*) exit 0 ;; esac
+echo "task-priority: this task has no priority" >&2
+exit 1
+SH
+  chmod +x "$stub"
+  hold_with_check() {  # <check-path> <extra hold args...>
+    local check=$1
+    shift
+    env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_TASK_PRIORITY_CHECK="$check" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      "$ROOT/bin/fm-captain-hold.sh" hold "$id" --title "Needs a priority" --reason "captain must decide" \
+      --repo sample --until 2099-01-01 "$@"
+  }
+  hold_with_check "$stub" >"$home/out" 2>&1 && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a hold with no priority passed an installed refusing check"
+  assert_no_grep "$id" "$home/data/backlog.md" "a refused hold still created the task"
+  hold_with_check "$stub" --priority 2 >/dev/null 2>&1 || fail "a hold with a priority was refused by the check"
+  assert_grep "$id" "$home/data/backlog.md" "a passing hold did not create the task"
+  id=priority-hold-absent
+  hold_with_check "$home/not-installed" >/dev/null 2>&1 || fail "a hold failed with the check absent"
+  assert_grep "$id" "$home/data/backlog.md" "an absent check blocked the hold"
+  pass "a created hold honors the installed task-priority check and ignores its absence"
 }
 
 test_hold_raises_its_signoff_card_through_the_armed_addon_script() {
@@ -4836,3 +4871,4 @@ test_hold_raises_its_signoff_card_through_the_armed_addon_script
 test_hold_skips_the_addon_signoff_card_while_unarmed
 test_hold_falls_back_to_the_fork_signoff_adapter_without_the_addon
 test_hold_fails_when_the_addon_signoff_raise_fails
+test_hold_create_honors_the_task_priority_check
