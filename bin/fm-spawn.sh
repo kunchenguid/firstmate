@@ -2457,7 +2457,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG____MODELJSON__}'\'' opencode --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -3072,9 +3072,11 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
+  # opencode 2.x removed the top-level --model flag; its model rides the
+  # OPENCODE_CONFIG_CONTENT JSON through model_json_for_harness below.
   # polytoken encodes reasoning effort inside the model reference, so the
   # flag carries the composed reference fm_polytoken_model_ref validated
   # above, including the model-scoped reasoning level, never an unpinned
@@ -3083,6 +3085,16 @@ model_flag_for_harness() {
     printf -- '--model %s ' "$(shell_quote "${POLYTOKEN_MODEL_REF:-$model}")"
     ;;
   esac
+}
+
+model_json_for_harness() {
+  local harness=$1 model=$2
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  [ "$harness" = opencode ] || return 0
+  local model_json
+  model_json=$(json_escape "$model")
+  model_json=${model_json//\'/\'\\\'\'}
+  printf ',"model":"%s"' "$model_json"
 }
 
 effort_flag_for_harness() {
@@ -6103,8 +6115,10 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+MODELJSON=$(model_json_for_harness "$HARNESS" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__MODELJSON__/$MODELJSON}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
