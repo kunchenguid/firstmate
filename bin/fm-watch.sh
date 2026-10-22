@@ -3187,8 +3187,11 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
+WATCHER_INHERITED_GENERATION=
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
+  ! fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER" \
+    || WATCHER_INHERITED_GENERATION=${FM_RECOVERY_MARKER_TOKEN##*:}
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -3349,8 +3352,18 @@ resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # A successor recovers, once, a pending downtime generation different from
+  # the one it inherited at start-up. An append onto an announced downtime
+  # marker mints a new generation; the supervision host handing the inherited
+  # generation back to main, or an append onto its unacked handling marker,
+  # reuses it, and that wake is still the predecessor's.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER" || return 0
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*) ;;
+      *) return 0 ;;
+    esac
+    [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "$WATCHER_INHERITED_GENERATION" ] || return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then

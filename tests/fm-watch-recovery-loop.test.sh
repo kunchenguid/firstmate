@@ -222,5 +222,137 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a handling successor skips the generation it inherited at start (the
+# predecessor's wake is already on the way) but recovers, exactly once, a
+# generation an external durable append opens after it started; otherwise a
+# quiet fleet leaves the appended note unacknowledged indefinitely.
+test_handling_successor_recovers_generation_opened_after_start() {
+  local dir home state fakebin child now out count marker
+  dir=$(make_case recovery-successor-late-generation)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  printf 'pending:downtime:inherited.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 3
+  if grep -F 'check: rearm-resurface' "$out" >/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced the generation it inherited: $(cat "$out")"
+  fi
+  # An external durable append (the fm-inbox.sh note path) opens a fresh
+  # pending generation while the successor is alive.
+  append_wake "$state" check inbox-note "check: captain note"
+  now=0
+  while [ "$now" -lt 40 ]; do
+    grep -F 'check: rearm-resurface' "$out" >/dev/null 2>&1 && break
+    sleep 0.5
+    now=$((now + 1))
+  done
+  if ! grep -F 'check: rearm-resurface' "$out" >/dev/null 2>&1; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor never recovered the generation opened after it started: $(cat "$out")"
+  fi
+  sleep 2
+  count=$(grep -cF 'check: rearm-resurface' "$out" || true)
+  marker=$(cat "$state/.watcher-down")
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ "$count" = 1 ] || fail "expected exactly one rearm-resurface for the new generation, got $count: $(cat "$out")"
+  case "$marker" in
+    announced:downtime:*) ;;
+    *) fail "late generation was not marked announced: $marker" ;;
+  esac
+  [ "$marker" != "announced:downtime:inherited.1.aaa" ] \
+    || fail "the late generation did not replace the inherited one: $marker"
+  pass "a handling successor skips its inherited generation and recovers one opened after it started"
+}
+
+# T4: the supervision host hands the inherited generation back to main by
+# republishing it as pending downtime (fm-supervision-host.sh, attended
+# acceptor failed); the still-live successor must neither re-announce that
+# in-flight wake nor exit. The inherited generation is the one the marker holds
+# after the start-up arm check, including one that check minted over an acked
+# marker with queued rows.
+test_handling_successor_skips_host_handback_of_inherited_generation() {
+  local start=$1 dir home state fakebin child now out marker generation
+  dir=$(make_case "recovery-successor-host-handback-$start")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  if [ "$start" = acked ]; then
+    append_wake "$state" check predecessor "check: predecessor wake"
+  fi
+  printf '%s:downtime:inherited.1.aaa\n' "$start" > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  now=0
+  while [ "$now" -lt 40 ]; do
+    case "$(cat "$state/.watcher-down")" in
+      announced:downtime:*) break ;;
+    esac
+    sleep 0.1
+    now=$((now + 1))
+  done
+  marker=$(cat "$state/.watcher-down")
+  generation=${marker##*:}
+  case "$start:$marker" in
+    pending:announced:downtime:inherited.1.aaa) ;;
+    acked:announced:downtime:inherited.1.aaa) kill -TERM "$child" 2>/dev/null || true; fail "start-up arm check did not mint a new generation over the acked marker" ;;
+    acked:announced:downtime:*) ;;
+    *) kill -TERM "$child" 2>/dev/null || true; fail "start-up arm check did not retire the inherited generation: $marker" ;;
+  esac
+  printf 'pending:downtime:%s\n' "$generation" > "$state/.watcher-down.tmp"
+  chmod 600 "$state/.watcher-down.tmp"
+  mv -f "$state/.watcher-down.tmp" "$state/.watcher-down"
+  sleep 4
+  if grep -F 'check: rearm-resurface' "$out" >/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced the inherited generation the host handed back ($start start): $(cat "$out")"
+  fi
+  if ! kill -0 "$child" 2>/dev/null; then
+    fail "handling successor stopped supervising after the host hand-back ($start start): $(cat "$out")"
+  fi
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ "$(cat "$state/.watcher-down")" = "pending:downtime:$generation" ] \
+    || fail "the handed-back generation was consumed by the successor ($start start): $(cat "$state/.watcher-down")"
+  pass "a handling successor skips the host hand-back of its inherited generation ($start start) and keeps supervising"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_recovers_generation_opened_after_start
+test_handling_successor_skips_host_handback_of_inherited_generation pending
+test_handling_successor_skips_host_handback_of_inherited_generation acked
 test_unacknowledged_recovery_is_announced_once_per_generation
