@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<!--
+  Reports page template for bin/fm-reports-page.sh. That script owns the build
+  mechanics and names the two slots this file carries: the build stamp in the
+  BUILT constant, and the one line that becomes the JSON payload of rendered
+  entries and the sources they were read from. Each slot appears exactly once,
+  which the build verifies.
+
+  The page is opened as a plain file. It therefore makes no network request,
+  loads no external font, script, or stylesheet, and has no self-refresh: a
+  rebuild is seen by reloading. Everything a report or a recorded decision
+  contributes arrives already escaped by bin/fm-reports-render.jq, and this page
+  only ever puts that text through textContent or its html through one
+  container, never through string concatenation into the document.
+
+  The list carries two kinds of entry: a report, and a recorded captain decision
+  that gated no report of this home. A decision entry says so in the list, and
+  the count line names both numbers, so the page never reads as if every entry
+  were a report.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #6a737d;
+  --line: #e1e4e8;
+  --side: #f6f8fa;
+  --accent: #4082ff;
+  --active: #e8f0ff;
+  --code: #f2f4f7;
+  --chip: #e6e9ee;
+  --ok: #2f8c4f;
+  --warn: #b5751a;
+  --width: 300px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181c;
+    --fg: #e6e9ee;
+    --muted: #949ca6;
+    --line: #2b3038;
+    --side: #1b1f24;
+    --accent: #6c9dff;
+    --active: #1e2634;
+    --code: #22272e;
+    --chip: #2b3038;
+    --ok: #5fbd80;
+    --warn: #d9a44a;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.55 system-ui, "Segoe UI", sans-serif;
+  display: grid;
+  grid-template-columns: var(--width) minmax(0, 1fr);
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* --- sidebar --- */
+aside {
+  position: relative;
+  background: var(--side);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.head { padding: 14px 14px 10px; border-bottom: 1px solid var(--line); }
+.head h1 { margin: 0 0 10px; font-size: 17px; letter-spacing: 0.01em; }
+.head input[type="search"], .head select {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+.head select { margin-top: 8px; }
+.head input:focus-visible, .head select:focus-visible,
+.bar button:focus-visible, nav a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.count { margin-top: 8px; font-size: 12px; color: var(--muted); }
+/* A source of decisions that could not be read is named here rather than left
+   to look like "there were none". */
+.gaps { margin-top: 6px; font-size: 12px; color: var(--warn); }
+.gaps:empty { display: none; }
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.6;
+  vertical-align: 1px;
+}
+nav { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+nav a {
+  display: block;
+  padding: 9px 14px 9px 11px;
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid transparent;
+  color: inherit;
+  text-decoration: none;
+}
+nav a:hover { background: var(--active); }
+nav a[aria-current="page"] { background: var(--active); border-left-color: var(--accent); }
+/* A list title may carry a long unbreakable token, a URL for instance, and a
+   title that cannot break makes the whole list scroll sideways. */
+nav .t { display: block; font-weight: 600; overflow-wrap: anywhere; }
+nav .m { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); word-break: break-all; }
+nav .none { padding: 14px; color: var(--muted); font-size: 13px; }
+
+/* drag handle on the sidebar's right edge */
+.grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+
+/* --- reader --- */
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.bar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.bar button {
+  /* Never shrink: the bar is a flex row whose file-and-date line takes the
+     remaining space, and a shrinking button clips its own label - "Index" at
+     phone width was cut mid-word before this. The label ellipsises instead. */
+  flex: 0 0 auto;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.bar button:hover { background: var(--side); }
+.bar .where { flex: 1 1 auto; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scroll { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+article { max-width: 920px; margin: 0 auto; padding: 22px 20px 64px; }
+article > :first-child { margin-top: 0; }
+article h1 { font-size: 26px; line-height: 1.25; overflow-wrap: anywhere; }
+article h2 { font-size: 20px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
+article h3 { font-size: 17px; }
+article h1, article h2, article h3, article h4 { margin: 1.6em 0 0.6em; scroll-margin-top: 70px; }
+article p, article ul, article ol, article pre, article table, article blockquote { margin: 0 0 1em; }
+article a { color: var(--accent); }
+article code { background: var(--code); border-radius: 4px; padding: 0.12em 0.32em; font-size: 0.92em; }
+article pre {
+  background: var(--code);
+  border-radius: 7px;
+  padding: 11px 13px;
+  overflow-x: auto;
+}
+article pre code { background: none; padding: 0; }
+article blockquote {
+  border-left: 3px solid var(--accent);
+  margin-left: 0;
+  padding: 0.1em 0 0.1em 13px;
+  color: var(--muted);
+}
+article table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+article th, article td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+article th { background: var(--side); }
+article img { max-width: 100%; height: auto; }
+article hr { border: 0; border-top: 1px solid var(--line); }
+.empty { color: var(--muted); }
+
+/* --- the decisions under a report --- */
+.dec { margin-top: 2.4em; border-top: 2px solid var(--line); padding-top: 0.2em; }
+/* An entry that is only a decision opens with its own title and then the
+   decisions, so the rule that separates a report from them has nothing to
+   separate. */
+article > h1:first-child + .dec { margin-top: 1.2em; border-top: 0; padding-top: 0; }
+.dec > h2 { border-bottom: 0; }
+.dec-group { margin: 0 0 1.6em; }
+.dec-where { margin: 0 0 0.7em; font-size: 12px; color: var(--muted); }
+/* Only the task id may break mid-token; breaking the whole line would split a
+   date across two lines. */
+.dec-where code { overflow-wrap: anywhere; }
+.dec-label { margin: 0 0 0.3em; font-size: 12px; font-weight: 600; color: var(--muted); }
+.dec-q { margin: 0 0 1.1em; }
+.dec-item { margin: 0 0 1.1em; padding: 0.1em 0 0.1em 13px; border-left: 3px solid var(--line); }
+.dec-item.dec-decided { border-left-color: var(--ok); }
+.dec-item.dec-open { border-left-color: var(--warn); }
+.dec-meta { margin: 0 0 0.5em; font-size: 12px; color: var(--muted); }
+.dec-state { font-weight: 600; color: var(--fg); }
+.dec-item > :last-child { margin-bottom: 0; }
+/* A decision's own words are prose inside an entry, so their headings stay
+   below the entry's title instead of competing with it. */
+.dec-item h1, .dec-item h2, .dec-item h3, .dec-item h4 { margin: 1.2em 0 0.5em; }
+.dec-item h1 { font-size: 19px; }
+.dec-item h2 { font-size: 17px; border-bottom: 0; padding-bottom: 0; }
+.dec-item h3, .dec-item h4 { font-size: 15px; }
+
+/* --- narrow: the sidebar becomes a drawer --- */
+.scrim { display: none; }
+@media (max-width: 720px) {
+  body { grid-template-columns: minmax(0, 1fr); }
+  aside {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 5;
+    width: 82vw;
+    max-width: 360px;
+    height: 100dvh;
+    transform: translateX(-102%);
+    transition: transform 0.18s ease-out;
+  }
+  body.drawer aside { transform: none; }
+  body.drawer .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    background: rgba(0, 0, 0, 0.45);
+  }
+  .grip { display: none; }
+}
+body.no-index:not(.drawer) aside { display: none; }
+@media (min-width: 721px) {
+  body.no-index { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media print {
+  body { display: block; height: auto; overflow: visible; }
+  aside, .bar, .scrim { display: none !important; }
+  .scroll { overflow: visible; }
+  article { max-width: none; padding: 0; }
+}
+</style>
+</head>
+<body>
+<aside>
+  <div class="head">
+    <h1>Reports</h1>
+    <input type="search" id="q" placeholder="Search titles, reports, decisions" autocomplete="off" aria-label="Search reports and decisions">
+    <select id="sort" aria-label="Sort reports">
+      <option value="new">Newest first</option>
+      <option value="old">Oldest first</option>
+      <option value="az">Title A to Z</option>
+      <option value="za">Title Z to A</option>
+      <option value="file">File name</option>
+    </select>
+    <div class="count" id="count"></div>
+    <div class="gaps" id="gaps"></div>
+  </div>
+  <nav id="list"></nav>
+  <div class="grip" id="grip" title="Drag to resize, double-click to reset"></div>
+</aside>
+<div class="scrim" id="scrim"></div>
+<main>
+  <div class="bar">
+    <button type="button" id="toggle" title="Show or hide the list (i)">Index</button>
+    <button type="button" id="prev" title="Previous report (k)">&uarr;</button>
+    <button type="button" id="next" title="Next report (j)">&darr;</button>
+    <span class="where" id="where"></span>
+  </div>
+  <div class="scroll" id="scroll">
+    <article id="report"></article>
+  </div>
+</main>
+
+<script id="reports-data" type="application/json">
+__FM_REPORTS_DATA__
+</script>
+<script>
+const BUILT = "__FM_REPORTS_BUILT__";
+const DATA = JSON.parse(document.getElementById("reports-data").textContent);
+const REPORTS = DATA.entries;
+const SOURCES = DATA.sources || [];
+const KINDS = REPORTS.reduce((a, r) => (a[r.kind] = (a[r.kind] || 0) + 1, a), {});
+
+// Searchable body text per entry, derived once: tags out, the five entities
+// fm-reports-render.jq produces back in, so a search for "&&" or "<script"
+// finds the entry that talks about them. A decision's words are part of that
+// html, so searching finds a phrase that appears only in a decision.
+const BODY = REPORTS.map(r => (r.html || "")
+  .replace(/<[^>]*>/g, " ")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  .replace(/&amp;/g, "&")
+  .toLowerCase());
+const TITLES = REPORTS.map(r => (r.title || "").toLowerCase());
+
+const el = {
+  q: document.getElementById("q"),
+  sort: document.getElementById("sort"),
+  count: document.getElementById("count"),
+  list: document.getElementById("list"),
+  report: document.getElementById("report"),
+  where: document.getElementById("where"),
+  scroll: document.getElementById("scroll"),
+  grip: document.getElementById("grip"),
+  scrim: document.getElementById("scrim"),
+  gaps: document.getElementById("gaps")
+};
+
+// localStorage is a convenience only: every read and write may throw (private
+// window, blocked site data) and the page must render the same either way.
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+};
+
+let shown = [];
+
+function order(rows) {
+  const by = el.sort.value;
+  const out = rows.slice();
+  if (by === "new") out.sort((a, b) => b.ts - a.ts);
+  else if (by === "old") out.sort((a, b) => a.ts - b.ts);
+  else if (by === "az") out.sort((a, b) => a.title.localeCompare(b.title));
+  else if (by === "za") out.sort((a, b) => b.title.localeCompare(a.title));
+  else out.sort((a, b) => (a.file || a.id).localeCompare(b.file || b.id));
+  return out;
+}
+
+function matches(i, needle) {
+  return !needle || TITLES[i].includes(needle) || BODY[i].includes(needle);
+}
+
+function current() {
+  let id;
+  try {
+    id = decodeURIComponent(location.hash.replace(/^#/, ""));
+  } catch (e) {
+    return null;
+  }
+  return REPORTS.find(r => r.id === id) || null;
+}
+
+function paint() {
+  const needle = el.q.value.trim().toLowerCase();
+  shown = order(REPORTS.filter((r, i) => matches(i, needle)));
+  el.count.textContent = shown.length + " of " + REPORTS.length +
+    " · " + (KINDS.report || 0) + " reports, " + (KINDS.decision || 0) + " decisions" +
+    (BUILT ? " · built " + BUILT : "");
+  el.list.textContent = "";
+  if (!shown.length) {
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = REPORTS.length ? "No entry matches." : "No entry yet.";
+    el.list.append(none);
+    return;
+  }
+  const open = current();
+  for (const r of shown) {
+    const a = document.createElement("a");
+    a.href = "#" + encodeURIComponent(r.id);
+    if (open && open.id === r.id) a.setAttribute("aria-current", "page");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = r.title;
+    if (r.kind === "decision") {
+      const b = document.createElement("span");
+      b.className = "badge";
+      b.textContent = "decision";
+      t.append(b);
+    }
+    const m = document.createElement("span");
+    m.className = "m";
+    m.textContent = (r.file || "no report") + " · " + r.updated;
+    a.append(t, m);
+    a.addEventListener("click", () => document.body.classList.remove("drawer"));
+    el.list.append(a);
+  }
+}
+
+function show() {
+  const r = current();
+  if (!r) {
+    if (REPORTS.length) {
+      const newest = REPORTS.filter(entry => entry.kind === "report")
+        .sort((a, b) => b.ts - a.ts)[0]
+        || REPORTS.slice().sort((a, b) => b.ts - a.ts)[0];
+      location.replace("#" + encodeURIComponent(newest.id));
+      return;
+    }
+    document.title = "Reports";
+    el.where.textContent = "";
+    el.report.textContent = "";
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "This home has no report and no recorded decision yet. Build the page again once there is one.";
+    el.report.append(p);
+    paint();
+    return;
+  }
+  document.title = r.title + " · Reports";
+  el.where.textContent = (r.file ? r.file + " · as of " : "decision · ") + r.updated;
+  // The html comes from fm-reports-render.jq, which escaped every byte of the
+  // report before building any markup, so no report text reaches the parser as
+  // markup.
+  el.report.innerHTML = r.html;
+  el.scroll.scrollTop = 0;
+  paint();
+}
+
+function step(delta) {
+  if (!shown.length) return;
+  const open = current();
+  let i = open ? shown.findIndex(r => r.id === open.id) : -1;
+  i = i < 0 ? (delta > 0 ? 0 : shown.length - 1) : i + delta;
+  if (i < 0 || i >= shown.length) return;
+  location.hash = "#" + encodeURIComponent(shown[i].id);
+}
+
+function setIndex(hidden) {
+  document.body.classList.toggle("no-index", hidden);
+  store.set("reports-index-hidden", hidden ? "1" : "0");
+}
+
+function toggleIndex() {
+  if (window.matchMedia("(max-width: 720px)").matches) {
+    document.body.classList.toggle("drawer");
+    return;
+  }
+  setIndex(!document.body.classList.contains("no-index"));
+}
+
+document.getElementById("toggle").addEventListener("click", toggleIndex);
+document.getElementById("prev").addEventListener("click", () => step(-1));
+document.getElementById("next").addEventListener("click", () => step(1));
+el.scrim.addEventListener("click", () => document.body.classList.remove("drawer"));
+el.q.addEventListener("input", paint);
+el.q.addEventListener("search", paint);
+el.q.addEventListener("keydown", e => {
+  if (e.key === "Escape") { el.q.value = ""; paint(); }
+});
+el.sort.addEventListener("change", () => { store.set("reports-sort", el.sort.value); paint(); });
+window.addEventListener("hashchange", show);
+
+// An in-report link to a heading scrolls there without replacing the report
+// anchor, so a section jump never navigates away from the report.
+el.report.addEventListener("click", e => {
+  const a = e.target.closest ? e.target.closest('a[href^="#"]') : null;
+  if (!a) return;
+  e.preventDefault();
+  let id;
+  try { id = decodeURIComponent(a.getAttribute("href").slice(1)); }
+  catch (_) { return; }
+  const target = id && el.report.querySelector("#" + (window.CSS && CSS.escape ? CSS.escape(id) : id));
+  if (target) target.scrollIntoView({ block: "start" });
+});
+
+document.addEventListener("keydown", e => {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const t = e.target;
+  const typing = t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA");
+  if (e.key === "Escape") { document.body.classList.remove("drawer"); return; }
+  if (typing) return;
+  if (e.key === "i") { e.preventDefault(); toggleIndex(); }
+  else if (e.key === "j") { e.preventDefault(); step(1); }
+  else if (e.key === "k") { e.preventDefault(); step(-1); }
+  else if (e.key === "/") { e.preventDefault(); el.q.focus(); el.q.select(); }
+});
+
+// Sidebar width: dragged on the grip, remembered, double-click resets.
+(function width() {
+  const MIN = 180;
+  const saved = parseInt(store.get("reports-width") || "", 10);
+  const cap = () => Math.max(MIN, Math.round(window.innerWidth * 0.6));
+  const apply = px => document.documentElement.style.setProperty("--width", px + "px");
+  if (saved >= MIN) apply(Math.min(saved, cap()));
+  let dragging = false;
+  el.grip.addEventListener("pointerdown", e => {
+    dragging = true;
+    el.grip.setPointerCapture(e.pointerId);
+  });
+  el.grip.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    const px = Math.min(Math.max(MIN, Math.round(e.clientX)), cap());
+    apply(px);
+  });
+  el.grip.addEventListener("pointerup", e => {
+    if (!dragging) return;
+    dragging = false;
+    el.grip.releasePointerCapture(e.pointerId);
+    const px = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--width"), 10);
+    if (px >= MIN) store.set("reports-width", String(px));
+  });
+  el.grip.addEventListener("dblclick", () => {
+    document.documentElement.style.removeProperty("--width");
+    store.set("reports-width", "");
+  });
+})();
+
+// A source that was missing, skipped, or unreadable at build time, named once.
+if (SOURCES.some(s => s.state !== "ok")) {
+  el.gaps.textContent = "Not read in full: " +
+    SOURCES.filter(s => s.state !== "ok").map(s => s.name + " (" + s.state + ")").join(", ");
+}
+
+el.sort.value = store.get("reports-sort") || "new";
+if (!el.sort.value) el.sort.value = "new";
+setIndex(store.get("reports-index-hidden") === "1");
+show();
+</script>
+</body>
+</html>
