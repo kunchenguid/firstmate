@@ -10,8 +10,12 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+POLL="$ROOT/bin/fm-pr-poll.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
@@ -4629,6 +4633,103 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+# Arm an authenticated static merge poll on <id> in <home>, exactly the
+# provider-tagged artifacts bin/fm-pr-check.sh publishes, through the production
+# library (fm_pr_poll_prepare + fm_pr_poll_publish_prepared). The origin task's
+# metadata carries the canonical pr=/pr_head= identity block, written last the
+# way bin/fm-pr-check.sh writes it.
+arm_pr_poll() {  # <home> <id> <url> <head>
+  local home=$1 id=$2 url=$3 head=$4
+  local state="$home/state"
+  mkdir -p "$home/projects/missing-$id"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/projects/missing-$id" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=fixture-$id" \
+    "pr=$url" \
+    "pr_head=$head"
+  chmod 0600 "$state/$id.meta"
+  fm_pr_url_parse "$url" || fail "fixture URL did not parse: $url"
+  fm_pr_poll_prepare "$state" "$id" "$FM_PR_PROVIDER" "$url" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$POLL" \
+    || fail "could not prepare the fixture PR poll for $id"
+  fm_pr_poll_publish_prepared || fail "could not publish the fixture PR poll for $id"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$POLL" \
+    || fail "fixture PR poll was not authenticated before the captain hold"
+}
+
+# Regression: recording a reviewed captain-call inventory on an origin whose
+# metadata already carries an armed PR merge poll must not disarm that poll. A
+# plain append would write the inventory after the pr=/pr_head= identity block,
+# and fm_pr_metadata_identity_parse refuses any non-PR field after it, which is
+# how a previously appended inventory can stop PR polling. This runs the real
+# complete path and the real poll authentication and proves the poll, its exact
+# PR identity, and its static check all survive. Both the empty (--none) and
+# non-empty inventories go through the same writer, so both are exercised here.
+test_complete_preserves_an_armed_pr_poll() {
+  local home origin sibling state url head meta decision_line pr_line normalized_identity
+  home=$(make_home complete-preserves-poll)
+  state="$home/state"
+  origin=ship-guard
+  sibling=guard-review-call
+  url=https://github.com/example/repo/pull/8
+  head=0123456789abcdef0123456789abcdef01234567
+  arm_pr_poll "$home" "$origin" "$url" "$head"
+
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$state/$origin.meta"
+  if fm_pr_poll_artifacts_valid "$state" "$origin" "$POLL"; then
+    fail "the broken post-PR inventory fixture unexpectedly authenticated"
+  fi
+  run_captain "$home" complete "$origin" --none >/dev/null \
+    || fail "complete --none failed to repair a broken post-PR inventory"
+  fm_pr_poll_artifacts_valid "$state" "$origin" "$POLL" \
+    || fail "the armed PR poll was disarmed by an empty captain-call inventory"
+  fm_pr_metadata_identity_parse "$state/$origin.meta" \
+    || fail "the origin metadata no longer parses after an empty inventory"
+  [ "$FM_PR_META_URL" = "$url" ] || fail "parsed PR URL was not exact: $FM_PR_META_URL"
+  [ "$FM_PR_META_NUMBER" = 8 ] || fail "parsed PR number was not exact: $FM_PR_META_NUMBER"
+  meta="$state/$origin.meta"
+  cp "$meta" "$home/normalized.meta"
+  normalized_identity=$(fm_pr_file_identity "$meta") || fail "could not identify normalized metadata"
+  run_captain "$home" complete "$origin" --none >/dev/null \
+    || fail "idempotent complete --none retry failed"
+  cmp -s "$home/normalized.meta" "$meta" || fail "an idempotent retry changed normalized metadata"
+  [ "$(fm_pr_file_identity "$meta")" = "$normalized_identity" ] \
+    || fail "an idempotent retry replaced normalized metadata"
+
+  # Non-empty inventory: hold a separate captain task and attest it.
+  tasks_in "$home" add "$sibling" "A guarded decision" --repo sample >/dev/null \
+    || fail "could not create the sibling captain task"
+  run_captain "$home" hold "$sibling" --reason "a guarded decision remains" >/dev/null \
+    || fail "could not hold the sibling captain task"
+  run_captain "$home" complete "$origin" "$sibling" >/dev/null \
+    || fail "complete with an inventory failed on an origin with an armed poll"
+  fm_pr_poll_artifacts_valid "$state" "$origin" "$POLL" \
+    || fail "the armed PR poll was disarmed by a non-empty captain-call inventory"
+  fm_pr_metadata_identity_parse "$state/$origin.meta" \
+    || fail "the origin metadata no longer parses after a non-empty inventory"
+  [ "$FM_PR_META_URL" = "$url" ] || fail "parsed PR URL was not exact after inventory: $FM_PR_META_URL"
+
+  # The inventory was recorded, and it precedes the pr= identity block.
+  grep -qxF "decision_keys=$sibling" "$meta" || fail "the reviewed inventory was not recorded"
+  decision_line=$(grep -n '^decision_keys=' "$meta" | tail -1 | cut -d: -f1)
+  pr_line=$(grep -n '^pr=' "$meta" | head -1 | cut -d: -f1)
+  [ "$decision_line" -lt "$pr_line" ] \
+    || fail "decision_keys ($decision_line) did not precede pr= ($pr_line) in the metadata"
+  # No inventory field reached the executable check, which stays byte-for-byte
+  # the static template, so authentication never runs injected script.
+  cmp -s "$POLL" "$state/$origin.check.sh" \
+    || fail "the published check was no longer the byte-for-byte static template"
+  assert_no_grep 'decision_keys=' "$state/$origin.check.sh" "inventory leaked into the executable check"
+  [ "$(fm_pr_file_mode "$meta")" = 600 ] || fail "the rewritten metadata lost its private 0600 mode"
+  pass "recording a captain-call inventory preserves an already armed PR merge poll"
+}
+
+test_complete_preserves_an_armed_pr_poll
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair

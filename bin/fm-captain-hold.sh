@@ -1729,6 +1729,68 @@ reconcile_note() {
   printf 'still-open: %s\n' "$id"
 }
 
+# Record the reviewed captain-call inventory in the origin task's metadata.
+# A plain append lands these keys at the end of the file, which is after any
+# pr=/pr_head= identity block an armed merge poll wrote there. The poll
+# authentication path refuses every non-PR field that follows that block
+# (fm_pr_metadata_identity_parse in bin/fm-pr-lib.sh), so an appended inventory
+# silently disarms the watcher's PR poll. The pr= block is therefore kept last,
+# the way bin/fm-pr-check.sh writes it, with the inventory before it, and the
+# rewrite is one atomic rename under the meta lock this command already holds so
+# a concurrent poll read never sees a torn file. A metadata file with no pr=
+# block carries no such boundary and keeps the historical append unchanged.
+record_decision_inventory() {  # <meta> <keys>
+  local meta=$1 keys=$2 tmp line seen_pr=0 stale_layout=0
+  local saw_reviewed=0 saw_keys=0
+  local -a others=() pr_block=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      decisions_reviewed=*)
+        saw_reviewed=1
+        [ "$seen_pr" = 0 ] || stale_layout=1
+        ;;
+      decision_keys=*)
+        saw_keys=1
+        [ "$seen_pr" = 0 ] || stale_layout=1
+        ;;
+      pr=*)
+        seen_pr=1
+        pr_block+=("$line")
+        ;;
+      pr_head=*) pr_block+=("$line") ;;
+      *) others+=("$line") ;;
+    esac
+  done < "$meta"
+  if [ "$saw_reviewed" = 1 ] && [ "$saw_keys" = 1 ] \
+    && [ "$(meta_value "$meta" decisions_reviewed)" = 1 ] \
+    && [ "$(meta_value "$meta" decision_keys)" = "$keys" ] \
+    && { [ "$seen_pr" = 0 ] || [ "$stale_layout" = 0 ]; }; then
+    return 0
+  fi
+  if [ "$seen_pr" = 0 ]; then
+    printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta" \
+      || fail "could not record the captain-call inventory in $meta"
+    return 0
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.fm-captain-hold-meta.XXXXXX") \
+    || fail "cannot stage the captain-call inventory for $meta"
+  if ! {
+      [ "${#others[@]}" -eq 0 ] || printf '%s\n' "${others[@]}"
+      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys"
+      printf '%s\n' "${pr_block[@]}"
+    } > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the captain-call inventory for $meta"
+  fi
+  # The pr= block carries a mode-0600 identity poll (bin/fm-pr-check.sh), so the
+  # replacement keeps that private mode rather than inheriting the umask.
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; fail "cannot secure the captain-call inventory for $meta"; }
+  if ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fail "could not record the captain-call inventory in $meta"
+  fi
+}
+
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
   local resolved_how attested_by_prefix='' origin_state unrecorded_origin=''
@@ -1785,9 +1847,7 @@ EOF
   fi
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
-    fi
+    record_decision_inventory "$meta" "$keys"
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
 

@@ -102,7 +102,8 @@ An expired deferral therefore remains answerable.
 
 ### Recording a reviewed inventory (`complete`)
 
-While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and appends `decisions_reviewed=1`.
+While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, and records the result in `decision_keys=` and `decisions_reviewed=1`.
+When that metadata already carries an armed merge poll's terminal `pr=` identity block, including `pr_head=` when available, `complete` keeps that block last so recording the review does not invalidate poll authentication.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
 
 `complete` accepts `--none` as an explicit semantic inventory result.
@@ -525,6 +526,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- Empty and non-empty reviewed inventories preserve an already armed PR merge poll, repair a historical inventory placed after the PR identity block, retain the exact PR identity and private metadata mode, and leave a normalized retry byte-for-byte unchanged.
 
 ### Answers, stamps, and deferral
 
