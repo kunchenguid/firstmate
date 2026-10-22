@@ -254,20 +254,26 @@ else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
 # Opt-in config/ready-after-green: a no-mistakes PR is ready only once the
-# child's own status holds the checks-green report for this exact PR, so a PR
-# registered while its checks are pending or failing publishes no ready line.
+# child's own status holds the checks-green report naming this exact PR, so a
+# PR registered while its checks are pending or failing publishes no ready
+# line. The report is read with the same test bin/fm-crew-state.sh uses, so
+# text around `PR <url> checks green` does not withhold the line.
 # The child's later done line still reaches the parent through
 # bin/fm-inactive-reconcile.sh, and registering again after the report
 # publishes this line. Only the last done line counts, so a later done that
 # does not report green withdraws an earlier one.
 fm_pr_check_ready_line_waits_for_green() {
-  local last
+  local note
   [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ready-after-green" ] || return 1
   case "$PROVIDER:$PR_MODE" in
     gerrit:*|*:direct-PR|*:local-only) return 1 ;;
   esac
-  last=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 || true)
-  [ "$(printf '%s\n' "$last" | sed -E 's/^done( \[at=[^]]*\])?: //')" != "PR $URL checks green" ]
+  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //' || true)
+  fm_dod_note_reports_ci_ready "$note" || return 0
+  case " $note " in
+    *"$URL"[^[:alnum:]]*) return 1 ;;
+  esac
+  return 0
 }
 
 # In a secondmate home the registration itself is a captain-facing fact:
