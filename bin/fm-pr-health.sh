@@ -210,7 +210,10 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
     default=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
     [ "$branch" != "${default#origin/}" ] || continue
     [ "$branch" != "$(meta_value "$STATE/$id.meta" base_branch)" ] || continue
-    cached=$(jq -r --arg id "$id" --arg branch "$branch" '.branches[$id] | select(.branch == $branch) | .url' "$TMP/health.json")
+    cached=$(jq -r --arg id "$id" --arg branch "$branch" --slurpfile owned "$TMP/owned.json" '
+      .prs as $prs | .branches[$id] | select(.branch == $branch) | .url
+      | select(($prs[.].final // false) | not)
+      | select(. as $url | any($owned[0][]; .url == $url and .final) | not)' "$TMP/health.json")
     if [ -n "$cached" ]; then
       printf '%s\t%s\n' "$id" "$cached" >> "$TMP/enroll.tsv"
       continue

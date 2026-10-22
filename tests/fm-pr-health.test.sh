@@ -328,6 +328,30 @@ test_enrolled_before_ready_and_after_cleanup_still_wake() {
   pass 'a PR enrolled before any ready report, and one kept after cleanup, both still wake'
 }
 
+test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered() {
+  local home wt
+  home=$(new_home replaced-pr)
+  wt="$home/copy"
+  git init -q -b feature-12 "$wt"
+  git -C "$wt" remote add origin git@github.com:o/r.git
+  task "$home" early "worktree=$wt"
+  printf '12\n' > "$home/forge/branch-feature-12"
+  pr "$home" 12 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 12 '.checks = [{name:"CI Status",conclusion:null,required:true}]'
+  arm "$home"
+  expect_silent "$home" 'running checks must not wake'
+  # Still before any ready report, the worker closes PR 12 and opens PR 13 from the unchanged branch.
+  set_pr "$home" 12 '.state = "closed"'
+  printf '13\n' > "$home/forge/branch-feature-12"
+  pr "$home" 13 "$HEAD_B" "$BASE_1" true false
+  set_pr "$home" 13 '.checks = [{name:"CI Status",conclusion:"FAILURE",required:true}]'
+  expect_silent "$home" 'closing the cached PR must not wake'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/13 has failing required checks at latest commit bbbbbbb: CI Status \(task early\)$' \
+    'the open PR on the unchanged branch must replace the closed one'
+  expect_silent "$home" 'the replacement PR must dedupe like any other'
+  pass 'an open PR that replaces a closed one on the same task branch is discovered'
+}
+
 test_green_without_reviewer_is_silent() {
   local home
   home=$(new_home no-reviewer)
@@ -511,6 +535,7 @@ for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_com
   test_required_check_appearing_after_optional_failure_wakes \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
   test_other_homes_red_check_is_silent test_enrolled_before_ready_and_after_cleanup_still_wake \
+  test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered \
   test_green_without_reviewer_is_silent test_base_without_required_checks_counts_any_failing_check \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
