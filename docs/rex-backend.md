@@ -116,6 +116,45 @@ A remote second mate on Rex runs in a visible `fm-<id>` session on that host's o
 - The away daemon runs in a detached block of the captain's session: it is addressable by id but sits in no tab, so the captain's tab strip never changes.
 - The away record stores the block's target and its server, and closing it is verified by exit 3 on that block id.
 - Injects pass the shared composer gate, so an escalation never lands on text the captain is typing.
+- The palette's **Show or Hide Away Pane** command shows that block below the focused pane and hides it again; see [Command palette](#command-palette).
+
+## Command palette
+
+Firstmate can add its own commands to the Rex command palette, grouped under **Firstmate**.
+Installing them edits the captain's Rex `init.lua` and reloads every connected client's keymap, so Firstmate installs them only on the captain's word:
+
+```sh
+bin/fm-rex-palette.sh install    # also: uninstall
+```
+
+- The installer owns only one marked block at the top of that file, so the captain's own later lines always win, and `uninstall` leaves the rest of the file byte for byte as it was.
+- It works only on this machine's own Rex server, because Rex reloads its config only over the local socket; its header owns the backup, check, and symlink mechanics.
+- No key is bound: the captain assigns a shortcut to any command in the Rex app.
+- When Firstmate's module fails to load, the captain's config still loads and the palette shows **Firstmate: Palette Failed to Load** with the reason.
+
+| Command | What it does |
+| --- | --- |
+| Show Fleet | A popup with the fleet view. |
+| This Worker | A popup with the focused worker's task, latest status, open decisions, and pull request. |
+| Peek Worker | A popup that follows the focused worker's screen. |
+| Go to Waiting Worker | Shows the tab of the worker waiting on the captain: a decision first, then a blocker, a failure, and a ready pull request. |
+| Show or Hide Away Pane | Shows away mode's hidden supervisor pane below the focused pane, or hides it again; it keeps running either way. |
+| Answer Decision | A popup listing open decisions and captain holds; the typed answer is filed as `Answer for <task> [key=<key>]: <text>`. |
+| Tell Firstmate | A popup for a free note, filed with `About <task>:` in front when a worker is focused. |
+| Request Merge | A popup listing recorded pull requests; a confirmed pick is filed as `Merge request: <PR URL> (task <task>)`. |
+
+The three acting commands only file a note in Firstmate's captain inbox through `bin/fm-inbox.sh`, which wakes Firstmate.
+Firstmate then answers the worker or merges through its usual paths and checks; the palette itself never steers a worker or merges.
+A popup closes itself when its command ends.
+
+On a pane that lives on another host, such as a remote second mate's, a command resolves the pane to that second mate from this home's records: its own pane, or any pane in its `fm-<id>` session, because Firstmate reaches a second mate's workers only through the second mate.
+Peek then uses the remote route, and notes name the second mate.
+A popup always runs on this machine, so for such a pane it opens in this machine's `fm-local` session and Rex is asked to show that session; without one the command says so.
+Go to Waiting Worker likewise shows this machine's `fm-local` session for a remote second mate, never a session on the other host.
+
+Rex gives a command 30 seconds and runs it in the Rex server's own environment, so each command only asks `bin/fm-rex-popup.sh plan` what to do and leaves slow work to the popup, and the installer records the operator's `PATH` and `FM_HOME`.
+A command run from the CLI never moves the captain's view; only a key or palette use does.
+`bin/fm-rex-popup.sh`'s header owns the plan and popup contracts.
 
 ## Attention marks
 
@@ -183,13 +222,15 @@ tests/fm-backend-rex.test.sh
 tests/fm-backend-rex-smoke.test.sh
 tests/fm-afk-inject-rex-e2e.test.sh
 tests/fm-remote-doctor-rex.test.sh
+tests/fm-rex-palette.test.sh
+tests/fm-rex-palette-smoke.test.sh
 FM_REX_SECONDMATE_E2E=1 tests/fm-rex-secondmate-e2e.test.sh
 FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
 FM_REX_STATUS_LIVE=1 tests/fm-rex-program-status-live-e2e.test.sh
 ```
 
-- `fm-backend-rex.test.sh` and `fm-remote-doctor-rex.test.sh` use a fake `rex`.
-- The smoke and away-mode tests drive the real binary on a lab server without tokens.
+- `fm-backend-rex.test.sh`, `fm-remote-doctor-rex.test.sh`, and `fm-rex-palette.test.sh` use a fake `rex`.
+- The smoke, palette smoke, and away-mode tests drive the real binary on a lab server without tokens.
 - The program-status test spawns one trivial scout per installed harness and records which root states each publishes; it fails if Claude Code stops publishing `working`.
 - The second mate test launches a real Pi second mate on a lab server, aborting before any model request, so it only runs when opted in.
 - The last spawns a real Claude scout and submits prompts, so it only runs when opted in.

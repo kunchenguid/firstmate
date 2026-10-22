@@ -420,7 +420,8 @@ family_for_basename() {
     fm-backend-paseo.test.sh|fm-backend-paseo-smoke.test.sh)
       printf '%s\n' paseo
       ;;
-    fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh|fm-afk-inject-rex-e2e.test.sh)
+    fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh|fm-afk-inject-rex-e2e.test.sh|\
+    fm-rex-palette.test.sh|fm-rex-palette-smoke.test.sh)
       printf '%s\n' rex
       ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
@@ -714,6 +715,8 @@ tests/fm-backend-paseo.test.sh 8000
 tests/fm-backend-rex-smoke.test.sh 40
 tests/fm-afk-inject-rex-e2e.test.sh 60
 tests/fm-backend-rex.test.sh 4300
+tests/fm-rex-palette-smoke.test.sh 40
+tests/fm-rex-palette.test.sh 7800
 tests/fm-backend-tmux-smoke.test.sh 291
 tests/fm-backend-zellij-smoke.test.sh 23
 tests/fm-backend-zellij.test.sh 10453
@@ -1487,7 +1490,7 @@ families_for_changed_path() {
       printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/rex*|bin/fm-rex-lab.sh|bin/fm-rex-marks.sh)
+    bin/backends/rex*|bin/fm-rex-lab.sh|bin/fm-rex-marks.sh|bin/fm-rex-palette.sh|bin/fm-rex-popup.sh)
       printf '%s\n' rex
       printf '%s\n' backend-dispatch
       ;;

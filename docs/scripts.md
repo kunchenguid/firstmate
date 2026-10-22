@@ -39,6 +39,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-rex-lab.sh`          | Provision, guardedly operate, and tear down a private Rex lab server on a `/tmp` socket, with a live-server tripwire |
 | `fm-rex-marks.sh`        | Turn each Rex task's latest status into one badge and notification on its pane (`plan`, `sync`, `clear`); the watcher runs `sync` each poll and cleanup runs `clear` |
+| `fm-rex-palette.sh`      | Install or remove Firstmate's Rex command-palette block in this machine's Rex `init.lua`, only on the captain's word |
+| `fm-rex-popup.sh`        | Plan each Rex palette command and run its popups; the acting popups only file captain inbox notes |
 | `fm-herdr-lab-viewer.py` | The pty engine behind `fm-herdr-lab.sh viewer`: one real foreground Herdr client on a non-zero window grid |
 | `fm-lab-home.sh`         | Mint disposable lab homes and manage their isolated tmux socket directories       |
 | `fm-live-lab.sh`         | Build and operate a disposable live supervision lab; see its header for usage and readiness contract |
@@ -78,6 +80,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `backends/paseo.sh`      | Experimental Paseo session-provider adapter                                          |
 | `backends/rex.sh`        | Experimental Rex session-provider adapter                                            |
+| `backends/rex-palette.lua` | The Rex palette commands, loaded by the block `fm-rex-palette.sh` installs     |
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture, forge binding, or ship-branch prefix from `data/projects.md` for fleet sync, home seeding, and the forge agreement a ship spawn or scout promotion applies |
 | `fm-forge-detect.sh`     | Propose a clone's forge binding from its origin remote for project-add intake, never recording it |

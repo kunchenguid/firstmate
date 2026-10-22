@@ -2354,6 +2354,42 @@ On 2026-10-22, with the same Rex build:
 
 Only Claude Code is trusted for busy state and submit confirmation today; Codex and omp publish root records too and can join `FM_BACKEND_REX_STATUS_APPS` once a guard proves their `working` edge across a full prompt.
 
+### Command palette
+
+On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers, these probes back [Command palette](../rex-backend.md#command-palette):
+
+| Guarantee | Probe | Result |
+| --- | --- | --- |
+| Config path | `keymap --json` | `.config.path` names the server's own config file, here the lab's `--config` file. |
+| Load beside the captain's lines | the installed block in a lab config holding a stand-in captain action, then `config reload` and `actions --json` | Lists the eight `fm_` actions and the captain's action, which still runs; `keymap --json` lists no `fm_` binding. |
+| Popup | `do -s <session> -b <block> fm_this` | `session.new_layer` opens a `floating` layer in that session running the popup body, and the layer disappears when the body exits. |
+| Client action from the CLI | an action calling `rex.client.queue("session.select", ...)` under `rex do` | The action's own work completes, then the call fails with `client action was not delivered: no client is targeted. Use -C.`, so the commands queue a view change only when `ctx.origin` is `key` or `palette`; `rex do` reports `ctx.origin` as `api`. |
+| Away pane | `session.move_block {block_id, anchor_block_id, direction: "vertical", side: "after", ratio: 0.7}`, then `session.detach_block` | `block inspect` `.block.placement` reads `placed`, then `detached`, and the block's shell keeps running. |
+| Broken module | the block's `dofile` aimed at a file that is not Lua | `config check` passes, the captain's action still loads, and `do fm_load_error` fails with `Firstmate palette not loaded: ...`. |
+| Uninstall | install, then uninstall | `cmp` against the original file is clean and `actions --json` lists no `fm_` action. |
+| Stray arguments | `do fm_fleet bogus=1` | Accepted: an action that declares no arguments, or an empty or closed schema, takes any, so the commands ignore stray ones. |
+
+Remote panes were checked against ds9's own Rex server (`rex 0.0.1792607779-g171246`, API revision 5) over the tailnet: a probe session with two tabs, recorded in a lab home as a remote second mate's `remote_target`, resolved through `fm-rex-popup.sh plan this|answer --server ds9` to that second mate as `remote-mate` for its own pane and `remote-worker` for the other tab, with the popup sent to the lab's `fm-local` session; the probe session was then killed, and ds9 listed no sessions.
+
+The Rex app itself was not driven, because attaching it to a lab server would change the captain's own app.
+So the palette entries, assigning a shortcut, and the `ctx.server` value the app passes for another host's pane come from Rex's `client.action` schema and documentation, not from observation.
+Because `session.select` on another host's session was never observed, the commands only ever select a session on this machine.
+`rex api call client.action` with `server` set cannot stand in for the app, because the CLI first attaches to the named `session_id` on the server it calls and fails with `session_not_found`.
+
+The palette smoke on a lab server passed:
+
+```text
+ok - rex palette smoke: install loads every Firstmate action beside the captain's own, with no key bound
+ok - rex palette smoke: This Worker opens a popup over the worker that closes on Enter
+ok - rex palette smoke: an answer typed into the popup lands in the captain inbox
+ok - rex palette smoke: goto selects the waiting worker's tab
+ok - rex palette smoke: the away pane is shown and hidden without stopping it
+ok - rex palette smoke: a broken module becomes a palette error and the captain's config still loads
+ok - rex palette smoke: uninstall restores the config byte for byte and unloads the actions
+```
+
+Refresh it with `tests/fm-rex-palette-smoke.test.sh`.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
