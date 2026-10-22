@@ -338,7 +338,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and Paseo before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -2205,6 +2205,76 @@ tests/fm-backend-paseo-smoke.test.sh
 ```
 
 The real smoke proves daemon reachability, shared-workspace creation and adoption, sibling tabs without a second project, current-path probing, send and keys, bounded capture, tab-only kill, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+
+## Rex
+
+The current compatibility floor is Rex API revision 5 for both the CLI and the server.
+The active live evidence was gathered on 2026-10-21 on macOS 26.6.2 with jq 1.8.1 against the personal Rex server, using the CLI the server bundle ships:
+
+```text
+$ rex version
+rex 0.0.1792607779-g171246
+commit: 1712469ff26fb10b37b53ea6f60d5a86f8ba9f3a
+built: 2026-10-21T18:36:19Z
+api: revision 5 (supports 0 to 5)
+$ rex --autostart=false api call server.status | jq .api_revision
+5
+```
+
+Every live check ran in scratch sessions created for it, labeled `fm-test-*`, addressed by explicit session id, and killed by exact id afterwards; no other session was touched.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Not found | `rex --autostart=false block call -s <sid> -b <unknown block> size` | `Error: block target "block:<uuid>" not found`, exit 3. |
+| Unreachable | `rex --autostart=false -S unix:///nonexistent/rex.sock ls --json` | `Error: rex server is not running` / `rex server autostart is disabled`, exit 4. |
+| Server address | `rex whoami --json` | `.endpoint` names the socket the CLI resolves; `REX_SERVER` in the environment did not redirect the CLI, while `-S` did, so the adapter records the reported endpoint rather than the variable. |
+| Tab create | `rex window new -s <sid> <label> --focus=false --cwd <dir> --json` | Returned `window_id` and `block_ids`; the session's `active_window_id` did not change; `rex run` requires a command, so it cannot open a task's login shell. |
+| Session create | `rex new <label> --window <label> --cwd <dir> --json` | Returned `session_id` and `initial_windows[0].{window_id,block_ids}`. |
+| Resize | `rex block call -s <sid> -b <bid> resize '{"columns":200,"rows":50}'` | Applied to an unviewed block (`size` then read `{"columns":200,"rows":50,...,"owner":null}`). |
+| Process view | `rex block call -s <sid> -b <bid> process` | `foreground{pid,name,path,argv0,cwd}`, `ancestors[]`, and `last_exit`; `foreground.cwd` followed a nested shell started with `cd <dir> && exec /bin/sh`, and a Claude Code 2.1.308 block read `{"pid":46775,"name":"2.1.308","argv0":"claude"}` with ancestors `zsh`, `login`. |
+| Plain capture | `rex capture -s <sid> -b <bid>` | A 100x10 block holding `a`, `b`, a prompt, and six blank rows returned `a\nb\n/tmp \n❯ \n`: trailing blank rows are dropped. |
+| Styled capture | `rex capture -s <sid> -b <bid> --format=vt` | The same block returned all ten rows joined by CRLF and ending in `\r\n`, so the empty bottom row is implicit; the adapter restores it and derives the viewport as the last `size.rows` rows. |
+| Close | `rex block close -s <sid> <bid>` | Later reads of the block exit 3; closing a window's last block closes the window, and a session left with no windows stays until `rex kill <sid>`. |
+
+Live adapter and control-plane evidence on that build:
+
+- A Claude Code 2.1.308 worker started in a task block read `alive` with native state `idle` and composer `empty`; submitting a one-word prompt through `fm_backend_send_text_submit` returned `empty`, after which `busy_state` read `busy` with native `working` for two one-second polls and then `idle` with native `done`.
+- Literal text typed without Enter read composer `pending`, and Ctrl+U returned it to `empty`.
+- `bin/fm-control.sh <id> interrupt` printed `interrupt-delivered ... backend=rex verified=agent-alive cancel=unconfirmed`; `exit` printed `stopped ...`, a second `exit` printed `already-stopped ...`, and after the block was closed `exit` printed `endpoint-gone ...`.
+- `bin/fm-control.sh <id> relaunch` on that gone block opened a fresh tab in the recorded session, launched Claude there, and rewrote the record with the new `rex_window_id` and `rex_block_id`; `bin/fm-peek.sh` showed the worker's reply and `bin/fm-send.sh` delivered a steer it answered.
+- A relaunch that refused after creating its tab left a bare-shell tab carrying the task's block label, and the next reclaim closed it before opening its own.
+
+```sh
+tests/fm-backend-rex.test.sh
+tests/fm-backend-rex-smoke.test.sh
+tests/fm-afk-launch.test.sh
+```
+
+```text
+$ bash tests/fm-backend-rex-smoke.test.sh
+ok - real rex: created the test's own session session:<uuid>
+ok - real rex: a Rex-hosted launcher gets a focus-safe 200x50 tab in its own session; duplicates are refused
+ok - real rex: line submit, capture, and a derived viewport of exactly size.rows lines; literal and every mapped key send
+ok - real rex: current_path follows a nested shell; agent_state reads dead at a shell, ambiguous under another program
+ok - real rex: OSC 7501 records from the foreground shell drive busy_state
+ok - real rex: kill closes exactly the task tab and the recorded server proves it gone
+ok - real rex: relaunch reclaim opens a tab in the exact session, and a gone session returns 2 creating nothing
+ok - real rex: no state-changing call left the test session and every other session is byte-identical
+```
+
+The away launcher's Rex end-to-end case in `tests/fm-afk-launch.test.sh` printed:
+
+```text
+ok - rex e2e: captain session unchanged after start (no tab or split)
+ok - rex e2e: daemon launched in its own dedicated session, recorded by exact id
+ok - rex e2e: captain session unchanged after stop
+ok - rex e2e: daemon session killed by exact id on stop
+ok - rex e2e: record + .afk cleared on stop
+```
+
+Both real-server suites skip unless a Rex server is already reachable without autostart, and refresh this record after a Rex upgrade.
 
 ## Codex App host tools
 

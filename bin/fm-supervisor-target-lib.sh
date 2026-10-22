@@ -21,6 +21,11 @@
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
+# fm_supervisor_in_rex: this process runs directly inside a Rex block.
+fm_supervisor_in_rex() {
+  [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]
+}
+
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) - uses the exact tmux target
 #      forms owned by bin/fm-backend.sh's fm_backend_target_exists header, or a
@@ -34,7 +39,11 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 #      fm_backend_herdr_session) and $HERDR_PANE_ID. Checked after $TMUX_PANE so a
 #      tmux pane nested inside herdr still resolves to tmux, matching
 #      fm_backend_detect's innermost-first rule.
-#   4. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
+#   4. TERM_PROGRAM=rex + $REX_SESSION + $REX_BLOCK - Rex injects them into every
+#      block's process tree; compose the "<session-uuid>:<block-uuid>" target
+#      bin/backends/rex.sh records (both ids without their kind prefix).
+#      Checked after tmux and herdr, whose nested panes rewrite TERM_PROGRAM.
+#   5. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
 #      session is named differently). Returns 1 so the caller can warn.
 discover_supervisor_target() {
   if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
@@ -49,18 +58,23 @@ discover_supervisor_target() {
     printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
     return 0
   fi
+  if fm_supervisor_in_rex; then
+    printf '%s:%s' "${REX_SESSION#session:}" "${REX_BLOCK#block:}"
+    return 0
+  fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
   return 1
 }
 
 # discover_supervisor_backend: resolve the supervisor pane's BACKEND, independent
 # of the target string so an explicit FM_SUPERVISOR_TARGET override still knows
-# which primitives (tmux vs herdr) to dispatch through. Priority mirrors
+# which primitives (tmux, herdr, or rex) to dispatch through. Priority mirrors
 # discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
 #   2. $TMUX_PANE set - tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
-#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
+#   4. TERM_PROGRAM=rex (with $REX_SESSION and $REX_BLOCK present) - rex.
+#   5. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
 discover_supervisor_backend() {
   if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_BACKEND"
@@ -72,6 +86,10 @@ discover_supervisor_backend() {
   fi
   if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
     printf 'herdr'
+    return 0
+  fi
+  if fm_supervisor_in_rex; then
+    printf 'rex'
     return 0
   fi
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
