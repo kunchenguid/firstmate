@@ -29,7 +29,8 @@
 #   `## Captain's intent` line opening with a Captain label or address.
 #   When config/herdr-lifecycle-spawn-guard exists, a brief naming
 #   bin/fm-herdr-lab.sh or a listed Herdr session/server lifecycle command must
-#   carry the Herdr isolation contract emitted by bin/fm-brief.sh --herdr-lab.
+#   carry the Herdr isolation contract emitted by bin/fm-brief.sh --herdr-lab;
+#   the refusal names the first such match.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -3570,12 +3571,14 @@ fi
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   HERDR_LIFECYCLE_BRIEF_GUARD=$(fm_config_source_present "$CONFIG/herdr-lifecycle-spawn-guard") || exit 1
-  if [ "$HERDR_LIFECYCLE_BRIEF_GUARD" = 1 ] &&
-    { grep -Fq 'bin/fm-herdr-lab.sh' "$BRIEF" ||
-      grep -Eq '(^|[^[:alnum:]_])herdr[[:space:]]+(session|server)[[:space:]]+(start|stop|delete|restart|reload-config|live-handoff)([^[:alnum:]_-]|$)' "$BRIEF"; } &&
-    ! grep -Fq '# Herdr isolation - HARD SAFETY CONTRACT' "$BRIEF"; then
-    echo "error: $BRIEF names a Herdr lifecycle command but lacks the Herdr isolation contract; regenerate it with bin/fm-brief.sh --herdr-lab" >&2
-    exit 1
+  if [ "$HERDR_LIFECYCLE_BRIEF_GUARD" = 1 ]; then
+    HERDR_LIFECYCLE_COMMAND=$(perl -ne '
+      if (m{(bin/fm-herdr-lab\.sh|(?<![[:alnum:]_])herdr[[:space:]]+(?:session|server)[[:space:]]+(?:start|stop|delete|restart|reload-config|live-handoff)(?![[:alnum:]_-]))}) { print $1; exit }
+    ' -- "$BRIEF")
+    if [ -n "$HERDR_LIFECYCLE_COMMAND" ] && ! grep -Fq '# Herdr isolation - HARD SAFETY CONTRACT' "$BRIEF"; then
+      echo "error: $BRIEF names the Herdr lifecycle command \`$HERDR_LIFECYCLE_COMMAND\` but lacks the Herdr isolation contract; regenerate it with bin/fm-brief.sh --herdr-lab" >&2
+      exit 1
+    fi
   fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
