@@ -1,7 +1,7 @@
 # Documentation audiences
 
 [`documentation-audiences.json`](documentation-audiences.json) is the machine-consumed classification owner for every maintained prose surface.
-`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
+`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, local link targets, and the canonical internal agent-only skill directory against tracked frontmatter metadata without comparing trigger wording.
 Audience metadata is centralized there rather than copied into front matter on every page.
 
 The audience classes have one placement purpose each:
