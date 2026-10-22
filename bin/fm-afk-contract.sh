@@ -52,10 +52,7 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
-#                                  and never fewer than the default
-#                                  (SPEND CAP below)
+#   spend_max_concurrent_workers: <n>   concurrent-worker cap (SPEND CAP below)
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
 #   confirmed_epoch: <seconds>        is the go, so no later human step stamps it
 #   mode: quiet                    only on a quiet entry (FM_AFK_MODE=quiet); absent
@@ -104,8 +101,8 @@
 #   fm-afk-contract.sh validate [--path <record>]  exit 0 when the record is readable and complete
 #   fm-afk-contract.sh live-workers
 #     Print the ordinary worker count this home holds right now (SPEND CAP
-#     below). Reads no record, so it answers before an entry as well as during
-#     one.
+#     below). Reads no posture record, so it answers before an entry as well as
+#     during one.
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
 #
@@ -130,11 +127,16 @@
 # both the number written at entry and the counting rule behind it).
 # The cap bounds how many ordinary workers this home runs concurrently while an
 # away record stands; bin/fm-spawn.sh enforces it by refusing a fresh ordinary
-# spawn once the home already holds that many. An ordinary worker record is
-# every state/*.meta whose kind is not secondmate, counted by
-# fm_afk_contract_live_ordinary_workers and exposed as `live-workers`, which is
-# the one implementation both the entry default and that refusal read, so the
-# two can never count differently.
+# spawn once the home already holds that many. `live-workers` is this script's
+# one count implementation, read by entry, spawn admission and return reporting.
+# This estimates eligible worker concurrency; it does not meter token spend.
+# It counts ordinary workers still able to spend: launch-grace and unproven
+# endpoints reserve capacity, while proven-dead endpoints and proven-idle
+# accepted deliveries or waiting workers free it. A spawn_gen younger than
+# FM_SPAWN_CAP_LAUNCH_GRACE (default 120 seconds) reserves a slot without a
+# probe. Each endpoint probe is bounded by FM_AFK_CONTRACT_PROBE_SECONDS
+# (default 10 seconds); activity and current-state detail reads each use
+# FM_AFK_CONTRACT_DETAIL_SECONDS (default 5 seconds).
 # Without --spend, entry records the count standing at that moment, so away mode
 # never narrows work already under way; it never records less than
 # FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
@@ -155,6 +157,16 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$FM_AFK_CONTRACT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-busy-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -185,15 +197,144 @@ fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
 }
 
-# The ordinary worker records this home holds right now (the header's SPEND
-# CAP): every state/*.meta whose kind is not secondmate, because a secondmate is
-# a persistent home rather than spend. This is the one implementation of that
-# count, read by the entry default here and by bin/fm-spawn.sh's refusal.
+# Return the newest event before any trailing resolutions, using the
+# classifier's event boundary so continuation text cannot mask activity.
+fm_afk_contract_latest_non_resolved_verb() {
+  local line verb i=0 legacy_re
+  local -a event_lines=()
+  legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  while IFS= read -r line || [ -n "$line" ]; do
+    event_lines[i]=$line
+    i=$((i + 1))
+  done
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    line=${event_lines[i]}
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
+    status_line_verb "$line" verb
+    [ "$verb" != "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] || continue
+    printf '%s\n' "$verb"
+    return 0
+  done
+  return 1
+}
+
+# Count workers still able to spend, the shared SPEND CAP owner. Recent launch
+# records and unproven backend/activity/state reads reserve capacity. The
+# backend probe deadline is bounded; idle exclusions retain the activity,
+# newest-event, DoD and current-state gates.
 fm_afk_contract_live_ordinary_workers() {  # [state-dir]
-  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0
+  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0 gen now id backend target
+  local meta_lock endpoint_state absence status kind line verb newest_verb activity current
+  local paused_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  local held_verb=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  now=$(date +%s)
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
-    [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
+    [ "$(fm_meta_get "$meta" kind)" != secondmate ] || continue
+    # Sourcing the wake library creates state; defer it until worker metadata exists.
+    FM_STATE_OVERRIDE="$state" fm_afk_contract_lock_helpers || return 1
+    meta_lock=$(fm_meta_lock_path "$meta") || { live=$((live + 1)); continue; }
+    if fm_pid_alive "$(cat "$meta_lock/pid" 2>/dev/null)"; then
+      live=$((live + 1))
+      continue
+    fi
+    gen=$(fm_meta_get "$meta" spawn_gen)
+    gen=${gen#s}
+    gen=${gen%%.*}
+    case "$gen" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$((now - gen))" -lt "${FM_SPAWN_CAP_LAUNCH_GRACE:-120}" ]; then
+          live=$((live + 1))
+          continue
+        fi
+        ;;
+    esac
+    id=${meta##*/}
+    id=${id%.meta}
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -z "$target" ]; then
+      live=$((live + 1))
+      continue
+    fi
+    # A stalled backend must neither hang entry nor hold the spawn task-set
+    # lock. Any timeout or failed read is unproven and remains counted.
+    # shellcheck disable=SC2016 # child positional parameters are intentional
+    endpoint_state=$(fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
+      '. "$1"; fm_backend_worker_state "$2" "$3"' \
+      _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) \
+      || endpoint_state=unreadable
+    if [ "$endpoint_state" = missing ]; then
+      if [ "$backend" = herdr ]; then
+        # shellcheck disable=SC2016
+        if ! fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
+          '. "$1"; fm_backend_source herdr && fm_backend_herdr_endpoint_confirmed_gone "$2"' \
+          _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$target" >/dev/null 2>&1; then
+          endpoint_state=unreadable
+        fi
+      else
+        # shellcheck disable=SC2016
+        absence=$(fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
+          '. "$1"; . "$2"; fm_control_endpoint_absence_verdict "$3" "$4"' \
+          _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$FM_AFK_CONTRACT_DIR/fm-control-lib.sh" \
+          "$backend" "$target" 2>/dev/null) || absence=unreadable
+        [ "${absence%%$'\t'*}" = gone ] || endpoint_state=unreadable
+      fi
+    fi
+    if [ "$(fm_meta_get "$meta" cleanup_recovery)" = launch ] && [ "$endpoint_state" != missing ]; then
+      live=$((live + 1))
+      continue
+    fi
+    case "$endpoint_state" in
+      dead|missing) continue ;;
+      alive|ambiguous) ;;
+      *) live=$((live + 1)); continue ;;
+    esac
+
+    status="$state/$id.status"
+    kind=$(fm_meta_get "$meta" kind)
+    line=$(status_current_line "$status" "$kind")
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      "$paused_verb"|"$held_verb"|needs-decision)
+        newest_verb=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$status" 2>/dev/null \
+          | fm_afk_contract_latest_non_resolved_verb) \
+          || newest_verb=$(fm_afk_contract_latest_non_resolved_verb < "$status") \
+          || newest_verb=
+        case "$newest_verb" in
+          "$paused_verb"|"$held_verb"|needs-decision) ;;
+          *) live=$((live + 1)); continue ;;
+        esac
+        ;;
+      done)
+        if [ "$kind" = ship ] && ! fm_dod_should_gate_ship_done \
+          "$kind" "$(fm_meta_get "$meta" mode)" "$line"; then
+          live=$((live + 1))
+          continue
+        fi
+        ;;
+      *) live=$((live + 1)); continue ;;
+    esac
+    # shellcheck disable=SC2016 # child positional parameters are intentional
+    activity=$(fm_run_timed "${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}" bash -c \
+      '. "$1/fm-backend.sh"; . "$1/fm-busy-lib.sh"; fm_busy_classify_meta "$2" "$3" "$4"' \
+      _ "$FM_AFK_CONTRACT_DIR" "$meta" "$id" "$state" 2>/dev/null) \
+      || activity=unknown
+    if [ "${activity%% *}" != idle ]; then
+      live=$((live + 1))
+      continue
+    fi
+    current=$(fm_run_timed "${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}" env \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 \
+      "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null) || current=
+    case "$verb:$current" in
+      done:"state: done "*) continue ;;
+      "$paused_verb":"state: paused "*|"$paused_verb":"state: parked "*|"$paused_verb":"state: done "*) continue ;;
+      needs-decision:"state: parked "*|needs-decision:"state: done "*|"$held_verb":"state: parked "*|"$held_verb":"state: done "*) continue ;;
+      "$held_verb":"state: unknown · source: none · no current-state source available") continue ;;
+    esac
     live=$((live + 1))
   done
   printf '%s\n' "$live"

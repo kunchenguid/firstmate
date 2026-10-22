@@ -3622,7 +3622,9 @@ printf 'signal: streaming chain wake %s\n' "$count"
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
+  # Keep the JavaScript heredoc outside command substitution: stock Bash 3.2
+  # reparses its quotes instead of leaving the Node input opaque.
+  PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3691,6 +3693,13 @@ await handlers.get("before_agent_start")?.({
 }, {});
 // The run reaches the first queued follow-up; the second is still queued when
 // the captain replaces the session, so only the second rides the handoff.
+// Pi's custom-start event has no prompt. Even identical custom-message text
+// does not consume the pending user wake (the SDK's messageType contract).
+handlers.get("before_agent_start")?.({
+  type: "before_agent_start",
+  messageType: "custom",
+  message: { role: "custom", customType: "fixture-custom-start", content: prompts[1], display: true },
+}, {});
 consumeQueued(prompts[0]);
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
@@ -3711,8 +3720,8 @@ await waitFor(() => arms() === 4, "replacement arm");
 await waitFor(() => !existsSync(handoffPath), "consumed replay clears its handoff record");
 process.exit(0);
 EOF
-)
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
   [ -z "$out" ] || fail "Pi streaming-time delivery chain test printed output: $out"
   pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"

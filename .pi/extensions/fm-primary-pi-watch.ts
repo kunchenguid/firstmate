@@ -675,8 +675,7 @@ export default function (pi: ExtensionAPI) {
     return generationIsLive(owner);
   }
 
-  // Pi consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // Apply the delivery-versus-consumption boundary documented above.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
