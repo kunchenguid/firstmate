@@ -1401,6 +1401,57 @@ wait_for_pid_gone() {  # <pid> <polls>
   return 1
 }
 
+# On a loaded host a freshly started watcher can take longer than the arm's
+# fixed confirmation budget to get from taking the lock to its first beacon.
+# A child that already holds the lock under its own identity is slow, not stuck,
+# so the arm must keep waiting for it instead of killing it at the budget. A
+# `touch` shim stretches the watcher's startup between lock acquisition and the
+# first beat to twice the confirmation budget.
+test_arm_does_not_kill_a_lock_holding_slow_starter() {
+  local dir home state fakebin armout slow_marker
+  dir=$(make_case slow-lock-holding-starter)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  slow_marker="$dir/slowed"
+  mkdir -p "$home/data"
+  cat > "$fakebin/touch" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  */.last-heartbeat)
+    if [ ! -e "$slow_marker" ]; then
+      : > "$slow_marker"
+      sleep 5
+    fi ;;
+esac
+exec "$(command -v touch)" "\$@"
+SH
+  chmod +x "$fakebin/touch"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=2 FM_WATCHER_STALL_BOUND=60 "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -q '^watcher: started pid=\|^watcher: FAILED' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$slow_marker" ] || fail "the slow-startup shim never ran: $(cat "$armout")"
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "arm killed or lost a slow lock-holding watcher: $(cat "$armout")"
+  ! grep -q '^watcher: FAILED' "$armout" \
+    || fail "arm reported a failure for a healthy slow watcher: $(cat "$armout")"
+  WATCH_PID=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -1)
+  is_live_non_zombie "$WATCH_PID" || fail "slow watcher pid $WATCH_PID was not left running"
+  kill -TERM "$WATCH_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
+  pass "watch-arm: a slow lock-holding watcher child survives the confirmation budget"
+}
+
 # A running watcher whose state directory is deleted (a torn-down temporary
 # home) must exit after noticing the deletion with a logged reason, not run on
 # as an orphan (upstream #4760). Allow for a slow CI runner finishing the cycle
@@ -1717,6 +1768,7 @@ test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
+test_arm_does_not_kill_a_lock_holding_slow_starter
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
