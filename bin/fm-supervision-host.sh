@@ -50,12 +50,16 @@
 #     (bin/fm-branch-dispatch.mjs offer) says the branch may take this close,
 #     so main-only classes (check triggers, decision-owned triggers, a scan
 #     that is unsafe or holds nothing for the branch) stay main's. That
-#     pass-through starts the successor watcher cycle and leaves it running
-#     before the close is printed, so supervision continues when the session
-#     drops the handoff. It confirms no handling handoff, so the recovery
-#     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The host records that successor's arm before relinquishing it
-#     (detach_successor owns the persistence check and failure path). The
+#     main-only pass-through, and on a Claude primary every attended
+#     pass-through (the Stop hook starts no handling successor of its own
+#     while the host runs), starts the successor watcher cycle and leaves it
+#     running before the close is printed, so supervision continues through
+#     main's turn and when the session drops the handoff. It confirms no
+#     handling handoff, so the recovery marker still reads downtime and the
+#     re-arm owner delivers the close to main. The host records that successor's arm before relinquishing it
+#     (detach_successor owns the persistence check and failure path), and that
+#     record is what keeps the arm re-arming in place after a close of its own
+#     that no one reads (FM_WATCH_ARM_LEFT_RECORD in the arm's header). The
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
 #     conditions under which that restores a single owner and the fallback;
@@ -138,9 +142,10 @@
 # engine turn. It also reads the record of a successor a pass-through left for
 # main: while that arm still runs under its recorded identity, the first cycle
 # without --restart requests a take-over rather than an ordinary attach.
-# Activation removes the
-# record only once that identity is no longer alive, so a later host retries a
-# take-over that left it running.
+# Activation removes the record once that identity is no longer alive, and the
+# park removes it once its first cycle reports, so a host stopped before then
+# leaves a later host to retry the take-over, and an arm this park only
+# attached to stops re-arming at its next close.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
@@ -468,10 +473,14 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   # process group down after the exit-2 rewake, so it gets a group of its own
   # (the shape start_handling_successor in bin/fm-claude-stop-autoarm.sh uses).
   [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set -m 2>/dev/null || true
+  # Such an arm also learns where a pass-through records it, so once left it
+  # re-arms in place after its own close (bin/fm-watch-arm.sh header).
+  local left=
+  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || left=$LEFT_RECORD
   if [ -n "$predecessor" ]; then
-    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
+    FM_WATCH_ARM_LEFT_RECORD=$left FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
+    FM_WATCH_ARM_LEFT_RECORD=$left FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   fi
   pid=$!
   [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set +m 2>/dev/null || true
@@ -527,6 +536,16 @@ stream_ready_line() {
   printf '%s\n' "$line"
   READY_LINE=$line
   READY_PENDING=0
+  release_left_record
+}
+
+# The first cycle has reported, so the take-over of the arm a pass-through
+# left is decided: drop its record, so that arm, if this park only attached to
+# it, ends at its next close instead of re-arming past this park's notice.
+release_left_record() {
+  [ -n "$LEFT_ARM" ] || return 0
+  rm -f "$LEFT_RECORD" 2>/dev/null || true
+  LEFT_ARM=
 }
 
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
@@ -553,6 +572,7 @@ await_close() {
     READY_LINE=
   fi
   READY_PENDING=0
+  release_left_record
   forget_process "$ARM_PID"
   rm -f "$ARM_OUT" 2>/dev/null || true
   CLOSED_ARM_PID=$ARM_PID
@@ -1094,7 +1114,9 @@ while :; do
   if ! fm_afk_contract_away_present "$STATE"; then
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
-      if [ "$ATTENDED_WHY" = main-only ]; then
+      # The Claude Stop hook starts no handling successor of its own while
+      # the host runs, so on Claude every pass-through leaves one for main.
+      if [ "$ATTENDED_WHY" = main-only ] || [ "$PRIMARY" = claude ]; then
         leave_successor_for_main || true
       fi
       emit
