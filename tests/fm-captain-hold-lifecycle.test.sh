@@ -642,6 +642,90 @@ SH
   pass "captain-hold mutations address the beads backend without a markdown override"
 }
 
+# A hold raises its sign-off card through the firstmate-addons signoff script when
+# installed, falling back to this repo's adapter otherwise, and only while armed.
+signoff_addon_stub() {  # <addons-dir>
+  mkdir -p "$1/signoff/bin"
+  cat > "$1/signoff/bin/fm-procevent-signoff.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s\n' "$1" "$2" "$FM_HOME" "$FM_CODE_ROOT" >> "$SIGNOFF_LOG"
+exit "$SIGNOFF_STATUS"
+SH
+  chmod +x "$1/signoff/bin/fm-procevent-signoff.sh"
+}
+
+signoff_hold() {  # <home> <task-id> <addons-dir> <log> <stub-status>
+  local home=$1 id=$2 addons=$3 log=$4 status=$5
+  env -u FM_CODE_ROOT PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ADDONS_DIR="$addons" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    SIGNOFF_LOG="$log" SIGNOFF_STATUS="$status" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --title "Route the card" \
+    --reason "captain must decide" --repo sample
+}
+
+test_hold_raises_its_signoff_card_through_the_armed_addon_script() {
+  local home addons log id=signoff-addon-route expected_root
+  home=$(make_home signoff-addon-route)
+  addons="$home/addons"
+  log="$home/signoff.log"
+  mkdir -p "$home/projects/sample" "$home/state/procevent"
+  : > "$home/state/procevent/signoff.source"
+  signoff_addon_stub "$addons"
+  signoff_hold "$home" "$id" "$addons" "$log" 0 >/dev/null \
+    || fail "a hold with the signoff add-on installed failed"
+  expected_root="$(cd "$ROOT/bin" && pwd)/.."
+  assert_equals "raise|$id|$home|$expected_root" "$(cat "$log")" \
+    "the add-on did not receive the card with this home and code root"
+  pass "an armed hold raises its sign-off card through the installed add-on script"
+}
+
+test_hold_skips_the_addon_signoff_card_while_unarmed() {
+  local home addons log id=signoff-addon-unarmed
+  home=$(make_home signoff-addon-unarmed)
+  addons="$home/addons"
+  log="$home/signoff.log"
+  mkdir -p "$home/projects/sample"
+  signoff_addon_stub "$addons"
+  signoff_hold "$home" "$id" "$addons" "$log" 1 >/dev/null \
+    || fail "an unarmed hold with the signoff add-on installed failed"
+  assert_absent "$log" "an unarmed home raised a sign-off card through the add-on"
+  pass "an unarmed hold never reaches the installed add-on script"
+}
+
+test_hold_falls_back_to_the_fork_signoff_adapter_without_the_addon() {
+  local home log id=signoff-fork-fallback rc=0 out
+  home=$(make_home signoff-fork-fallback)
+  log="$home/signoff.log"
+  mkdir -p "$home/projects/sample" "$home/state/procevent"
+  : > "$home/state/procevent/signoff.source"
+  cat > "$home/fakebin/sign-off-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SIGNOFF_LOG"
+exit 1
+SH
+  chmod +x "$home/fakebin/sign-off-axi"
+  out=$(signoff_hold "$home" "$id" "$home/no-addons" "$log" 0 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a hold with no sign-off card raised reported success"
+  assert_contains "$out" "no sign-off card was raised" "a failed fork-adapter card did not fail the hold"
+  assert_grep "raise --key" "$log" "the fork adapter did not run its card when no add-on is installed"
+  pass "without the add-on, an armed hold falls back to the fork sign-off adapter"
+}
+
+test_hold_fails_when_the_addon_signoff_raise_fails() {
+  local home addons log id=signoff-addon-failure rc=0 out
+  home=$(make_home signoff-addon-failure)
+  addons="$home/addons"
+  log="$home/signoff.log"
+  mkdir -p "$home/projects/sample" "$home/state/procevent"
+  : > "$home/state/procevent/signoff.source"
+  signoff_addon_stub "$addons"
+  out=$(signoff_hold "$home" "$id" "$addons" "$log" 1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failing add-on raise reported a successful hold"
+  assert_contains "$out" "no sign-off card was raised" "a failing add-on raise did not fail the hold"
+  assert_grep "raise|$id" "$log" "the failing add-on raise never reached the add-on script"
+  pass "a failing add-on sign-off raise fails the hold"
+}
+
 # A Beads workspace with due.required and no types.custom captain type is the
 # live fleet shape. hold must still create a fresh captain row there: waive
 # due rather than invent one, and map to native type task rather than register
@@ -4748,3 +4832,7 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_hold_raises_its_signoff_card_through_the_armed_addon_script
+test_hold_skips_the_addon_signoff_card_while_unarmed
+test_hold_falls_back_to_the_fork_signoff_adapter_without_the_addon
+test_hold_fails_when_the_addon_signoff_raise_fails

@@ -57,9 +57,10 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
-# When this home has armed bin/fm-procevent-signoff.sh, an undated `hold` also
+# When this home has armed the sign-off adapter, an undated `hold` also
 # raises a sign-off board card keyed by this home's tag, the task id and the hold
-# stamp; that adapter owns the card,
+# stamp; that adapter owns the card (the firstmate-addons signoff script when
+# it is installed, else bin/fm-procevent-signoff.sh),
 # and a card it cannot raise fails the command (the hold stays recorded).
 #
 # `answer` records the captain's exact words and resolves the call in the same
@@ -916,7 +917,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0 card_close=release
+  local signoff_script addon_signoff existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0 card_close=release
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1023,13 +1024,20 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
-  # Optional sign-off card: a no-op unless bin/fm-procevent-signoff.sh is armed
-  # here. A created question closes on answer, held work is released; a dated
-  # deferral gets no live card, and a card failure exits nonzero (the hold stays recorded).
+  # Optional sign-off card, raised only while the sign-off adapter is armed here.
+  # The firstmate-addons signoff script is used when installed, else this repo's
+  # bin/fm-procevent-signoff.sh. A created question closes on answer, held work is
+  # released; a dated deferral gets no live card, and a card failure exits nonzero
+  # (the hold stays recorded).
   if [ -z "$until" ]; then
     release_task_control_lock
-    "$SCRIPT_DIR/fm-procevent-signoff.sh" raise "$id" "$(show_field_value "$show" title)" "$reason" "$card_close" \
-      || { printf 'error: task %s is held, but no sign-off card was raised for it\n' "$id" >&2; exit 1; }
+    if [ -f "$STATE/procevent/signoff.source" ]; then
+      signoff_script=$SCRIPT_DIR/fm-procevent-signoff.sh
+      addon_signoff=${FM_ADDONS_DIR:-$FM_HOME/projects/firstmate-addons}/signoff/bin/fm-procevent-signoff.sh
+      [ ! -f "$addon_signoff" ] || signoff_script=$addon_signoff
+      FM_HOME=$FM_HOME FM_CODE_ROOT=${FM_CODE_ROOT:-$SCRIPT_DIR/..} "$signoff_script" raise "$id" "$(show_field_value "$show" title)" "$reason" "$card_close" \
+        || { printf 'error: task %s is held, but no sign-off card was raised for it\n' "$id" >&2; exit 1; }
+    fi
   fi
   printf '%s\n' "$id"
 }
