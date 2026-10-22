@@ -20,12 +20,18 @@
 # every close it handled itself. Each owner passes its harness as
 # FM_SUPERVISION_HOST_PRIMARY, which the engine carries as the primary pin.
 #
-# OUTPUT, the contract every owner reads. The first cycle's status line
+# OUTPUT, the stdout contract every owner reads. The first cycle's status line
 # ("watcher: started ..." or "watcher: attached ...") is printed as soon as the
 # arm prints it, so an owner that waits for arm readiness sees it at once;
-# everything else is printed in one write when the host exits: the close as
-# the arm printed it (without that status line), then any "supervision-host:"
-# lines. A "supervision-host:" line is a wake in its own right (the park
+# everything else is printed in one write when the host exits: normally the
+# close as the arm printed it (without that status line), then any
+# "supervision-host:" lines. If downtime restoration fails for a close that
+# turned main-only at turn start, the host instead prints
+# "supervision-host hand-back failed: watcher downtime could not be restored
+# for the main hand-back" and exits 1 without printing the close. This is not
+# a wake; it must be nonempty even when no readiness line was emitted, so the
+# owner does not mistake a failed hand-back for host death.
+# A "supervision-host:" line is a wake in its own right (the park
 # boundary prints nothing else); "supervision-host stood down: ..." means this
 # session or generation no longer owns supervision and the owner stands down
 # silently; an exit status above 128, or no output at all, means the host
@@ -60,11 +66,8 @@
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
 #     conditions under which that restores a single owner and the fallback;
 #   - away (an away record exists): every close goes to the engine.
-# Every turn that starts attended meets that rule again at its start, so a
-# close accepted away whose turn starts attended (the captain returned in
-# between) or an attended close whose task turned main-only while the
-# successor started reaches main exactly as the arm printed it, and that
-# successor cycle stays running.
+# Turn-start posture and eligibility changes follow docs/supervision-host.md
+# "Away"; OUTPUT above owns the failed main-only hand-back contract.
 # A close the engine takes is handled in one order: it starts and verifies the
 # successor watcher cycle and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
@@ -84,18 +87,16 @@
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
 # unprocessed captain outcome until main acknowledges it. Otherwise the host
 # parks on the successor.
-# Every other outcome exits with the close's own reason line plus one
-# "supervision-host:" line saying why main has this wake, after stopping the
-# successor cycle so main's next turn end starts from the same state as
-# without the host. Whenever the captain returned during an away engine turn
+# Failure-path hand-backs follow docs/supervision-host.md "Failure direction".
+# Whenever the captain returned during an away engine turn
 # that recorded visible outcomes, handled or not, the return brief was rendered
 # before they existed, so the host exits with the close, one "supervision-host:"
 # line naming them, and one line per visible outcome, for main to relay. The
 # host injects nothing and has no delivery path of its own; the owner's
-# existing wake path is the only way main hears from it, and its fallback is
-# always to exit with the close's own reason line. That handoff is only a
-# prompt: each non-silent outcome recorded after the return is already a
-# durable queued wake
+# existing wake path is the only way main hears from it; OUTPUT above owns
+# the fallback's close and failure diagnostics. That handoff is only a prompt:
+# each non-silent outcome recorded after the return is already a durable
+# queued wake
 # (bin/fm-branch-report.sh), so it still reaches main when the host dies at the
 # turn's end or its owner drops the handoff, as a superseded Cursor park does.
 #
@@ -1145,6 +1146,10 @@ while :; do
     if [ -n "$SUCCESSOR_GENERATION" ] \
       && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
       log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
+      # Not "supervision-host:", which would make the close a wake; and not
+      # silent, because no output at all reads as a host that died, which its
+      # owner retries into a second park that no event ever closes.
+      printf 'supervision-host hand-back failed: watcher downtime could not be restored for the main hand-back\n'
       exit 1
     fi
     emit
