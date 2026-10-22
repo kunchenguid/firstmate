@@ -129,11 +129,8 @@ FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
 # below-floor warning would repeat on every crewmate; the key is the detected
 # release, so an upgrade or a downgrade is announced again.
 FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
-# Per-pane escalation dedupe marker prefix, under the state dir. One marker per
-# window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
-# is enqueued, cleared on any working edge, so exactly one wake fires per
-# ->blocked edge and a reconnect level-reconcile never re-delivers a still-
-# blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
+# Per-pane escalation dedupe marker prefix, under the state dir
+# (bin/fm-transition-lib.sh owns the dedupe contract).
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
@@ -3941,60 +3938,22 @@ fm_backend_herdr_event_reader_cmd() {
   printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.py"
 }
 
-# fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
-# <window> ("<session>:<pane_id>"), keyed identically to the watcher's
-# .stale-<key> (tr ':/.' '___'), under <state_dir>.
+# The per-pane escalation dedupe (marker path, apply, commit, clear) is the
+# shared owner's (bin/fm-transition-lib.sh); these keep herdr's marker prefix.
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
-  local state=$1 window=$2 key
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
+  fm_transition_marker "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2"
 }
 
-# fm_backend_herdr_apply_transition: route one normalized record through the
-# shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
-# On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
-# it prints the record on stdout and returns 0 (the caller stops and hands the
-# record up). The caller commits the marker only after handling the record.
-# `absorb` (working) clears the marker and
-# returns 1. `defer`/`fallback`, and an already-marked `actionable`, return 1
-# with no output. <session> reconstructs the window ("<session>:<pane_id>") for
-# the marker key, matching the watcher's own key scheme.
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id to action window marker
-  pane_id=$(fm_transition_pane_id "$record")
-  [ -n "$pane_id" ] || return 1
-  to=$(fm_transition_to_status "$record")
-  action=$(fm_transition_policy "$to")
-  window="$session:$pane_id"
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  case "$action" in
-    actionable)
-      if [ ! -e "$marker" ]; then
-        printf '%s' "$record"
-        return 0
-      fi
-      ;;
-    absorb)
-      rm -f "$marker" 2>/dev/null || true
-      ;;
-  esac
-  return 1
+  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3"
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id window marker
-  pane_id=$(fm_transition_pane_id "$record")
-  [ -n "$pane_id" ] || return 1
-  window="$session:$pane_id"
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  : > "$marker"
+  fm_transition_commit "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3"
 }
 
 fm_backend_herdr_clear_transition() {  # <state_dir> <window>
-  local state=$1 window=$2 marker
-  [ -n "$window" ] || return 0
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  rm -f "$marker" 2>/dev/null || true
+  fm_transition_clear "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2"
 }
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to

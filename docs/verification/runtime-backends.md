@@ -2235,7 +2235,9 @@ Current active CLI findings:
 | Resize | `rex block call -s <sid> -b <bid> resize '{"columns":200,"rows":50}'` | Applied to an unviewed block (`size` then read `{"columns":200,"rows":50,...,"owner":null}`). |
 | Process view | `rex block call -s <sid> -b <bid> process` | `foreground{pid,name,path,argv0,cwd}`, `ancestors[]`, and `last_exit`; `foreground.cwd` followed a nested shell started with `cd <dir> && exec /bin/sh`, and a Claude Code 2.1.308 block read `{"pid":46775,"name":"2.1.308","argv0":"claude"}` with ancestors `zsh`, `login`. |
 | Plain capture | `rex capture -s <sid> -b <bid>` | A 100x10 block holding `a`, `b`, a prompt, and six blank rows returned `a\nb\n/tmp \n❯ \n`: trailing blank rows are dropped. |
-| Styled capture | `rex capture -s <sid> -b <bid> --format=vt` | The same block returned all ten rows joined by CRLF and ending in `\r\n`, so the empty bottom row is implicit; the adapter restores it and derives the viewport as the last `size.rows` rows. |
+| Styled capture | `rex capture -s <sid> -b <bid> --format=vt` | The same block returned all ten rows joined by CRLF and ending in `\r\n`, so the empty bottom row is implicit. |
+| Styled read with cursor | `rex block call -s <sid> -b <bid> format '{"format":"vt","extra_cursor":true}'` | `.content` held the same CRLF-joined grid without the capture's final line feed, followed by the cursor as `ESC[<row>;<col>H` with a 1-based screen row; the adapter restores the implicit bottom row, derives the viewport as the last `size.rows` rows, and anchors the composer on that row. An idle OpenCode 1.19.3 at 200x50 ended `ESC[45;6H`, inside its composer, with its status line drawn below it (`tests/fixtures/rex-opencode-1.19.3/`). |
+| Event script | `rex --autostart=false do -s <sid> --for <N>s <script.lua> --args '<json>'` | The `listening:` banner went to stderr, each handler's `print` reached stdout line by line, `rex.after(0, ...)` ran once the handlers were listening, the run exited 0 at the `--for` deadline, and a session that does not exist exited 3. |
 | Close | `rex block close -s <sid> <bid>` | Later reads of the block exit 3; closing a window's last block closes the window, and a session left with no windows stays until `rex kill <sid>`. |
 
 Live adapter and control-plane evidence on that build:
@@ -2249,6 +2251,8 @@ Live adapter and control-plane evidence on that build:
 ```sh
 tests/fm-backend-rex.test.sh
 tests/fm-backend-rex-smoke.test.sh
+tests/fm-backend-rex-eventwait-smoke.test.sh
+FM_REX_COMPOSER_LIVE=1 tests/fm-backend-rex-composer-live-e2e.test.sh
 tests/fm-afk-launch.test.sh
 ```
 
@@ -2261,7 +2265,7 @@ ok - real rex: current_path follows a nested shell; agent_state reads dead at a 
 ok - real rex: OSC 7501 records from the foreground shell drive busy_state
 ok - real rex: kill closes exactly the task tab and the recorded server proves it gone
 ok - real rex: relaunch reclaim opens a tab in the exact session, and a gone session returns 2 creating nothing
-ok - real rex: no state-changing call left the test session and every other session is byte-identical
+ok - real rex: no state-changing call left the test sessions and every other session is byte-identical
 ```
 
 The away launcher's Rex end-to-end case in `tests/fm-afk-launch.test.sh` printed:
@@ -2274,7 +2278,75 @@ ok - rex e2e: daemon session killed by exact id on stop
 ok - rex e2e: record + .afk cleared on stop
 ```
 
-Both real-server suites skip unless a Rex server is already reachable without autostart, and refresh this record after a Rex upgrade.
+### Push events
+
+Rechecked on 2026-10-22 on the same Rex build, macOS, and jq.
+A program status edge drives the event reader as Rex delivers it in `terminal.program_status_changed`, with `ev.record` carrying `state`, `kind`, `app`, `msg`, and `owner.pid`; `terminal.child_exited` and `block_closed` name the block whose program exited or which closed.
+
+```text
+$ bash tests/fm-backend-rex-eventwait-smoke.test.sh
+ok - real rex: the push capability gate passes without starting a server
+ok - real rex: a driven blocked edge returns its record, with Rex's kind and message, 146ms after the report was sent
+ok - real rex: the watcher fast path enqueues a stale wake carrying Rex's blocked kind and message
+ok - real rex: an escalated block is not re-delivered and the reader runs its whole budget (2092ms for 2s)
+ok - real rex: closing a watched block ends the wait 120ms later for an immediate poll
+ok - real rex: a reader that cannot start returns 2 and the watcher falls back to polling
+ok - real rex: no state-changing call left the test sessions and every other session is byte-identical
+```
+
+Real harness edges on that build, each captured by `fm_backend_wait_transition rex` running across the harness's launch or turn:
+
+- Claude Code 2.1.308 asking an `AskUserQuestion` question reported `{"state":"blocked","kind":"question","app":"claude-code","msg":"answer: red or blue? (red · blue)","owner":{"pid":27995,"name":"2.1.308"}}`, and the wait returned the record `...|blocked|claude-code|question: answer: red or blue? (red · blue)` 106ms after Rex's `updated_at` for it.
+- Grok 1.0.67's workspace-trust dialog reported `blocked` with kind `permission`, and the wait returned `...|blocked|grok-build|permission: Trust this folder?`.
+- Codex 0.163.0's workspace-trust dialog reported no program status, so it reached no push edge.
+
+### Worker tools on Rex
+
+Rechecked on 2026-10-22 on the same Rex build.
+Each installed tool ran in its own `fm-test-` session through the real control plane: `fm-spawn.sh --relaunch` launched it on a bare-shell task tab with a one-word prompt, then `bin/fm-peek.sh`, a `bin/fm-send.sh` steer it answered, `bin/fm-control.sh` `interrupt` during a `sleep 40` turn, `exit`, a second `exit`, and `relaunch` with a second one-word prompt.
+Busy and composer state were polled every second through `fm_backend_busy_state` and `fm_backend_composer_state`.
+Every tool below printed `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`, then `stopped`, then `already-stopped`, then `relaunched`, and answered both prompts; the guard refused no call outside its session.
+
+| Tool and version | Model | Program status (OSC 7501) | Busy source read on Rex | Composer |
+| --- | --- | --- | --- | --- |
+| Claude Code 2.1.308 | `haiku` | `working`, `done`, `blocked` (`claude-code`) | `claude-hook` | `empty` idle and after each submit |
+| Codex 0.163.0 | `gpt-6-luna` | `working`, `idle` (`codex`) | `unknown codex-unverified`, the shared Codex contract | `empty` |
+| Grok 1.0.67 | default | `working`, `done`, `blocked` (`grok-build`) | `rex-native` while working, `grok-regex` after | `empty` |
+| OpenCode 1.19.3 | `openai/gpt-6-luna-fast` | none | `opencode-plugin` | `empty` with the cursor-anchored read |
+| Pi 0.87.0 and Pi signed 0.87.0 | `openai-codex/gpt-6-luna` | none | `pi-ext` | `empty` |
+| Muse Code 1.4.11 | default | `working`, `done` (`muse`) | `rex-native` while working, `muse-session-log` after | `empty` |
+| Devin 3000.11.1 | default | none | `devin-hook` | `empty` |
+
+OpenCode 1.19.3 draws a status line below its composer, so the cursorless bottom-most read reported `unknown` and exit, relaunch, and steers refused until the composer read anchored on Rex's cursor row.
+Codex and Grok each showed a workspace-trust dialog for the scratch repository, which the run answered as an operator before the steps above.
+The launches set `DISABLE_AUTOUPDATER=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, and `MUSE_NO_AUTO_UPDATE=1`, and every tool's version was unchanged afterwards.
+
+Untested on Rex:
+
+- Cursor Agent 2026.09.28 is installed but not signed in on this machine; its tab showed `Press any key to log in...`, the composer read `unknown`, and `exit` correctly refused to type into that screen.
+- Kimi, Oh My Pi, Gemini, Rovo Dev, Antigravity, Command Code, and Polytoken are not installed here, so Command Code stays refused on Rex.
+
+The idle composer of every installed tool the live guard covers, read on Rex with and without the cursor:
+
+```text
+$ FM_REX_COMPOSER_LIVE=1 bash tests/fm-backend-rex-composer-live-e2e.test.sh
+ok - claude (2.1.308 (Claude Code)): real idle composer classifies empty on rex
+ok - claude (2.1.308 (Claude Code)): the same idle screen read cursorless is not pending (verdict: empty)
+ok - codex (codex-cli 0.163.0): real idle composer classifies empty on rex
+ok - codex (codex-cli 0.163.0): the same idle screen read cursorless is not pending (verdict: empty)
+ok - opencode (1.19.3): real idle composer classifies empty on rex
+ok - opencode (1.19.3): the same idle screen read cursorless is not pending (verdict: unknown)
+ok - pi (0.87.0): real idle composer classifies empty on rex
+ok - pi (0.87.0): the same idle screen read cursorless is not pending (verdict: empty)
+ok - grok (grok 1.0.67 (2fe064390d07) [stable]): real idle composer classifies empty on rex
+ok - grok (grok 1.0.67 (2fe064390d07) [stable]): the same idle screen read cursorless is not pending (verdict: empty)
+# harness absent, not verified here: kimi
+ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): real idle composer classifies empty on rex
+ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): the same idle screen read cursorless is not pending (verdict: unknown)
+ok - real rex: no state-changing call left the test sessions and every other session is byte-identical
+```
+
+The real-server suites skip unless a Rex server is already reachable without autostart; refresh this record from them after a Rex upgrade, and from the live composer guard after any tool upgrade.
 
 ## Codex App host tools
 
