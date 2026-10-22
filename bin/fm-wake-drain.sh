@@ -578,15 +578,15 @@ EOF
 # main, only where fm_supervision_host_outcomes_drained holds (the Pi branch
 # extension owns this path on Pi), and never while an away record exists,
 # because those outcomes wait for the return; quiet mode's record is a present
-# captain (bin/fm-afk-contract.sh AWAY OR QUIET). Bounded, and silent when
-# nothing is new or unprocessed.
+# captain (bin/fm-afk-contract.sh AWAY OR QUIET).
 #   - Captain outcomes come first and never wait behind routine ones. Every
 #     unprocessed captain row is presented on every drain until main
-#     acknowledges it, collapsed to one line per task: the task's newest
-#     presented summary, naming how many unprocessed captain outcomes it
-#     carries, with tasks in order of their oldest unprocessed row. The byte
+#     acknowledges it, one line per outcome in sequence order, preserving older
+#     handoffs even when a newer summary for the task omits them. The byte
 #     cap presents only the oldest contiguous run of captain rows and counts
-#     the newer ones it holds back, so the printed bin/fm-branch-outcome.sh
+#     the newer ones it holds back. Captain summaries are never truncated;
+#     one oversized oldest row is printed in full so its handoff cannot be
+#     lost or stall the drain. Thus the printed bin/fm-branch-outcome.sh
 #     mark-processed target, the newest presented row, acknowledges exactly
 #     what was presented and always at least the oldest row. An unprocessed
 #     captain row is never adopted as processed, so a home that opts in
@@ -597,12 +597,15 @@ EOF
 #     presenter never advanced the read cursor), and the section asks main to
 #     check the task's current state first and reply to the captain only
 #     about outcomes still open, as if settled ones had never been listed,
-#     then acknowledge every presented outcome, settled and open alike.
+#     then follow AGENTS.md section 10's ready-work handoff contract before
+#     acknowledging every presented outcome, settled and open alike.
 #   - Visible routine outcomes are listed once, for awareness, the way the Pi
 #     branch's routine notes reach main's transcript without a turn; silent
 #     routine outcomes never appear. The newest visible rows that fit a byte
 #     cap are listed, and older visible rows collapse into a count, since
 #     bin/fm-branch-outcome.sh list keeps them all.
+#     Routine truncation respects whole UTF-8 characters in every locale and
+#     carries a sequence-specific full-outcome lookup.
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
@@ -613,10 +616,11 @@ EOF
 # (bin/fm-afk-return.sh) keeps its catch-up gated instead of clearing over
 # outcomes a later drain would present again.
 print_branch_outcomes_section() {
-  local config rows through captain routine line seq task task_line target i
+  local LC_ALL=C
+  local config rows through captain routine line seq task_line target
   local text='' used=0 shown=0 held=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
   local routine_lines='' routine_count=0 routine_shown=0
-  local -a captain_tasks=() captain_lines=() captain_line_bytes=()
+  local -a captain_lines=()
   [ "$ACTOR" = main ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_supervision_host_outcomes_drained "$config" || return 0
@@ -634,44 +638,36 @@ print_branch_outcomes_section() {
   if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
     || ! captain=$(printf '%s\n' "$rows" | jq -rs '
       map(select(.verdict == "captain")) | sort_by(.seq)
-      | reduce .[] as $r ({count: {}, lines: []};
-          .count[$r.task] += 1
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
-      | .lines[]' 2>/dev/null) \
+      | .[]
+      | "\(.seq)\t[seq \(.seq), recorded \(.recordedAgo) ago] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
-      | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
+      | "\(.seq)\t[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
     || case "$through" in ''|*[!0-9]*) true ;; *) false ;; esac; then
     printf 'BRANCH OUTCOMES SKIPPED: the outcome store could not be projected safely; nothing was marked read, so these outcomes are presented again on the next drain.\n' >&2
     return 1
   fi
 
   target=0
-  while IFS=$(printf '\t') read -r seq task task_line; do
+  while IFS=$(printf '\t') read -r seq task_line; do
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     if [ "$held" -gt 0 ]; then
       held=$((held + 1))
       continue
     fi
-    cap_outcome_line "$task_line" $((item_bytes - 1))
-    i=0
-    while [ "$i" -lt "$shown" ] && [ "${captain_tasks[$i]}" != "$task" ]; do i=$((i + 1)); done
-    bytes=$(( used + OUTCOME_LINE_BYTES + 1 ))
-    [ "$i" -eq "$shown" ] || bytes=$(( bytes - captain_line_bytes[i] - 1 ))
-    if [ "$bytes" -gt "$captain_bytes" ]; then
+    bytes=$(( used + ${#task_line} + 1 ))
+    if [ "$bytes" -gt "$captain_bytes" ] && [ "$shown" -gt 0 ]; then
       held=1
       continue
     fi
-    captain_tasks[i]=$task
-    captain_lines[i]=$OUTCOME_LINE
-    captain_line_bytes[i]=$OUTCOME_LINE_BYTES
-    [ "$i" -lt "$shown" ] || shown=$((shown + 1))
+    captain_lines[shown]=$task_line
+    shown=$((shown + 1))
     used=$bytes
     target=$seq
   done <<ROWS
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per outcome, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement apart from any ready-work handoff; before acknowledging any outcome, including one whose source task has settled, act on every ready-work handoff it contains: check each named unit and dispatch it in this turn, or record its not-ready reason and the condition that must change before retrying on its backlog note; an applicable recorded reason suppresses repeat handoffs):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
@@ -684,16 +680,16 @@ ROWS
   fi
 
   used=0
-  while IFS= read -r line; do
+  while IFS=$(printf '\t') read -r seq line; do
     [ -n "$line" ] || continue
     routine_count=$((routine_count + 1))
   done <<ROWS
 $routine
 ROWS
   # Newest first against the cap, printed oldest first.
-  while IFS= read -r line; do
+  while IFS=$(printf '\t') read -r seq line; do
     [ -n "$line" ] || continue
-    cap_outcome_line "$line" $((item_bytes - 1))
+    cap_outcome_line "$line" $((item_bytes - 1)) "$seq"
     bytes=$(( OUTCOME_LINE_BYTES + 1 ))
     [ $((used + bytes)) -le "$routine_bytes" ] || break
     routine_lines="$OUTCOME_LINE
@@ -720,19 +716,15 @@ ROWS
   fi
 }
 
-# BRANCH OUTCOMES' per-item cut: the shared digest marker in place of the
-# tail once the line passes <max> bytes, cut bytewise whatever the caller's
-# locale and backed off to the last whole UTF-8 character, so a multibyte
-# summary keeps the section inside its byte budgets and stays valid text. Sets
-# OUTCOME_LINE and OUTCOME_LINE_BYTES.
-cap_outcome_line() {  # <line> <max-bytes>
+cap_outcome_line() {
   local LC_ALL=C line=$1 max=$2 keep body tail rest need
+  local suffix=" [truncated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs $3]"
   if [ "${#line}" -le "$max" ]; then
     OUTCOME_LINE=$line
     OUTCOME_LINE_BYTES=${#line}
     return 0
   fi
-  keep=$((max - ${#FM_LINE_CAP_SUFFIX}))
+  keep=$((max - ${#suffix}))
   [ "$keep" -ge 0 ] || keep=0
   body=${line:0:keep}
   tail=${body##*[!$'\x80'-$'\xbf']}
@@ -744,7 +736,7 @@ cap_outcome_line() {  # <line> <max-bytes>
     *) need=0 ;;
   esac
   [ "${#tail}" -ge "$need" ] || body=${rest%?}
-  OUTCOME_LINE=$body$FM_LINE_CAP_SUFFIX
+  OUTCOME_LINE=$body$suffix
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 

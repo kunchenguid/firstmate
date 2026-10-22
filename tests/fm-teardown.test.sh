@@ -740,10 +740,10 @@ test_teardown_closes_the_backlog_item_itself() {
     "closed backlog item did not record the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
-  printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'Apply the ready-work check in bin/fm-branch-prompt.sh (AGENTS.md section 10 for MAIN)' >/dev/null \
     || fail "teardown dropped the dependency-cleared follow-up: $out"
-  printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
-    || fail "teardown did not preserve date-gate check: $out"
+  printf '%s\n' "$out" | grep -F 'if you cannot spawn, report a captain-verdict ready-work handoff for MAIN to act on before acknowledgement' >/dev/null \
+    || fail "teardown dropped the dispatch handoff: $out"
   printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
     && fail "teardown still asked a later turn to close the item it already closed: $out"
   pass "teardown closes its own backlog item before reporting success"
@@ -915,8 +915,8 @@ test_no_mistakes_origin_remote_allows() {
 
   expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
-  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
+  grep -F 'Apply the ready-work check in bin/fm-branch-prompt.sh (AGENTS.md section 10 for MAIN)' "$case_dir/stdout" >/dev/null \
+    || fail "nm-origin: teardown manual prompt omitted the ready-work check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
@@ -4657,6 +4657,18 @@ test_leaked_worktree_process_is_reaped() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
 
+  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
+  # installed, keeping this process-reaping test hermetic.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+for proc in /proc/[0-9]*; do
+  pid=${proc##*/}
+  cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
+  printf 'p%s\nfcwd\nn%s\n' "$pid" "$cwd"
+done
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+
   # A backgrounded, disowned process rooted (by cwd) under the task's own
   # worktree - the same shape the observed incident's leaked `go test`
   # binaries took (reparented to init, no live task meta to attribute them
@@ -4687,6 +4699,18 @@ test_leaked_tasktmp_process_is_reaped() {
   printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
   mkdir -p "$case_dir/tasktmp"
   land_shippable_commit "$case_dir"
+
+  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
+  # installed, matching the worktree process-reaping test above.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+for proc in /proc/[0-9]*; do
+  pid=${proc##*/}
+  cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
+  printf 'p%s\nfcwd\nn%s\n' "$pid" "$cwd"
+done
+SH
+  chmod +x "$case_dir/fakebin/lsof"
 
   ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
   pid=$!

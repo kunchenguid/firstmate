@@ -21,8 +21,10 @@ A failed script's duration is excluded even when its lane uploaded an artifact.
 In particular, run 36664663190's serial 5 finished in 22m15s with an assertion failure, not a timeout; treating that as a healthy whole-lane sample would hide the failure.
 Collect successful per-script measurements for every member before calculating a split.
 
-`tests/fm-supervision-host.test.sh` uses 789123 ms from run 36669175457, after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179), rather than its pre-fix maximum of 1065298 ms.
-That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
+The earlier 789123 ms host-suite hint came from run 36669175457 after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179).
+It became stale: the complete host suite passed in 1667231 ms on [run 37621307086](https://github.com/kunchenguid/firstmate/actions/runs/37621307086) before its 30-minute shard was cancelled, and in 1549388 ms on green [run 37657787194](https://github.com/kunchenguid/firstmate/actions/runs/37657787194).
+The suite now runs as two serial scripts, with every existing assertion in exactly one group.
+Their initial 734024 ms and 933207 ms hints come from the slower run's timestamp at the group boundary and completed `FM_TEST_END` marker; replace these estimates with per-script artifacts from several green split runs.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The 2026-10-07 polytoken adapter tests carry provisional local measurements instead - 21090 ms for `tests/fm-polytoken-harness.test.sh` and the 103 ms live-guard skip for `tests/fm-polytoken-signals-live-e2e.test.sh`, both measured on the adapter-verification macOS host - until the next CI refresh replaces them with Ubuntu measurements, because they postdate the 2026-09-30 baseline.
 The wedge-cap suite carries the Ubuntu measurements from CI run [39597689178](https://github.com/kunchenguid/firstmate/actions/runs/39597689178) - 374225 ms for `tests/fm-watch-wedge-cap.test.sh` and the 74 ms live-guard skip for `tests/fm-watch-wedge-cap-live.test.sh` - in place of the provisional local measurements the suite first carried (1003000 ms and the 155 ms skip), which overstated the CI cost of both.
