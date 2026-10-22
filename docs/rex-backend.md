@@ -30,7 +30,7 @@ A detected selection prints a one-line notice naming the experimental backend an
 
 ## Task shape and metadata
 
-Each task is one Rex tab holding one block, in its home's own worker session:
+Each task is one Rex tab holding its block, plus any [side panes](#side-panes) the worker opens, in its home's own worker session:
 
 | Home | Session label | What it holds |
 | --- | --- | --- |
@@ -86,8 +86,31 @@ The live worktree path comes from the block's foreground process cwd, so spawn-t
 `fm_backend_agent_state` reads the block's foreground process, plus the terminal's foreground process group, through the same agent-process classifier tmux and herdr use: a recognized harness process is alive, a bare shell or a recorded exit is dead, anything else is ambiguous, and a closed block is missing.
 
 Cleanup closes only the task's block and then requires exit 3 on that block id before reporting success; an already-gone block stays quiet.
+It then closes the task's [side panes](#side-panes) in the task's current and recorded tabs (only the recorded one when the block was already gone), and leaves every other pane alone.
+An unreadable pane list or a side pane still present after close fails the cleanup, so the task's record stays and cleanup can be retried.
 When the closed tab was the last one in the home's own `fm-local` or `fm-<id>` session, cleanup closes that session too, unless it is Firstmate's own session or still holds a detached block.
 Spawning and that cleanup share one home-wide lock (`state/.rex-session.lock`), so a new task's tab can never land in a session between its empty check and its close.
+
+## Side panes
+
+A worker running in its own Rex pane can open side panes beside itself in its tab, so the captain sees a test run, a dev server, or validation progress next to the worker.
+
+```sh
+bin/fm-rex-side.sh open tests -- make test
+bin/fm-rex-side.sh open dev -- env PORT=3000 npm run dev
+bin/fm-rex-side.sh list
+bin/fm-rex-side.sh close dev
+```
+
+- A side pane opens below the worker without taking focus and stays open after its command exits, so its last output stays readable; `list` shows whether each one is running or exited, with its exit status.
+- A name already open in the tab refuses until `close <name>` closes it.
+- Its label is `<worker block label>/<name>`, for example `fm-firstmate-42de5bad-t1/tests`, because Rex records no creating client on a block.
+- The helper acts only from a proven worker pane, with the same structural proof as detection, and refuses with nothing changed anywhere else.
+- Cleanup closes exactly the task's labeled side panes in its current and recorded tabs, so no orphan tab is left even after the worker's pane moved; a foreign pane in those tabs is never closed, and a side pane that does not close fails the cleanup.
+- The command runs with the login shell's environment, not the caller's.
+
+Every ship and scout brief tells the worker about the helper, except a `--rex-lab` brief, whose contract keeps the worker off the live server.
+The script's header owns the options and exit codes.
 
 - Rex's agent SessionStart hook (`rex __internal session-start`) tells every Claude and Codex agent to rename its session, which for a Rex-backed worker or second mate is a shared session Firstmate finds by name; every brief and charter `bin/fm-brief.sh` scaffolds therefore tells the agent to ignore that prompt, and the captain can also turn off automatic agent session naming in Rex Settings -> Integrations.
 
@@ -221,7 +244,7 @@ A steer is confirmed submitted when the composer reads empty, or when the root s
 ## Active limits
 
 - Rex is a beta that changes often; the adapter gates on API revision 4 and the block methods it calls, and the dated verification record should be re-run after each Rex update.
-- A server holds 64 sessions, 64 tabs per session, and 1024 blocks by default (`rex server start --help`), so one session holds at most 64 concurrent tasks.
+- A server holds 64 sessions, 64 tabs per session, 64 panes per tab, and 1024 blocks by default (`rex server start --help`), so one session holds at most 64 concurrent tasks and a worker's tab at most 63 side panes.
 - A server restart ends every worker on it.
 - Rex has no viewport-only read: `rex capture` and the `format` block method both include scrollback and omit trailing blank rows, so the visible screen cannot be located. Rex is therefore not a visible-capture backend: Kimi spawns and devin and Command Code armed interrupts are refused, and the composer classifier runs without a cursor row.
 - A Pi composer on Rex reads as unknown, because the classifier runs without a cursor row and Pi's prompt carries no identifying border; the composer gate then defers rather than types.

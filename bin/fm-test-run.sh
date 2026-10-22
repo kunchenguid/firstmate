@@ -1490,7 +1490,7 @@ families_for_changed_path() {
       printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/rex*|bin/fm-rex-lab.sh|bin/fm-rex-marks.sh|bin/fm-rex-palette.sh|bin/fm-rex-popup.sh)
+    bin/backends/rex*|bin/fm-rex-lab.sh|bin/fm-rex-marks.sh|bin/fm-rex-palette.sh|bin/fm-rex-popup.sh|bin/fm-rex-side.sh)
       printf '%s\n' rex
       printf '%s\n' backend-dispatch
       ;;

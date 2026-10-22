@@ -37,6 +37,8 @@ SERVER=unix:///tmp/fm-rex-fake.sock
 #   window-ls.json       `window ls -s S --json`; `window rename` only logs
 #   events.jsonl         `events ...` prints these lines, then holds the
 #                        stream open; events.exit makes it exit at once
+#   split.json           `split ... --json`; absent -> exit 1
+#   wait.exit            exit code for `wait` (default 0)
 #   api-call.json        `api call ...` (e.g. session.new_block); absent -> exit 1
 #   inspect/<id>.json    `block inspect <id> --json`; absent -> exit 3
 #   blocks/<sid>.json    `block ls -s <sid> --json`
@@ -96,6 +98,8 @@ case "$cmd" in
     cat "$F/events.jsonl" 2>/dev/null
     exec sleep 30 ;;
   kill) exit "$(cat "$F/kill.exit" 2>/dev/null || echo 0)" ;;
+  split) emit "$F/split.json" 1 ;;
+  wait) exit "$(cat "$F/wait.exit" 2>/dev/null || echo 0)" ;;
   send) cat >>"$F/sent"; printf '\n' >>"$F/sent"; exit "$(cat "$F/send.exit" 2>/dev/null || echo 0)" ;;
   send-key) exit "$(cat "$F/send-key.exit" 2>/dev/null || echo 0)" ;;
   capture)
@@ -487,11 +491,140 @@ test_list_live_filters_by_home_scope() {
   local out
   new_case list
   printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
-  printf '{"blocks":[{"block_id":"block:%s","label":"%s"},{"block_id":"block:%s","label":"fm-other-home-t9"}]}' \
-    "$BID" "$(fm_backend_rex_scoped_name fm-t1)" "$LBID" >"$FAKE/blocks/session_$SID.json"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s"},{"block_id":"block:%s","label":"fm-other-home-t9"},{"block_id":"block:%s","label":"%s/tests"}]}' \
+    "$BID" "$(fm_backend_rex_scoped_name fm-t1)" "$LBID" "$WID" "$(fm_backend_rex_scoped_name fm-t1)" >"$FAKE/blocks/session_$SID.json"
   out=$(fm_backend_rex_list_live)
   [ "$out" = "$T"$'\t'fm-t1 ] || fail "list_live should list only this home's blocks, got '$out'"
-  pass "rex: list_live lists only this home's scoped blocks"
+  pass "rex: list_live lists only this home's scoped task blocks, never their side panes"
+}
+
+test_kill_closes_only_the_tasks_side_panes() {
+  local label other_wid=01a15f2e-d000-7000-8000-000000000001 s1=01a15f2e-d001-7000-8000-000000000001 \
+    s2=01a15f2e-d002-7000-8000-000000000002 f1=01a15f2e-d003-7000-8000-000000000003 \
+    f2=01a15f2e-d004-7000-8000-000000000004 f3=01a15f2e-d005-7000-8000-000000000005
+  new_case kill-side
+  label=$(fm_backend_rex_scoped_name fm-t1)
+  inspect_json "$BID" "$SID" "$label"
+  for b in "$s1" "$s2" "$f1" "$f2" "$f3"; do inspect_json "$b" "$SID" side; done
+  : >"$FAKE/close-removes"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/dev","window_id":"window:%s"},{"block_id":"block:%s","label":"captain-notes","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"},{"block_id":"block:%s","label":"%s-2/tests","window_id":"window:%s"}]}' \
+    "$BID" "$label" "$WID" "$s1" "$label" "$WID" "$s2" "$label" "$WID" "$f1" "$WID" "$f2" "$label" "$other_wid" "$f3" "$label" "$WID" \
+    >"$FAKE/blocks/session_$SID.json"
+  printf '{"session_id":"session:%s","label":"fm-local","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
+  calls | grep -q " block close -s session:$SID block:$s1" || fail "kill must close the task's side pane in its tab"
+  calls | grep -q " block close -s session:$SID block:$s2" || fail "kill must close every side pane of the task in its tab"
+  calls | grep -q " block close -s session:$SID block:$f1" && fail "a foreign pane in the task's tab must never be closed"
+  calls | grep -q " block close -s session:$SID block:$f2" && fail "a side pane in another tab must never be closed"
+  calls | grep -q " block close -s session:$SID block:$f3" && fail "another task's prefix-alike pane must never be closed"
+  [ "$(calls | grep -n " block close -s session:$SID block:$s1" | cut -d: -f1)" -gt "$(calls | grep -n " block close -s session:$SID block:$BID" | cut -d: -f1)" ] \
+    || fail "side panes close only after the worker's own block is proven gone"
+  calls | grep " block close\| ls \| block ls\| kill " | grep -q '^leaked' && fail "side-pane cleanup leaked REX_* into a rex call"
+
+  new_case kill-side-gone
+  label=$(fm_backend_rex_scoped_name fm-t1)
+  inspect_json "$s1" "$SID" side
+  : >"$FAKE/close-removes"
+  printf 'window=%s\nrex_server=%s\nrex_window_id=%s\n' "$T" "$SERVER" "$WID" >"$STATE/t1.meta"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"}]}' "$s1" "$label" "$WID" >"$FAKE/blocks/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-t1 || fail "a gone worker block is a successful kill"
+  calls | grep -q " block close -s session:$SID block:$s1" || fail "a worker already gone must still have its side panes closed in its recorded tab"
+  : >"$FAKE/log"
+  inspect_json "$s1" "$SID" side
+  fm_backend_kill rex "$T" "" "" || fail "kill without a label should succeed"
+  calls | grep -q " block close" && fail "without the task label no side pane may be closed"
+
+  new_case kill-side-moved
+  label=$(fm_backend_rex_scoped_name fm-t1)
+  inspect_json "$BID" "$SID" "$label" "$other_wid"
+  for b in "$s1" "$s2" "$f2"; do inspect_json "$b" "$SID" side; done
+  : >"$FAKE/close-removes"
+  printf 'window=%s\nrex_server=%s\nrex_window_id=%s\n' "$T" "$SERVER" "$WID" >"$STATE/t1.meta"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/dev","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/old","window_id":"window:%s"}]}' \
+    "$BID" "$label" "$other_wid" "$s1" "$label" "$WID" "$s2" "$label" "$other_wid" "$f2" "$label" "$f3" \
+    >"$FAKE/blocks/session_$SID.json"
+  printf '{"session_id":"session:%s","label":"fm-local","windows":[]}' "$SID" >"$FAKE/session/session_$SID.json"
+  fm_backend_kill rex "$T" "" fm-t1 || fail "kill of a moved worker should succeed"
+  calls | grep -q " block close -s session:$SID block:$s1" || fail "a side pane left in the worker's recorded tab must be closed after the worker moved"
+  calls | grep -q " block close -s session:$SID block:$s2" || fail "a side pane in the worker's current tab must be closed"
+  calls | grep -q " block close -s session:$SID block:$f2" && fail "a side pane in neither the current nor the recorded tab must never be closed"
+
+  new_case kill-side-stuck
+  label=$(fm_backend_rex_scoped_name fm-t1)
+  inspect_json "$s1" "$SID" side
+  printf 'window=%s\nrex_server=%s\nrex_window_id=%s\n' "$T" "$SERVER" "$WID" >"$STATE/t1.meta"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"}]}' "$s1" "$label" "$WID" >"$FAKE/blocks/session_$SID.json"
+  out=$(fm_backend_kill rex "$T" "" fm-t1 2>&1) && fail "a side pane still present after close must fail the kill"
+  assert_contains "$out" "still present" "the stuck side-pane refusal should say so"
+
+  new_case kill-side-unreadable
+  printf 'window=%s\nrex_server=%s\nrex_window_id=%s\n' "$T" "$SERVER" "$WID" >"$STATE/t1.meta"
+  printf '1' >"$FAKE/blocks/session_$SID.exit"
+  : >"$FAKE/blocks/session_$SID.json"
+  out=$(fm_backend_kill rex "$T" "" fm-t1 2>&1) && fail "an unreadable pane inventory must fail the kill"
+  assert_contains "$out" "could not list" "the unreadable-inventory refusal should say so"
+  pass "rex: kill closes only the task's labeled side panes in its current and recorded tabs, after its own block, also when the worker is already gone, and fails when one may remain"
+}
+
+test_side_pane_helper() {
+  local out rc label sp=01a15f09-9000-7000-8000-000000000001 sp2=01a15f09-9000-7000-8000-000000000002
+  new_case side
+  label=$(fm_backend_rex_scoped_name fm-t1)
+  inspect_json "$LBID" "$LSID" "$label"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$},\"last_exit\":null}"
+  printf '{"anchor_id":"block:%s","block_ids":["block:%s"],"split_ids":["split:x"],"revision":3}' "$LBID" "$sp" >"$FAKE/split.json"
+  side() { REX_BLOCK=block:$LBID REX_SESSION=session:$LSID REX_SERVER=$SERVER "$ROOT/bin/fm-rex-side.sh" "$@"; }
+
+  out=$(side open tests -- make test) || fail "open should succeed in a proven worker pane: $out"
+  [ "$out" = "tests"$'\t'"block:$sp" ] || fail "open should print the name and new block id, got '$out'"
+  calls | grep -q "^clean -S $SERVER --autostart=false split -s session:$LSID -b block:$LBID --split below --ratio 35 --focus=false --keep-open --label $label/tests -c $PWD --json -- make test\$" \
+    || fail "open must split the worker's own pane unfocused and labeled, with REX_* scrubbed: $(calls | grep split)"
+  for opt in --wait --right "--ratio 50" --below; do
+    # shellcheck disable=SC2086
+    rc=0; side open dev $opt -- npm run dev >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "open must reject the removed option $opt as a usage error, got $rc"
+  done
+  rc=0; side open dev npm run dev >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "open must require -- before the command, got $rc"
+
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/tests","window_id":"window:%s"},{"block_id":"block:%s","label":"%s/dev","window_id":"window:%s"},{"block_id":"block:%s","label":"captain","window_id":"window:%s"}]}' \
+    "$LBID" "$label" "$WID" "$sp" "$label" "$WID" "$sp2" "$label" "$WID" "$BID" "$WID" >"$FAKE/blocks/session_$LSID.json"
+  process_json "$sp" '{"last_exit":{"exit_code":1,"error":"exit status 1"}}'
+  process_json "$sp2" '{"last_exit":null}'
+  out=$(side list) || fail "list should succeed"
+  [ "$out" = "tests"$'\t'"exited 1"$'\t'"block:$sp"$'\n'"dev"$'\t'"running"$'\t'"block:$sp2" ] || fail "list should show this worker's side panes and their state, got '$out'"
+  : >"$FAKE/log"
+  for name in dev tests; do
+    out=$(side open "$name" -- npm run dev 2>&1) && fail "open must refuse a name already open in the tab, running or exited ($name)"
+    assert_contains "$out" "already open" "the same-name refusal should say so"
+  done
+  calls | grep -q " split \| close" && fail "a same-name refusal must change nothing"
+  inspect_json "$sp2" "$LSID" "$label/dev"
+  : >"$FAKE/close-removes"
+  out=$(side close dev) || fail "close should succeed"
+  [ "$out" = "closed"$'\t'"dev"$'\t'"block:$sp2" ] || fail "close should report the closed pane, got '$out'"
+  calls | grep -q " block close -s session:$LSID block:$sp\$" && fail "close <name> must close only that side pane"
+  calls | grep -q " block close -s session:$LSID block:$BID" && fail "close must never close a foreign pane"
+  out=$(side close nope 2>&1) && fail "closing an unknown side pane must fail"
+  rc=0; side close --all >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "close --all was removed and must be a usage error, got $rc"
+
+  : >"$FAKE/log"
+  process_json "$LBID" '{"child":{"pid":999999},"foreground":{"pid":999999},"last_exit":null}'
+  out=$(side open tests -- make test 2>&1) && fail "a REX_BLOCK this process does not run in must refuse"
+  assert_contains "$out" "not running in its own Rex pane" "the unproven-pane refusal should say so"
+  calls | grep -q " split \| close" && fail "an unproven pane must change nothing"
+  process_json "$LBID" "{\"child\":{\"pid\":$$},\"foreground\":{\"pid\":$$},\"last_exit\":null}"
+  inspect_json "$LBID" "$LSID" "captain-shell"
+  out=$(side list 2>&1) && fail "a pane without a Firstmate task label must refuse"
+  assert_contains "$out" "not a Firstmate task label" "the label refusal should say so"
+  inspect_json "$LBID" "$LSID" "$label/tests"
+  out=$(side open x -- true 2>&1) && fail "a side pane must not open side panes of its own"
+  out=$(side open 'bad name' -- true 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "an invalid name is a usage error, got $rc"
+  out=$(side open tests 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "open without a command is a usage error, got $rc"
+  pass "fm-rex-side.sh: opens unfocused labeled side panes only from a proven worker pane, refuses a name already open, and lists and closes only its own"
 }
 
 # --- selection and records -----------------------------------------------------
@@ -1261,6 +1394,8 @@ test_composer_state_and_submit
 test_agent_state_mapping
 test_absence_verdict
 test_kill_closes_proves_gone_and_retires_the_home_session
+test_kill_closes_only_the_tasks_side_panes
+test_side_pane_helper
 test_list_live_filters_by_home_scope
 test_detection_requires_structural_proof
 test_validate_task_endpoint_arm

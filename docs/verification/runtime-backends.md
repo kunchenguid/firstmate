@@ -2250,7 +2250,7 @@ FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
 ```
 
 The fake-binary suite pins the call contract (`-S`, `--autostart=false`, full ids, stripped markers), server resolution, the version gate, `fm-local` and `fm-<id>` placement with its adopt, reuse, and refusal paths, the supervisor-session exclusion, keys, composer, agent state, the absence verdict, the kill and session-retirement matrix, detection, supervisor discovery, the detached block, and the away launcher's record lifecycle.
-The real smoke proves one unfocused `fm-local` session holding exactly the task tabs, duplicate-label refusal, live cwd, literal send and keys, agent state from real processes (an idle shell reads dead, `sleep` reads ambiguous, a `claude`-named process reads alive), the scrollback capture, block-only close with exit 3, session retirement after the last tab, a second mate pane as the first tab of its `fm-<id>` session with a worker spawned from inside that pane joining the same session, and exit 4 with nothing autostarted.
+The real smoke proves one unfocused `fm-local` session holding exactly the task tabs, duplicate-label refusal, live cwd, literal send and keys, agent state from real processes (an idle shell reads dead, `sleep` reads ambiguous, a `claude`-named process reads alive), the scrollback capture, worker side panes and their cleanup, block-only close with exit 3, session retirement after the last tab, a second mate pane as the first tab of its `fm-<id>` session with a worker spawned from inside that pane joining the same session, and exit 4 with nothing autostarted.
 
 On 2026-10-22, with the same Rex build on lab servers, the token-free away-mode guard passed:
 
@@ -2396,6 +2396,19 @@ ok - rex palette smoke: uninstall restores the config byte for byte and unloads 
 ```
 
 Refresh it with `tests/fm-rex-palette-smoke.test.sh`.
+
+### Side panes
+
+On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers, these probes back [Side panes](../rex-backend.md#side-panes):
+
+| Guarantee | Probe | Result |
+| --- | --- | --- |
+| Unfocused split | `split -s <session> -b <worker-block> --split below --ratio 35 --focus=false --keep-open --label <worker-label>/tests --json -- <cmd>` | Returns `block_ids[0]` in the worker's tab; the tab's `focused_block_id` stays the worker's block, and `block ls` lists the new block with that label and the tab's `window_id`. |
+| Kept output | the same split, after its command exits | `capture` still shows the command's output and `com.superlogical.terminal.process` reports `last_exit` with the exit code; without `--keep-open` the pane closes and its id exits 3. |
+| Orphan tab | `block close` of the worker's block alone | The tab stays open around the side pane, so cleanup closes the worker's labeled side panes too; once they and any foreign pane close, the tab is gone. |
+| Pane limit | `rex server start --help` | `--max-panes N` refuses new panes once a window holds N (default 64). |
+
+The real smoke runs `fm-rex-side.sh` inside a task pane, then proves the test pane's exit status in `list` and its kept output, an unchanged focus, cleanup closing both side panes while a foreign pane in the same tab survives, and no tab left once that foreign pane closes.
 
 ## Codex App host tools
 

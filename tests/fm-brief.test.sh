@@ -712,6 +712,34 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_rex_side_pane_note_follows_the_lab_contract() {
+  local home id brief kind
+  home="$TMP_ROOT/rex-side-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-rex-side-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Rex side panes" "$brief" "$kind brief does not tell the worker about Rex side panes"
+    assert_grep "\`'$ROOT/bin/fm-rex-side.sh' open <name> -- <command...>\`" "$brief" \
+      "$kind brief must name the side-pane helper by its quoted absolute Firstmate path"
+    id="brief-rex-side-lab-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --rex-lab >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --rex-lab >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Rex isolation - HARD SAFETY CONTRACT" "$brief" "$kind --rex-lab brief lost its contract"
+    assert_no_grep "fm-rex-side.sh" "$brief" "$kind --rex-lab brief must not invite live-server side panes"
+  done
+  pass "fm-brief.sh: ship and scout briefs name the Rex side-pane helper, except under the Rex lab contract"
+}
+
 # Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
 # firstmate to fill `{TASK}` and `{FIRSTMATE_SPEC}`. The unguarded Herdr gate used
 # to quote `{TASK}` in its own prose, so that documented global replace spliced
@@ -1677,6 +1705,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_rex_side_pane_note_follows_the_lab_contract
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter

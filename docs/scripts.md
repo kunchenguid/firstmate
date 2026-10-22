@@ -38,6 +38,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-brief-heading-lib.sh` | Single owner of reading a brief's sections, shared by the `--intent` contract, spawn and promotion validation, and `fm-dispatch-resolve.sh` |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-rex-lab.sh`          | Provision, guardedly operate, and tear down a private Rex lab server on a `/tmp` socket, with a live-server tripwire |
+| `fm-rex-side.sh`         | Let a worker open, list, and close labeled side panes in its own Rex tab; task cleanup closes them |
 | `fm-rex-marks.sh`        | Turn each Rex task's latest status into one badge and notification on its pane, plus validation progress and an opt-in tint (`plan`, `sync`, `clear`); the watcher runs `sync` each poll and cleanup runs `clear` |
 | `fm-rex-palette.sh`      | Install or remove Firstmate's Rex command-palette block in this machine's Rex `init.lua`, only on the captain's word |
 | `fm-rex-popup.sh`        | Plan each Rex palette command and run its popups; the acting popups only file captain inbox notes |

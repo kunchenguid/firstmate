@@ -119,6 +119,43 @@ printf '%s\n' "$LIVE" | grep -qx "$TA"$'\t'fm-smoke-a || smoke_fail "list_live d
 printf '%s\n' "$LIVE" | grep -qx "$TB"$'\t'fm-smoke-b || smoke_fail "list_live did not list task b"
 pass "rex smoke: list_live finds this home's tabs"
 
+# Side panes: a worker opens one from inside its own pane with
+# bin/fm-rex-side.sh, unfocused, and its cleanup closes exactly those.
+IDS=$(fm_backend_rex_create_task fm-smoke-side "$WORK") || smoke_fail "side-pane task create_task failed"
+read -r _ WID_S BID_S <<EOF
+$IDS
+EOF
+TS="$SID:$BID_S"
+SIDE_LABEL=$(fm_backend_rex_scoped_name fm-smoke-side)
+state=$(wait_state "$TS" dead) || smoke_fail "the side-pane task's shell read '$state', expected dead"
+SIDE_OUT="$TMP_ROOT/side.out"
+fm_backend_rex_send_text_line "$TS" "export REX_SERVER='$FM_REX_SERVER'; '$ROOT/bin/fm-rex-side.sh' open tests -- sh -c 'echo side-tests-ran; exit 3' >'$SIDE_OUT.tmp' 2>&1; '$ROOT/bin/fm-rex-side.sh' open dev -- sleep 600 >>'$SIDE_OUT.tmp' 2>&1; for i in \$(seq 1 50); do '$ROOT/bin/fm-rex-side.sh' list | grep -q exited && break; sleep 0.2; done; '$ROOT/bin/fm-rex-side.sh' list >>'$SIDE_OUT.tmp' 2>&1; mv '$SIDE_OUT.tmp' '$SIDE_OUT'" fm-smoke-side \
+  || smoke_fail "could not run the side-pane helper inside the task pane"
+for _ in $(seq 1 200); do [ -s "$SIDE_OUT" ] && break; sleep 0.1; done
+grep -q "^tests"$'\t'"exited 3"$'\t' "$SIDE_OUT" || smoke_fail "list did not show the exited test pane: $(cat "$SIDE_OUT")"
+grep -q "^dev"$'\t'"running"$'\t' "$SIDE_OUT" || smoke_fail "list did not show the running dev pane: $(cat "$SIDE_OUT")"
+SIDE_TESTS=$(sed -n 's/^tests\texited 3\t//p' "$SIDE_OUT")
+SIDE_DEV=$(sed -n 's/^dev\trunning\t//p' "$SIDE_OUT")
+fm_backend_rex_cli capture -s "session:$SID" -b "$SIDE_TESTS" --trim | grep -q side-tests-ran || smoke_fail "the test pane's output is not readable after its command exited"
+VIEW=$(fm_backend_rex_cli window ls -s "session:$SID" --json)
+[ "$(printf '%s' "$VIEW" | jq -r --arg w "window:$WID_S" '.windows[] | select(.window_id == $w) | .focused_block_id')" = "block:$BID_S" ] \
+  || smoke_fail "opening a side pane moved focus off the worker's pane"
+[ "$(fm_backend_rex_cli block inspect "$SIDE_TESTS" --json | jq -r '.block.label')" = "$SIDE_LABEL/tests" ] || smoke_fail "the side pane is not labeled <worker label>/tests"
+FOREIGN=$(fm_backend_rex_cli split -s "session:$SID" -b "block:$BID_S" --focus=false --keep-open --label captain-pane --json | jq -r '.block_ids[0]') \
+  || smoke_fail "could not open a foreign pane in the task's tab"
+REX_BLOCK="block:$BID_S" REX_SESSION="session:$SID" REX_SERVER="$FM_REX_SERVER" "$ROOT/bin/fm-rex-side.sh" open x -- true >/dev/null 2>&1 \
+  && smoke_fail "the helper opened a pane for a REX_BLOCK this process does not run in"
+fm_backend_kill rex "$TS" "" fm-smoke-side || smoke_fail "kill of the side-pane task failed"
+for b in "$SIDE_TESTS" "$SIDE_DEV"; do
+  fm_backend_rex_cli block inspect "$b" --json >/dev/null 2>&1
+  [ "$?" -eq 3 ] || smoke_fail "cleanup left the side pane $b open"
+done
+fm_backend_rex_cli block inspect "$FOREIGN" --json >/dev/null 2>&1 || smoke_fail "cleanup closed a foreign pane in the task's tab"
+fm_backend_rex_cli block close -s "session:$SID" "$FOREIGN" >/dev/null 2>&1 || smoke_fail "could not close the foreign pane"
+fm_backend_rex_cli window ls -s "session:$SID" --json | jq -e --arg w "window:$WID_S" 'any(.windows[]; .window_id == $w)' >/dev/null \
+  && smoke_fail "the side-pane task's tab outlived its panes"
+pass "rex smoke: a worker opens unfocused labeled side panes from its own pane, and cleanup closes exactly those, leaving no orphan tab"
+
 # Attention marks: one tty write lands Firstmate's own id=fm record, titled
 # with the tab label, and an OSC 777 notification that Rex streams as
 # desktop_notification. A root record standing in for the harness's own report
