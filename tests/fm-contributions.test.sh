@@ -1652,7 +1652,8 @@ unanswered_home() { # name: delivery on a captain hold with one unanswered inlin
   local home
   home=$(new_home "$1")
   forge_home "$home"
-  sed -i '/ delivery /s/$/ (hold: wait for the scope decision) (hold-kind: captain)/' "$home/data/backlog.md"
+  sed -i.bak '/ delivery /s/$/ (hold: wait for the scope decision) (hold-kind: captain)/' "$home/data/backlog.md" \
+    && rm -f "$home/data/backlog.md.bak"
   jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
     body:"Why is this retried?",html_url:"https://github.com/o/r/pull/8#discussion_r31",
     created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/inline.json"
