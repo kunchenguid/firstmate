@@ -323,6 +323,51 @@ test_composer_footer_zone_refuses_rather_than_allows() {
   pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
+test_composer_footer_zone_claude_slash_popup() {
+  # Recorded live 2026-10-15 on Claude Code 2.1.301 under herdr 0.9.3: a typed
+  # /exit opens the slash-command popup directly BELOW the composer's closing
+  # rule, and the popup's selected row leads with the same `❯` the composer was
+  # proven by. Taken as a live composer, that row made the payload proof read
+  # the whole menu, so fm-control exit cleared /exit and never sent it.
+  local rule composer popup screen out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  rule='────────────────────────────────────────────────────────────'
+  composer=$'transcript line\n\n'"$rule"$'\n❯'"$NBSP"$'/exit\n'"$rule"
+  popup=$'\n  ❯ /exit                    Exit the CLI'
+  popup+=$'\n    /context                 Visualize current context usage as a colored grid'
+  popup+=$'\n    /usage-credits           Configure usage credits or request them from your admin when you'
+  popup+=$'\n                             hit a limit'
+  popup+=$'\n    /quiet                   Enter quiet supervision mode when the captain invokes /quiet or'
+  popup+=$'\n                             asks for quiet mode, quiet-while-present, or fewer routine wake t…'
+  screen="$composer$popup"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = /exit ] || fail "the composer above a slash popup must extract as '/exit', got '$out'"
+  out=$(LC_ALL=C fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = /exit ] || fail "the composer above a slash popup must extract as '/exit' under LC_ALL=C, got '$out'"
+  assert_screen "claude slash popup below the composer" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # The popup only exists while the composer holds a typed `/`. Under a
+  # visibly empty composer the same rows are unclaimed and must never let the
+  # pane read empty.
+  screen=$'transcript line\n\n'"$rule"$'\n❯'"$NBSP"$'\n'"$rule$popup"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_idle")
+  [ "$out" != empty ] \
+    || fail "popup-shaped rows under an empty composer must never read empty, got '$out'"
+  # A column-0 glyph row is where a live composer starts, never a popup row.
+  screen="$composer"$'\n❯ /fix the  login bug'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" != /exit ] || fail "a live composer below the envelope must keep winning, got '$out'"
+  # A wrapped description is accepted only at the description column.
+  screen="$composer"$'\n  ❯ /exit                    Exit the CLI\n                          hit a limit'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" != /exit ] || fail "a misaligned continuation row must not count as popup furniture, got '$out'"
+  # A rule inside the run is not popup furniture: the zone fails and the
+  # envelope above it is not selected.
+  screen="$composer$popup"$'\n'"$rule"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" != /exit ] || fail "a rule below the popup must not leave the envelope selected, got '$out'"
+  pass "fm_composer_classify_screen: Claude's slash popup below the composer is footer furniture only while the composer holds a /command"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -1380,6 +1425,7 @@ test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
+test_composer_footer_zone_claude_slash_popup
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant

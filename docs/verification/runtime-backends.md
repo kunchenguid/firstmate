@@ -1407,7 +1407,7 @@ The pre-Enter payload proof then judged the typed command unsent, pressed Ctrl+U
 
 The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer is by definition inside the viewport, and the viewport is the one bound that always contains it.
 The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend, herdr included; its payloads are task lines, not slash commands, so the popup shape does not arise there.
-The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the menu rows never read as typed text.
+On 2.1.283 the popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the menu rows never read as typed text; the 2.1.301 shape below breaks that assumption.
 Verified live in the lab: with the popup up the state read answers `pending` (previously `empty`) and the payload proof returns `/exit` (previously empty), the submit presses Enter, and the Claude process exits, leaving the shell prompt.
 Growing the window only adds rows above the composer, so the bottom-most-shape selection, the footer zone, and every previously passing verdict are unchanged.
 
@@ -1430,6 +1430,57 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
+```
+
+### Claude slash-command popup below the composer
+
+Measured 2026-10-15 against Herdr 0.9.3 and Claude Code 2.1.301 in an isolated `fm-lab-` session.
+
+Typing `/exit` can draw the command popup directly below the composer's closing rule, and the popup's selected row now leads with the same `❯` the composer row uses:
+
+```text
+────────────────────────────────────────
+❯ /exit
+────────────────────────────────────────
+  ❯ /exit                    Exit the CLI
+    /context                 Visualize current context usage as a colored grid
+```
+
+The placement depends on the Claude account: the same binary in the same pane size drew the popup above the composer under a second config directory and below it under the default one.
+Under the below placement the cursorless selection took the popup's `❯` row as the bottom-most live composer, the payload proof read the whole menu instead of `/exit`, and the submit cleared the composer and reported `send-failed`.
+`bin/fm-control.sh exit` then failed with `the exit command could not be sent to task <id> on herdr`, and relaunch and `bin/fm-secondmate-restart.sh` inherited it.
+The shared composer classifier (`bin/fm-composer-lib.sh`, THE COMPOSER FOOTER ZONE) now counts the popup as the envelope's footer furniture only while that composer holds a typed `/` command, so the extracted content is `/exit` and the state verdict stays `pending`.
+
+The same lab run surfaced a locale defect in the Herdr submit confirmation: under `ar_EG.UTF-8`, macOS awk parsed the `0.5` budget as `0` and printed `0٫1000`, so the confirmation poll never slept between samples.
+`fm_backend_herdr_submit_confirm_budget` and `fm_backend_herdr_wait_for_working` now compute under `LC_ALL=C`.
+
+Portable regressions:
+
+```sh
+tests/fm-composer-lib.test.sh
+tests/fm-backend-herdr.test.sh
+```
+
+```text
+ok - fm_composer_classify_screen: Claude's slash popup below the composer is footer furniture only while the composer holds a /command
+ok - fm_backend_herdr_send_text_submit: a typed /exit with Claude's popup drawn below the composer is proven and submitted
+ok - fm_backend_herdr_wait_for_working: the confirmation budget keeps its interval under the comma-decimal locale ar_EG.UTF-8
+```
+
+Live guard, run under the default config directory that draws the popup below the composer:
+
+```sh
+env -u CLAUDE_CONFIG_DIR FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+```text
+ok - live Herdr submit confirm: Claude Code (2.1.301 (Claude Code)) on herdr 0.9.3 proves and submits a typed /exit behind its command popup
+```
+
+Re-run 2026-10-16 after the host moved to Herdr 0.9.5, once with `env -u CLAUDE_CONFIG_DIR` and once under the second config directory:
+
+```text
+ok - live Herdr submit confirm: Claude Code (2.1.301 (Claude Code)) on herdr 0.9.5 proves and submits a typed /exit behind its command popup
 ```
 
 ### Claude background-task exit picker

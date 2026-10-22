@@ -110,6 +110,17 @@
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
 # nothing.
 #
+# The one same-glyph exception is Claude Code's slash-command popup, which
+# 2.1.301 can draw directly below the closing rule with its selected row led
+# by `❯` (recorded live 2026-10-15 on herdr 0.9.3). Selected as a composer, it
+# made the payload proof read the whole menu, so a typed /exit was cleared and
+# fm-control exit never stopped the worker. Popup rows
+# (_fm_composer_slash_popup_row) count as furniture only while the envelope's
+# own glyph row holds a typed `/` command, only as the run's leading rows, only
+# when indented off column 0, and with a wrapped description only at its
+# column. The envelope then still holds text, so this exception can never
+# produce `empty`.
+#
 # COVERAGE: this is exercised for the bordered box and the pi separator pair,
 # the two shapes claude 2.x renders. The opencode left bar is wired in for the
 # same treatment but is UNEXERCISED - every left-bar row this repo records
@@ -1643,6 +1654,53 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
 
+# _fm_composer_slash_popup_row: 0 when <raw-row> is one row of Claude Code's
+# slash-command popup, which Claude 2.1.301 can draw directly below the
+# closing rule of a composer holding a typed `/` command (see THE COMPOSER
+# FOOTER ZONE in this file's header). A command row is indented, optionally
+# leads with <proof> as its selection marker, names a `/` command, and may
+# carry a description after a gap of two or more spaces; that description's
+# column is recorded in FM_COMPOSER_POPUP_DESC_COL. A wrapped description row
+# is accepted only at exactly the column <desc-col> recorded by the row above
+# (0 means no description column is open). Column 0 is never a popup row:
+# that is where a live composer row starts. The marker is replaced with one
+# ASCII column before measuring, so the column test is the same in every
+# locale.
+_fm_composer_slash_popup_row() {  # <raw-row> <proof-glyph> <desc-col>
+  local row=$1 proof=$2 desc_col=$3 lead body cmd gap width
+  fm_composer_normalize_spaces_var row
+  row=${row%"${row##*[![:space:]]}"}
+  lead=${row%%[![:space:]]*}
+  body=${row#"$lead"}
+  [ -n "$lead" ] && [ -n "$body" ] || return 1
+  width=${#lead}
+  case "$body" in
+    /*) ;;
+    "$proof"' '*)
+      body=${body#"$proof"}
+      gap=${body%%[![:space:]]*}
+      body=${body#"$gap"}
+      width=$((width + 1 + ${#gap}))
+      case "$body" in /*) ;; *) return 1 ;; esac
+      ;;
+    *)
+      [ "$desc_col" -gt 0 ] && [ "${#lead}" -eq "$desc_col" ] || return 1
+      FM_COMPOSER_POPUP_DESC_COL=$desc_col
+      return 0
+      ;;
+  esac
+  cmd=${body%%[[:space:]]*}
+  body=${body#"$cmd"}
+  gap=${body%%[![:space:]]*}
+  body=${body#"$gap"}
+  if [ -z "$body" ]; then
+    FM_COMPOSER_POPUP_DESC_COL=0
+    return 0
+  fi
+  [ "${#gap}" -ge 2 ] || return 1
+  FM_COMPOSER_POPUP_DESC_COL=$((width + ${#cmd} + ${#gap}))
+}
+
 # _fm_composer_locate_footer_zone: THE composer footer zone of <plain> (see THE
 # COMPOSER FOOTER ZONE in this file's header). Records the bottom-most
 # glyph-PROVEN envelope in FM_COMPOSER_FOOTER_AFTER (its closing row, including
@@ -1659,7 +1717,7 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
 # when no envelope is glyph-proven, when a blank row sits directly beneath it,
 # or when the run holds no bare candidate at all (nothing to demote).
 _fm_composer_locate_footer_zone() {  # <plain>
-  local plain=$1 close next trimmed proof=''
+  local plain=$1 close next raw trimmed proof='' popup_col
   FM_COMPOSER_FOOTER_AFTER=-1
   FM_COMPOSER_FOOTER_GLYPH=-1
   FM_COMPOSER_FOOTER_LAST=-1
@@ -1694,12 +1752,25 @@ _fm_composer_locate_footer_zone() {  # <plain>
   # there, so settle that from the scan's own record before walking any rows.
   [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
   FM_COMPOSER_FOOTER_LAST=$FM_COMPOSER_FOOTER_AFTER
+  # A slash popup can only be open under an envelope that holds a typed `/`.
+  trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  trimmed=${trimmed#*"$proof"}
+  fm_composer_normalize_trim_var trimmed
+  case "$trimmed" in /*) popup_col=0 ;; *) popup_col=-1 ;; esac
   next=$((FM_COMPOSER_FOOTER_AFTER + 1))
   while :; do
-    trimmed=$(_fm_composer_screen_row "$next" "$plain")
+    raw=$(_fm_composer_screen_row "$next" "$plain")
+    trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || break
-    _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1
+    if [ "$popup_col" -ge 0 ] \
+       && _fm_composer_slash_popup_row "$raw" "$proof" "$popup_col"; then
+      popup_col=$FM_COMPOSER_POPUP_DESC_COL
+    else
+      popup_col=-1
+      _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1
+    fi
     FM_COMPOSER_FOOTER_LAST=$next
     next=$((next + 1))
   done
