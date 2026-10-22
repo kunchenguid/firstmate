@@ -1088,19 +1088,18 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # Change the task immediately before the second offer computation, rather
 # than racing the successor startup. The first offer accepts the close; the
 # turn-boundary offer must see the new main-owned decision.
-turn_main_only_at_second_offer() {  # <home> [quiet|snapshot]
+turn_main_only_at_second_offer() {  # <home> [snapshot]
   local real_node turn snapshot=':'
   real_node=$(command -v node)
-  turn='printf '"'"'needs-decision [at=%s]: which export format?\n'"'"' "$(date +%s)" >> "$FM_HOME/state/demo.status"'
-  # Quiet: the offer alone turns main-only, with no status line for the
-  # successor watcher to close on.
-  [ "${2:-}" != quiet ] || turn='echo eligible=0; exit 0'
+  # The offer alone turns main-only, with no competing status wake for the
+  # successor watcher whose continuity the hook cases assert.
+  turn='echo eligible=0; exit 0'
   if [ "${2:-}" = snapshot ]; then
     # Freeze the accepted queue before the new status can reach the successor.
     # Pi must see the old signal plus the new status, not a later decision wake.
     snapshot='mkdir -p "$FM_HOME/pi-offer-state"
       cp "$FM_HOME/state/.wake-queue" "$FM_HOME/state/demo.meta" "$FM_HOME/pi-offer-state/"'
-    turn="$turn"'
+    turn='printf '"'"'needs-decision [at=%s]: which export format?\n'"'"' "$(date +%s)" >> "$FM_HOME/state/demo.status"
       cp "$FM_HOME/state/demo.status" "$FM_HOME/pi-offer-state/"'
   fi
   cat > "$1/fakebin/node" <<SH
@@ -1428,7 +1427,7 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
 test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
   local home watcher
   home=$(make_primary_home hook-turns-main-only-teardown)
-  turn_main_only_at_second_offer "$home" quiet
+  turn_main_only_at_second_offer "$home"
   : > "$home/hook.own-group"
   start_hook_session "$home"
   turn_end "$home"
@@ -1452,7 +1451,7 @@ test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
   home=$(make_primary_home hook-turns-main-only-write-fails)
   # Change eligibility without a second status wake closing the successor:
   # this case exercises a failed hand-back beside a healthy successor.
-  turn_main_only_at_second_offer "$home" quiet
+  turn_main_only_at_second_offer "$home"
   real_mktemp=$(command -v mktemp)
   cat > "$home/fakebin/mktemp" <<SH
 #!/usr/bin/env bash

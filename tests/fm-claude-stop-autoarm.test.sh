@@ -1716,6 +1716,9 @@ printf 'supervision-host: the away session could not take this wake: fixture; re
 for i in 1 2 3 4 5 6 7 8 9 10; do printf 'supervision-host: outcome %s for demo [routine]: fixture %s\n' "$i" "$i"; done
 SH
         ;;
+      failed-empty)
+        printf 'exit 1\n'
+        ;;
       crash)
         printf 'kill -KILL "$$"\n'
         ;;
@@ -1916,6 +1919,23 @@ test_host_lost_announced_handback_notifies_once_per_episode() {
   pass "auto-arm: a lost host hand-back on an announced marker notifies once per failure episode"
 }
 
+# Host exit status is the failure contract even when no diagnostic was emitted.
+# A retry here could park on the healthy successor of an undelivered hand-back.
+test_host_empty_failure_is_reported_without_retry() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-empty-failure")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" failed-empty
+  printf 'pending:handling:fixture-generation\n' > "$dir/state/.watcher-down"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an explicit host failure must notify main"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "an explicit host failure was retried"
+  assert_contains "$out" "auto-arm FAILED" "an empty failed hand-back must deliver the failure notice"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "an explicit host failure must commit outcome=failed"
+  pass "auto-arm: an explicit host failure with empty output notifies main without retrying"
+}
+
 test_host_crash_is_retried_then_reported() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-crash")
@@ -2045,6 +2065,7 @@ test_host_stand_down_is_silent
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
+test_host_empty_failure_is_reported_without_retry
 test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib

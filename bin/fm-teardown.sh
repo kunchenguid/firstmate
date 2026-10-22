@@ -1630,6 +1630,7 @@ pr_number_from_target() {
 
 ensure_commit_object() {
   local target=$1 commit=$2 n
+  local FM_PR_PROVIDER='' FM_PR_HOST='' FM_PR_PATH='' FM_PR_NUMBER=''
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
     fm_pr_gitlab_fetch_head "$WT" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$commit" \
@@ -1683,6 +1684,8 @@ EOF
 LANDED_MR_TARGET=
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
+  local FM_PR_PROVIDER='' FM_PR_HOST='' FM_PR_PATH='' FM_PR_NUMBER='' FM_PR_URL=''
+  local FM_PR_RECORD_MERGED='' FM_PR_RECORD_HEAD='' FM_PR_RECORD_URL='' FM_PR_RECORD_TARGET=''
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
