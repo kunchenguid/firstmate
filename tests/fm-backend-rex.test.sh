@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+# tests/fm-backend-rex.test.sh - fake-rex-CLI unit tests for the Rex
+# session-provider adapter (bin/backends/rex.sh), whose real-CLI behavior is
+# recorded in docs/verification/runtime-backends.md#rex. The fake `rex` is
+# STATEFUL rather than a canned response queue: it keeps a small server model
+# (sessions > windows > blocks) in a JSON file, so placement, cleanup, and
+# absence proofs are asserted against the resulting server state, not against
+# call counts. It mirrors the real CLI's verified exit codes (2 bad command
+# line, 3 not found, 4 unreachable) and its "a stopped server forgets every
+# session" behavior. Real `jq` is used (a required tool for this backend). The
+# real-server smoke test lives in tests/fm-backend-rex-smoke.test.sh.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the rex adapter)"; exit 0; }
+
+TMP_ROOT=$(fm_test_tmproot fm-backend-rex-tests)
+
+# A pid that no live process carries, so the shared agent classifier's live
+# pid probe never reads a real process.
+DEAD_PID=99999999
+
+# make_rex_fake: a stateful fake `rex` at <dir>/bin/rex. Every invocation is
+# logged as one space-joined line to <dir>/fake/log. Marker files under
+# <dir>/fake steer failure modes: `unreachable` (every call exits 4), `down`
+# (a stopped server: --autostart=false reads exit 4, any other call starts a
+# fresh server with no sessions), `ls-fail`, `close-noop` (a close that leaves
+# the block alive). Per-block canned reads live in fake/process/<uuid>.json,
+# fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
+make_rex_fake() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/home/state"
+  cat >"$dir/bin/rex" <<'SH'
+#!/usr/bin/env bash
+D="${FM_REX_FAKE_DIR:?}"
+S="$D/state.json"
+[ -f "$S" ] || printf '{"sessions":[]}' >"$S"
+{ printf 'rex'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$D/log"
+autostart=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --autostart=false) autostart=0; shift ;;
+    --*) shift ;;
+    *) break ;;
+  esac
+done
+if [ -f "$D/unreachable" ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
+if [ -f "$D/down" ]; then
+  if [ "$autostart" = 0 ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
+  rm -f "$D/down"
+  printf '{"sessions":[]}' >"$S"
+fi
+newid() {
+  local n
+  n=$(( $(cat "$D/.n" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" >"$D/.n"
+  printf '%s:%08x-0000-7000-8000-%012x' "$1" "$n" "$n"
+}
+save() { jq "$@" "$S" >"$S.tmp" && mv "$S.tmp" "$S"; }
+notfound() { echo "error: $1 not found" >&2; exit 3; }
+has_session() { jq -e --arg s "$1" 'any(.sessions[]; .session_id == $s)' "$S" >/dev/null; }
+has_block() {
+  jq -e --arg s "$1" --arg b "$2" \
+    'any(.sessions[] | select(.session_id == $s) | .windows[].blocks[]; .block_id == $b)' "$S" >/dev/null
+}
+cmd=${1:-}; shift
+sub=
+case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
+sid=; bid=; fmt=text; wlabel=; pos=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) sid=$2; shift 2 ;;
+    -b) bid=$2; shift 2 ;;
+    --format=*) fmt=${1#--format=}; shift ;;
+    --window) wlabel=$2; shift 2 ;;
+    --cwd) shift 2 ;;
+    --) shift; pos+=("$@"); break ;;
+    --*) shift ;;
+    *) pos+=("$1"); shift ;;
+  esac
+done
+p0=${pos[0]:-}; p1=${pos[1]:-}
+case "$cmd:$sub" in
+  version:)
+    printf 'rex 0.0.1-fake\napi: revision %s\n' "${FM_REX_FAKE_API:-5}" ;;
+  whoami:)
+    printf '{"endpoint":"%s"}\n' "${FM_REX_FAKE_ENDPOINT:-unix:///fake/rex.sock}" ;;
+  ls:)
+    [ ! -f "$D/ls-fail" ] || exit 1
+    jq -c '{sessions: [.sessions[] | {session_id, label}]}' "$S" ;;
+  api:call)
+    case "$p0" in
+      server.status) printf '{"api_revision":%s}\n' "${FM_REX_FAKE_SERVER_API:-5}" ;;
+      session.view)
+        has_session "$sid" || notfound "session"
+        jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
+          | {session_id, label, windows: [.windows[] | {window_id, label,
+              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]}' "$S" ;;
+      *) exit 2 ;;
+    esac ;;
+  new:)
+    s=$(newid session); w=$(newid window); b=$(newid block)
+    save --arg s "$s" --arg w "$w" --arg b "$b" --arg l "$p0" --arg wl "$wlabel" \
+      '.sessions += [{session_id: $s, label: $l, windows: [{window_id: $w, label: $wl,
+        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]}]'
+    printf '{"session_id":"%s","initial_windows":[{"window_id":"%s","block_ids":["%s"]}]}\n' "$s" "$w" "$b" ;;
+  window:new)
+    has_session "$sid" || notfound "session"
+    w=$(newid window); b=$(newid block)
+    save --arg s "$sid" --arg w "$w" --arg b "$b" --arg l "$p0" \
+      '(.sessions[] | select(.session_id == $s) | .windows) += [{window_id: $w, label: $l,
+        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]'
+    printf '{"window_id":"%s","block_ids":["%s"]}\n' "$w" "$b" ;;
+  block:rename)
+    has_block "$sid" "$p0" || notfound "block"
+    save --arg s "$sid" --arg b "$p0" --arg l "$p1" \
+      '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b) | .label) = $l' ;;
+  block:close)
+    has_block "$sid" "$p0" || notfound "block"
+    [ ! -f "$D/close-noop" ] || exit 0
+    save --arg s "$sid" --arg b "$p0" \
+      '(.sessions[] | select(.session_id == $s) | .windows) |= ([.[] | .blocks |= map(select(.block_id != $b))]
+        | map(select(.blocks | length > 0)))' ;;
+  block:call)
+    has_block "$sid" "$bid" || notfound "block"
+    u=${bid#block:}
+    case "$p0" in
+      size)
+        jq -c --arg s "$sid" --arg b "$bid" '.sessions[] | select(.session_id == $s) | .windows[].blocks[]
+          | select(.block_id == $b) | {columns, rows, owner: null}' "$S" ;;
+      resize)
+        save --arg s "$sid" --arg b "$bid" --argjson r "$p1" \
+          '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b))
+            |= (.columns = $r.columns | .rows = $r.rows)' ;;
+      process)
+        if [ -f "$D/process/$u.json" ]; then cat "$D/process/$u.json"; else
+          printf '{"foreground":{"pid":%s,"name":"zsh","path":"/bin/zsh","argv0":"-zsh","cwd":"/tmp"},"ancestors":[],"last_exit":null}\n' "${FM_REX_FAKE_DEAD_PID:-99999999}"
+        fi ;;
+      program_status)
+        if [ -f "$D/status/$u.json" ]; then cat "$D/status/$u.json"; else printf '{"records":[]}\n'; fi ;;
+      *) exit 2 ;;
+    esac ;;
+  capture:)
+    has_block "$sid" "$bid" || notfound "block"
+    u=${bid#block:}
+    if [ "$fmt" = vt ]; then cat "$D/capture/$u.vt" 2>/dev/null; else cat "$D/capture/$u.txt" 2>/dev/null; fi ;;
+  send:)
+    has_block "$sid" "$bid" || notfound "block"
+    [ -n "$p0" ] || exit 2
+    printf '%s\n' "$p0" >>"$D/sent" ;;
+  send-key:)
+    has_block "$sid" "$bid" || notfound "block"
+    case "$p0" in enter|escape|tab|ctrl+c|ctrl+u) ;; *) exit 2 ;; esac
+    printf '%s\n' "$p0" >>"$D/keys" ;;
+  kill:)
+    has_session "$p0" || notfound "session"
+    save --arg s "$p0" '.sessions |= map(select(.session_id != $s))' ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$dir/bin/rex"
+}
+
+# rex_env: run a bash snippet with the adapter loaded through the dispatcher,
+# the fake CLI on REX_BIN_DIR, and an isolated home. Extra VAR=value words
+# before the snippet are exported first.
+rex_env() {  # <dir> [VAR=value...] <snippet>
+  local dir=$1
+  shift
+  (
+    unset TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER
+    export FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
+      STATE="$dir/home/state" FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
+      FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex"
+    while [ $# -gt 1 ]; do
+      export "${1?}"
+      shift
+    done
+    bash -c '. "$0/bin/fm-backend.sh" && fm_backend_source rex && eval "$1"' "$ROOT" "$1"
+  )
+}
+
+# fake_rex: drive the fake directly (test setup and server-state reads).
+fake_rex() {  # <dir> <rex-args...>
+  local dir=$1
+  shift
+  FM_REX_FAKE_DIR="$dir/fake" "$dir/bin/rex" "$@"
+}
+
+new_case() {  # <name> -> echoes a fresh case dir with the fake installed
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir"
+  make_rex_fake "$dir"
+  printf '%s' "$dir"
+}
+
+state_json() {  # <dir> <jq-filter>
+  jq -r "$2" "$1/fake/state.json"
+}
+
+home_label() {  # <dir>
+  rex_env "$1" 'fm_backend_rex_home_label'
+}
+
+# Every call that names a session-scoped object must carry an explicit -s.
+assert_scoped_calls() {  # <dir> <msg>
+  local bad
+  bad=$(grep -E '^rex( --autostart=false)? (window new|block |capture|send|send-key)' "$1/fake/log" | grep -v -- ' -s ' || true)
+  [ -z "$bad" ] || fail "$2: unscoped call(s):"$'\n'"$bad"
+}
+
+# --- tool resolution and version gate ----------------------------------------
+
+test_bin_prefers_rex_bin_dir() {
+  local dir out
+  dir=$(new_case bin-order)
+  mkdir -p "$dir/path-bin"
+  printf '#!/bin/sh\nexit 0\n' >"$dir/path-bin/rex"; chmod +x "$dir/path-bin/rex"
+  out=$(rex_env "$dir" "PATH=$dir/path-bin:$PATH" 'fm_backend_rex_bin')
+  assert_equals "$dir/bin/rex" "$out" "REX_BIN_DIR/rex must win over a rex on PATH"
+  out=$(rex_env "$dir" "PATH=$dir/path-bin:$PATH" 'unset REX_BIN_DIR; fm_backend_rex_bin')
+  assert_equals "$dir/path-bin/rex" "$out" "PATH is the fallback when REX_BIN_DIR is unset"
+  out=$(rex_env "$dir" "FM_BACKEND_REX_BUNDLE_BIN=$dir/bin/rex" 'unset REX_BIN_DIR; PATH=/usr/bin:/bin; fm_backend_rex_bin')
+  assert_equals "$dir/bin/rex" "$out" "the server bundle path is the last fallback"
+  pass "fm_backend_rex_bin: REX_BIN_DIR, then PATH, then the server bundle path"
+}
+
+test_version_check_gates_api_revision() {
+  local dir out
+  dir=$(new_case version)
+  rex_env "$dir" 'fm_backend_rex_version_check' || fail "version_check must accept API revision 5"
+  out=$(rex_env "$dir" FM_REX_FAKE_API=4 'fm_backend_rex_version_check' 2>&1) \
+    && fail "version_check must refuse a CLI at API revision 4"
+  assert_contains "$out" "revision 4" "the CLI refusal must name the revision"
+  out=$(rex_env "$dir" FM_REX_FAKE_SERVER_API=4 'fm_backend_rex_version_check' 2>&1) \
+    && fail "version_check must refuse a server at API revision 4"
+  assert_contains "$out" "server speaks API revision 4" "the server refusal must name the server revision"
+  out=$(rex_env "$dir" 'unset REX_BIN_DIR; PATH=/usr/bin:/bin; fm_backend_rex_version_check' 2>&1) \
+    && fail "version_check must refuse when no rex CLI exists"
+  assert_contains "$out" "was not found" "a missing CLI must be reported"
+  pass "fm_backend_rex_version_check: accepts API revision 5 and refuses an older CLI, older server, or missing CLI"
+}
+
+# shellcheck disable=SC2016 # the snippet expands inside the adapter's shell
+test_parse_target_restores_prefixes() {
+  local dir out
+  dir=$(new_case parse)
+  out=$(rex_env "$dir" 'fm_backend_rex_parse_target "01a1-aa:02b2-bb" && printf "%s %s" "$FM_BACKEND_REX_SESSION" "$FM_BACKEND_REX_BLOCK"')
+  assert_equals "session:01a1-aa block:02b2-bb" "$out" "parse_target must restore both prefixes"
+  rex_env "$dir" 'fm_backend_rex_parse_target "session:01a1-aa:02b2-bb"' && fail "a prefixed target must be refused"
+  rex_env "$dir" 'fm_backend_rex_parse_target "01a1"' && fail "a target without a block must be refused"
+  rex_env "$dir" 'fm_backend_rex_parse_target "01A1-ZZ:02b2"' && fail "a non-uuid session must be refused"
+  pass "fm_backend_rex_parse_target: <session-uuid>:<block-uuid> only, prefixes restored"
+}
+
+# --- placement ---------------------------------------------------------------
+
+test_create_task_per_home_session_create_then_adopt() {
+  local dir label out1 out2 sid1 sid2 bid1 bid2
+  dir=$(new_case per-home)
+  label=$(home_label "$dir")
+  out1=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp') || fail "first create_task failed"
+  out2=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp') || fail "second create_task failed"
+  read -r sid1 _ bid1 <<<"$out1"
+  read -r sid2 _ bid2 <<<"$out2"
+  assert_equals "$sid1" "$sid2" "both tasks must share the one per-home session"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.label == \"$label\")] | length")" \
+    "exactly one per-home session must exist"
+  assert_equals 2 "$(state_json "$dir" ".sessions[0].windows | length")" "each task must get its own tab"
+  assert_equals "fm-alpha fm-beta" "$(state_json "$dir" '[.sessions[0].windows[].label] | join(" ")')" \
+    "tabs must carry the task labels"
+  assert_equals "fm-$label-alpha" "$(state_json "$dir" ".sessions[0].windows[0].blocks[] | select(.block_id == \"$bid1\") | .label")" \
+    "the block must carry the home-scoped label"
+  assert_equals "200x50" "$(state_json "$dir" ".sessions[0].windows[1].blocks[] | select(.block_id == \"$bid2\") | \"\(.columns)x\(.rows)\"")" \
+    "a new block must be resized to 200x50"
+  assert_grep "window new -s $sid1 fm-beta --focus=false" "$dir/fake/log" "a tab must be opened focus-safe in the exact session"
+  assert_scoped_calls "$dir" "create_task"
+  pass "fm_backend_rex_create_task: one per-home session created once then adopted, one tab per task, scoped block label, 200x50"
+}
+
+test_create_task_uses_confirmed_launcher_session() {
+  local dir cap capsid capbid out sid
+  dir=$(new_case launcher)
+  cap=$(fake_rex "$dir" new captain --window main --cwd /tmp --json)
+  capsid=$(printf '%s' "$cap" | jq -r .session_id)
+  capbid=$(printf '%s' "$cap" | jq -r '.initial_windows[0].block_ids[0]')
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+    'fm_backend_rex_create_task fm-alpha /tmp') || fail "create_task in the launcher session failed"
+  read -r sid _ _ <<<"$out"
+  assert_equals "$capsid" "$sid" "a Rex-hosted launcher must place the tab in its own session"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "no per-home session may be created"
+  assert_equals main "$(state_json "$dir" '.sessions[0].windows[0].label')" "the captain's tab must be untouched"
+  assert_grep "--focus=false" "$dir/fake/log" "the tab must not steal focus"
+
+  rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=block:00000000-0000-7000-8000-0000000000ff" \
+    'fm_backend_rex_create_task fm-beta /tmp' 2>/dev/null && fail "a launcher claim the server cannot confirm must be refused"
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "a refused claim must open no tab"
+
+  out=$(rex_env "$dir" TERM_PROGRAM=tmux "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+    'fm_backend_rex_create_task fm-gamma /tmp') || fail "create_task from tmux nested in Rex failed"
+  read -r sid _ _ <<<"$out"
+  assert_not_equals "$capsid" "$sid" "tmux nested in a Rex block must use the per-home session"
+
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+    'fm_backend_rex_create_task fm-delta /tmp other-home') || fail "other-home create_task failed"
+  read -r sid _ _ <<<"$out"
+  assert_not_equals "$capsid" "$sid" "a secondmate home must use its own per-home session"
+  assert_equals 2 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$capsid\") | .windows[]] | length")" \
+    "the captain's session must hold only its own tab and the launcher-home task tab"
+  pass "fm_backend_rex_create_task: confirmed launcher session gets the tab focus-safe; unconfirmed claims refuse; nested tmux and other-home use the per-home session"
+}
+
+test_create_task_refusals() {
+  local dir label sid
+  dir=$(new_case refusals)
+  label=$(home_label "$dir")
+  touch "$dir/fake/ls-fail"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp' 2>/dev/null && fail "an unreadable inventory must refuse"
+  assert_no_grep "rex new" "$dir/fake/log" "an unreadable inventory must never create a session"
+  rm -f "$dir/fake/ls-fail"
+
+  fake_rex "$dir" new "$label" --window x --cwd /tmp --json >/dev/null
+  fake_rex "$dir" new "$label" --window y --cwd /tmp --json >/dev/null
+  rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp' 2>/dev/null && fail "two per-home sessions must refuse"
+  sid=$(state_json "$dir" '.sessions[1].session_id')
+  fake_rex "$dir" kill "$sid"
+
+  rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp' >/dev/null || fail "first create must succeed"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp' 2>/dev/null && fail "a duplicate scoped block label must refuse"
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "a refused duplicate must open no tab"
+
+  rex_env "$dir" 'fm_backend_rex_create_task_in_session session:00000000-0000-7000-8000-0000000000ff fm-x /tmp' 2>/dev/null
+  expect_code 2 "$?" "create_task_in_session on a gone session"
+  pass "fm_backend_rex_create_task: refuses an unreadable inventory, ambiguous per-home sessions, and duplicates; a gone session returns 2"
+}
+
+test_reclaim_replaces_a_husk_and_refuses_a_live_one() {
+  local dir out sid bid husk new
+  dir=$(new_case reclaim-husk)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  out=$(rex_env "$dir" "fm_backend_rex_create_task_in_session '$sid' fm-beta /tmp") || fail "reclaim tab failed"
+  read -r _ _ husk <<<"$out"
+  out=$(rex_env "$dir" "fm_backend_rex_create_task_in_session '$sid' fm-beta /tmp") || fail "a reclaim over a bare-shell husk must succeed"
+  read -r _ _ new <<<"$out"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[0].windows[].blocks[] | select(.block_id == \"$husk\")] | length")" \
+    "the bare-shell husk must be closed"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[0].windows[].blocks[] | select(.label | endswith(\"-beta\"))] | length")" \
+    "exactly one block may carry the reclaimed task's label"
+  write_process "$dir" "$new" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"claude\"},\"ancestors\":[],\"last_exit\":null}"
+  rex_env "$dir" "fm_backend_rex_create_task_in_session '$sid' fm-beta /tmp" 2>/dev/null \
+    && fail "a reclaim over a block running a harness must refuse"
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "a refused reclaim must open no tab"
+  pass "fm_backend_rex_create_task_in_session: closes a bare-shell husk carrying the task label, refuses over a live one"
+}
+
+test_reclaim_fallback_placement_replaces_a_husk() {
+  local dir out sid husk new label
+  dir=$(new_case reclaim-fallback-husk)
+  label=$(home_label "$dir")
+  # The recorded session is gone (a server restart), so the reclaim falls back
+  # to the ordinary placement; its launch then refuses before republishing,
+  # leaving a bare-shell husk there that the retry meets again.
+  rex_env "$dir" 'fm_backend_rex_create_task_in_session session:00000000-0000-7000-8000-0000000000ff fm-beta /tmp' 2>/dev/null
+  expect_code 2 "$?" "a reclaim into a gone session must fall back"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim') || fail "first fallback reclaim failed"
+  read -r sid _ husk <<<"$out"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim') \
+    || fail "a fallback reclaim over a bare-shell husk must succeed"
+  read -r _ _ new <<<"$out"
+  assert_not_equals "$husk" "$new" "the retry must open a fresh block"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[].windows[].blocks[] | select(.block_id == \"$husk\")] | length")" \
+    "the bare-shell husk must be closed"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[].windows[].blocks[] | select(.label == \"fm-$label-beta\")] | length")" \
+    "exactly one block may carry the reclaimed task's label"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp' 2>/dev/null \
+    && fail "an ordinary spawn must still refuse a block carrying the task's label"
+  write_process "$dir" "$new" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"claude\"},\"ancestors\":[],\"last_exit\":null}"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim' 2>/dev/null \
+    && fail "a fallback reclaim over a block running a harness must refuse"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\") | .windows[]] | length")" \
+    "a refused reclaim must open no tab"
+  pass "fm_backend_rex_create_task reclaim: the fallback placement closes a bare-shell husk, refuses a live one, and spawn still refuses duplicates"
+}
+
+# --- reads -------------------------------------------------------------------
+
+test_capture_and_derived_viewport() {
+  local dir out sid bid t u
+  dir=$(new_case capture)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"; u=${bid#block:}
+  fake_rex "$dir" block call -s "$sid" -b "$bid" resize '{"columns":200,"rows":3}'
+  printf 'hist1\r\nhist2\r\nrow1\r\nrow2\r\n' >"$dir/fake/capture/$u.vt"
+  out=$(rex_env "$dir" "fm_backend_visible_capture rex '$t' && printf x")
+  assert_equals $'row1\nrow2\n\nx' "$out" "a trailing CRLF must restore the implicit empty bottom row"
+  printf 'hist1\r\nrow1\r\n\033[2mrow2\033[0m\r\nrow3\n' >"$dir/fake/capture/$u.vt"
+  out=$(rex_env "$dir" "fm_backend_visible_capture rex '$t' && printf x")
+  assert_equals $'row1\nrow2\nrow3\nx' "$out" "the viewport is the last size.rows rows with styling stripped"
+  out=$(rex_env "$dir" "fm_backend_rex_visible_capture_vt '$t'")
+  assert_contains "$out" $'\033[2mrow2' "the styled viewport must keep SGR styling"
+  printf 'a\r\nb\r\nc\r\n' >"$dir/fake/capture/$u.txt"
+  out=$(rex_env "$dir" "fm_backend_capture rex '$t' 2")
+  assert_equals $'b\nc' "$out" "capture must strip CR and keep the last N lines"
+  rex_env "$dir" "fm_backend_capture rex '${sid#session:}:00000000-0000-7000-8000-0000000000ff' 5" >/dev/null \
+    && fail "capture of a missing block must fail"
+  pass "rex capture: CR stripped and tailed; viewport derived from the last size.rows styled rows, implicit empty bottom row restored"
+}
+
+write_process() {  # <dir> <block-id> <json>
+  printf '%s\n' "$3" >"$1/fake/process/${2#block:}.json"
+}
+
+test_agent_state_from_process_view() {
+  local dir out sid bid t
+  dir=$(new_case agent-state)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a bare shell foreground is dead"
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"claude\",\"path\":\"/opt/claude\",\"argv0\":\"claude\",\"cwd\":\"/w\"},\"ancestors\":[],\"last_exit\":null}"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a harness foreground is alive"
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"less\",\"path\":\"/usr/bin/less\",\"argv0\":\"less\"},\"ancestors\":[{\"pid\":$DEAD_PID,\"name\":\"node\",\"path\":\"/opt/codex/bin/codex\",\"argv0\":\"codex\"}],\"last_exit\":null}"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a harness ancestor of a pager is alive"
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"vim\",\"path\":\"/usr/bin/vim\",\"argv0\":\"vim\"},\"ancestors\":[],\"last_exit\":null}"
+  assert_equals ambiguous "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a non-shell non-harness foreground is ambiguous"
+  write_process "$dir" "$bid" '{"foreground":null,"ancestors":[],"last_exit":{"code":0}}'
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "an exited terminal child is dead"
+  write_process "$dir" "$bid" '{"foreground":null,"ancestors":[],"last_exit":null}'
+  assert_equals ambiguous "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a block still starting is ambiguous"
+  assert_equals missing "$(rex_env "$dir" "fm_backend_agent_state rex '${sid#session:}:00000000-0000-7000-8000-0000000000ff'")" \
+    "a structured not-found is missing"
+  touch "$dir/fake/down"
+  assert_equals unreadable "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a stopped server is unreadable"
+  assert_present "$dir/fake/down" "a passive read must never start a stopped server"
+  rm -f "$dir/fake/down"; touch "$dir/fake/unreachable"
+  assert_equals unreadable "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "an unreachable server is unreadable"
+  pass "fm_backend_agent_state rex: alive/dead/ambiguous from the process view, missing on not-found, unreadable without starting a server"
+}
+
+test_native_busy_trusts_live_owner_only() {
+  local dir out sid bid t
+  dir=$(new_case busy)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  assert_equals unknown "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" "no record reads unknown"
+  write_process "$dir" "$bid" '{"foreground":{"pid":4242,"name":"claude"},"ancestors":[{"pid":4000,"name":"zsh"}],"last_exit":null}'
+  printf '{"records":[{"state":"working","kind":"agent","owner":{"pid":4242}}]}\n' >"$dir/fake/status/${bid#block:}.json"
+  assert_equals busy "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" "a working record from the foreground owner reads busy"
+  printf '{"records":[{"state":"idle","owner":{"pid":4000}}]}\n' >"$dir/fake/status/${bid#block:}.json"
+  assert_equals idle "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" "an idle record from an ancestor owner reads idle"
+  printf '{"records":[{"state":"working","owner":{"pid":777}}]}\n' >"$dir/fake/status/${bid#block:}.json"
+  assert_equals unknown "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" "a record whose owner left the foreground is ignored"
+  pass "fm_backend_busy_state rex: OSC 7501 records count only while their owner is the foreground process or an ancestor"
+}
+
+test_current_path_follows_foreground() {
+  local dir out sid bid
+  dir=$(new_case cwd)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"zsh\",\"cwd\":\"/work/tree\"},\"ancestors\":[],\"last_exit\":null}"
+  out=$(rex_env "$dir" "fm_backend_rex_current_path '${sid#session:}:${bid#block:}'")
+  assert_equals /work/tree "$out" "current_path must read the foreground cwd"
+  pass "fm_backend_rex_current_path: the foreground process cwd"
+}
+
+# --- input -------------------------------------------------------------------
+
+test_send_literal_and_keys() {
+  local dir out sid bid t
+  dir=$(new_case input)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  rex_env "$dir" "fm_backend_rex_send_literal '$t' '-n dashed'" || fail "an option-shaped literal must send"
+  assert_equals "-n dashed" "$(cat "$dir/fake/sent")" "the literal must arrive verbatim"
+  : >"$dir/fake/log"
+  rex_env "$dir" "fm_backend_rex_send_literal '$t' ''" || fail "empty input must succeed"
+  assert_no_grep "send" "$dir/fake/log" "empty input must make no call"
+  for k in Enter Escape Tab C-c C-u; do
+    rex_env "$dir" "fm_backend_send_key rex '$t' $k" || fail "key $k must send"
+  done
+  assert_equals "enter escape tab ctrl+c ctrl+u" "$(tr '\n' ' ' <"$dir/fake/keys" | sed 's/ $//')" "keys must map to Rex names"
+  : >"$dir/fake/log"
+  rex_env "$dir" "fm_backend_send_key rex '$t' F5" 2>/dev/null && fail "an unmapped key must be refused"
+  assert_no_grep "send-key" "$dir/fake/log" "an unmapped key must make no call"
+  : >"$dir/fake/keys"
+  rex_env "$dir" "fm_backend_rex_send_text_line '$t' 'echo hi'" || fail "send_text_line must succeed"
+  assert_equals enter "$(cat "$dir/fake/keys")" "send_text_line must submit with Enter"
+  assert_scoped_calls "$dir" "input"
+  pass "rex input: literal text after --, no call for empty input, verified key names only, line submit"
+}
+
+# --- cleanup and absence proof ----------------------------------------------
+
+test_kill_closes_and_retires_per_home_session() {
+  local dir out sid bid1 bid2
+  dir=$(new_case kill)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid1 <<<"$out"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp'); read -r _ _ bid2 <<<"$out"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of a live block must succeed"
+  assert_equals 1 "$(state_json "$dir" '.sessions[0].windows | length')" "kill must close only its own tab"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of an already-gone block must succeed"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid2#block:}'" || fail "kill of the last block must succeed"
+  assert_equals 0 "$(state_json "$dir" '.sessions | length')" "the emptied per-home session must be retired"
+  pass "fm_backend_kill rex: closes exactly its tab, treats a gone block as done, retires the emptied per-home session"
+}
+
+test_kill_never_retires_a_foreign_session() {
+  local dir cap capsid capbid out sid bid
+  dir=$(new_case kill-foreign)
+  cap=$(fake_rex "$dir" new captain --window main --cwd /tmp --json)
+  capsid=$(printf '%s' "$cap" | jq -r .session_id)
+  capbid=$(printf '%s' "$cap" | jq -r '.initial_windows[0].block_ids[0]')
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  fake_rex "$dir" block close -s "$capsid" "$capbid"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" || fail "kill in a foreign session must succeed"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "a session not labeled for this home must never be killed, even empty"
+  pass "fm_backend_kill rex: never kills a session this home does not own, even when it is empty"
+}
+
+test_kill_refuses_without_proof() {
+  local dir out sid bid
+  dir=$(new_case kill-noop)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  touch "$dir/fake/close-noop"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "a close that leaves the block alive must fail"
+  rm -f "$dir/fake/close-noop"; touch "$dir/fake/unreachable"
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "an unreachable server must fail the kill"
+  pass "fm_backend_kill rex: refuses success unless the block is proven gone"
+}
+
+test_absence_recheck() {
+  local dir out sid bid t ep=unix:///fake/rex.sock
+  dir=$(new_case absence)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' '$ep'")" "a live shell block is dead"
+  assert_equals unproven "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' ''")" "no recorded server is unproven"
+  assert_equals unproven "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' unix:///other.sock")" \
+    "a different server can prove nothing"
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"vim\"},\"ancestors\":[],\"last_exit\":null}"
+  assert_equals unproven "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' '$ep'")" "an ambiguous block is unproven"
+  fake_rex "$dir" block close -s "$sid" "$bid"
+  assert_equals missing "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' '$ep'")" "a closed block is missing"
+  touch "$dir/fake/unreachable"
+  assert_equals unproven "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '$t' '$ep'")" "an unreachable server is unproven"
+  rm -f "$dir/fake/unreachable"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp'); read -r sid _ bid <<<"$out"
+  touch "$dir/fake/down"
+  assert_equals missing "$(rex_env "$dir" "fm_backend_rex_endpoint_absence_recheck '${sid#session:}:${bid#block:}' '$ep'")" \
+    "a stopped server, restarted, proves the block gone"
+  pass "fm_backend_rex_endpoint_absence_recheck: proof only from the recorded server; missing/dead/unproven"
+}
+
+test_control_absence_verdict_reads_rex_meta() {
+  local dir out sid bid t meta
+  dir=$(new_case control-absence)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  meta="$dir/home/state/t.meta"
+  printf 'backend=rex\nwindow=%s\nrex_server=unix:///fake/rex.sock\n' "$t" >"$meta"
+  fake_rex "$dir" block close -s "$sid" "$bid"
+  out=$(rex_env "$dir" ". '$ROOT/bin/fm-control-lib.sh'; fm_control_endpoint_absence_verdict rex '$t' '$meta'")
+  assert_equals gone "${out%%$'\t'*}" "a proven-missing block must read gone to the control plane"
+  printf 'backend=rex\nwindow=%s\nrex_server=unix:///other.sock\n' "$t" >"$meta"
+  out=$(rex_env "$dir" ". '$ROOT/bin/fm-control-lib.sh'; fm_control_endpoint_absence_verdict rex '$t' '$meta'")
+  assert_not_equals gone "${out%%$'\t'*}" "a different recorded server must never read gone"
+  pass "fm_control_endpoint_absence_verdict rex: gone only on a not-found from the recorded server"
+}
+
+# rex_control_task: record task <id> on the fake's block <session-uuid>:<block-uuid>
+# with <server> as its rex_server, for driving bin/fm-control.sh.
+rex_control_task() {  # <dir> <id> <session-id> <window-id> <block-id> <server>
+  local dir=$1 id=$2 sid=$3 wid=$4 bid=$5 server=$6
+  mkdir -p "$dir/wt-$id" "$dir/home/data/$id"
+  printf '# brief for %s\n' "$id" >"$dir/home/data/$id/brief.md"
+  {
+    echo "window=${sid#session:}:${bid#block:}"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/wt-$id"
+    echo "project=$dir/wt-$id"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "backend=rex"
+    echo "rex_server=$server"
+    echo "rex_session_id=$sid"
+    echo "rex_window_id=$wid"
+    echo "rex_block_id=$bid"
+  } >"$dir/home/state/$id.meta"
+}
+
+run_rex_control() {  # <dir> <args...>
+  local dir=$1
+  shift
+  env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$ROOT/bin/fm-control.sh" "$@" 2>&1
+}
+
+test_control_exit_after_a_server_stop() {
+  local dir out rc sid wid bid ep=unix:///fake/rex.sock
+  dir=$(new_case control-exit-stopped)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-t1 /tmp'); read -r sid wid bid <<<"$out"
+  rex_control_task "$dir" t1 "$sid" "$wid" "$bid" "$ep"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-t2 /tmp'); read -r sid wid bid <<<"$out"
+  rex_control_task "$dir" t2 "$sid" "$wid" "$bid" unix:///other.sock
+
+  touch "$dir/fake/unreachable"
+  out=$(run_rex_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a server that cannot be reached or started proves nothing"
+  assert_not_contains "$out" "endpoint-gone" "exit must not claim a stop it could not prove"
+  rm -f "$dir/fake/unreachable"
+
+  touch "$dir/fake/down"
+  out=$(run_rex_control "$dir" t2 exit); rc=$?
+  expect_code 1 "$rc" "a stopped server answering for a different recorded server must refuse"
+  assert_not_contains "$out" "endpoint-gone" "a different server's not-found proves nothing"
+
+  touch "$dir/fake/down"
+  out=$(run_rex_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit after a server stop must reach the absence proof"
+  assert_contains "$out" "endpoint-gone t1" "a stopped server's restarted not-found proves the block gone"
+  pass "fm-control exit on rex: a stopped server goes through the recorded-server absence proof, and refuses when it cannot prove absence"
+}
+
+test_list_live_scopes_to_this_home() {
+  local dir out sid bid label
+  dir=$(new_case list-live)
+  label=$(home_label "$dir")
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  fake_rex "$dir" new "other" --window fm-zeta --cwd /tmp --json >/dev/null
+  out=$(rex_env "$dir" 'fm_backend_rex_list_live')
+  assert_equals "${sid#session:}:${bid#block:}"$'\t'"fm-alpha" "$out" "list_live must list only this home's blocks"
+  touch "$dir/fake/unreachable"
+  out=$(rex_env "$dir" 'fm_backend_rex_list_live')
+  assert_equals "" "$out" "an unreachable server lists nothing"
+  [ -n "$label" ] || fail "home label must not be empty"
+  pass "fm_backend_rex_list_live: home-scoped blocks only, nothing when unreachable"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
+test_bin_prefers_rex_bin_dir
+test_version_check_gates_api_revision
+test_parse_target_restores_prefixes
+test_create_task_per_home_session_create_then_adopt
+test_create_task_uses_confirmed_launcher_session
+test_create_task_refusals
+test_reclaim_replaces_a_husk_and_refuses_a_live_one
+test_reclaim_fallback_placement_replaces_a_husk
+test_capture_and_derived_viewport
+test_agent_state_from_process_view
+test_native_busy_trusts_live_owner_only
+test_current_path_follows_foreground
+test_send_literal_and_keys
+test_kill_closes_and_retires_per_home_session
+test_kill_never_retires_a_foreign_session
+test_kill_refuses_without_proof
+test_absence_recheck
+test_control_absence_verdict_reads_rex_meta
+test_control_exit_after_a_server_stop
+test_list_live_scopes_to_this_home

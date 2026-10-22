@@ -4,6 +4,15 @@
 # Both local tracked-file convergence and remote inherited-material transfer
 # publish the same bounded record before delivery. A failed send leaves the
 # record for the locked bootstrap retry; a successful send removes it.
+# A remote route writes its record with owed=1 before each convergence attempt
+# can change the home (write-ahead), so a kill at any point, including the
+# startup network bound's TERM followed by KILL, leaves the reread owed. Once
+# the attempt reports, the record stays owed when that attempt (or an earlier
+# one) changed the home's instructions or inherited material, or when
+# completion is unknown (transport 255 or a per-mate budget cut-off). An
+# attempt whose outcome proves nothing changed, with no earlier reread owed, is
+# written back to owed=0 when it failed or removed when it converged; an owed
+# reread survives unchanged retries until a successful send.
 
 FM_SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
 FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE='Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.'
@@ -40,10 +49,11 @@ fm_remote_inherit_generation_next() { # <state-dir> <id>
   printf '%s\n' "$next"
 }
 
-fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1>
-  local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
+fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1> [owed:0|1]
+  local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7 owed=${8:-1}
   local marker parent tmp
   case "$remote" in 0|1) ;; *) return 1 ;; esac
+  case "$owed" in 0|1) ;; *) return 1 ;; esac
   case "$home$commit$instructions$message" in *$'\n'*|*$'\r'*) return 1 ;; esac
   marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
   parent=${marker%/*}
@@ -62,7 +72,35 @@ fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <mes
     printf 'instructions=%s\n' "$instructions"
     printf 'message=%s\n' "$message"
     printf 'remote=%s\n' "$remote"
+    printf 'owed=%s\n' "$owed"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+}
+
+# True when a remote route's record owes a reread nudge (the header above); a
+# record written before the owed= field existed counts as owed.
+fm_secondmate_remote_nudge_owed() { # <state> <id>
+  local marker remote owed
+  marker=$(fm_secondmate_nudge_marker_path "$1" "$2") || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  remote=$(sed -n 's/^remote=//p' "$marker" | head -1)
+  [ "$remote" = 1 ] || return 1
+  owed=$(sed -n 's/^owed=//p' "$marker" | head -1)
+  [ "$owed" != 0 ]
+}
+
+# True when one remote home sync result changed what its running agent reads:
+# `synced:` naming instruction paths, or one from a host too old to name them
+# (unknown counts as changed). `current:` and a sync that moved only files
+# outside the instruction surface change nothing.
+fm_secondmate_remote_sync_changed() { # <sync-output>
+  local line instr
+  line=$(printf '%s\n' "$1" | grep '^synced: ' | tail -1)
+  [ -n "$line" ] || return 1
+  case " $line" in
+    *' instr='*) instr=${line##* instr=} ;;
+    *) return 0 ;;
+  esac
+  [ -n "$instr" ]
 }

@@ -184,6 +184,34 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
+test_omp_restart_guidance_depends_on_home_vs_checkout() {
+  local home out
+  home="$TMP_ROOT/omp-other-home"
+  mkdir -p "$home/state"
+
+  # Home is not the firstmate checkout: relaunch through the launcher.
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'relaunch through `fm <project>`' "omp repair line must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp repair line omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp repair line still tells a non-checkout home to restart omp inside it"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>`, which sets FM_HOME and --cwd' "omp protocol must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp protocol omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp protocol still tells a non-checkout home to restart omp inside it"
+
+  # Home is the checkout itself: today's text.
+  out=$(FM_HOME="$ROOT" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "restart omp inside this home" "omp repair line lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp repair line named the launcher for the checkout home"
+  out=$(env -u FM_HOME "$RENDER" --harness omp)
+  assert_contains "$out" "restart omp inside this home; pass \`-e " "omp protocol lost today's wording for the checkout home"
+  assert_contains "$out" "restart omp inside this home if the extensions are not loaded" "omp protocol repair step lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp protocol named the launcher for the checkout home"
+  pass "omp restart guidance names the fm launcher only when the home is not the checkout"
+}
+
 test_cross_harness_ordinary_continuation_and_repair_matrix() {
   local ordinary out
 
@@ -311,6 +339,7 @@ test_unknown_fallback
 test_conditional_stanzas
 test_quiet_mode_stanzas
 test_repair_lines
+test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
