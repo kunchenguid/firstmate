@@ -750,6 +750,12 @@ cmd_register_extension() {
   # result holds the source lock while the extension host takes the lifecycle
   # lock. The reverse order here would let both wait on each other forever.
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  # A blocking poll holds the lifecycle lock until it completes. Reject its
+  # replacement under the source lock before waiting on that poll's lock.
+  if ! extension_registration_replacement_safe_locked "$id"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot replace extension registration while its prior runner remains active: $id"
+  fi
   if ! extension_lifecycle_lock_acquire; then
     fm_procevent_source_lock_release "$id"
     die "cannot lock the extension lifecycle"
@@ -784,10 +790,6 @@ cmd_register_extension() {
     owner_task=$(source_owner_task "$id")
     register_extension_locks_release "$id"
     die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
-  fi
-  if ! extension_registration_replacement_safe_locked "$id"; then
-    register_extension_locks_release "$id"
-    die "cannot replace extension registration while its prior runner remains active: $id"
   fi
   if ! fm_procevent_extension_registration_publish_locked "$STATE" "$adapter" "$id" \
       "$extension_id" "$extension_version" "$capability_version" "$package_digest" \
