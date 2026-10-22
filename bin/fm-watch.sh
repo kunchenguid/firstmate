@@ -2767,6 +2767,71 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+# Deliver a queued captain inbox note (bin/fm-inbox.sh) to firstmate. The note
+# is appended straight to the durable queue as a check row, so no status signal
+# announces it. An ordinary watcher still meets it through the recovery marker
+# every append publishes, but a handling successor skips that resurface by
+# design (resurface_after_downtime), so without this a note queued after any
+# wake sits until something unrelated ends the cycle. The seen-marker
+# discipline is procevent_surface_queued's: a marker is written only after the
+# reason line prints, so a failed print is retried and a delivered one is not.
+# A marker names the queue row's sequence as well as its key, so a later row
+# for the same note is never mistaken for the one already delivered. Its dot
+# keeps the prune below off status markers, whose names never hold one.
+# One wake covers every unsurfaced note, because the drain presents them all.
+inbox_surfaced_marker_name() {  # <queue-key> <queue-seq>
+  printf '.seen-inbox.%s.%s' "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')" "$2"
+}
+
+inbox_surface_after_output() {
+  local output_status=$1 name tmp status=0
+  if [ "$output_status" -eq 0 ]; then
+    for name in $INBOX_SURFACED; do
+      tmp=$(umask 077; mktemp "$STATE/.inbox-marker.XXXXXX") || { status=1; continue; }
+      if ! mv -f -- "$tmp" "$STATE/$name"; then
+        rm -f -- "$tmp"
+        status=1
+      fi
+    done
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+inbox_surface_queued() {
+  local seq key payload name marker live=$'\n' reason="" count=0
+  INBOX_SURFACED=
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 0
+  while IFS=$'\t' read -r seq key payload; do
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    name=$(inbox_surfaced_marker_name "$key" "$seq")
+    live="$live$name"$'\n'
+    [ -e "$STATE/$name" ] && continue
+    INBOX_SURFACED="$INBOX_SURFACED $name"
+    count=$((count + 1))
+    [ -n "$reason" ] && continue
+    case "$payload" in
+      check:*) reason=$payload ;;
+      *) reason="check: captain inbox note ${key#inbox:}" ;;
+    esac
+  done < <(awk -F '\t' 'NF >= 5 && $3 == "check" && $4 ~ /^inbox:/ && !seen[$4]++ { print $2 "\t" $4 "\t" $5 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null)
+  # A marker whose row the drain has consumed can never match again.
+  for marker in "$STATE"/.seen-inbox.*; do
+    [ -e "$marker" ] || continue
+    case "$live" in *$'\n'"${marker##*/}"$'\n'*) ;; *) rm -f -- "$marker" ;; esac
+  done
+  if [ -z "$INBOX_SURFACED" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  [ "$count" -le 1 ] || reason="$reason (+$((count - 1)) more captain inbox notes queued)"
+  # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+  FM_WAKE_POST_OUTPUT_ACTION=inbox_surface_after_output
+  wake "$reason"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -3452,9 +3517,12 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  # A captain inbox note is queued directly rather than discovered as a status
+  # signal; a handling successor would otherwise never surface it.
+  inbox_surface_queued
 
-  # A process-event result carries richer adapter-owned wake context than the
-  # generic recovery reason, so give that owner first refusal.
+  # A process-event result or inbox note carries richer wake context than the
+  # generic recovery reason, so give those owners first refusal.
   resurface_after_downtime
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.

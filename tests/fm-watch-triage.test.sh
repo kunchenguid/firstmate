@@ -6616,6 +6616,105 @@ test_procevent_marker_failure_exits_and_replays() {
   pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
+# --- captain inbox notes: surfaced once even by a handling successor ---------
+
+# A handling successor is the steady-state cycle after any wake and skips the
+# generic `check: rearm-resurface` recovery, so every wake it prints for a
+# queued note below can only come from the inbox surface itself.
+inbox_successor_bg() {  # <dir> <out>
+  watch_bg "$1/state" "$1/fakebin" "$2" env FM_WATCH_HANDLING_SUCCESSOR=1
+}
+
+queue_inbox_note() {  # <dir> <text>: queue through the real capture surface, print the note id
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-inbox.sh" note --json -- "$2" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])'
+}
+
+test_inbox_note_ends_a_waiting_successor_cycle_once() {
+  local dir state out pid id lines
+  dir=$(make_case inbox-successor-once); state="$dir/state"; out="$dir/watch.out"
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "the successor exited before any note was queued: $(cat "$out")"
+  [ ! -s "$out" ] || { reap "$pid"; fail "the successor printed before any note was queued: $(cat "$out")"; }
+  id=$(queue_inbox_note "$dir" "reply from the slack thread") || { reap "$pid"; fail "the inbox note could not be queued"; }
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a queued inbox note did not end the waiting successor cycle"; }
+  lines=$(awk 'END { print NR + 0 }' "$out")
+  [ "$lines" = 1 ] || fail "the inbox wake printed $lines lines: $(cat "$out")"
+  grep -Fx "check: captain inbox note $id - reply from the slack thread" "$out" >/dev/null \
+    || fail "the successor did not print the note's own wake reason: $(cat "$out")"
+  grep "$(printf '\tcheck\tinbox:%s\t' "$id")" "$state/.wake-queue" >/dev/null \
+    || fail "surfacing consumed the durable inbox row"
+
+  # Firstmate has not acknowledged the row yet; the next cycle must not repeat it.
+  : > "$out"
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "a delivered inbox note ended the next cycle again: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a delivered inbox note was surfaced twice: $(cat "$out")"
+  pass "a queued inbox note ends a waiting successor cycle exactly once"
+}
+
+test_inbox_note_failed_print_is_retried() {
+  local dir state out fifo reader pid status id marker
+  dir=$(make_case inbox-print-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
+  id=$(queue_inbox_note "$dir" "note whose wake print fails") || fail "the inbox note could not be queued"
+  mkfifo "$fifo"
+  sh -c ': < "$1"' _ "$fifo" & reader=$!
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$fifo" 2>/dev/null &
+  pid=$!
+  wait "$reader" || true
+  status=0
+  wait_for_exit "$pid" 100 || status=$?
+  [ "$status" -ne 124 ] || { reap "$pid"; fail "the watcher survived a failed inbox wake print"; }
+  [ "$status" -ne 0 ] || fail "a failed inbox wake print exited as delivered"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-inbox.*' -type f | head -1)
+  [ -z "$marker" ] || fail "a failed inbox wake print recorded the note as delivered"
+  [ ! -e "$state/.wake-queue.lock" ] || fail "a failed inbox wake print left the queue lock held"
+
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a note whose wake print failed was not retried"; }
+  grep -Fx "check: captain inbox note $id - note whose wake print fails" "$out" >/dev/null \
+    || fail "the retry did not print the note's wake reason: $(cat "$out")"
+
+  : > "$out"
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "the delivered retry was surfaced again: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the delivered retry was surfaced again: $(cat "$out")"
+  pass "a failed inbox wake print is retried and a delivered one is not"
+}
+
+test_inbox_notes_surface_together_and_a_new_row_resurfaces() {
+  local dir state out pid first second marker_count
+  dir=$(make_case inbox-batch); state="$dir/state"; out="$dir/watch.out"
+  # The status marker of a task that happens to be named inbox-notes.
+  printf 'task status signature\n' > "$state/.seen-inbox-notes_status"
+  first=$(queue_inbox_note "$dir" "first note") || fail "the first inbox note could not be queued"
+  second=$(queue_inbox_note "$dir" "second note") || fail "the second inbox note could not be queued"
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "two queued inbox notes did not end the successor cycle"; }
+  grep -Fx "check: captain inbox note $first - first note (+1 more captain inbox notes queued)" "$out" >/dev/null \
+    || fail "two notes did not surface as one wake led by the oldest: $(cat "$out")"
+  marker_count=$(find "$state" -maxdepth 1 -name '.seen-inbox.*' -type f | awk 'END { print NR + 0 }')
+  [ "$marker_count" = 2 ] || fail "one wake for two notes recorded $marker_count delivered rows"
+
+  # After handling, a later row for an already-delivered note is new work.
+  ack_stopped_cycle "$state" >/dev/null || fail "the batched inbox wake could not be acknowledged"
+  append_wake "$state" check "inbox:$second" "check: captain inbox note $second - second note" \
+    || fail "the repeated inbox row could not be queued"
+  : > "$out"
+  inbox_successor_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a later row for a delivered note was suppressed"; }
+  grep -Fx "check: captain inbox note $second - second note" "$out" >/dev/null \
+    || fail "the later row did not surface under its own reason: $(cat "$out")"
+  marker_count=$(find "$state" -maxdepth 1 -name '.seen-inbox.*' -type f | awk 'END { print NR + 0 }')
+  [ "$marker_count" = 1 ] || fail "markers for consumed rows were not dropped ($marker_count remain)"
+  [ -s "$state/.seen-inbox-notes_status" ] || fail "dropping consumed inbox markers removed a task status marker"
+  pass "unsurfaced inbox notes share one wake and a later row for a delivered note surfaces again"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -7304,6 +7403,9 @@ test_procevent_launch_failed_episodes_are_each_delivered
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
+test_inbox_note_ends_a_waiting_successor_cycle_once
+test_inbox_note_failed_print_is_retried
+test_inbox_notes_surface_together_and_a_new_row_resurfaces
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status

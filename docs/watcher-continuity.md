@@ -194,7 +194,10 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
-It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+It enters its poll loop immediately and keeps scanning signals, stale panes, checks, and queued captain inbox notes.
+Before generic recovery, it turns one or more not-yet-surfaced `inbox:*` check rows into a single actionable close led by the oldest note's own reason.
+It records that those rows were surfaced only after the reason line is written, so a failed write is retried on a later cycle while the queue rows remain for normal drain and acknowledgement.
+After that acknowledgement consumes a row, a later row for the same note is new work and can surface again.
 
 ### Manual recovery and other harnesses
 
