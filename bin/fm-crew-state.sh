@@ -111,7 +111,9 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a check of the full ci-step log overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
+#      green, so a green PR is never silently read as still-validating. A ci log
+#      whose last marker reports no CI checks reads working (no-checks), and the
+#      crew's own checks-green report is not promoted over it. And a
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
 #      rebase is allowed) and the ci log's last marker reads checks green,
@@ -166,7 +168,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
@@ -926,9 +927,7 @@ nm_ci_checks_state() {
     | tail -1)
   case "$marker" in
     *"checks passed"*) printf 'green' ;;
-    *"no CI checks reported - still monitoring"*)
-      # Off unless the home creates config/ci-no-checks-not-green (issue #3216).
-      if [ -e "$CONFIG/ci-no-checks-not-green" ]; then printf 'no-checks'; else printf 'green'; fi ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac

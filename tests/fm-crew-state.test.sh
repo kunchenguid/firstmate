@@ -1240,7 +1240,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -1249,62 +1249,27 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
-}
-
-# Opt-in: a home that creates config/ci-no-checks-not-green reads the zero-checks
-# marker as "nothing has verified this PR", not as checks green (issue #3216).
-# Two consumers read the verdict, so each gets its own case.
-test_ci_no_checks_flag_run_step_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-nochecks-flag-run-step)
-  make_repo_on_branch "$d/wt" fm/feat-cinocheckflag
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinocheckflag.meta" "window=fm:fm-feat-cinocheckflag" "worktree=$d/wt" "kind=ship"
-  mkdir -p "$d/config"; : > "$d/config/ci-no-checks-not-green"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocheckflag)"
-  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
-  local out; out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" feat-cinocheckflag)
-  assert_contains "$out" "state: working" "flagged home: a PR with no CI checks -> working"
-  assert_not_contains "$out" "checks green" "flagged home: a PR with no CI checks is not checks green"
-  assert_contains "$out" "no CI checks" "flagged home: the detail names the real condition"
-  pass "flagged home: zero-checks ci marker is not reported as checks green"
+  assert_contains "$out" "state: working" "a PR with no CI checks -> working"
+  assert_not_contains "$out" "checks green" "a PR with no CI checks is not checks green"
+  assert_contains "$out" "no CI checks" "the detail names the real condition"
+  pass "a PR with no CI checks reported is not read as checks green"
 }
 
 # The crew's own "done: ... checks green" report must not be promoted by the
 # status-log override when the ci log says no check ever reported.
-test_ci_no_checks_flag_status_log_override_stays_working() {
+test_ci_no_checks_status_log_override_stays_working() {
   reset_fakes
-  local d; d=$(new_case ci-nochecks-flag-status-log)
-  make_repo_on_branch "$d/wt" fm/feat-cinocheckflagsl
+  local d; d=$(new_case ci-nochecks-status-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinocheckssl
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinocheckflagsl.meta" "window=fm:fm-feat-cinocheckflagsl" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocheckflagsl.status"
-  mkdir -p "$d/config"; : > "$d/config/ci-no-checks-not-green"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocheckflagsl)"
+  fm_write_meta "$d/state/feat-cinocheckssl.meta" "window=fm:fm-feat-cinocheckssl" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocheckssl.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocheckssl)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
-  local out; out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" feat-cinocheckflagsl)
-  assert_contains "$out" "state: working" "flagged home: crew-reported green with no CI checks -> working"
-  assert_not_contains "$out" "source: status-log" "flagged home: no-checks must not reach the status-log override"
-  pass "flagged home: status-log override refuses a PR with no CI checks"
-}
-
-# Same inputs, flag absent: the unchanged default reading stays in force.
-test_ci_no_checks_flag_absent_status_log_override_unchanged() {
-  reset_fakes
-  local d; d=$(new_case ci-nochecks-noflag-status-log)
-  make_repo_on_branch "$d/wt" fm/feat-cinocheckoff
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinocheckoff.meta" "window=fm:fm-feat-cinocheckoff" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocheckoff.status"
-  mkdir -p "$d/config"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocheckoff)"
-  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
-  local out; out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" feat-cinocheckoff)
-  assert_contains "$out" "state: done" "unflagged home: zero-checks marker keeps its default reading"
-  pass "unflagged home: zero-checks ci marker keeps its default reading"
+  local out; out=$(run_crew_state "$d" feat-cinocheckssl)
+  assert_contains "$out" "state: working" "crew-reported green with no CI checks -> working"
+  assert_not_contains "$out" "source: status-log" "no-checks must not reach the status-log override"
+  pass "status-log override refuses a PR with no CI checks"
 }
 
 # The monitor logs a checks state only when it changes, and a base-branch
@@ -5849,10 +5814,8 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
-test_ci_no_checks_flag_run_step_stays_working
-test_ci_no_checks_flag_status_log_override_stays_working
-test_ci_no_checks_flag_absent_status_log_override_unchanged
+test_ci_monitoring_no_checks_stays_working
+test_ci_no_checks_status_log_override_stays_working
 test_ci_monitoring_green_then_rearm_stays_green
 test_ci_monitoring_green_before_log_tail_stays_green
 test_ci_monitoring_no_checks_yet_stays_working
