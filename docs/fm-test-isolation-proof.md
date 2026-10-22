@@ -230,6 +230,21 @@ One member needs a current Pi to pass at all.
 `tests/fm-pi-branch-extension.test.sh` compares firstmate's supervision-branch extension against the stock renderers of the installed `@earendil-works/pi-coding-agent`, and the proof host's global install was stale at 0.81.1 while the published release was 0.84.4.
 On the stale package the case fails serially as well as concurrently, so it is a prerequisite rather than a concurrency result; both runs above pinned the current package with `FM_PI_PACKAGE_DIR`, and on a host whose global install is current the plain command reproduces them.
 
+#### Workforce membership refresh: not proven on this host
+
+- Date: 2026-10-03
+- Host: NixOS, Bash 5.3.9, Python 3.13.15, Git 2.54.0.
+- Command: `bash bin/fm-test-isolation-proof.sh --pool standalone --jobs 4 --json docs/fm-test-standalone-isolation-proof.json`
+- Result: `FM_ISOLATION_SUMMARY total=31 failed=10 concurrency=4 duration_ms=295599` (exit 1).
+- Machine-readable result: [standalone isolation artifact](fm-test-standalone-isolation-proof.json), with `fm_test_run_jobs_enabled=false`.
+
+The current family includes `tests/fm-workforce.test.sh`, which exited 0 under four-worker concurrency in 85859 ms.
+This run does not establish a refreshed family concurrency guarantee.
+Several existing candidates failed because their restricted `/usr/bin:/bin` paths could not find Bash on NixOS; others exposed an existing `raw: unbound variable` in pending-reply handling or failed remote-worker readiness.
+The remaining public-followup candidate stalled in its rechain lock wait; its owned command was terminated with SIGTERM after more than three minutes, and its resulting failure is included in the aggregate rather than presented as a completed conformance pass.
+All ten failing candidate scripts and the affected pending-reply implementation are unchanged from the PR base.
+A successful exact family proof on a supported environment remains required before claiming the Workforce membership refresh is proven.
+
 ## Production runner effect of the 2026-09-03 admissions
 
 Each family measured with `bin/fm-test-run.sh --family <name> --jobs <n>` on the same host, back to back, every run reporting 0 failures.
