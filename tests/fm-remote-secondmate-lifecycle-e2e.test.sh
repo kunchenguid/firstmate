@@ -1310,7 +1310,12 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+# The watcher exits only after the relaunch spawn returns, and it bounds that
+# spawn itself with SECONDMATE_LIVENESS_TIMEOUT (120s by default). This wait
+# must outlast that bound so a slow runner reports the watcher's own verdict
+# below instead of expiring first: CI runners spend 29-35s in the spawn, which
+# the previous 30s bound (1500 polls) cut off (issue #7629).
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 15000 ]; do
   sleep 0.02
   watch_wait=$((watch_wait + 1))
 done
