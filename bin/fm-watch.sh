@@ -3139,6 +3139,27 @@ evict_stalled_holder() {
   ! fm_pid_alive "$pid"
 }
 
+# Highest sequence among this home's queued wake rows, 0 when none are queued.
+queued_row_high_water() {
+  { cat "$FM_WAKE_QUEUE" 2>/dev/null || true; } \
+    | awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > hw { hw = $2 + 0 } END { print hw + 0 }'
+}
+
+# A handling successor's predecessor delivered every row already queued, so only
+# a row above this baseline is new work for it. Read before taking the watcher
+# lock: the arm reports this successor started only once the lock names it, so
+# the handling turn's drain cannot begin before the baseline exists.
+SUCCESSOR_QUEUE_BASELINE=0
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  SUCCESSOR_QUEUE_BASELINE=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
+  case "$SUCCESSOR_QUEUE_BASELINE" in ''|*[!0-9]*) SUCCESSOR_QUEUE_BASELINE=0 ;; esac
+  successor_rows_high_water=$(queued_row_high_water)
+  [ "$successor_rows_high_water" -le "$SUCCESSOR_QUEUE_BASELINE" ] \
+    || SUCCESSOR_QUEUE_BASELINE=$successor_rows_high_water
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+fi
+
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
@@ -3347,10 +3368,12 @@ rerecord_device_shifted_pr_poll() {  # <id>
 
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
-  # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # Re-announcing that wake is what turned a lost handshake into an unbounded
+  # recovery loop, so surface only a row appended after this successor started,
+  # such as a captain inbox note; nothing else would wake an idle session for it.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    [ "$(queued_row_high_water)" -gt "$SUCCESSOR_QUEUE_BASELINE" ] || return 0
+    wake "check: rearm-resurface"
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
