@@ -151,6 +151,7 @@ run_spawn() {
   mkdir -p "$home/user-home"
   env -u FM_TRACE_CONTEXT \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
+    TREEHOUSE_ROOT="${home%/}.treehouse-root" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -173,6 +174,7 @@ run_spawn_tc() {
   mkdir -p "$home/user-home"
   env FM_TRACE_CONTEXT="$tc" \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
+    TREEHOUSE_ROOT="${home%/}.treehouse-root" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -274,6 +276,7 @@ run_two_level() {
   mkdir -p "$sm/user-home"
   env FM_TRACE_CONTEXT="$TL_ENV_TC" TRACEPARENT="$TL_CARRIER" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" HOME="$sm/user-home" CLAUDE_CONFIG_DIR='' \
+    TREEHOUSE_ROOT="${sm%/}.treehouse-root" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \

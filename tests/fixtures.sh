@@ -342,9 +342,15 @@ fm_test_run_spawn() {
   # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
   # so every launch-shape assertion in the suite keeps reading the same command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
-  local spawn_home=$home/user-home
+  # That throwaway HOME sits inside the test home, where bin/fm-spawn.sh refuses
+  # a Treehouse pool root, so TREEHOUSE_ROOT is pinned beside the test home
+  # unless a test names its own through FM_TEST_TREEHOUSE_ROOT; an empty value
+  # leaves it unset, so the default base applies. A test that needs HOME
+  # outside the test home names it through FM_TEST_SPAWN_HOME.
+  local spawn_home=${FM_TEST_SPAWN_HOME:-$home/user-home}
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
+    TREEHOUSE_ROOT="${FM_TEST_TREEHOUSE_ROOT-${home%/}.treehouse-root}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

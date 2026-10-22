@@ -1358,6 +1358,51 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+# Spawns now allocate from each home's own <default>/fm-homes/<home-id> root,
+# but a task spawned before that still records a slot under Treehouse's old
+# default root.
+# Teardown must find and return that slot by the path the task recorded, never
+# by a root recomputed from the home, so the in-flight task still retires
+# cleanly and its slot goes back to the default-root pool it came from.
+test_default_root_slot_is_returned_by_its_recorded_path() {
+  local case_dir rc slot wt_head
+  case_dir=$(make_case default-root-slot)
+  slot="$case_dir/home/.treehouse/project-3d92bc/1/project"
+  mkdir -p "$(dirname "$slot")"
+  printf '{}\n' > "$case_dir/home/.treehouse/project-3d92bc/treehouse-state.json"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1-legacy "$slot" main
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$(dirname "$slot")/.fm-slot-owner"
+  write_meta "$case_dir" local-only ship "$slot"
+  git -C "$slot" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "merged work"
+  wt_head=$(git -C "$slot" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_TREEHOUSE_LOG:?}"
+case " $* " in *" --root "*|*" --root="*) echo "unexpected --root" >&2; exit 1 ;; esac
+[ "${1:-}" != return ] || [ -d "${!#}" ] || { echo "worktree ${!#} is not managed by treehouse" >&2; exit 1; }
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_HOME="$case_dir" FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-root-slot: teardown should retire a task recorded on a default-root slot"$'\n'"$(cat "$case_dir/stderr")"
+  grep -Fxq -- "return --force $slot" "$case_dir/treehouse.log" \
+    || fail "default-root-slot: teardown did not return the recorded default-root slot: $(cat "$case_dir/treehouse.log")"
+  ! grep -Fq -- "fm-homes" "$case_dir/treehouse.log" \
+    || fail "default-root-slot: teardown looked for the slot under the home's own pool root: $(cat "$case_dir/treehouse.log")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "default-root-slot: teardown left the task record behind"
+  assert_absent "$(dirname "$slot")/.fm-slot-owner" \
+    "default-root-slot: teardown kept the task's claim on the returned slot"
+  pass "a task recorded on an old default-root slot is torn down and returned by its recorded path"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -5540,6 +5585,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_default_root_slot_is_returned_by_its_recorded_path
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

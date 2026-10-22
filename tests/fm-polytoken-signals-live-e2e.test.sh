@@ -107,7 +107,7 @@ fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67
 # the real tool does.
 printf '#!/bin/sh\nexec "%s" "$@"\n' "$REAL_TMUX" > "$LAB/bin/tmux"
 # shellcheck disable=SC2016 # the single-quoted shim expands its own argument
-printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
+printf '#!/bin/sh\n[ "${1:-}" != --root ] || shift 2\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
 chmod +x "$LAB/bin/tmux" "$LAB/bin/treehouse"
 export PATH="$LAB/bin:$PATH" FM_HOME="$H" HOME="$U" XDG_CONFIG_HOME="$U/.config" XDG_DATA_HOME="$U/.local/share" XDG_STATE_HOME="$U/.local/state" XDG_CACHE_HOME="$U/.cache"
 unset TMUX FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
