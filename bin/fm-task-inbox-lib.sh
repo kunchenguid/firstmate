@@ -90,8 +90,8 @@
 # whatever the result, so the record never rings a third time and never
 # escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
-# ladder rings the same inbox, so the retry waits behind it, and an
-# acknowledged record drops its mark. The remote steer leg has no watcher
+# ladder rings the same inbox, so the retry waits behind it, and a
+# read or acknowledged record drops its mark. The remote steer leg has no watcher
 # ladder and owes no retry.
 #
 # Inbox names containing bytes outside printable ASCII are unsupported. The
@@ -144,7 +144,7 @@ fm_task_inbox_busy_max() {
 }
 
 # Persist before returning the new count, so a fresh watcher continues the same
-# bounded wait. A removed or acknowledged record is a quiet no-op.
+# bounded wait. A removed, read, or acknowledged record is a quiet no-op.
 fm_task_inbox_record_busy() {  # <state-dir> <task-id> <record-path>
   local dir base previous count
   dir=$(fm_task_inbox_dir "$1" "$2")
