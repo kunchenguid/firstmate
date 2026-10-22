@@ -408,7 +408,7 @@ fm_herdr_lab_cancel_provision() { # <pid>
 }
 
 fm_herdr_lab_provision() { # <session>
-  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds
+  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds fd
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -434,7 +434,19 @@ fm_herdr_lab_provision() { # <session>
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
-  fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
+  (
+    # A redirected function launch retains Bash's saved caller descriptors.
+    # Detach stdio permanently, close every inherited extra fd, and replace
+    # this child with Herdr rather than leaving a shell waiting for it.
+    exec </dev/null >/dev/null 2>&1
+    for fd in /dev/fd/*; do
+      fd=${fd##*/}
+      case "$fd" in ''|*[!0-9]*|0|1|2) continue ;; esac
+      eval "exec $fd>&-"
+    done
+    export HERDR_SESSION="$name"
+    exec herdr server --session "$name"
+  ) &
   server_pid=$!
   attempt=0
   max_attempts=300

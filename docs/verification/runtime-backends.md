@@ -1315,6 +1315,36 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Headless startup and caller pipes
+
+Verified on 2026-10-13 on macOS aarch64 with Herdr 0.9.3, Bash 5.3.9, and stock Bash 3.2.57.
+A named lab server was stopped through `bin/fm-herdr-lab.sh`, then restarted through the adapter inside this capture:
+
+```sh
+result=$(fm_backend_herdr_server_ensure "$HERDR_LAB_SESSION" >/dev/null; printf 'returned\n')
+```
+
+The original launcher reported the lab server running but held the capture open until the guarded lab stop.
+The current launcher returned `returned` while the server remained running on both Bash versions.
+Guarded teardown verified the default-session tripwire unchanged after each run.
+
+Portable regressions use a live blocking fake server, an enclosing redirected function, and an extra caller-pipe descriptor:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-herdr.test.sh tests/fm-herdr-lab.test.sh
+```
+
+Observed focused output:
+
+```text
+ok - fm_backend_herdr_server_ensure: capture returns while server lives, closes extra pipes, and leaves no wrapper parent
+ok - fm-herdr-lab: captured provision closes inherited pipes and leaves no wrapper parent
+```
+
+The adapter regression exercises both available Bash paths and a cached selected client.
+Both original launchers fail these regressions before the fake server is released.
+The adapter keeps its startup environment scrubbing and bounded readiness poll; the lab helper keeps its session guards and fleet-state tripwire.
+
 ### fm-remote server birth and login-keychain access
 
 Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.

@@ -1685,14 +1685,28 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # inherited from whichever agent happened to start it. Bounded poll for the
 # server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running i client_bin=herdr fd
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
+  if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
+    client_bin=$(fm_backend_herdr_bin)
+  fi
   (
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
       CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server </dev/null >/dev/null 2>&1 &
-  ) || return 1
+    # Permanent redirects avoid Bash's saved copies of function-call stdio.
+    # Close inherited descriptors too: an enclosing redirected function may
+    # have saved the caller's capture pipe above fd 2. Exec leaves no shell
+    # parent waiting for the long-lived server with those copies still open.
+    exec </dev/null >/dev/null 2>&1
+    for fd in /dev/fd/*; do
+      fd=${fd##*/}
+      case "$fd" in ''|*[!0-9]*|0|1|2) continue ;; esac
+      eval "exec $fd>&-"
+    done
+    export HERDR_SESSION="$session"
+    exec "$client_bin" server --session "$session"
+  ) &
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0
