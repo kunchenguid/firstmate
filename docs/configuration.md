@@ -1529,7 +1529,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 | `clear` | A `profile:` line ready for `fm-spawn.sh`. |
 | `ambiguous` | Confidence below the floor with no runner-up taken. |
 | `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
-| `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
+| `error` | API, network, malformed response metadata, rendering, or quota-axi failure; a nonzero quota-axi exit that still wrote a valid snapshot is not a failure. |
 
 Every result above exits 0.
 
