@@ -66,6 +66,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-git-strip-ai-trailers.sh` | Strip known AI commit trailers at commit-msg time and install that hook, plus any forge=external push guard, for a fleet launch |
 | `fm-git-push-guard.sh`  | Refuse a forge=external task's pushes to the shared origin and of task-prefixed branches, and write its per-task guard record ([design](external-review-forge.md)) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
+| `fm-route-domain.sh`     | Route incoming task or brief to a secondmate domain using Jev System One             |
+| `fm-route-dispatch.sh`   | Route and optionally dispatch an intake task to the matching secondmate              |
+| `fm-route-domain.py`     | The Jev request engine behind `fm-route-domain.sh`, applying `config/dispatch-never-send` |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
 | `fm-agent-process-lib.sh` | Backend-neutral harness-process name classifier shared by recovery-grade adapters |
