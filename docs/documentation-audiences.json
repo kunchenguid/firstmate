@@ -557,6 +557,70 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/captures/opencode-badge-wrap/40-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/40-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/44-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/44-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/45-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/45-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/47-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/47-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/48-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/48-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/51-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/51-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/52-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/52-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/60-empty.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/opencode-badge-wrap/60-typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },

@@ -1209,6 +1209,54 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode typed draft above the wrapped dir fragment on plain backends" unknown "$CAPS_PLAIN" "$v11825_typed_wrap"
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$v11825_typed_wrap")
   [ "$out" = 'Reply with OK.' ] || fail "a draft above the wrapped fragment must survive extraction, got '$out'"
+  # Live fork pane (OpenCode 1.18.25 on a narrow pane): the agent/model badge is
+  # drawn inside the bar box and WRAPS - the dot loses or keeps a space
+  # (`Build·`, `Buil ·`, `Build ·`), the first word can break (`Buil` / `d`), and
+  # the model tail lands in fragment rows below - and the idle hint's quoted
+  # suggestion wraps too (`Ask anything... "Fix a TODO in the` / `codebase"`).
+  # The classifier read those rows as typed text, so an empty composer read
+  # `pending` and the doorbell, interrupt and relaunch all refused. The badge is
+  # always the last thing in the box, so its opening row and every row after it
+  # are furniture. Real captures at 40-60 columns (tests/captures/
+  # opencode-badge-wrap) must read empty and extract nothing; the same panes
+  # with `fix login bug` typed must read pending and extract only that text.
+  local cap_dir cap w
+  cap_dir="$(dirname "${BASH_SOURCE[0]}")/captures/opencode-badge-wrap"
+  for w in 40 44 45 47 48 51 52 60; do
+    cap=$(cat "$cap_dir/$w-empty.txt")
+    assert_screen "opencode wrapped badge, $w cols, empty on herdr" empty "$CAPS_STYLED" "$cap"
+    assert_screen "opencode wrapped badge, $w cols, empty on cmux/orca" empty "$CAPS_PLAIN" "$cap"
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$cap")
+    [ -z "$out" ] || fail "wrapped badge at $w cols must not extract as content, got '$out'"
+    cap=$(cat "$cap_dir/$w-typed.txt")
+    assert_screen "opencode wrapped badge, $w cols, typed draft on herdr" pending "$CAPS_STYLED" "$cap"
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$cap")
+    [ "$out" = 'fix login bug' ] || fail "draft above the wrapped badge at $w cols must extract only its text, got '$out'"
+  done
+  # A draft whose own first word looks like a badge opener, above the real
+  # wrapped badge, is still typed text; a lone badge-like row with nothing
+  # wrapped below it is not claimed.
+  local badge_draft badge_lone
+  badge_draft=$'  ┃\n  ┃  Build·x\n  ┃\n  ┃  Build·MiniMax M3.1 Flash free (OpenRouter) OpenR\n  ┃                                             outer\n  ┃\n'"$floor"
+  assert_screen "opencode typed Build·x draft above the wrapped badge stays pending" pending "$CAPS_STYLED" "$badge_draft"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$badge_draft")
+  [ "$out" = 'Build·x' ] || fail "a Build·x draft above the wrapped badge must extract its text, got '$out'"
+  badge_lone=$'  ┃\n  ┃\n  ┃  Build·MiniMax M3.1 Flash free (OpenRouter)\n  ┃\n'"$floor"
+  assert_screen "opencode badge-like row without a wrapped tail is not claimed on herdr" pending "$CAPS_STYLED" "$badge_lone"
+  local badge_typed_tail hint_open_quote
+  badge_typed_tail=$'  ┃  Build·fix the tests\n  ┃  and more\n  ┃\n'"$floor"
+  assert_screen "opencode typed Build· line with no bar row above it stays pending" pending "$CAPS_STYLED" "$badge_typed_tail"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$badge_typed_tail")
+  [ "$out" = 'Build·fix the tests and more' ] || fail "typed Build· draft must keep its text, got '$out'"
+  hint_open_quote=$'  ┃\n  ┃  Ask anything... "hi\n  ┃  one\n  ┃  two\n  ┃\n'"$floor"
+  assert_screen "opencode hint with an open quote is not a wrap over two plain rows" pending "$CAPS_STYLED" "$hint_open_quote"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$hint_open_quote")
+  [ "$out" = 'one two' ] || fail "plain rows below an open hint quote must keep their text, got '$out'"
+  # The original stuck pane's trimmed shape (single `outer` tail row).
+  local badge_idle
+  badge_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build·MiniMax M3.1 Flash free (OpenRouter) OpenR\n  ┃                                             outer\n  ┃\n'"$floor"
+  assert_screen "opencode original stuck-pane badge on herdr" empty "$CAPS_STYLED" "$badge_idle"
+
   # Live 2026-10-10 (OpenCode 1.18.25 through Herdr, the desklink lead's
   # engine-fix worker): on a still-longer worktree path the SAME right-aligned
   # `<dir>:<branch>` cell wraps over TWO rows - its `~/...` directory fragment
