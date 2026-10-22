@@ -367,6 +367,7 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
+Its [header](../bin/fm-watch-arm.sh) owns the ownership refusals for unverifiable live watcher identities in every arm mode.
 
 ### How an arm resolves a close
 
