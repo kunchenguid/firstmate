@@ -40,8 +40,8 @@ When Firstmate itself runs directly inside a Rex block, every task tab opens in 
 A claim the server cannot confirm refuses rather than guessing a placement.
 Otherwise, and always for a secondmate's own home, the tab opens in one session per home labeled with the home tag (`firstmate-<hash>` or `2ndmate-<id>-<hash>`), adopted when exactly one session carries that label, created once when none does, and refused when several do.
 
-Every tab is created with `window new --focus=false`, so a spawn never moves your focus.
-An unviewed block starts at 80x24, so every new task block is resized to 200x50; a client that later views it takes ownership and applies its own size.
+Tabs in an existing session are created with `window new --focus=false`; when a per-home session must be created, its initial window becomes the first task's tab.
+An unviewed block starts at 80x24, so the adapter attempts to resize each new task block to 200x50 and warns if resizing fails; a client that later views it takes ownership and applies its own size.
 The tab is labeled `fm-<id>` for you, and the block carries the home-scoped label `fm-<home-tag>-<id>`, used only for duplicate refusal and recovery listing.
 
 The recorded target is `<session-uuid>:<block-uuid>`, because Rex ids carry their own colon (`session:<uuid>`, `block:<uuid>`):
@@ -63,6 +63,7 @@ Every CLI call passes the recorded session with `-s`, because the CLI otherwise 
 
 `send -- <text>` sends literal, unsubmitted input, and the caller sends Enter separately.
 Keys map to Rex names (`enter`, `escape`, `tab`, `ctrl+c`, `ctrl+u`); any other key is refused rather than guessed.
+Verified submit types the payload once, retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.
 
 `capture --trim` returns the scrollback plus the screen as plain text, and the adapter trims the tail locally.
 Rex has no viewport-only capture, so the visible viewport is derived from the styled `--format=vt` capture, which always ends with the full screen grid, blank rows included.
@@ -86,13 +87,8 @@ An already-gone block counts as closed.
 A per-home session left with no tabs is then killed, but only a session carrying this home's label, never Firstmate's own launcher session, and never when its view cannot be read.
 Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-session.lock`), so a new tab can never land in a session between its empty check and its kill.
 
-`bin/fm-control.sh` `exit` and `relaunch` work on Rex.
-A session never survives its server, and Rex never reuses an id, so a structured not-found for the recorded block proves it gone, provided the server that answers is the one the task was created on.
-The record therefore carries that server's endpoint as `rex_server=`, and the proof refuses unless the reachable server reports the same endpoint; the proof may start a stopped personal server, whose fresh start then answers not-found with authority.
-Because passive reads never start a server, a stopped server first reads `unreadable`; `exit` and `relaunch` put a Rex `unreadable` through the same proof, and refuse whenever it cannot settle the endpoint.
-A reclaim opens the replacement tab in the exact recorded session, focus-safe, and falls back to ordinary placement only when that session is itself gone.
-A bare-shell block left by an earlier reclaim that refused before its record was republished carries the same block label, and the next reclaim closes it first, in either placement; a non-shell program in it refuses the reclaim, and an ordinary spawn still refuses any block carrying that label.
-[`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the reclaim contract.
+`bin/fm-control.sh` `exit` and `relaunch` work on Rex; [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recorded-server absence proof, stopped-server recovery, reclaim placement, and reclaim-only shell-husk cleanup.
+An ordinary spawn refuses any block carrying the task's scoped label.
 
 ## Away mode
 
