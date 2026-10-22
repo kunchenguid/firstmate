@@ -138,7 +138,7 @@
 # `--none` is an explicit semantic attestation that the just-reviewed surface
 # has no unresolved captain call, and is refused while the origin still has an
 # open keyed status decision. With a non-empty inventory, every listed task is
-# verified durable (captain-held, or carrying a recorded resolution),
+# verified durable (docs/captain-hold-lifecycle.md owns the inventory checks),
 # is never the origin itself, and, when `hold --origin` recorded one, was held
 # for this origin; a hold with no recorded origin is accepted on durability
 # alone and named in the output,
@@ -523,6 +523,10 @@ resolution_block() {  # <mode>
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
+# Without captain annotations, an open task's leading stamp can signal an
+# incomplete re-hold or unfinished release normalization; the old record alone
+# cannot vouch for that state. Done tasks retain their recorded resolution as
+# evidence, and verify_entry_durable separately checks the stored origin.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
   task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
@@ -530,10 +534,14 @@ verify_hold_durable() {  # <task-id>
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
+  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+  if body_has_resolution_record "$body"; then
+    if [ "$state" != "done" ] \
+      && [ -n "$(body_hold_set_timestamp "$(decode_shown_value "$body")")" ]; then
+      fail "captain-held task $id carries a recorded answer from an earlier call, but its newer hold never completed; re-run the hold or answer it again"
+    fi
     return 0
   fi
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
@@ -821,7 +829,7 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
+write_hold_origin() {  # <task-id> <shown-body> <origin>
   local id=$1 body=$2 origin=$3 stamp rest new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
@@ -830,10 +838,7 @@ write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$stamp
-  if [ -n "$origin" ]; then
-    new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
-  fi
+  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -845,7 +850,25 @@ write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
   fi
   if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
     rm -f -- "$tmp"
-    fail "could not record the hold origin on $id"
+    printf 'fm-captain-hold: could not record the hold origin on %s\n' "$id" >&2
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
+# Best-effort restoration removes a refused hold attempt's stamp while
+# preserving the prior body; the new origin has not been published yet.
+# tasks-axi cannot write an empty body, and a task that began empty carries no
+# earlier answer for a stale stamp to mislabel, so that case keeps its body.
+restore_hold_body() {  # <task-id> <shown-original-body>
+  local id=$1 body tmp
+  body=$(decode_shown_value "$2") || return 1
+  [ -n "$body" ] || return 0
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-restore.XXXXXX") || return 1
+  if ! printf '%s\n' "$body" > "$tmp" || ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    printf 'fm-captain-hold: could not restore the body of %s after an incomplete hold\n' "$id" >&2
+    return 1
   fi
   rm -f -- "$tmp"
 }
@@ -902,7 +925,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -975,16 +998,17 @@ command_hold() {
   # Publish the timestamp before the captain-hold annotation. A concurrent
   # snapshot may see the harmless stamp by itself, but can never see a newly
   # held task without the timestamp that defines this hold lifecycle's age.
+  # Resolve the origin identity before stamping or holding. A lookup failure
+  # leaves an existing task untouched, but a missing row was already created.
+  if [ -n "$origin" ]; then
+    origin=$(task_identity "$origin") || exit $?
+  fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
+  original_body=$(show_field "$show" body)
   write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
-  if [ -n "$origin" ]; then
-    origin=$(task_identity "$origin") || exit $?
-    previous_origin=$(body_hold_origin "$(show_field_value "$show" body)")
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
-  fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
       || hold_status=$?
@@ -993,21 +1017,22 @@ command_hold() {
       || hold_status=$?
   fi
   if [ "$hold_status" -ne 0 ]; then
-    # A refused re-hold must not associate the previous hold or answer with a
-    # new origin. Restore the old line verbatim, without resolving it again.
-    if [ -n "$origin" ]; then
-      write_hold_origin "$id" "$(show_field "$show" body)" "$previous_origin" || exit $?
-    fi
+    # Restore the body without resolving its old origin again. The new origin
+    # is still unpublished even if this best-effort restoration fails.
+    restore_hold_body "$id" "$original_body" || true
     fail "could not hold task $id for the captain"
   fi
   task_show "$id" || fail "task $id disappeared while holding it"
   show=$TASK_SHOW_OUTPUT
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
+  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  if [ -n "$origin" ]; then
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  fi
   printf '%s\n' "$id"
 }
 
