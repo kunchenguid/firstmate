@@ -612,7 +612,7 @@ EOF
   [ "$status" -ne 0 ] || fail "a Herdr lifecycle brief without the isolation contract should be refused"
   assert_contains "$out" "Herdr isolation contract" \
     "Herdr lifecycle refusal did not name the missing isolation contract"
-  assert_contains "$out" '`herdr session stop`' \
+  assert_contains "$out" "\`herdr session stop\`" \
     "Herdr lifecycle refusal did not name the matched command"
   assert_contains "$out" "fm-brief.sh --herdr-lab" \
     "Herdr lifecycle refusal did not name the brief regeneration remedy"
