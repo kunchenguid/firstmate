@@ -253,6 +253,13 @@ case "$*" in
     [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
     /bin/ps -o ppid= -p "$pid"
     ;;
+  *"lstart="*)
+    # The holder naming reads the live process's start time and age from the
+    # process itself. One read answers both, so the two describe the same
+    # observation of the same process.
+    printf 'Wed Oct 21 12:34:56 2026      01:02:03\n'
+    exit 0
+    ;;
 esac
 exit 1
 SH
@@ -2557,6 +2564,43 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
+# A lock refused because another live session holds it names that holder: the
+# pid, the process start time, and the process age, read live from the process
+# itself. The digest then offers the two choices and stops nothing itself.
+test_read_only_session_names_the_live_lock_holder() {
+  local rec root home fakebin holder_pid out
+  rec=$(new_world read-only-holder-naming)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "the competing live lock owner did not force read-only mode"
+  assert_contains "$out" "Another live firstmate session holds the fleet lock" \
+    "the read-only banner did not name the live lock holder"
+  assert_contains "$out" "pid $holder_pid" "the holder naming did not carry the holder pid"
+  assert_contains "$out" "started Wed Oct 21 12:34:56 2026" \
+    "the holder naming did not carry the process start time"
+  assert_contains "$out" "age 01:02:03" "the holder naming did not carry the process age"
+  assert_contains "$out" "Choose one" "the read-only banner did not offer the two choices"
+  assert_contains "$out" "stop that session yourself" \
+    "the read-only banner did not offer the stop-the-holder choice"
+  assert_contains "$out" "keep this session read-only" \
+    "the read-only banner did not offer the read-only choice"
+  assert_contains "$out" "Nothing is stopped automatically" \
+    "the read-only banner did not say that nothing is stopped automatically"
+
+  pass "a read-only session names the live lock holder with its pid, start time, and age, and offers the two choices"
+}
+
 test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
   local rec root home fakebin holder_pid out baseline_before completion_before
   rec=$(new_world agents-refresh-read-only)
@@ -3154,6 +3198,7 @@ test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_session_names_the_live_lock_holder
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
