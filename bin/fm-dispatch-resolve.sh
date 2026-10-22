@@ -14,7 +14,8 @@
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
 # What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the brief's
+#   <base>/v1/systemone (base: https://api.typesafe.ai unless TYPESAFE_BASE_URL
+#   says otherwise) with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
 #   scout brief (the whole brief when it has neither section), as state and
 #   ONE Choice question whose options are every rule's `when` from
@@ -62,8 +63,15 @@
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
 #
-# Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+# Environment (each read from the process environment, else the same
+#   $FM_HOME/.env as the key; the environment wins and an empty value is unset):
+#   TYPESAFE_API_KEY     the opt-in key described above.
+#   TYPESAFE_BASE_URL    endpoint base, default https://api.typesafe.ai. It must
+#                        start with https:// and carry no credentials (no @); one
+#                        trailing slash is dropped and the tool appends
+#                        /v1/systemone itself. An invalid value exits 2 without
+#                        echoing it, never falls back to the default.
+#   TYPESAFE_MODEL       model name sent in the request, default jev-latest.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -128,6 +136,23 @@ if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
+
+# ---- endpoint and model --------------------------------------------------------
+# Resolved like the key: environment first, else the .env line, an empty value
+# counts as unset, and the built-in value above is the default. Only the base URL
+# is validated, and its error never prints the value because a mistaken URL can
+# carry credentials.
+ts_setting() {  # <name> <default>
+  local value=${!1:-}
+  [ -n "$value" ] || value=$(fmx_env_get "$1" "$FM_HOME/.env")
+  printf '%s' "${value:-$2}"
+}
+TS_MODEL=$(ts_setting TYPESAFE_MODEL "$TS_MODEL")
+TS_BASE=$(ts_setting TYPESAFE_BASE_URL "$TS_BASE")
+if [[ $TS_BASE != https://* || $TS_BASE == *@* ]]; then
+  die "TYPESAFE_BASE_URL must start with https:// and carry no credentials (set in the environment or $FM_HOME/.env; unset it for the default)"
+fi
+TS_BASE=${TS_BASE%/}
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"

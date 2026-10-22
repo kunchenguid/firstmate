@@ -1562,11 +1562,15 @@ By accepted design, a `clear` result does not enforce catalog/authentication, re
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
-**Key handling and fixed settings**
+**Key handling and settings**
 
 - The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 - The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+- The resolver reads the optional `TYPESAFE_BASE_URL` and `TYPESAFE_MODEL` exactly like the key: the environment wins, else the home's `.env` line, and an empty value counts as unset.
+- `TYPESAFE_BASE_URL` defaults to `https://api.typesafe.ai` and must start with `https://` and carry no credentials (no `@`); one trailing slash is dropped and the resolver appends `/v1/systemone` itself.
+  An invalid value exits 2 as a configuration error that names the setting without echoing the value, never falls back to the default, and is checked only once the key has turned the tool on.
+- `TYPESAFE_MODEL` defaults to `jev-latest`.
+- The resolver fixes the default confidence floor at 0.6 and the request timeout at 5 seconds.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
@@ -2718,6 +2722,8 @@ FMX_ENV_FILE=           # optional alternate .env file for direct Relay client i
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_BASE_URL=      # optional typed dispatch endpoint base, must start with https://; default https://api.typesafe.ai
+TYPESAFE_MODEL=         # optional typed dispatch model name; default jev-latest
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
