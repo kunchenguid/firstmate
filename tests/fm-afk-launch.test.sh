@@ -1817,6 +1817,7 @@ SH
       cp "$st/bin/tmux" "$st/bin/daemon"
       chmod +x "$st/bin/tmux" "$st/bin/daemon"
       sleep 600 &
+      # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
       pid=$!
       owner="$st/state/.supervise-daemon.lock"
       printf '%s' "$pid" > "$owner/pid"
@@ -1899,6 +1900,7 @@ unit_readiness_waits_for_identity_publication() {
       cp "$1/identity" "$1/state/.supervise-daemon.lock/pid-identity"
       while :; do sleep 0.1; done
     ' _ "$st" &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     pid=$!
     i=0
     while [ ! -f "$st/ready" ] && [ "$i" -lt 100 ]; do
@@ -1934,6 +1936,7 @@ unit_readiness_uncertainty_preserves_started_lifecycle() {
   mkdir -p "$st/state" "$st/bin" "$st/owner"
   enter_posture "$st"
   sleep 600 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   printf '%s' "$pid" > "$st/owner/pid"
   TZ=America/Argentina/Buenos_Aires LC_ALL=C COLUMNS=10000 ps -p "$pid" -o lstart= -o command= > "$st/owner/pid-identity"
@@ -1970,6 +1973,7 @@ unit_launcher_reclaims_proven_stale_owners() {
     st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-proven-stale.XXXXXX")
     mkdir -p "$st/state/.afk-launch.lock"
     sleep 600 &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     pid=$!
     identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid")
     printf '%s' "$pid" > "$st/state/.afk-launch.lock/pid"
