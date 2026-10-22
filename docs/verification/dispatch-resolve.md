@@ -18,6 +18,17 @@ Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the s
 OpenRouter's [Jev 1.13 model catalog entry](https://openrouter.ai/typesafe/jev-1.13) listed `typesafe/jev-1.13` at $0.042 per million input tokens and $0 per million output tokens on 2026-10-12.
 OpenRouter's [Decisions API guide](https://openrouter.ai/blog/insights/what-is-jev/) specifies `POST https://openrouter.ai/api/alpha/decisions` with the same `{model, state, questions}` Choice request and typed Choice answer.
 
+OpenAI's [Decisions API guide](https://developers.openai.com/api/docs/guides/decisions) on 2026-10-22 specified `POST /v1/decisions` with `{model, input, questions}`, where a `choice` question carries `name`, `instructions`, and `choices` of `{value, description}`, and named `gpt-6-luna` as the only supported model.
+Its illustrative choice answer is an `answers` array entry with `type`, `name`, `choice`, `probabilities` as `{value, probability}` pairs, and `confidence`, plus a `refusal` answer type; the guide marks that response as illustrative, so the mapping still needs the live capture below.
+
+## Live provider checks (pending)
+
+Each provider needs a dated section here with the real request and response captures and the same 25-brief set as the Jev run below, with a calibration note.
+Pending as of 2026-10-22, not yet run:
+
+- `systemone` against a System One-compatible host, such as a local llama.cpp server serving a Clef model: request body, response body, latency against the 10-second timeout, and the no-key header path.
+- `openai` against `https://api.openai.com/v1/decisions`: mapped request body, raw response body, the `usage` fields actually returned, and a refusal if one can be provoked.
+
 ## Live rule match against real briefs
 
 Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
@@ -112,6 +123,9 @@ It proves the key is absent from child environments, never appears on `curl` arg
 It proves the default typesafe.ai request keeps its fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It also proves OpenRouter requires an explicit provider and model, accepts the environment or `.env` key, sends the same Choice request to the Decisions API, preserves clear and ambiguous output, withholds a never-send match, and handles malformed responses and HTTP errors.
 The fake `curl` and `quota-axi` prove that the OpenRouter key stays out of their argv and environments.
+It proves that with no provider set, other providers' settings leave the original off line unchanged byte for byte, with no network or quota call.
+It proves `systemone` posts the unchanged System One request to `<base>/v1/systemone`, sends no `Authorization` header and opens no descriptor without a key, carries a key only on the descriptor, reads its settings from `.env`, exits 2 for a missing model or a missing or scheme-less base URL, withholds a never-send base URL, and returns partial responses and transport failure as `error`.
+It proves `openai` is off with one line without its key, exits 2 without a model, sends the same state as JSON text `input` with one named choice question carrying every option, maps the probability array back, withholds a never-send match inside the serialized input or the model name, and rejects refusals, missing or duplicated answers and option values, missing options or confidence, and non-JSON bodies before quota is read.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` covers bootstrap's typesafe-key validation gate and child-environment protection; [configuration](../configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns that gate's operator contract.
