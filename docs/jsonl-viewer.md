@@ -1,9 +1,10 @@
 # Task, report, and agent journal viewer
 
-`fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
+`fm-jsonl-viewer.mjs` provides a browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
+Its only write action explicitly archives one current Waiting or Processing task and routes resource cleanup through the existing task-retirement owner.
 Task discovery and business classification use the [canonical task record owner](configuration.md#task-records) through one structured fleet snapshot.
 The only content artifacts it exposes are `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
-It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
+It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and other lifecycle controls.
 
 ## Start the viewer
 
@@ -25,6 +26,8 @@ The default listener is `0.0.0.0:17847`.
 Override it with `--host` and `--port`, or `FM_JSONL_VIEWER_HOST` and `FM_JSONL_VIEWER_PORT`.
 The server provides plain HTTP without TLS termination.
 Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
+Direct access accepts archive writes only from the viewer's exact `http://host:port` origin.
+An HTTPS reverse proxy must set `FM_JSONL_VIEWER_PUBLIC_ORIGIN` to its exact public origin, including scheme and any non-default port.
 
 Open `http://SERVER:17847/` and enter the token on the dedicated login page.
 After authentication, the Viewer keeps each reading task on a distinct route and layout:
@@ -49,6 +52,8 @@ The list ordering keeps `Completed` and `Needs reconciliation` tasks together, w
 Report and brief directories, orphan execution metadata, status logs and legacy archives cannot add tasks or override their recorded business state.
 Queued and in-flight tasks show current progress, next step and recorded execution Harness/tool and Model in the sidebar.
 Selecting one shows its goal, acceptance, current progress, remaining gap and next step from the canonical title and progress fields.
+Waiting and Processing task details provide an Archive task action with one confirmation describing that automatic progress stops while code, reports and unknown remote effects remain preserved.
+The action is bound to the displayed canonical update and execution generation, requires the existing bearer credential plus a same-origin JSON request, and reports business archival separately from completed, retained or pending resource cleanup.
 Missing fields display `Not recorded`; finished and archived tasks have no active progress panel.
 Task search includes these progress and execution fields.
 Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.

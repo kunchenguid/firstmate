@@ -23,7 +23,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | [`fm-dod-lib.sh`](../bin/fm-dod-lib.sh) | Own ship/scout worker role scope, ship definitions of done, intent extraction, and the conditional validation-skill trigger |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-herdr-lab-viewer.py` | The pty engine behind `fm-herdr-lab.sh viewer`: one real foreground Herdr client on a non-zero window grid |
-| [`fm-jsonl-viewer.mjs`](jsonl-viewer.md) | Serve a token-protected, read-only browser dashboard for one home's tasks, reports, and agent journals |
+| [`fm-jsonl-viewer.mjs`](jsonl-viewer.md) | Serve a token-protected browser dashboard for one home's tasks, reports, and agent journals, with a narrow canonical task archive action |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |

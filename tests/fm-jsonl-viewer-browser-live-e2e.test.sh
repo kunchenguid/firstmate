@@ -76,7 +76,7 @@ done
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$BRIEF_ID" 'Held with task instructions' --repo viewer --kind ship >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block "$BRIEF_ID" --by upstream >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add no-document 'Held without document' --repo viewer --kind ship >/dev/null
-FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block no-document --by upstream >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" hold no-document --kind captain --reason 'Waiting for a decision' >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Dashboard completed task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
@@ -670,6 +670,28 @@ try {
   await page.locator("#source").selectOption("tasks");
   await page.getByRole("button", { name: /Held without document/ }).first().click();
   await page.getByText("No canonical task document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+
+  let releaseArchive;
+  const archiveGate = new Promise(resolve => { releaseArchive = resolve; });
+  await page.route("**/api/task-archive", async route => {
+    await archiveGate;
+    await route.continue();
+  }, { times: 1 });
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#archive-task").click();
+  if (!(await page.locator("#archive-task").isDisabled())) throw new Error("pending archive action remained enabled");
+  await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Tall dashboard task 02" }).click();
+  if (await page.locator("#archive-task").isDisabled()) throw new Error("one task's pending archive disabled another task");
+  if (!(await page.locator("#task-archive-status").isHidden())) throw new Error("one task's pending archive status leaked into another task");
+  releaseArchive();
+  await page.locator('#sessions .task-card[data-category="history"]').filter({ hasText: "Held without document" }).waitFor({ state: "visible", timeout: 5000 });
+  await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Tall dashboard task 02" }).click();
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#archive-task").click();
+  await page.locator("#task-archive-status").filter({ hasText: "Archived; no task resources were recorded." }).waitFor({ state: "visible", timeout: 5000 });
+  await page.locator('#sessions .task-card[data-category="history"]').filter({ hasText: "Tall dashboard task 02" }).waitFor({ state: "visible", timeout: 5000 });
+  if (await page.locator("#archive-task").isVisible()) throw new Error("archived task retained an active archive action");
+  await captureEvidence("viewer-dashboard-archive-waiting-processing");
 
   delayFirstReport = true;
   await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Delayed report task" }).click();

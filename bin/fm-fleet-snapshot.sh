@@ -491,7 +491,7 @@ prefetch_task_current_states() {
 
 task_json_lines() {
   local cleanup_json
-  local meta original_meta id kind executor provider task_type cloud_state remote_task_state harness model mode yolo project worktree spawn_gen backend target status_log report_path
+  local meta original_meta id kind executor provider task_type cloud_state remote_task_state harness model mode yolo project worktree spawn_gen execution_generation backend target status_log report_path
   local current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json cloud_state_json remote_state_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -512,13 +512,21 @@ task_json_lines() {
     remote_task_state=$(meta_value "$meta" remote_state)
     harness=$(meta_value "$meta" harness)
     model=$(meta_value "$meta" model)
+    execution_generation=
     [ "$model" != default ] || model=
-    if [ "$executor" = remote-agent ]; then
+    if [ "$executor" = remote-agent ] && [ "$provider" = ida ]; then
       # Read an execution fact through its local schema owner, never a provider refresh.
       # shellcheck source=bin/fm-remote-agent-lib.sh
       . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
       if fm_remote_state_load "$id"; then
         model=$(jq -r '.provider_state.model | select(type == "string")' "$REMOTE_STATE_FILE")
+        execution_generation="remote-$(jq -r '(.generation // 1) | tostring' "$REMOTE_STATE_FILE")"
+      fi
+    elif { [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; } && [ "$provider" = aime ]; then
+      # shellcheck source=bin/fm-aime-cloud-lib.sh
+      . "$SCRIPT_DIR/fm-aime-cloud-lib.sh"
+      if fm_aime_state_load "$id"; then
+        execution_generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
       fi
     fi
     mode=$(meta_value "$meta" mode)
@@ -526,6 +534,7 @@ task_json_lines() {
     project=$(meta_value "$meta" project)
     worktree=$(meta_value "$meta" worktree)
     spawn_gen=$(meta_value "$meta" spawn_gen)
+    [ -n "$execution_generation" ] || execution_generation=$spawn_gen
     if [ "$executor" = cloud-worker ]; then
       backend=cloud
       target=
@@ -628,6 +637,7 @@ task_json_lines() {
       --arg project "$project" \
       --arg worktree "$worktree" \
       --arg spawn_gen "$spawn_gen" \
+      --arg execution_generation "$execution_generation" \
       --arg backend "$backend" \
       --arg target "$target" \
       --arg pr "$pr" \
@@ -660,6 +670,7 @@ task_json_lines() {
         yolo:($yolo // ""),
         project:($project // ""),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        execution_generation:($execution_generation | if . == "" then null else . end),
         backend:$backend,
         paths:{
           meta:$meta_path,
