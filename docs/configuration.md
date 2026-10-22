@@ -678,6 +678,7 @@ Age-based retention works independently of the selected backlog backend and keep
 The optional local, gitignored `config/ci-no-checks-not-green` presence flag opts this home into reading a pull request that reported no CI checks as unverified instead of as checks green.
 By default `bin/fm-crew-state.sh` reads the no-mistakes ci log marker `no CI checks reported - still monitoring until merged or closed` as checks green, the same reading as `all CI checks passed`.
 With the flag present, that marker reads as working with a detail that no CI checks were reported, and a crew's own `checks green` report is not promoted to done while that marker is the latest one.
+A failed or cancelled run that ended at the ci monitor with that marker as its last one keeps its failed or unknown reading instead of being read as held for merge.
 It stays opt-in because a repository that declares no CI would otherwise never reach done through the ci log.
 The flag is a home-local reading preference and is not inherited by secondmate homes.
 [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh)'s `nm_ci_checks_state` owns the exact reading.
