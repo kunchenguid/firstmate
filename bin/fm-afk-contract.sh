@@ -3,8 +3,9 @@
 # captain's away words recorded verbatim, the read-back rendering, the entry
 # announcement, and the archive at return.
 #
-# FM_AFK_CONTRACT_ENTER_GUARD names a command the `enter` path runs under this
-# script's own mutation lock, just before it writes the record. The command
+# FM_AFK_CONTRACT_ENTER_GUARD names an executable the `enter` path runs under
+# this script's own mutation lock, just before it writes the record, with
+# FM_AFK_CONTRACT_ENTER_GUARD_ARG as its first argument. The executable
 # receives the resolved entry mode in FM_AFK_CONTRACT_ENTRY_MODE and refuses
 # the write by exiting non-zero. The guard exists so a check that authorises
 # the write is evaluated under the SAME lock as the write itself: a check made
@@ -578,7 +579,10 @@ fm_afk_contract_cmd_enter() {
   # non-zero.
   if [ -n "${FM_AFK_CONTRACT_ENTER_GUARD:-}" ]; then
     export FM_AFK_CONTRACT_ENTRY_MODE
-    sh -c "$FM_AFK_CONTRACT_ENTER_GUARD" || return 1
+    # The guard is an executable plus its arguments, each quoted separately:
+    # a checkout path may contain spaces, and a path pasted into shell code
+    # would be split there.
+    "$FM_AFK_CONTRACT_ENTER_GUARD" ${FM_AFK_CONTRACT_ENTER_GUARD_ARG:+"$FM_AFK_CONTRACT_ENTER_GUARD_ARG"} || return 1
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then

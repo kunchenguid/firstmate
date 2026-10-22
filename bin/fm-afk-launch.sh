@@ -438,7 +438,8 @@ fm_afk_launch_enter() {
   # mutation lock, so the check and the write cannot be overtaken between
   # them. A standing away record keeps away mode even for a quiet-mode
   # caller, and that write is an away mandate, so the guard refuses it too.
-  FM_AFK_CONTRACT_ENTER_GUARD="$FM_AFK_LAUNCH_DIR/fm-afk-launch.sh guard" \
+  FM_AFK_CONTRACT_ENTER_GUARD="$FM_AFK_LAUNCH_DIR/fm-afk-launch.sh" \
+    FM_AFK_CONTRACT_ENTER_GUARD_ARG=guard \
     "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }
