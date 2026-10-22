@@ -1102,6 +1102,8 @@ $FM_PR_GITHUB_REQUIRED_ERROR
 EOF
   fi
   producers='[]'
+  # Keep only distinct required (name, app id) pairs: github_required_checks_missing
+  # takes producers as one --argjson, which Linux MAX_ARG_STRLEN (128 KiB) caps.
   if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
     if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
       || [ -z "$runs" ] \
