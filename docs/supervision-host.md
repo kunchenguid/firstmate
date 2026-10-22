@@ -50,6 +50,7 @@ Until they land, their current behavior stays as described in their own owners.
 | The arm owners | Each primary's existing arm owner | Runs the host for a home that runs it and delivers a handed-back wake to main; see [Arm owners](#arm-owners). |
 | The engine | `bin/fm-supervision-engine-lib.sh` | Owns the home gate, including the default on Claude and the opt-out, the verified-engine list, and one bounded engine turn, including the reap of engine tool processes that outlive it. |
 | Row eligibility and the offer rule | `bin/fm-branch-dispatch.mjs` | The command entry to `.pi/extensions/lib/fm-branch-dispatch.ts`, so the host and the Pi extension compute branch-claimable rows, their task scope, and whether the branch may take a close (`branchOfferForWake`) from one owner; it also renders the wake message with the same away-posture tail, or the dialog mirror at its head. |
+| The repeat bound and judge hook | `bin/fm-supervision-gate.sh` | Decides whether a wake the engine would take needs a turn at all; see [The repeat bound](#the-repeat-bound). |
 | The grant and the drain | `bin/fm-wake-grant.sh` | Publishes the branch's rows bound to the host's own process; [watcher-continuity.md](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor drain and acknowledgement the engine runs. |
 | The prompt | `bin/fm-branch-prompt.sh` | Emits the same byte-stable prompt the Pi branch runs; each wake names its host's report surface. |
 | The report surface | `bin/fm-branch-report.sh` | The command twin of the Pi branch's `fm_branch_report` tool, with the same task scoping; see [The report surface](#the-report-surface). |
@@ -163,13 +164,14 @@ On each actionable close the engine takes, the host runs these steps:
 
 1. It starts and verifies the successor watcher cycle and confirms the handling handoff, so the fleet stays supervised while the engine works.
 2. It computes the branch-claimable rows in the turn's posture and publishes the grant.
-3. It runs one bounded engine turn with the branch prompt and the wake message carrying, attended, the dialog mirror and, away, the record's read-back.
+3. It asks the [repeat bound](#the-repeat-bound) whether the turn is needed, and on a skip records the outcome and consumes the rows itself.
+   Otherwise it runs one bounded engine turn with the branch prompt and the wake message carrying, attended, the dialog mirror and, away, the record's read-back.
    The engine drains, handles, reports through `bin/fm-branch-report.sh`, and acknowledges, exactly as the Pi branch does.
 4. It releases the branch's leases and grant, whether or not the wake was handled.
 5. It parks on the successor only for a handled wake.
    A main-only pass-through is not a park: the host exits after leaving that cycle running, as [Attended](#attended) describes.
 
-The host counts the wake handled only when all three hold:
+The host counts an engine turn's wake handled only when all three hold:
 
 - The turn exited cleanly.
 - The turn recorded at least one report.
@@ -196,6 +198,24 @@ Each visible outcome recorded after the return is available to main in the retur
 So a visible outcome remains available to main even when the handoff is lost.
 Silent outcomes remain in the store but are neither queued nor relayed as notes.
 One example is a Cursor park superseded by the return turn's own end, which stops its host as the engine turn finishes.
+
+## The repeat bound
+
+An idle worker's pane often changes only cosmetically, such as a clock or a token counter, and each change re-wakes the host with a plain stale wake.
+Without a bound each one costs an engine turn that usually concludes "unchanged, no action", and such repeats are most of a host's silent outcomes.
+
+So before an engine turn the host asks `bin/fm-supervision-gate.sh` whether the turn is needed.
+It skips only an unchanged repeat, under 60 minutes old, of a situation the engine itself already called a silent no-op, and at most 5 skips in a row before a real turn; the gate's header owns the exact rules.
+A signal, check, or heartbeat wake is never skipped, so a status append, a decision, a blocker, a finished result, and a merge always reach a turn.
+
+A skip is recorded and acknowledged exactly as a turn would be.
+The host, as the branch actor of the turn it opened, records one silent routine outcome through `bin/fm-branch-report.sh` naming the outcome it repeats, then consumes exactly the granted rows with `bin/fm-wake-drain.sh --consume-granted`, which presents nothing, so no other task's unread status is marked seen.
+Any failure along that path runs the engine turn instead.
+A skip neither counts toward nor clears [the broken-session latch](#the-broken-session-latch), and it leaves the dialog-mirror cursor and the engine conversation as they were, so the next real turn still receives the captain's words.
+The host ledger records each skip as a `skipped` line, and the next real turn sees the skip's outcome as the task's previous outcome.
+Each skip's outcome carries its place in the run of skips, so the count lives in the outcome store with nothing beside it.
+
+An optional [pre-turn judge](configuration.md#pre-turn-judge-configsupervision-judge) may veto a skip, or in shadow mode only record what it would have decided.
 
 ## Captain outcomes
 
@@ -409,6 +429,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | Test | What it covers |
 |---|---|
 | `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
+| `tests/fm-supervision-gate.test.sh` | The repeat bound's rules, its cap, and the judge hook's on, shadow, failure, and timeout behavior, against real queue rows and a real outcome store. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |

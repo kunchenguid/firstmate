@@ -7,6 +7,11 @@
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
+# --consume-granted, for the supervision branch actor only, runs the drain and
+# acknowledgement a branch turn runs over its granted rows while presenting
+# nothing: the supervision host uses it when its repeat bound skips a turn
+# (bin/fm-supervision-gate.sh), so no other task's unread status is marked seen.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # Every scratch file this script mints (.main-eligible-rows.tmp.*,
@@ -50,6 +55,7 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 BRANCH_OUTCOMES_RC=0
+CONSUME_GRANTED=false
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -228,7 +234,12 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  --consume-granted)
+    [ "$#" -eq 1 ] || { echo "wake drain: unexpected consume arguments" >&2; exit 2; }
+    [ "$ACTOR" = branch ] || { echo "wake drain: --consume-granted consumes a supervision branch grant only" >&2; exit 2; }
+    CONSUME_GRANTED=true
+    ;;
+  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION | --consume-granted]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -970,6 +981,9 @@ if [ -n "$ACK_THROUGH" ]; then
   exit 0
 fi
 
+if [ ! -s "$FM_WAKE_QUEUE" ] && [ "$CONSUME_GRANTED" = true ]; then
+  exit 0
+fi
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
@@ -1058,7 +1072,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   ''|*[!0-9]*) ;;
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
-if [ -n "$RAW_ROWS" ]; then
+if [ -n "$RAW_ROWS" ] && [ "$CONSUME_GRANTED" = false ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
@@ -1069,6 +1083,11 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+if [ "$CONSUME_GRANTED" = true ]; then
+  # The drain and acknowledgement a branch turn runs, with nothing presented:
+  # no row, status section, or outcome section is printed or marked read.
+  exec "$SCRIPT_DIR/fm-wake-drain.sh" --ack-through "$ACK_THROUGH" --recovery-generation "${RECOVERY_MARKER_TOKEN##*:}"
+fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 

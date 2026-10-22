@@ -117,6 +117,12 @@
 #     remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh latest --task <id>
+#     Print the task's newest record, read or not, with an added
+#     "statusUnchanged" boolean: true only when the record carries status
+#     provenance equal to the task's status log captured now, the same capture
+#     append records. Validates the full store under the lock. Exit 0 with no
+#     output when the task has no record.
 #   fm-branch-outcome.sh lookup --seqs <n,...>
 #     Print the requested records in sequence order only when every sequence
 #     exists; validate the full store while holding its lock.
@@ -163,7 +169,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | latest --task <id> | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -714,6 +720,28 @@ case "$CMD" in
     fi
     if [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  latest)
+    [ "$#" -eq 2 ] && [ "$1" = --task ] || usage
+    TASK=$2
+    outcome_index_path "$TASK" >/dev/null || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    capture_status_position "$TASK"
+    if [ -s "$STORE" ] && ! jq -cs --arg task "$TASK" --argjson endpoint "$CAPTURED_STATUS_ENDPOINT" \
+      --arg ident "$CAPTURED_STATUS_IDENT" '
+      map(select(.task == $task)) | last // empty
+      | . + {statusUnchanged: (has("statusEndpoint") and .statusEndpoint == $endpoint and .statusIdent == $ident)}
+    ' "$STORE"; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing read because the outcome store could not be projected" >&2
+      exit 1
     fi
     fm_lock_release "$LOCK"
     ;;

@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host) and its [pre-turn judge](#pre-turn-judge-configsupervision-judge), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -337,6 +337,20 @@ The opt-out is inherited into secondmate homes: a primary that opts out also opt
 The primary-authoritative propagation contract, including removal of a mate's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 `config/supervision-host` is local to each home and not inherited, because each home's engine and model are its own choice.
 While the home runs the host, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
+
+### Pre-turn judge (config/supervision-judge)
+
+The optional local, gitignored `config/supervision-judge` names an executable the host consults before it skips an engine turn under its [repeat bound](supervision-host.md#the-repeat-bound).
+It holds one line `<mode> <executable>`, where the executable is an absolute path or a path relative to the home, and blank and `#` lines are ignored:
+
+- `on` skips the turn only when the bound would skip it and the judge answers `skip`.
+- `shadow` asks the judge and records its answer in `state/.supervision-host.log`, but never skips, so its answers can be compared with what the engine then decides.
+
+The judge reads one JSON object on stdin describing the wake and must print `skip` or `turn` as its first line within 10 seconds.
+Any other answer, a nonzero exit, a timeout, or a file that names no runnable judge means the engine turn runs.
+The judge is never consulted for a wake the bound already sends to a turn, so it can only remove skips, never add them.
+`bin/fm-supervision-gate.sh` owns the input fields and the decision order.
+The file is read at every wake, and it is local to each home and not inherited by secondmate homes.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

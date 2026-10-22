@@ -69,7 +69,11 @@
 # successor watcher cycle and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
 # the turn's posture with the dispatch owner, publishes that grant
-# (bin/fm-wake-grant.sh), runs one bounded headless engine turn
+# (bin/fm-wake-grant.sh), asks the repeat bound (bin/fm-supervision-gate.sh)
+# whether the turn is needed at all - a skip records the gate's silent outcome
+# as this turn's report, consumes exactly the granted rows
+# (bin/fm-wake-drain.sh --consume-granted), and counts the wake handled with
+# no engine turn - and otherwise runs one bounded headless engine turn
 # (bin/fm-supervision-engine-lib.sh) with the generated branch prompt
 # (bin/fm-branch-prompt.sh), the dialog-mirror feed (bin/fm-host-mirror.sh)
 # at the head of an attended wake and the away tail instead when away,
@@ -833,6 +837,38 @@ health_record() {  # <engine-error 0|1> <reports>
   health_save
 }
 
+# The repeat bound and its judge hook (bin/fm-supervision-gate.sh owns the
+# decision). True only when the gate skipped this turn and the host, as the
+# branch actor of the turn it opened, recorded the gate's silent outcome and
+# then consumed exactly the granted rows; on any other result the engine turn
+# runs as before. A skip neither counts toward nor clears the latch, and
+# leaves the dialog-mirror cursor and engine conversation untouched.
+skip_by_repeat_bound() {  # <turn> <rows> <task> <mirror> <first-reason-line>
+  local turn=$1 rows=$2 task=$3 mirror=$4 first=$5 gate decision judge why skips summary unacked
+  set -- decide --task "$task" --posture "$TURN_POSTURE" --rows "$rows"
+  [ "$TURN_POSTURE" != attended ] || set -- "$@" --mirror-file "$mirror"
+  gate=$("$SCRIPT_DIR/fm-supervision-gate.sh" "$@" 2>/dev/null) || return 1
+  decision=$(printf '%s\n' "$gate" | sed -n 's/^decision=//p')
+  judge=$(printf '%s\n' "$gate" | sed -n 's/^judge=//p')
+  why=$(printf '%s\n' "$gate" | sed -n 's/^why=//p')
+  skips=$(printf '%s\n' "$gate" | sed -n 's/^skips=//p')
+  summary=$(printf '%s\n' "$gate" | sed -n 's/^summary=//p')
+  if [ "$decision" != skip ]; then
+    [ "${judge:-none}" = none ] || log_line "gate	turn	task=$task	judge=$judge	$why	$first"
+    return 1
+  fi
+  FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN="$turn" "$SCRIPT_DIR/fm-branch-report.sh" \
+    --task "$task" --verdict routine --silent true --summary "$summary" >/dev/null 2>&1 || { : > "$RECEIPTS"; return 1; }
+  # shellcheck disable=SC2086 # rows is a space-separated list of sequence numbers.
+  if ! FM_SUPERVISION_ACTOR=branch "$SCRIPT_DIR/fm-wake-drain.sh" --consume-granted >/dev/null 2>&1 \
+    || ! unacked=$(fm_wake_rows_queued $rows) || [ -n "$unacked" ]; then
+    : > "$RECEIPTS"
+    return 1
+  fi
+  log_line "skipped	turn=$turn	posture=$TURN_POSTURE	task=$task	skips=$((skips + 1))	judge=$judge	$why	$first"
+  return 0
+}
+
 # Handle one close on the engine, in the posture the record gives when the
 # turn starts (TURN_POSTURE). Returns 0 when the wake is handled (or held
 # nothing the branch may claim), 2 with ATTENDED_WHY set when the turn starts
@@ -923,6 +959,13 @@ handle_wake() {  # <reason-lines>
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
     HANDLE_WHY="the dialog mirror could not be read"
     return 1
+  fi
+  if [ "${unscoped:-0}" != 1 ] && [ -n "$tasks" ] && [ "$tasks" = "${tasks%% *}" ] \
+    && skip_by_repeat_bound "$turn" "$rows" "$tasks" "$mirror" "$first"; then
+    [ -z "$readback" ] || rm -f "$readback"
+    rm -f "$TURN_FILE" "$mirror"
+    "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
+    return 0
   fi
   set -- --report "the bin/fm-branch-report.sh command"
   if [ "$TURN_POSTURE" = away ]; then

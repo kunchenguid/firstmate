@@ -38,7 +38,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   hold-lease  the same, but leave the lease held (the host must release it)
 #   return      handle, but the captain returns (the record is archived) before
 #               the turn ends
-#   return-silent the same, but the routine outcome is silent
+#   silent      the same as handle, but the routine outcome is silent
+#   return-silent the same, but the captain returns before the turn ends
 #   return-fail the same, then exit nonzero without a result
 #   return-fail-silent the same, but the routine outcome is silent
 #   return-many handle, then seed more than 1,000 same-turn receipts after an
@@ -92,7 +93,7 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|silent|captain|captain-close-before-return|held|captain-held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -105,7 +106,7 @@ case "$mode" in
     else
       report_args=(--task "$task" --verdict "$verdict" --summary "stub handled $task")
       case "$mode" in
-        return-silent|return-fail-silent)
+        silent|return-silent|return-fail-silent)
           report_args=(--task "$task" --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true)
           ;;
       esac
@@ -2121,6 +2122,47 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   pass "host: an away wake is handled on the engine through the branch contract and never reaches main"
 }
 
+# The repeat bound (bin/fm-supervision-gate.sh): an idle worker's pane changing
+# cosmetically re-wakes the host with a plain stale wake, and once the engine
+# has called the situation a silent no-op, an unchanged repeat is recorded and
+# acknowledged by the host with no engine turn, while a status append still
+# reaches the engine.
+test_unchanged_stale_repeat_is_skipped_without_an_engine_turn() {
+  local home tmux_case last
+  home=$(make_home repeat-bound attended)
+  tmux_case=$(make_case repeat-bound-tmux)
+  cp "$tmux_case/fakebin/tmux" "$home/fakebin/tmux"
+  printf 'project=demo\nwindow=test:fm-demo\nharness=claude\n' > "$home/state/demo.meta"
+  printf 'working [at=1]: waiting at its prompt\n' > "$home/state/demo.status"
+  prime_status_seen "$home/state" "$home/state/demo.status"
+  printf 'idle prompt, clock 10:00' > "$home/pane"
+  echo silent > "$home/stub-mode"
+  export FM_FAKE_TMUX_WINDOW=test:fm-demo FM_FAKE_TMUX_CAPTURE="$home/pane"
+  start_host "$home"
+  wait_until 300 handled_at_least "$home" 1 \
+    || fail "repeat: the first stale wake was not handled on the engine: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_re '^(arg=)?FIRSTMATE SUPERVISION WAKE: stale: test:fm-demo' "$home/engine-call.1" "repeat: the first turn must carry the stale wake"
+
+  printf 'idle prompt, clock 10:04' > "$home/pane"
+  wait_until 300 grep -qs '	skipped	' "$home/state/.supervision-host.log" \
+    || fail "repeat: the unchanged repeat was not skipped: $(cat "$home/state/.supervision-host.log")"
+  [ "$(engine_calls "$home")" -eq 1 ] || fail "repeat: a skipped wake still ran an engine turn"
+  last=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1)
+  [ "$(printf '%s\n' "$last" | jq -r '[.seq, .task, .verdict, .silent] | @tsv')" = "$(printf '2\tdemo\troutine\ttrue')" ] \
+    || fail "repeat: the skip must record one silent routine outcome for the task: $last"
+  assert_contains "$(printf '%s\n' "$last" | jq -r .summary)" "unchanged since outcome 1" "repeat: the skip's outcome must name what it repeats"
+  assert_no_grep 'stale: test:fm-demo' "$home/state/.wake-queue" "repeat: the skipped wake was not acknowledged"
+  [ ! -s "$home/host.rc" ] || fail "repeat: a skipped wake reached main: $(cat "$home/host.out")"
+  watcher_live "$home" || fail "repeat: the host is not parked on a live successor after a skip"
+
+  append_status "$home" 'moved past the prompt'
+  wait_until 300 handled_at_least "$home" 2 \
+    || fail "repeat: the status append did not reach the engine: $(cat "$home/state/.supervision-host.log")"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "repeat: the status append was not handled by an engine turn"
+  unset FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE
+  pass "host: an unchanged stale repeat of a silent outcome is recorded and acknowledged without an engine turn, and a status append still takes one"
+}
+
 test_away_turn_without_a_report_hands_the_wake_to_main() {
   local home token
   home=$(make_home away-noreport away)
@@ -3016,6 +3058,7 @@ test_dialog_bearing_files_are_owner_only
 test_undelivered_dialog_is_fed_again_on_the_next_turn
 test_attended_wake_with_an_unreadable_mirror_reaches_main
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main
+test_unchanged_stale_repeat_is_skipped_without_an_engine_turn
 test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
 test_silent_outcomes_are_not_relayed_when_the_captain_returns
