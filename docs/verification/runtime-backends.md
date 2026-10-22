@@ -2221,7 +2221,7 @@ $ rex --autostart=false api call server.status | jq .api_revision
 5
 ```
 
-Every live check ran in scratch sessions created for it, labeled `fm-test-*`, addressed by explicit session id, and killed by exact id afterwards; no other session was touched.
+This historical live evidence used scratch sessions labeled `fm-test-*` on the personal Rex server. Current live tests instead start a private server per run; the personal-server results below are retained as historical evidence, not as the current test procedure.
 
 Current active CLI findings:
 
@@ -2346,7 +2346,9 @@ ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): the same idle screen read cursorl
 ok - real rex: no state-changing call left the test sessions and every other session is byte-identical
 ```
 
-The real-server suites skip unless a Rex server is already reachable without autostart; refresh this record from them after a Rex upgrade, and from the live composer guard after any tool upgrade.
+The real-Rex suites skip only when the Rex CLI or `jq` is unavailable.
+Each starts a private server with a temporary Unix socket, state directory, and empty config, disables autostart, and removes the server and data on exit; server startup failures fail the test rather than falling back.
+Refresh this record from the private-server suites after a Rex upgrade, and from the live composer guard after any tool upgrade.
 
 ## Codex App host tools
 

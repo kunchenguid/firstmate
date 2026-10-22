@@ -48,6 +48,7 @@ printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
 GLOBAL_CLEANUP() {
+  declare -F rex_test_cleanup >/dev/null 2>&1 && rex_test_cleanup
   rm -f "$SLEEPER" 2>/dev/null || true
   rm -rf "$OFF_CONFIG" 2>/dev/null || true
   local s
@@ -1722,19 +1723,14 @@ e2e_tmux() {
 }
 
 # ---------------------------------------------------------------------------
-# E2E rex: topology invariant on the REAL personal Rex server. Runs only when a
-# server is already reachable (it never starts one), works only in sessions it
-# creates (labeled fm-test-*), and removes them by exact id.
+# E2E rex: topology invariant on this run's private Rex server. The shared
+# safety helper gives it a temporary socket, state directory, and config.
 # ---------------------------------------------------------------------------
 e2e_rex() {
-  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (rex e2e)"; return 0; }
-  local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid label
-  (
-    unset REX_SESSION REX_BLOCK
-    . "$ROOT/bin/fm-backend.sh"
-    fm_backend_source rex && fm_backend_rex_bin >/dev/null 2>&1 \
-      && fm_backend_rex_read api call server.status >/dev/null 2>&1
-  ) || { echo "skip: no reachable Rex server (rex e2e never starts one)"; return 0; }
+  local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid label rc
+  # shellcheck source=tests/rex-test-safety.sh
+  . "$ROOT/tests/rex-test-safety.sh"
+  rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && { echo "skip: Rex CLI or jq unavailable (rex e2e)"; return 0; }; fail "rex e2e: private Rex server setup failed"; return 1; }
   rex_e2e() { (unset REX_SESSION REX_BLOCK; . "$ROOT/bin/fm-backend.sh"; fm_backend_source rex; "$@"); }
   rex_e2e_shape() {  # <session-id>: window and block ids, or empty when gone
     rex_e2e fm_backend_rex_session_view "$1" | jq -c '[.windows[] | {window_id, blocks: [.layers[].blocks[].block_id]}]'
@@ -1746,10 +1742,9 @@ e2e_rex() {
   }
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-rex-home.XXXXXX")
   label="fm-test-afk-daemon-$$"
-  out=$(rex_e2e fm_backend_rex_cli new "fm-test-afk-cap-$$" --cwd "$home_tmp" --json) \
-    || { fail "rex e2e: could not create the captain test session"; rm -rf "$home_tmp"; return 0; }
-  cap_sid=$(printf '%s' "$out" | jq -r .session_id)
-  cap_bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0]')
+  out=$(rex_test_new_session afk-cap) \
+    || { fail "rex e2e: could not create the captain test session"; rm -rf "$home_tmp"; rex_test_cleanup; return 1; }
+  read -r cap_sid cap_bid <<<"$out"
   cap_target="${cap_sid#session:}:${cap_bid#block:}"
   enter_posture "$home_tmp" || fail "rex e2e: could not enter fixture posture"
   before=$(rex_e2e_shape "$cap_sid")
@@ -1761,6 +1756,7 @@ e2e_rex() {
 
   during=$(rex_e2e_shape "$cap_sid")
   IFS=$'\t' read -r rec_backend rec_target rec_sid <"$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true
+  [ -z "$rec_sid" ] || printf '%s\n' "$rec_sid" >>"$REX_TEST_WORK/allowed"
   if [ "$before" = "$during" ]; then pass "rex e2e: captain session unchanged after start (no tab or split)"; else fail "rex e2e: captain session changed ($before -> $during)"; fi
   if [ "$rec_backend" = rex ] && [ -n "$rec_sid" ] && [ "$rec_sid" != "$cap_sid" ] \
     && [ "$(rex_e2e fm_backend_rex_session_view "$rec_sid" | jq -r .label)" = "$label" ] \
@@ -1785,6 +1781,8 @@ e2e_rex() {
 
   [ -z "$rec_sid" ] || rex_e2e_kill_test_session "$rec_sid"
   rex_e2e_kill_test_session "$cap_sid"
+  rex_test_assert_isolated
+  rex_test_cleanup
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 

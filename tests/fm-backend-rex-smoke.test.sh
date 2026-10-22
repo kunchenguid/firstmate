@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-backend-rex-smoke.test.sh - real Rex smoke test for the Rex
 # session-provider adapter (bin/backends/rex.sh). Every other suite fakes the
-# CLI; this one talks to the REAL personal Rex server, isolated by
-# tests/rex-test-safety.sh: its own fm-test- session only, a forwarding guard
-# that refuses any state-changing call outside it, and a byte-identical
-# tripwire over every other session. No harness is launched: only a plain
-# shell runs in the test's blocks, so no update prompt or install can be
-# triggered.
+# CLI; this one uses the private server provided by
+# tests/rex-test-safety.sh. No harness is launched: only a plain shell runs
+# in the test's blocks, so no update prompt or install can be triggered.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +17,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 # shellcheck source=tests/rex-test-safety.sh
 . "$ROOT/tests/rex-test-safety.sh"
-rex_test_prepare || exit 0
+rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 trap rex_test_cleanup EXIT
 WORK=$REX_TEST_WORK
 mkdir -p "$WORK/sub"
@@ -114,3 +111,15 @@ fm_backend_rex_create_task_in_session "session:00000000-0000-7000-8000-000000000
 pass "real rex: relaunch reclaim opens a tab in the exact session, and a gone session returns 2 creating nothing"
 
 rex_test_assert_isolated
+
+# --- server stop, passive recovery, and reclaim after session loss -------------
+rex_test_stop_server
+[ "$(fm_backend_rex_agent_state "$T")" = unreadable ] \
+  || fail "a passive read after stopping the private server must be unreadable, not autostart it"
+pass "real rex: passive reads do not start a stopped server"
+rex_test_start_server || fail "the private Rex server did not recover after restart"
+[ "$(fm_backend_rex_endpoint_absence_recheck "$T" "$ENDPOINT")" = missing ] \
+  || fail "a session lost at server stop must be proven missing after the private server recovers"
+fm_backend_rex_create_task_in_session "$SMOKE_SID" fm-test-after-restart "$WORK" >/dev/null 2>&1
+[ "$?" = 2 ] || fail "reclaim in a session lost at server stop must return 2"
+pass "real rex: after server restart, the recorded session is gone and reclaim creates nothing"
