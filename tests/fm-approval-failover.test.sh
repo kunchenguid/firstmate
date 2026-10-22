@@ -53,7 +53,7 @@ for harness in codex claude; do
   home="$TMP_ROOT/$harness"
   mkdir -p "$home/state" "$home/config"
   if [ "$harness" = codex ]; then setting=codex-approval-mode; fallback=approve-for-me; else setting=claude-permission-mode; fallback=auto; fi
-  printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\n' "$harness" > "$home/state/task.meta"
+  printf 'harness=%s\napproval_mode=bypass\n' "$harness" > "$home/state/task.meta"
   printf 'branch\t0\t1\n' > "$home/state/.lease-task"
   printf 'blocked: existing task event\n' > "$home/state/task.status"
   cp "$home/state/.lease-task" "$home/lease.before"
