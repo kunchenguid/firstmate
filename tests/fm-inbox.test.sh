@@ -236,6 +236,22 @@ assert_equals "0" "$(count_wakes "$home")" \
   "an acknowledged note never gets a repair wake"
 pass "repair and replay do not wake firstmate for an already-acknowledged note"
 
+# A note which was successfully announced before acknowledgement must retain
+# both facts on replay: an announcement marker is not pending-state truth.
+home=$(make_home announced-acked)
+announced=$(run_inbox "$home" note --request-id announced-acked --json "acknowledge me")
+announced_id=$(printf '%s' "$announced" | json_get id)
+run_inbox "$home" drain --ack "$announced_id" >/dev/null
+announced_replay=$(run_inbox "$home" note --request-id announced-acked --json "acknowledge me")
+assert_equals "True" "$(printf '%s' "$announced_replay" | json_get acknowledged)" \
+  "announced notes remain acknowledged on request replay"
+assert_equals "True" "$(printf '%s' "$announced_replay" | json_get announced)" \
+  "acknowledgement preserves historical announcement evidence"
+announced_repair=$(run_inbox "$home" announce --json "$announced_id")
+assert_equals "True" "$(printf '%s' "$announced_repair" | json_get acknowledged)" \
+  "announce receipts report the handled fact too"
+pass "announced and acknowledged are independent receipt facts"
+
 # --- bounded receipts JSON, omission disclosure, reply cursor ---------------
 
 json_len() {  # <key>

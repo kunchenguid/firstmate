@@ -1345,7 +1345,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
-  for script in fm-procevent.test.sh fm-quota-choose.test.sh fm-zz-unmapped-fixture.test.sh; do
+  for script in fm-procevent.test.sh fm-quota-choose.test.sh fm-zz-unmapped-fixture.test.sh fm-workforce.test.sh; do
     printf '#!/usr/bin/env bash\necho "ok - %s fixture"\n' "$script" >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -1361,27 +1361,29 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   grep -Fq 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/family.out" \
     || fail "the admitted residual-family run did not report both scripts green: $(cat "$tmp/family.out")"
 
-  set +e
-  (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
-    tests/fm-procevent.test.sh tests/fm-zz-unmapped-fixture.test.sh) \
-    >"$tmp/unmapped.out" 2>"$tmp/unmapped.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 2 ] \
-    || fail "an unclassified new test must not be admitted under --jobs, got $rc: $(cat "$tmp/unmapped.out")"
-  grep -Fq 'fm-zz-unmapped-fixture.test.sh' "$tmp/unmapped.err" \
-    || fail "the refusal did not name the unclassified script: $(cat "$tmp/unmapped.err")"
+  for script in fm-zz-unmapped-fixture.test.sh fm-workforce.test.sh; do
+    set +e
+    (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
+      tests/fm-procevent.test.sh "tests/$script") \
+      >"$tmp/unmapped.out" 2>"$tmp/unmapped.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] \
+      || fail "an unclassified new test must not be admitted under --jobs, got $rc: $(cat "$tmp/unmapped.out")"
+    grep -Fq "$script" "$tmp/unmapped.err" \
+      || fail "the refusal did not name the unclassified script: $(cat "$tmp/unmapped.err")"
 
-  # It is only concurrency that is refused: the same script still runs serially.
-  set +e
-  (cd "$repo" && bin/fm-test-run.sh tests/fm-zz-unmapped-fixture.test.sh) \
-    >"$tmp/serial.out" 2>"$tmp/serial.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] \
-    || fail "an unclassified test must still run serially, got $rc: $(cat "$tmp/serial.err")"
-  grep -Eq '^FM_TEST_BEGIN .+ family=unclassified expected_gate_skip=none$' "$tmp/serial.out" \
-    || fail "the unmapped fixture did not land in the catch-all family: $(cat "$tmp/serial.out")"
+    # It is only concurrency that is refused: the same script still runs serially.
+    set +e
+    (cd "$repo" && bin/fm-test-run.sh "tests/$script") \
+      >"$tmp/serial.out" 2>"$tmp/serial.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] \
+      || fail "an unclassified test must still run serially, got $rc: $(cat "$tmp/serial.err")"
+    grep -Eq '^FM_TEST_BEGIN .+ family=unclassified expected_gate_skip=none$' "$tmp/serial.out" \
+      || fail "the unmapped fixture did not land in the catch-all family: $(cat "$tmp/serial.out")"
+  done
   rm -rf "$tmp"
   pass "an unclassified new test stays serial while the proven residual family runs concurrently"
 }

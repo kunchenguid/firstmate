@@ -1,0 +1,203 @@
+{
+  "concurrency": 4,
+  "finished_at": "2026-10-03T18:42:44Z",
+  "fm_test_run_jobs_enabled": false,
+  "kind": "isolation-proof",
+  "pool": "standalone",
+  "production_sharding_enabled": false,
+  "run_id": "fm-isolation-1791052668975-2230388",
+  "scripts": [
+    {
+      "duration_ms": 24575,
+      "exit": 0,
+      "path": "tests/fm-branch-supervision.test.sh",
+      "worker": 17
+    },
+    {
+      "duration_ms": 34450,
+      "exit": 0,
+      "path": "tests/fm-busy-adapter-wiring.test.sh",
+      "worker": 12
+    },
+    {
+      "duration_ms": 3800,
+      "exit": 0,
+      "path": "tests/fm-busy-state.test.sh",
+      "worker": 22
+    },
+    {
+      "duration_ms": 27224,
+      "exit": 0,
+      "path": "tests/fm-classify-corr-token.test.sh",
+      "worker": 16
+    },
+    {
+      "duration_ms": 195,
+      "exit": 1,
+      "path": "tests/fm-claude-stop-autoarm.test.sh",
+      "worker": 5
+    },
+    {
+      "duration_ms": 377,
+      "exit": 1,
+      "path": "tests/fm-cursor-harness.test.sh",
+      "worker": 13
+    },
+    {
+      "duration_ms": 10838,
+      "exit": 0,
+      "path": "tests/fm-dispatch-resolve.test.sh",
+      "worker": 19
+    },
+    {
+      "duration_ms": 3837,
+      "exit": 1,
+      "path": "tests/fm-extension-binding.test.sh",
+      "worker": 18
+    },
+    {
+      "duration_ms": 60,
+      "exit": 0,
+      "path": "tests/fm-gitignore-config.test.sh",
+      "worker": 31
+    },
+    {
+      "duration_ms": 86,
+      "exit": 1,
+      "path": "tests/fm-live-gate.test.sh",
+      "worker": 21
+    },
+    {
+      "duration_ms": 319,
+      "exit": 0,
+      "path": "tests/fm-no-mistakes-required.test.sh",
+      "worker": 28
+    },
+    {
+      "duration_ms": 709,
+      "exit": 0,
+      "path": "tests/fm-peek-remote.test.sh",
+      "worker": 26
+    },
+    {
+      "duration_ms": 191,
+      "exit": 1,
+      "path": "tests/fm-pending-reply.test.sh",
+      "worker": 10
+    },
+    {
+      "duration_ms": 98472,
+      "exit": 0,
+      "path": "tests/fm-pi-branch-extension.test.sh",
+      "worker": 3
+    },
+    {
+      "duration_ms": 2812,
+      "exit": 0,
+      "path": "tests/fm-procevent-quota.test.sh",
+      "worker": 24
+    },
+    {
+      "duration_ms": 642,
+      "exit": 1,
+      "path": "tests/fm-procevent-when.test.sh",
+      "worker": 15
+    },
+    {
+      "duration_ms": 265,
+      "exit": 1,
+      "path": "tests/fm-procevent.test.sh",
+      "worker": 2
+    },
+    {
+      "duration_ms": 125,
+      "exit": 0,
+      "path": "tests/fm-project-origin.test.sh",
+      "worker": 30
+    },
+    {
+      "duration_ms": 295523,
+      "exit": 1,
+      "path": "tests/fm-public-followup.test.sh",
+      "worker": 1
+    },
+    {
+      "duration_ms": 2879,
+      "exit": 0,
+      "path": "tests/fm-quota-choose.test.sh",
+      "worker": 23
+    },
+    {
+      "duration_ms": 130,
+      "exit": 0,
+      "path": "tests/fm-remote-entrypoint.test.sh",
+      "worker": 29
+    },
+    {
+      "duration_ms": 55547,
+      "exit": 1,
+      "path": "tests/fm-remote-secondmate-parent-binding.test.sh",
+      "worker": 9
+    },
+    {
+      "duration_ms": 1062,
+      "exit": 1,
+      "path": "tests/fm-send-remote-delivery.test.sh",
+      "worker": 11
+    },
+    {
+      "duration_ms": 76312,
+      "exit": 0,
+      "path": "tests/fm-spawn-pool-base-freshen.test.sh",
+      "worker": 4
+    },
+    {
+      "duration_ms": 962,
+      "exit": 0,
+      "path": "tests/fm-test-fixture-cleanup.test.sh",
+      "worker": 27
+    },
+    {
+      "duration_ms": 1983,
+      "exit": 0,
+      "path": "tests/fm-test-fixtures.test.sh",
+      "worker": 25
+    },
+    {
+      "duration_ms": 29293,
+      "exit": 0,
+      "path": "tests/fm-voice-relay.test.sh",
+      "worker": 14
+    },
+    {
+      "duration_ms": 49553,
+      "exit": 0,
+      "path": "tests/fm-wake-drain-open-decisions-cursor.test.sh",
+      "worker": 6
+    },
+    {
+      "duration_ms": 8079,
+      "exit": 0,
+      "path": "tests/fm-wake-drain-open-decisions.test.sh",
+      "worker": 20
+    },
+    {
+      "duration_ms": 29476,
+      "exit": 0,
+      "path": "tests/fm-wake-drain-outcome-backstop.test.sh",
+      "worker": 7
+    },
+    {
+      "duration_ms": 85859,
+      "exit": 0,
+      "path": "tests/fm-workforce.test.sh",
+      "worker": 8
+    }
+  ],
+  "started_at": "2026-10-03T18:37:48Z",
+  "summary": {
+    "duration_ms": 295599,
+    "failed": 10,
+    "total": 31
+  }
+}
