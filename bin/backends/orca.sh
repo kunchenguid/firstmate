@@ -344,3 +344,12 @@ fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || return 1
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
+
+# fm_backend_orca_kill_confirmed: close one recorded task terminal and report
+# the close's own answer. Only the capped-session release decision uses this,
+# so ordinary teardown keeps fm_backend_orca_kill's best-effort contract
+# unchanged for every other task.
+fm_backend_orca_kill_confirmed() {  # <terminal-id>
+  fm_backend_orca_tool_check || return 1
+  fm_backend_orca_run_json orca terminal close --terminal "$1" --json >/dev/null
+}

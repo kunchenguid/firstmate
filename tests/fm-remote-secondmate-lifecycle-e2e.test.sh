@@ -48,7 +48,7 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup EXIT
 
@@ -1310,7 +1310,9 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+# Allow the watcher's 120-second spawn bound plus probing, wake publication,
+# and EXIT cleanup; a 30-second test deadline races a successful remote launch.
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 9000 ]; do
   sleep 0.02
   watch_wait=$((watch_wait + 1))
 done

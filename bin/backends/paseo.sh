@@ -606,6 +606,39 @@ fm_backend_paseo_kill() { # <target> [unused] [expected-label]
   fm_backend_paseo_retire_workspace "$FM_BACKEND_PASEO_WORKSPACE"
 }
 
+# fm_backend_paseo_terminal_absent: prove that the named terminal is gone
+# from the live terminal inventory. The inventory must be readable and must
+# be an array whose every entry is a different terminal; a read that could
+# not run is not proof of absence.
+fm_backend_paseo_terminal_absent() { # <terminal_id>
+  local inventory
+  inventory=$(fm_backend_paseo_cli terminal ls --all --json 2>/dev/null) || return 1
+  printf '%s' "$inventory" | jq -e --arg id "$1" '
+    type == "array" and all(.[]; (.id | type == "string"))
+    and all(.[]; .id != $id)
+  ' >/dev/null 2>&1
+}
+
+# fm_backend_paseo_kill_confirmed: close one recorded task terminal and prove
+# it is gone. Only the capped-session release decision uses this, so ordinary
+# teardown keeps fm_backend_paseo_kill's best-effort contract unchanged for
+# every other task.
+fm_backend_paseo_kill_confirmed() { # <target> [unused] [expected-label]
+  local expected_label=${3:-} tid
+  if [ -n "$expected_label" ]; then
+    if ! fm_backend_paseo_target_ready "$1" "$expected_label"; then
+      fm_backend_paseo_parse_target "$1" || return 1
+      fm_backend_paseo_terminal_absent "$FM_BACKEND_PASEO_TERMINAL"
+      return $?
+    fi
+  else
+    fm_backend_paseo_parse_target "$1" || return 1
+  fi
+  tid=$FM_BACKEND_PASEO_TERMINAL
+  fm_backend_paseo_kill "$1" "${2:-}" "$expected_label" || return 1
+  fm_backend_paseo_terminal_absent "$tid"
+}
+
 # fm_backend_paseo_retire_workspace: after a task tab closes, archive the
 # per-project shared workspace Firstmate created once it holds no tab and no
 # Paseo agent works in its folder, then delete its project when that folder

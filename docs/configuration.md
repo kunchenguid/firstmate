@@ -91,6 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Per-home live-Sol-session registry rows under `state/sol-sessions.tsv`, owned by `bin/fm-sol-cap-lib.sh` and documented with the ceiling below.
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -1438,6 +1439,92 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 **Inheritance**
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Sol session ceiling (config/sol-cap)
+
+The ceiling is **off unless the captain declares it**.
+`config/sol-cap` is a local, gitignored file in the dispatching home that names both the ceiling and the models it covers.
+Without that file there is no ceiling, no reservation, and no change to any dispatch: a home that never opted in behaves exactly as it did before this guard existed.
+A malformed file refuses loudly, naming the file and the problem, rather than guessing a ceiling the captain never wrote.
+A declaration the guard cannot read leaves it unable to know its own scope, so the refusal covers every dispatch through the guard, not only a capped model.
+
+```sh
+# config/sol-cap
+# max is required: the largest concurrent count the captain allows.
+# ceiling is optional: it may lower max, never raise it.
+# models is optional: a pipe-delimited list of exact model ids.
+# model-pattern is optional: one extended regular expression.
+max=4
+ceiling=2
+models=gpt-6.1-sol|gpt-6-sol
+model-pattern=^gpt-[0-9.]+-sol$
+```
+
+Every line is a `key=value` pair, and an explanation belongs on its own comment line: an inline comment becomes part of the value, so `max=4  # the plan limit` is not a valid `max`.
+
+| Key | Requirement |
+| --- | --- |
+| `max` | Required. A positive integer: the largest number of concurrent capped sessions the captain allows. |
+| `ceiling` | Optional. An integer from 1 through `max`; the effective cap. Absent, it is `max`. A value above `max` is refused. |
+| `models` | Optional. A pipe-delimited list of the exact model ids the ceiling covers. |
+| `model-pattern` | Optional. One extended regular expression matching the model ids the ceiling covers. |
+
+At least one of `models` or `model-pattern` is required, because a declaration that names no model covers nothing.
+A model covered by neither is never capped, never reserved, and never counted.
+Blank lines and `#` comments are ignored; every other line is a `key=value` pair, and an unknown key, a repeated key, a non-integer count, a `ceiling` above `max`, or an unusable pattern is refused by name.
+A capped session is a worker whose dispatched model is one the declaration covers.
+A fresh launch with `--model default` has no explicit model pin; remote endpoint reuse follows the reported-model reconciliation below.
+`bin/fm-sol-cap-lib.sh` is the single owner of the guard's mechanics and CLI, `bin/fm-spawn.sh` owns the hook point (after the spawn's harness/model axis resolves, before any endpoint, worktree, or record exists), and this section is the single owner of the operator contract.
+
+**What counts and where it lives**
+
+- The count registry is one TSV file per Firstmate home on this machine: `<state>/sol-sessions.tsv`, one row per capped session keyed by task id; the [`fm-sol-cap-lib.sh` header](../bin/fm-sol-cap-lib.sh) owns the row format.
+- The guard counts live rows across every local Firstmate home's state directory on this machine (the same enumeration `bin/fm-project-capacity-lib.sh` counts through), so local homes share one ceiling and remote homes are never walked because their workers run on another machine; a remote secondmate is counted in the dispatching home.
+- Each home's own declaration decides which of its sessions are capped, so a home that declared no ceiling owns no capped occupancy and is never adopted into another home's count; a home that drops its declaration keeps its stored rows as evidence, but those rows stop counting.
+- A registered stale row does not count: its recorded positive pid is no longer alive; age never releases a live worker.
+- A fresh spawn claims its row atomically under the local root home's `state/.sol-cap.lock`, with the spawning process's pid until launch delivery begins.
+- Before delivery, the reservation becomes conservative (pid 0), so an uncertain delivery or later spawn error cannot free a running worker's slot.
+- Local launch commands transfer that reservation to their own process before starting the worker; exiting the worker releases occupancy even while its interactive pane remains open.
+- Remote or uncertain deliveries keep pid 0 and require reconciliation before their slot can be released; they never expire by age.
+- A retry requesting an explicitly capped model refuses while its existing worker is live or delivery is uncertain; requesting an uncapped or default model alone does not release that occupancy.
+- A successful remote launch reconciles occupancy from the endpoint-reported model under the admission lock, while retaining its per-task spawn lock: an existing live or uncertain capped claim keeps its reconciliation semantics, and a confirmed uncapped route releases stale capped occupancy.
+- The task record of that remote launch carries the endpoint-reported model only when the captain's declaration covers it; otherwise it keeps the requested model, with an unpinned request recording an empty field. Reusing a live endpoint that runs an uncovered model therefore never records a model the declaration does not own, and the admission lock is still taken whenever the reported model is covered or the task already owns capped occupancy.
+- Failure to acquire the admission lock or publish the route leaves existing occupancy intact; if reconciliation fails after publication, the confirmed route record remains for the next admission to reconcile.
+- Confirmed endpoint cleanup and remote retirement release the owned capped occupancy; failed or uncertain closes retain it.
+- Local relaunch and secondmate recovery reconcile an owned claim under the lifecycle locks only after proving the endpoint dead or absent; uncertain state retains the claim.
+- Remote recovery probes the configured route under the spawn locks and retires its conservative claim only for a successful dead or missing verdict, including retries after delivery failed before parent metadata publication.
+- Remote runtime switches reuse only a live reservation or reserve a new capped slot in the parent before delivery, retaining existing occupancy until a confirmed uncapped replacement; publishing that replacement's model and releasing the claim share the admission lock so adoption cannot restore the old capped claim between them.
+- On the remote host, the nested `state/parent-route` registry shares its operational home's count and root lock with that secondmate's crew.
+- Before admission, owned capped workers preserved across an update are adopted from task metadata under the shared lock when they have no registry row; live or unverified workers count, while proven-stopped workers do not.
+- Adopted claims use pid -2 and are rechecked before counting when their spawn lifecycle lock is available; a proven stop becomes a non-counting stop marker, while uncertain workers retain occupancy.
+- The initial adoption honors the same lifecycle boundary: a replacement in flight owns its task's spawn lock, so the stop evidence of the incarnation it is replacing is not recreated while that replacement runs.
+- Delivery reservations with pid 0 are not rechecked by unrelated admissions, because a queued launch may still execute after its spawning process exits.
+- Dead-PID rows remain while their task metadata exists, preserving stop evidence against repeated adoption.
+- A replacement that reserves no slot marks the prior incarnation's row superseded (pid -3) when that row holds no live occupancy, so a row naming a session that has exited can never stand in for the newer incarnation of the same task id; a genuine endpoint reuse keeps its row, because the same session continues, and a row whose session is still live keeps its slot, because the dispatch has not displaced that session yet. A superseded row claims no slot until the next adoption resolves it: into the live worker its metadata names when that worker is capped, and out of the registry when the current incarnation claims no slot, so a replacement that never completes leaves no capacity behind.
+- Explicit confirmed-stop release records pid -1 while the capped task's metadata remains, even when no registry row or file existed; that row holds no occupancy, prevents re-adoption of the stopped worker, and is replaced by a new admitted incarnation.
+- Launches that own no capped occupancy bypass the admission lock, including retries whose only registry row is a non-counting stop marker or a dead positive PID; these records remain stop evidence until a new admitted incarnation or pruning replaces them.
+- Passing spawns prune stopped rows once their metadata is absent.
+- A malformed registry row (bad shape) refuses every capped dispatch with the row named rather than silently undercounting; staleness is release, but a broken row is a disruption, not a free slot.
+
+**Refusal, not queueing**
+
+A dispatch at the ceiling is refused before anything is created, with one actionable error naming the active sessions and their ages, in line with the dispatch contract that refuses rather than queues a wait with no bounded end.
+The refusal message names `config/sol-cap`, and the CLI prints the declaration and the resolved ceiling directly for inspection:
+
+```sh
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh status   $FM_HOME/config   # the declaration, or "inert"
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh models   $FM_HOME/config   # the declared exact model ids
+FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh ceiling  $FM_HOME/config   # the effective ceiling, or "inert"
+```
+
+**One model, one capacity path**
+
+This guard is the narrow, per-home form of a fleet-wide capacity rule.
+When a fleet-wide seat-pool declaration is also in use, a model that both declarations cover is counted once: the fleet-wide ledger is authoritative for it, and this guard defers to it instead of counting the same session a second time.
+A model declared in both is a configuration error and is refused, not counted twice.
+The cross-check itself belongs to the fleet-wide seat accounting, because only that mechanism knows which pool owns a model.
+
+**Boundary**: the no-mistakes daemon's internal gate/review agent spawns decode their own agent surface in the daemon's global config (`agent:`, `agent_config:`, `agent_path_override` in the operating no-mistakes config.yaml), its binary lives outside this repository, and a task may not administer it, so those spawns stay outside this count until whoever owns that daemon instance wires a hook to conform to this contract.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 

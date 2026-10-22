@@ -498,13 +498,15 @@ test_send_literal_and_keys() {
 # --- cleanup and absence proof ----------------------------------------------
 
 test_kill_closes_and_retires_per_home_session() {
-  local dir out sid bid1 bid2
+  local dir out sid bid1 bid2 close
   dir=$(new_case kill)
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid1 <<<"$out"
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp'); read -r _ _ bid2 <<<"$out"
-  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of a live block must succeed"
+  rex_env "$dir" "fm_backend_kill_confirmed rex '${sid#session:}:${bid1#block:}'" || fail "confirmed kill of a live block must succeed"
   assert_equals 1 "$(state_json "$dir" '.sessions[0].windows | length')" "kill must close only its own tab"
-  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of an already-gone block must succeed"
+  for close in fm_backend_kill fm_backend_kill_confirmed; do
+    rex_env "$dir" "$close rex '${sid#session:}:${bid1#block:}'" || fail "kill of an already-gone block must succeed"
+  done
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid2#block:}'" || fail "kill of the last block must succeed"
   assert_equals 0 "$(state_json "$dir" '.sessions | length')" "the emptied per-home session must be retired"
   pass "fm_backend_kill rex: closes exactly its tab, treats a gone block as done, retires the emptied per-home session"
@@ -525,13 +527,17 @@ test_kill_never_retires_a_foreign_session() {
 }
 
 test_kill_refuses_without_proof() {
-  local dir out sid bid
+  local dir out sid bid close
   dir=$(new_case kill-noop)
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
   touch "$dir/fake/close-noop"
-  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "a close that leaves the block alive must fail"
+  for close in fm_backend_kill fm_backend_kill_confirmed; do
+    rex_env "$dir" "$close rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "a close that leaves the block alive must fail"
+  done
   rm -f "$dir/fake/close-noop"; touch "$dir/fake/unreachable"
-  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "an unreachable server must fail the kill"
+  for close in fm_backend_kill fm_backend_kill_confirmed; do
+    rex_env "$dir" "$close rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "an unreachable server must fail the kill"
+  done
   pass "fm_backend_kill rex: refuses success unless the block is proven gone"
 }
 

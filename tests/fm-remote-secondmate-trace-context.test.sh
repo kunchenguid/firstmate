@@ -26,6 +26,7 @@ PARENT="$TMP_ROOT/parent"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 SECOND_HOME="$TMP_ROOT/remote-home-2"
+MODEL_HOME="$TMP_ROOT/remote-home-model"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
@@ -258,6 +259,58 @@ fm_trace_context_valid "$SECOND_TP" \
 [ "$(remote_injected_traceparent)" = "$SECOND_TP" ] \
   || fail "the second remote route's pane must receive its own recorded carrier"
 pass "boundary: each remote-routed second mate roots its own trace and never adopts the spawning environment's carrier"
+
+# --- reported models are used only for capped occupancy ---------------------
+# A reused endpoint can report a different model from the latest request.
+# Without a Sol declaration, the parent task record keeps the requested model.
+# With a declaration covering the endpoint's reported model, both the task
+# record and occupancy registry retain that reported identity.
+FM_SECONDMATE_CHARTER='Own the model-accounting build Mac.' \
+  FM_SECONDMATE_SCOPE='remote model accounting' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" model-probe remote-mac "$REMOTE_ROOT" "$MODEL_HOME" --no-projects >/dev/null \
+  || fail "remote model-accounting seed failed"
+assert_absent "$PARENT/config/sol-cap" "model-accounting fixture unexpectedly has a Sol declaration"
+remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-6.1-sol >/dev/null 2>&1 \
+  || fail "initial remote model-accounting spawn failed"
+remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-5.6-luna >/dev/null 2>&1 \
+  || fail "reused remote model-accounting spawn failed"
+assert_equals gpt-6.1-sol "$(sed -n 's/^model=//p' "$MODEL_HOME/state/parent-route/model-probe.meta")" \
+  "the reused remote endpoint did not keep reporting its initial model"
+assert_equals gpt-5.6-luna "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.meta")" \
+  "an undeclared home recorded the endpoint's reported model instead of the requested model"
+printf 'max=1\nmodels=gpt-6.1-sol\n' > "$PARENT/config/sol-cap"
+remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-5.6-luna >/dev/null 2>&1 \
+  || fail "capped reused remote model-accounting spawn failed"
+assert_equals gpt-6.1-sol "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.meta")" \
+  "a declaration covering the endpoint's report did not retain its actual model"
+assert_equals gpt-6.1-sol "$(awk -F '\t' '$1 == "model-probe" {print $2; exit}' "$PARENT/state/sol-sessions.tsv")" \
+  "the Sol occupancy registry did not reconcile the endpoint's reported model"
+printf 'max=1\nmodels=gpt-5.6-luna\n' > "$PARENT/config/sol-cap"
+# A retry that requests an explicitly capped model refuses while the task's
+# previous claim is still live or still an uncertain delivery (the retry
+# contract docs/configuration.md owns), so this case starts from what a
+# confirmed teardown leaves behind: the prior row's stop evidence (pid -1),
+# which holds no occupancy and cannot be replaced without proof. Admission
+# then reserves this delivery's slot, and publication reconciles it against
+# the endpoint's uncovered report.
+REGISTRY=$PARENT/state/sol-sessions.tsv
+if ! awk -F '\t' -v OFS='\t' '$1 == "model-probe" {$4 = -1} {print}' \
+  "$REGISTRY" > "$REGISTRY.tmp"; then
+  rm -f -- "$REGISTRY.tmp"
+  fail "the model-accounting fixture could not record the prior delivery as confirmed stopped"
+fi
+mv -- "$REGISTRY.tmp" "$REGISTRY" \
+  || fail "the model-accounting fixture could not record the prior delivery as confirmed stopped"
+remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-5.6-luna >/dev/null 2>&1 \
+  || fail "owned occupancy with an uncovered endpoint model failed"
+assert_equals gpt-5.6-luna "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.meta")" \
+  "owned occupancy overwrote the requested model with an uncovered endpoint model"
+assert_equals gpt-5.6-luna "$(awk -F '\t' '$1 == "model-probe" {print $2}' "$PARENT/state/sol-sessions.tsv")" \
+  "the admission registry and published task record disagree"
+assert_equals -1 "$(awk -F '\t' '$1 == "model-probe" {print $4}' "$PARENT/state/sol-sessions.tsv")" \
+  "the uncovered endpoint model did not release the admission reservation"
+rm -f -- "$PARENT/config/sol-cap" "$PARENT/state/sol-sessions.tsv"
+pass "remote task records keep the requested model unless a Sol declaration covers the endpoint's reported model"
 
 # --- the enablement flag is one allowlist, shared by both remote ends --------
 # config/trace-context reaches the remote home only because the sender and the

@@ -71,6 +71,10 @@ IFS=$'\t' read -r cmd action id harness model effort <<EOF
 $command_fields
 EOF
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
+if [ "$action" = state ]; then
+  printf 'probe diagnostic\nalive\n'
+  exit 0
+fi
 [ "$action" = relaunch ] || exit 94
 case "$FM_FAKE_RELAUNCH_MODE" in
   refuse)
@@ -190,3 +194,63 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
 echo "ALL TESTS PASSED"
+
+reset_meta
+printf 'max=4\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+for i in 1 2 3 4; do printf 'live-%s\tgpt-6.1-sol\t1\t%s\n' "$i" "$$"; done > "$HOME_DIR/state/sol-sessions.tsv"
+printf 'ios\tgpt-6.1-sol\t1\t99999999\n' >> "$HOME_DIR/state/sol-sessions.tsv"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 1 "$RC" "a runtime switch bypassed the full parent ceiling"
+awk -F'\t' '$1 != "live-4"' "$HOME_DIR/state/sol-sessions.tsv" > "$TMP/registry"
+mv "$TMP/registry" "$HOME_DIR/state/sol-sessions.tsv"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 0 "$RC" "an admitted Sol runtime switch failed: $OUT"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "remote switch did not preserve occupancy"
+OUT=$(FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim fifth ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+expect_code 1 "$RC" "stale-row replacement left the switched worker uncounted"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 0 "$RC" "an existing live reservation could not be reused: $OUT"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "reused occupancy was not preserved before delivery"
+OUT=$(FM_FAKE_RELAUNCH_MODE=refuse run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 1 "$RC" "refused remote replacement unexpectedly succeeded"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "failed runtime switch released occupancy"
+REAL_MV=$(command -v mv)
+export REAL_MV
+cat > "$FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [[ "$last" = */ios.meta ]]; then
+  [ "${FM_TEST_PUBLISH_FAIL:-0}" = 0 ] || exit 1
+  if [ -n "${FM_TEST_PUBLISH_PAUSE:-}" ]; then
+    touch "$FM_TEST_PUBLISH_PAUSE.ready"
+    while [ ! -e "$FM_TEST_PUBLISH_PAUSE.release" ]; do sleep 0.02; done
+  fi
+fi
+exec "$REAL_MV" "$@"
+SH
+chmod +x "$FAKEBIN/mv"
+OUT=$(PATH="$FAKEBIN:$PATH" FM_TEST_PUBLISH_FAIL=1 run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 1 "$RC" "failed metadata publication unexpectedly succeeded"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "publication failure released occupancy"
+PATH="$FAKEBIN:$PATH" FM_TEST_PUBLISH_PAUSE="$TMP/publication" run_relaunch ios claude claude-opus-5-5 medium > "$TMP/switch.out" &
+switch_pid=$!
+for ((i=0; i<200; i++)); do
+  [ ! -e "$TMP/publication.ready" ] || break
+  sleep 0.02
+done
+[ -e "$TMP/publication.ready" ] || fail "model publication did not reach the barrier"
+(
+  FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim concurrent ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state" > "$TMP/admission.out"
+  printf '%s\n' "$?" > "$TMP/admission.done"
+) &
+admission_pid=$!
+sleep 0.1
+[ ! -e "$TMP/admission.done" ] || fail "admission crossed the model-publication boundary"
+touch "$TMP/publication.release"
+wait "$switch_pid"; RC=$?
+OUT=$(cat "$TMP/switch.out")
+expect_code 0 "$RC" "reverse runtime switch failed: $OUT"
+wait "$admission_pid"
+assert_equals 0 "$(cat "$TMP/admission.done")" "post-publication admission restored stale Sol occupancy"
+assert_equals '' "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "confirmed non-Sol replacement retained occupancy"
+pass "remote runtime switches enforce parent admission and retain uncertain occupancy"
