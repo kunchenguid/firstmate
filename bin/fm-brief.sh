@@ -124,7 +124,7 @@
 # scaffold never emits a substitution a file-write tool would copy through.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
-# handled/, with an early scripted read receipt before acting (record, doorbell,
+# handled/, with an early read receipt (script or file-tool fallback) before acting (record, doorbell,
 # and ladder owned by bin/fm-task-inbox-lib.sh).
 # Ship tasks include a project-memory section bounding crewmate edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
@@ -463,7 +463,9 @@ Firstmate steers you through durable message files in $INBOX_DIR.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\` and read the complete contents of each record (including its final line even when it is not newline-terminated) in numeric order.
 Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
 Immediately after reading each message, before acting, record that you read it: \`$(shell_quote "$FM_ROOT/bin/fm-task-inbox-read.sh") $INBOX_DIR/NNN.msg\`.
-Do not record a read before actually reading the message; if the command fails, report the failure rather than assuming it was acknowledged.
+Do not record a read before actually reading the message.
+If the command fails or cannot run, use your file tools to create $INBOX_DIR/.read/ if needed, then create the empty receipt $INBOX_DIR/.read/NNN.msg for the message you just read.
+Report a read-acknowledgement failure only if the file-tool fallback also fails; never assume a failed write acknowledged the message.
 Then act on the message and acknowledge completed handling by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
 The read receipt stops unread-instruction alarms while you work; it does not mean the work is complete or replace the handled/ move.
 An empty or absent inbox needs no action.

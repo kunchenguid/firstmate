@@ -26,7 +26,10 @@
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here acknowledges completed handling
 #   <task>.inbox/.read/NNN.msg empty durable read receipt, written only after reading
-#                              by bin/fm-task-inbox-read.sh <record-path>; the
+#                              by bin/fm-task-inbox-read.sh <record-path>, or with
+#                              file tools if that command fails or cannot run
+#                              (create .read/ if needed, then the empty receipt);
+#                              report failure only if both methods fail; the
 #                              message stays in the root until handling completes
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
