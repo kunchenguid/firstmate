@@ -59,8 +59,12 @@
 # executable lives in the updated repo; left alone, the watch's next fire
 # would be wrongly refused. After each home's own update (primary and every
 # local secondmate), this script best-effort runs that home's own
-# fm-procevent-when.sh rebind-all to republish those bindings against the new
-# bytes; a failure there is swallowed rather than failing the update.
+# fm-procevent-when.sh rebind-all. For updated or already-current primary and
+# local homes, it also best-effort runs fm-pr-check.sh migrate-all; remote
+# sync runs that command in its own converged home. The PR migration re-arms
+# only authenticated watches without rewriting task metadata; a failure does
+# not fail the update. The updatefirstmate skill owns the one-time rollout
+# procedure when an older updater installs this migration-aware release.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -102,6 +106,12 @@ if [ "$FF_STATUS" = "updated" ]; then
   # always where this very script file happens to live (FM_ROOT_OVERRIDE, as
   # this test suite uses to point fm-update.sh at a fixture checkout).
   FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-procevent-when.sh" rebind-all || true
+fi
+if [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; then
+  if [ -x "$FM_ROOT/bin/fm-pr-check.sh" ]; then
+    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      "$FM_ROOT/bin/fm-pr-check.sh" migrate-all || true
+  fi
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -156,8 +166,8 @@ claim_settled_secondmate() {  # <id>
   fi
 }
 
-# bin/fm-ff-lib.sh calls this for each local home it left AT the base with a live
-# endpoint - status "updated" or "current" alike. A skipped home never gets here.
+# bin/fm-ff-lib.sh calls this for each local home it left AT the base, with or
+# without a live endpoint. A skipped home never gets here.
 fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
   # Same bin/-changed-out-from-under-a-watch problem as the primary home
   # above, for a local secondmate's own worktree; "current" means bin/ did
@@ -168,7 +178,11 @@ fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
   if [ "${4:-}" = "updated" ] && [ -x "$2/bin/fm-procevent-when.sh" ]; then
     FM_HOME="$2" FM_ROOT_OVERRIDE="$2" "$2/bin/fm-procevent-when.sh" rebind-all || true
   fi
-  claim_settled_secondmate "$1"
+  if [ -x "$2/bin/fm-pr-check.sh" ]; then
+    FM_HOME="$2" FM_ROOT_OVERRIDE="$2" FM_STATE_OVERRIDE="$2/state" \
+      "$2/bin/fm-pr-check.sh" migrate-all || true
+  fi
+  [ -z "$3" ] || claim_settled_secondmate "$1"
 }
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
@@ -191,6 +205,11 @@ if [ -f "$SECONDMATES_MD" ]; then
     home=$SECONDMATE_REGISTRY_HOME
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
       if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
+        while IFS= read -r remote_line; do
+          case "$remote_line" in
+            'PR watch refused:'*) printf 'remote secondmate %s on %s: %s\n' "$id" "$SECONDMATE_REGISTRY_HOST" "$remote_line" >&2 ;;
+          esac
+        done <<< "$remote_out"
         remote_result=$(printf '%s\n' "$remote_out" | tail -1)
         case "$remote_result" in
           synced:*)

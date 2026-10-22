@@ -393,8 +393,20 @@ cmd_sync() {
     # decide whether the running agent must reload; an older parent ignores the
     # suffix, and an older HOST omits it, which a parent must read as unknown
     # rather than as "nothing changed".
-    updated) printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" ;;
-    current) printf 'current: %s\n' "$commit" ;;
+    updated|current)
+      # The remote home's own state is outside the host code root updated by
+      # fm-update.sh. Re-arm its authenticated PR polls after its checkout has
+      # converged, before the parseable result line the parent reads last.
+      if [ -x "$TARGET_HOME/bin/fm-pr-check.sh" ]; then
+        FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$TARGET_HOME" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
+          "$TARGET_HOME/bin/fm-pr-check.sh" migrate-all || true
+      fi
+      if [ "$FF_STATUS" = updated ]; then
+        printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')"
+      else
+        printf 'current: %s\n' "$commit"
+      fi
+      ;;
     *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
   esac
 }

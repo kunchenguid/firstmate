@@ -920,6 +920,12 @@ new_remote_world() {
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
   printf 'echo a\n' > "$w/main/bin/tool.sh"
   printf 's1\n' > "$w/main/.agents/skills/note.md"
+  cat > "$w/main/bin/fm-pr-check.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = migrate-all ] || exit 2
+[ -z "${FM_TEST_PR_MIGRATE_LOG:-}" ] || printf '%s\n' "$FM_HOME" >> "$FM_TEST_PR_MIGRATE_LOG"
+SH
+  chmod +x "$w/main/bin/fm-pr-check.sh"
   git -C "$w/main" add -A
   git -C "$w/main" commit -qm c1
   git init -q --bare "$w/forge.git"
@@ -1121,6 +1127,24 @@ test_remote_sync_uses_present_objects() {
   [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote sync refused an already-present target: $REMOTE_SYNC_OUT"
   [ "$(head_of "$w/sm")" = "$c2" ] || fail "remote home did not advance on already-present objects"
   pass "R4 an already-present target advances the home with no fetch available"
+}
+
+test_remote_sync_migrates_its_own_pr_watches() {
+  local w c1 c2
+  w=$(new_remote_world remote-pr-migration)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  FM_TEST_PR_MIGRATE_LOG="$w/migrations" remote_sync "$w" sm "$c2"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote PR migration sync failed: $REMOTE_SYNC_OUT"
+  grep -qxF "$w/sm" "$w/migrations" || fail "remote home PR watches were not migrated after advance"
+  : > "$w/migrations"
+  FM_TEST_PR_MIGRATE_LOG="$w/migrations" remote_sync "$w" sm "$c2"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "current remote PR migration sync failed: $REMOTE_SYNC_OUT"
+  grep -qxF "$w/sm" "$w/migrations" || fail "current remote home did not retry PR migration"
+  pass "remote sync invokes guarded PR migration in its own home after convergence"
 }
 
 # --- R5: an unreachable target skips with an actionable reason -----------------
@@ -1452,6 +1476,7 @@ test_remote_sync_reports_the_changed_instruction_surface
 test_remote_sync_imports_from_host_copy
 test_remote_sync_imports_from_origin
 test_remote_sync_uses_present_objects
+test_remote_sync_migrates_its_own_pr_watches
 test_remote_sync_skips_unimportable_target
 test_remote_sync_skips_dirty_diverged_and_feature_branch
 test_remote_sync_without_target_follows_host_copy
