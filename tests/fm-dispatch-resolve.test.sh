@@ -4,10 +4,12 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
-# network, and the absent-key case proves the tool makes no call
-# at all.
+# A fake quota-axi serves the selected schema-5 fixture. A real-curl fixture
+# uses disposable loopback servers to prove proxy bypass; no case contacts
+# an external service, and the absent-key case proves no call at all.
 set -u
+
+unset TYPESAFE_API_KEY DISPATCH_SYSTEMONE_PROVIDER LAYA_API_KEY LAYA_SYSTEMONE_BASE_URL 2>/dev/null || true
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -110,7 +112,7 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] || [ -n "${LAYA_API_KEY+x}" ] || [ -n "${LAYA_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +140,7 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] || [ -n "${LAYA_API_KEY+x}" ] || [ -n "${LAYA_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -163,7 +165,8 @@ reset_log() {
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" DISPATCH_SYSTEMONE_PROVIDER=typesafe \
+    LAYA_API_KEY='' LAYA_SYSTEMONE_BASE_URL='' "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -173,7 +176,8 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" DISPATCH_SYSTEMONE_PROVIDER=typesafe \
+    TYPESAFE_API_KEY="$KEY" LAYA_API_KEY='' LAYA_SYSTEMONE_BASE_URL='' "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -182,6 +186,134 @@ run_without_curl() {
 
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
+
+# Separate provider helper preserves unset versus explicitly empty inputs.
+run_provider() {
+  local __exit=$1 __out=$2 __err=$3 _out _code
+  shift 3
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
+# --- Laya provider selection, origin boundary and environment precedence ---
+write_response "$RESPONSE" rule_4 0.9
+printf '%s\n' 'DISPATCH_SYSTEMONE_PROVIDER=laya' 'LAYA_SYSTEMONE_BASE_URL=http://127.0.0.1:8000/' 'LAYA_API_KEY=home-key' > "$HOME_DIR/.env"
+reset_log
+run_provider code out err "$BRIEF"
+expect_code 0 "$code" "home Laya resolves"
+assert_contains "$out" '  status: clear' "home Laya enables resolution without TypeSafe"
+assert_contains "$(cat "$LOG/argv")" 'http://127.0.0.1:8000/v1/systemone' "Laya strips trailing slash"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n30' "Laya selects thirty-second timeout"
+assert_equals 'Authorization: Bearer home-key' "$(cat "$LOG/header")" "home Laya key reaches header"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "Laya key stays out of children"
+reset_log
+DISPATCH_SYSTEMONE_PROVIDER='' run_provider code out err "$BRIEF"
+assert_equals '' "$out" "empty provider selects default off behavior"
+assert_absent "$LOG/argv" "empty provider never sends to home Laya"
+reset_log
+LAYA_SYSTEMONE_BASE_URL='' run_provider code out err "$BRIEF"
+assert_contains "$out" '  status: error' "empty URL overrides home URL"
+assert_absent "$LOG/argv" "empty URL sends nothing"
+reset_log
+LAYA_API_KEY='' run_provider code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "explicit empty Laya key permits unauthenticated server"
+assert_not_contains "$(cat "$LOG/argv")" '@/dev/fd/3' "empty key does not send home authentication"
+reset_log
+LAYA_API_KEY=env-key LAYA_SYSTEMONE_BASE_URL=https://laya.example:8443 run_provider code out err "$BRIEF"
+assert_equals 'Authorization: Bearer env-key' "$(cat "$LOG/header")" "environment Laya key wins"
+assert_not_contains "$(cat "$LOG/argv")" 'env-key' "Laya key never reaches argv"
+assert_contains "$(cat "$LOG/argv")" 'https://laya.example:8443/v1/systemone' "environment URL wins"
+for origin in http://localhost:8000 http://127.0.0.1:8000 'http://[::1]:8000' https://localhost:8443 https://127.0.0.1:8443 'https://[::1]:8443'; do
+  reset_log
+  LAYA_SYSTEMONE_BASE_URL=$origin run_provider code out err "$BRIEF"
+  assert_contains "$out" '  status: clear' "loopback origin accepted: $origin"
+  assert_contains "$(cat "$LOG/argv")" "$origin/v1/systemone" "loopback URL selected: $origin"
+done
+for origin in http://example.com https://user:pass@example.com https://example.com/path 'https://example.com?x=1' 'https://example.com/#x'; do
+  reset_log
+  LAYA_SYSTEMONE_BASE_URL=$origin run_provider code out err "$BRIEF"
+  assert_contains "$out" 'invalid LAYA_SYSTEMONE_BASE_URL' "unsafe origin rejected: $origin"
+  assert_absent "$LOG/argv" "unsafe origin sends nothing: $origin"
+done
+for bad_key in $'a\nb' $'a\rb'; do
+  reset_log
+  LAYA_API_KEY=$bad_key run_provider code out err "$BRIEF"
+  assert_contains "$out" 'provider API key contains a line break' "Laya rejects header injection"
+  assert_absent "$LOG/argv" "invalid key sends nothing"
+done
+printf '%s\n' 'TYPESAFE_API_KEY=home-typesafe-key' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY='' run_provider code out err "$BRIEF"
+assert_equals '' "$out" "empty TypeSafe key disables home key"
+assert_absent "$LOG/argv" "empty TypeSafe key sends nothing"
+rm -f "$HOME_DIR/.env"
+pass "Laya activation, origin validation, optional auth and empty overrides"
+
+# Real curl must deliver local requests directly even with hostile proxy settings.
+REAL_CURL_BIN="$TMP_ROOT/real-curl"
+mkdir -p "$REAL_CURL_BIN"
+ln -s "$(command -v curl)" "$REAL_CURL_BIN/curl"
+if ! python3 - "$TOOL" "$HOME_DIR" "$BRIEF" "$RESPONSE" "$REAL_CURL_BIN:$FAKEBIN:$BASE_PATH" <<'PYHTTP'
+import http.server
+import json
+import os
+import subprocess
+import sys
+import threading
+
+tool, home, brief, response, path = sys.argv[1:]
+requests = []
+proxy_requests = []
+class Endpoint(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        requests.append((self.path, self.headers.get("Authorization"),
+                         json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+        self.send_response(200)
+        self.end_headers()
+        with open(response, "rb") as stream:
+            self.wfile.write(stream.read())
+    def log_message(self, *args):
+        pass
+class Proxy(Endpoint):
+    def do_POST(self):
+        proxy_requests.append(self.path)
+        self.send_response(502)
+        self.end_headers()
+
+endpoint = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+for server in (endpoint, proxy):
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+try:
+    for host in ("127.0.0.1", "localhost"):
+        for key in ("", "local-test-key"):
+            env = dict(os.environ, PATH=path, FM_HOME=home,
+                       DISPATCH_SYSTEMONE_PROVIDER="laya", LAYA_API_KEY=key,
+                       LAYA_SYSTEMONE_BASE_URL=f"http://{host}:{endpoint.server_port}")
+            for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+                env[name] = f"http://127.0.0.1:{proxy.server_port}"
+            env["no_proxy"] = env["NO_PROXY"] = ""
+            before = len(requests)
+            result = subprocess.run([tool, brief], env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == 0 and "status: clear" in result.stdout, result
+            assert len(requests) == before + 1
+            assert not proxy_requests
+            route, auth, body = requests[-1]
+            assert route == "/v1/systemone"
+            assert auth == (f"Bearer {key}" if key else None)
+            assert body["state"]["task"]["brief"]
+finally:
+    for server in (endpoint, proxy):
+        server.shutdown()
+        server.server_close()
+PYHTTP
+then
+  fail "real curl loopback proxy bypass"
+fi
+pass "real curl bypasses proxies for authenticated and unauthenticated local Laya"
 
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
