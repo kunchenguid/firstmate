@@ -4193,17 +4193,11 @@ test_origin_is_never_its_own_inventory_entry() {
 # refuses a task held for a different origin. A hold recorded before that
 # record existed, or without --origin, still verifies and is flagged.
 test_complete_refuses_an_entry_held_for_another_origin() {
-  local home id other o out
+  local home id other out
   home=$(make_home origin-mismatch)
   id=sample-first-review
   other=sample-second-review
-  for o in "$id" "$other"; do
-    mkdir -p "$home/data/$o"
-    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
-      || fail "could not create the $o fixture"
-    write_origin_meta "$home" "$o"
-    printf 'done: report complete\n' > "$home/state/$o.status"
-  done
+  make_review_origins "$home" "$id" "$other"
   run_captain "$home" hold sample-other-call --title "Call for the second review" \
     --reason "captain must decide" --repo sample --origin "$other" >/dev/null \
     || fail "could not hold the call recorded for the second review"
@@ -4232,6 +4226,59 @@ test_complete_refuses_an_entry_held_for_another_origin() {
   assert_contains "$out" "no recorded origin on: sample-old-call" \
     "an older hold with no recorded origin was not flagged"
   pass "complete refuses an entry held for another origin and flags one with none recorded"
+}
+
+make_review_origins() {  # <home> <origin...>
+  local home=$1 o
+  shift
+  for o in "$@"; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+}
+
+# Two origins that found the same captain call both attest the one held task:
+# the second names the origin it was held for, and later passes keep that.
+test_two_origins_complete_against_one_shared_call() {
+  local home
+  home=$(make_home shared-call)
+  make_review_origins "$home" lane-a lane-b
+  run_captain "$home" hold shared-call --title "Choose shared behavior" \
+    --reason "the same captain choice was found by both lanes" --repo sample --origin lane-a >/dev/null \
+    || fail "could not hold the shared call"
+  run_captain "$home" complete lane-a shared-call >/dev/null \
+    || fail "the owning origin could not complete against the shared call"
+  run_captain "$home" complete lane-b --carried-by lane-a shared-call >/dev/null \
+    || fail "the second origin could not complete against the shared call"
+  run_captain "$home" hold own-call --title "Call only lane B found" \
+    --reason "captain must decide" --repo sample --origin lane-b >/dev/null \
+    || fail "could not hold the second origin's own call"
+  run_captain "$home" complete lane-b own-call >/dev/null \
+    || fail "a later pass lost the shared call's carrier"
+  run_captain "$home" verify lane-a >/dev/null || fail "the owning origin no longer verifies"
+  run_captain "$home" verify lane-b >/dev/null || fail "the second origin does not verify"
+  run_captain "$home" open shared-call || fail "completing both origins closed the shared call"
+  pass "two origins complete against one still-open shared call and both verify"
+}
+
+test_carried_by_refuses_an_owner_that_did_not_hold_the_call() {
+  local home
+  home=$(make_home carried-by-mismatch)
+  make_review_origins "$home" lane-a lane-b lane-c
+  run_captain "$home" hold shared-call --title "Choose shared behavior" \
+    --reason "captain must decide" --repo sample --origin lane-a >/dev/null \
+    || fail "could not hold the shared call"
+  if run_captain "$home" complete lane-c --carried-by lane-b shared-call 2> "$home/carrier.err" >/dev/null; then
+    fail "complete accepted a carrier the call was not held for"
+  fi
+  assert_grep "was held for origin lane-a, not lane-c or its carrier lane-b" "$home/carrier.err" \
+    "the refusal does not name the recorded origin and the wrong carrier"
+  assert_no_grep "decisions_reviewed=1" "$home/state/lane-c.meta" \
+    "the refused completion recorded an inventory attestation"
+  pass "complete --carried-by refuses an owner the call was not held for"
 }
 
 test_hold_origins_precede_backend_holds() {
@@ -4635,6 +4682,8 @@ test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
+test_two_origins_complete_against_one_shared_call
+test_carried_by_refuses_an_owner_that_did_not_hold_the_call
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes

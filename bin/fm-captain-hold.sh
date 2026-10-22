@@ -28,7 +28,7 @@
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
-#   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
+#   fm-captain-hold.sh complete <origin-id> (--none | [--carried-by <owner-origin-id>] <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
@@ -140,13 +140,20 @@
 # open keyed status decision. With a non-empty inventory, every listed task is
 # verified durable (captain-held, or carrying a recorded resolution),
 # is never the origin itself, and, when `hold --origin` recorded one, was held
-# for this origin; a hold with no recorded origin is accepted on durability
-# alone and named in the output,
+# for this origin or for the owner named by `--carried-by <owner-origin-id>`;
+# a hold with no recorded origin is accepted on durability alone and named in
+# the output,
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
 # passes may add ids. A post-teardown visual review can complete against the
 # surviving report and tasks without recreating task state.
+# `--carried-by` lets an origin that found a call another origin already holds
+# list that same task instead of a second row; the owner of every task that
+# matched it is recorded as an `<entry>:<owner>` pair in `decision_carriers=`
+# so later passes and `verify` apply the same check. `--carried-by` applies to
+# every task id in that invocation, so an origin whose calls are held by
+# different owners runs one `complete` per owner; the inventory is their union.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
@@ -457,6 +464,10 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+carrier_for() {  # <comma-list of entry:carrier> <entry>
+  printf '%s\n' "$1" | tr ',' '\n' | awk -F: -v entry="$2" '$1 == entry { print $2; exit }'
 }
 
 # A resolution record written by this script or by the retired
@@ -864,8 +875,11 @@ refuse_self_inventory() {
 # answered, which is not the same as an unknown entry and must not be spent
 # as absence. The result carries the attestation evidence and whether an
 # origin was recorded, so completion can disclose the legacy fallback.
-verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
-  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id
+# A carrier is the origin the call was held for when this origin found the same
+# call; an entry passes when its recorded origin is this origin or the carrier.
+# Only `complete` takes --carried-by, so only its refusal points at the option.
+verify_entry_durable() {  # <origin-or-empty> <entry> [carrier] [complete]; prints "<id> <how> <origin-state>"
+  local origin=$1 entry=$2 carrier=${3:-} from_complete=${4:-} resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id carrier_id
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
@@ -889,13 +903,21 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
     [ "$id" != "$origin_id" ] || refuse_self_inventory "$origin" "$entry"
   fi
   if [ -n "$stored" ]; then
+    origin_state=recorded
     if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
       stored_id=$(task_identity "$stored") || exit $?
       if [ "$stored_id" != "$origin_id" ]; then
-        fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
+        if [ -z "$carrier" ]; then
+          [ -n "$from_complete" ] \
+            || fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
+          fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin, list the right one, or, if $origin found the same call, see complete --carried-by"
+        fi
+        carrier_id=$(task_identity "$carrier") || exit $?
+        [ "$stored_id" = "$carrier_id" ] \
+          || fail "captain-held task $id was held for origin $stored, not $origin or its carrier $carrier; list the right task or name the origin it was held for"
+        origin_state=carried
       fi
     fi
-    origin_state=recorded
   fi
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
@@ -1731,7 +1753,7 @@ reconcile_note() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
-  local resolved_how attested_by_prefix='' origin_state unrecorded_origin=''
+  local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' none=0 carried_by='' carrier previous_carriers='' carriers=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1745,25 +1767,37 @@ command_complete() {
   fi
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
-  if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
-    supplied=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --none) none=1 ;;
+      --carried-by) shift; carried_by=${1:-}; validate_slug carrier-origin-id "$carried_by" ;;
+      *) validate_slug task-id "$1"; supplied="${supplied}${supplied:+ }$1" ;;
+    esac
+    shift
+  done
+  if [ "$none" = 1 ]; then
+    [ -z "$supplied" ] && [ -z "$carried_by" ] || fail "--none cannot be combined with task ids or --carried-by"
   else
-    while [ "$#" -gt 0 ]; do
-      [ "$1" != --none ] || fail "--none cannot be combined with task ids"
-      validate_slug task-id "$1"
-      supplied="${supplied}${supplied:+ }$1"
-      shift
-    done
+    [ -n "$supplied" ] || { usage >&2; exit 2; }
   fi
+  [ "$carried_by" != "$origin" ] || fail "--carried-by names $origin itself; list its own calls without it"
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
+    previous_carriers=$(meta_value "$meta" decision_carriers)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      resolved=$(verify_entry_durable "$origin" "$entry") || exit $?
+      carrier=$(carrier_for "$previous_carriers" "$entry")
+      if [ -n "$carried_by" ] && list_has_key "${supplied// /,}" "$entry"; then
+        carrier=$carried_by
+      fi
+      resolved=$(verify_entry_durable "$origin" "$entry" "$carrier" complete) || exit $?
       origin_state=${resolved##* }
+      if [ "$origin_state" = carried ]; then
+        carriers="${carriers}${carriers:+,}$entry:$carrier"
+      fi
       resolved=${resolved% *}
       resolved_how=${resolved##* }
       resolved=${resolved%% *}
@@ -1787,6 +1821,9 @@ EOF
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+    fi
+    if [ "$previous_carriers" != "$carriers" ]; then
+      printf 'decision_carriers=%s\n' "$carriers" >> "$meta"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
@@ -1817,7 +1854,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open resolved
+  local origin=${1:-} meta reviewed keys entry key open resolved carriers
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -1826,10 +1863,11 @@ command_verify() {
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
+  carriers=$(meta_value "$meta" decision_carriers)
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_entry_durable "$origin" "$entry" >/dev/null
+      verify_entry_durable "$origin" "$entry" "$(carrier_for "$carriers" "$entry")" >/dev/null
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF

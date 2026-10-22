@@ -110,7 +110,9 @@ A post-teardown visual review can complete against the surviving report and dura
 Before recording completion, `complete` verifies every listed task against tasks-axi.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused.
+An entry whose recorded origin differs from the one being completed is refused, unless `--carried-by <owner-origin-id>` names the origin it was held for.
+That form lets a second origin that found the same call attest the one held task without a second row or a changed hold, and `complete` records each such owner in `decision_carriers=` so later passes and `verify` apply the same check.
+`--carried-by` applies to every task id in that invocation, so an origin whose calls are held by different owners runs one `complete` per owner, and the reviewed inventory is their union.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
@@ -525,6 +527,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- Two origins that found the same call both complete against one still-open held task, the second with `--carried-by`, and both still pass `verify` after a later pass adds another entry.
+  A carrier the call was not held for is refused.
 
 ### Answers, stamps, and deferral
 
