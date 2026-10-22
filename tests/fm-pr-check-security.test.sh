@@ -802,6 +802,130 @@ test_fork_head_without_tracking_ref_registers() {
   pass "fm-pr-check registers a fork head the forge holds without any tracking ref"
 }
 
+# The receipts add-on owns the receipt candidate choice: without its hook the
+# gate is given no candidate, and with it the gate gets what the hook returns.
+test_receipt_candidate_hook() {
+  local dir sha addons arg
+  sha=0123456789abcdef0123456789abcdef01234567
+  for arg in absent present; do
+    dir=$(make_case "receipt-candidate-$arg")
+    addons="$dir/addons"
+    mkdir -p "$addons/receipts/bin"
+    {
+      # shellcheck disable=SC2016 # Literal stub source is written to the add-on file.
+      printf '%s\n' 'fm_receipts_accept_done() { printf "%s" "${7:-}" > "$FM_TEST_CANDIDATE_OUT"; }'
+      if [ "$arg" = present ]; then
+        # shellcheck disable=SC2016 # Literal stub source is written to the add-on file.
+        printf '%s\n' 'fm_receipts_pr_candidate() { printf "%s|%s|%s|%s|%s" "$1" "$2" "$3" "$4" "$5" > "$FM_TEST_HOOK_ARGS"; printf "%s" "$5"; }'
+      fi
+    } > "$addons/receipts/bin/fm-receipts-lib.sh"
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+      "project=$dir/project" "kind=ship" "mode=direct-PR"
+    FM_ADDONS_DIR="$addons" FM_TEST_CANDIDATE_OUT="$dir/candidate" FM_TEST_HOOK_ARGS="$dir/hook-args" \
+      FM_TEST_GH_HEAD=$sha run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+      > "$dir/stdout" 2> "$dir/stderr" || fail "check failed with receipt hook $arg: $(cat "$dir/stderr")"
+    if [ "$arg" = absent ]; then
+      [ -z "$(cat "$dir/candidate")" ] || fail "no hook still forwarded a candidate: $(cat "$dir/candidate")"
+    else
+      [ "$(cat "$dir/candidate")" = "$sha" ] || fail "the hook's candidate was not forwarded: $(cat "$dir/candidate")"
+      [ "$(cat "$dir/hook-args")" = "$dir/wt|https://github.com/o/r/pull/4|direct-PR|$dir/home/state/task-a.meta|$sha" ] \
+        || fail "the hook got the wrong arguments: $(cat "$dir/hook-args")"
+    fi
+  done
+  pass "fm-pr-check lets the receipts add-on hook choose the receipt candidate"
+}
+
+test_receipt_candidate_hook_failure_refuses() {
+  local dir
+  dir=$(make_case receipt-candidate-failing)
+  mkdir -p "$dir/addons/receipts/bin"
+  printf '%s\n' 'fm_receipts_pr_candidate() { return 3; }' > "$dir/addons/receipts/bin/fm-receipts-lib.sh"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  if FM_ADDONS_DIR="$dir/addons" FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr"; then
+    fail "a failing receipt hook did not refuse the check"
+  fi
+  grep -Fq 'fm_receipts_pr_candidate' "$dir/stderr" || fail "refusal did not name the hook: $(cat "$dir/stderr")"
+  grep -q '^pr=' "$dir/home/state/task-a.meta" && fail "a refused check recorded pr="
+  [ -e "$dir/home/state/task-a.check.sh" ] && fail "a refused check armed the merge poll"
+  pass "fm-pr-check refuses when the receipts add-on hook fails"
+}
+
+test_receipt_candidate_hook_junk_output_refuses() {
+  local dir
+  dir=$(make_case receipt-candidate-junk)
+  mkdir -p "$dir/addons/receipts/bin"
+  printf '%s\n' 'fm_receipts_pr_candidate() { printf "not a sha"; }' > "$dir/addons/receipts/bin/fm-receipts-lib.sh"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  if FM_ADDONS_DIR="$dir/addons" FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr"; then
+    fail "a receipt hook printing a non-SHA did not refuse the check"
+  fi
+  grep -Fq 'fm_receipts_pr_candidate' "$dir/stderr" || fail "refusal did not name the hook: $(cat "$dir/stderr")"
+  grep -q '^pr=' "$dir/home/state/task-a.meta" && fail "a refused check recorded pr="
+  [ -e "$dir/home/state/task-a.check.sh" ] && fail "a refused check armed the merge poll"
+  pass "fm-pr-check refuses when the receipts add-on hook prints a non-SHA"
+}
+
+test_receipt_candidate_hook_empty_output_passes_on_non_github() {
+  local dir
+  dir=$(make_case receipt-candidate-gitlab-empty)
+  mkdir -p "$dir/addons/receipts/bin"
+  {
+    # shellcheck disable=SC2016 # Literal stub source is written to the add-on file.
+    printf '%s\n' 'fm_receipts_accept_done() { printf "%s" "${7:-}" > "$FM_TEST_CANDIDATE_OUT"; }'
+    printf '%s\n' 'fm_receipts_pr_candidate() { return 0; }'
+  } > "$dir/addons/receipts/bin/fm-receipts-lib.sh"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  FM_ADDONS_DIR="$dir/addons" FM_TEST_CANDIDATE_OUT="$dir/candidate" \
+    run_check_entry "$dir" task-a https://gitlab.example/group/project/-/merge_requests/7 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a non-GitHub check with an empty hook candidate refused: $(cat "$dir/stderr")"
+  [ -e "$dir/candidate" ] || fail "the receipt gate was not reached on a non-GitHub check"
+  [ -z "$(cat "$dir/candidate")" ] || fail "empty hook output forwarded a candidate: $(cat "$dir/candidate")"
+  [ -e "$dir/home/state/task-a.check.sh" ] || fail "a non-GitHub check with an empty hook candidate did not arm"
+  pass "fm-pr-check accepts an empty receipt candidate on a non-GitHub pull request"
+}
+
+test_receipt_candidate_hook_older_head_refuses() {
+  local dir
+  dir=$(make_case receipt-candidate-stale)
+  mkdir -p "$dir/addons/receipts/bin"
+  printf '%s\n' 'fm_receipts_pr_candidate() { printf "%s" fedcba9876543210fedcba9876543210fedcba98; }' > "$dir/addons/receipts/bin/fm-receipts-lib.sh"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  if FM_ADDONS_DIR="$dir/addons" FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr"; then
+    fail "a receipt hook naming an older head than the verified pull request head did not refuse"
+  fi
+  grep -Fq 'fm_receipts_pr_candidate' "$dir/stderr" || fail "refusal did not name the hook: $(cat "$dir/stderr")"
+  grep -q '^pr=' "$dir/home/state/task-a.meta" && fail "a refused check recorded pr="
+  [ -e "$dir/home/state/task-a.check.sh" ] && fail "a refused check armed the merge poll"
+  pass "fm-pr-check refuses a receipt candidate that differs from the verified pull request head"
+}
+
+test_receipt_candidate_hook_skipped_when_gate_ignores_candidate() {
+  local dir
+  dir=$(make_case receipt-candidate-no-mistakes-skip)
+  mkdir -p "$dir/addons/receipts/bin"
+  printf '%s\n' 'fm_receipts_pr_candidate() { return 3; }' > "$dir/addons/receipts/bin/fm-receipts-lib.sh"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  FM_ADDONS_DIR="$dir/addons" FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a no-mistakes check with a verified head refused on an unused receipt hook: $(cat "$dir/stderr")"
+  [ -e "$dir/home/state/task-a.check.sh" ] || fail "a no-mistakes check with a verified head did not arm the merge poll"
+  pass "fm-pr-check arms a verified no-mistakes pull request without consulting the receipts hook"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3703,6 +3827,12 @@ test_retired_secondmate_merge_poll_keeps_signal_wake
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_fork_head_without_tracking_ref_registers
+test_receipt_candidate_hook
+test_receipt_candidate_hook_failure_refuses
+test_receipt_candidate_hook_junk_output_refuses
+test_receipt_candidate_hook_empty_output_passes_on_non_github
+test_receipt_candidate_hook_older_head_refuses
+test_receipt_candidate_hook_skipped_when_gate_ignores_candidate
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

@@ -3,13 +3,12 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge. A pull request
-# that lives in a repository other than the worktree's origin (a cross-repo
-# lane's second PR) forwards its verified forge head to the gate as a hook
-# argument instead of the worktree's HEAD, because the merge binds to that
-# forge head. The gate also reads a pull request's live forge head itself when
-# the worker copy holds no remote-tracking ref for it, so a push that opened the
-# PR from outside this copy's ref sync still registers.
+# head is that named head and is already stored on the forge. The optional
+# receipts add-on picks the receipt candidate from the verified forge head and
+# the gate receives it as a hook argument. The gate also reads a pull request's
+# live forge head itself when the worker copy holds no remote-tracking ref for
+# it, so a push that opened the PR from outside this copy's ref sync still
+# registers.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
@@ -163,21 +162,12 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# The fork decides whether a verified forge head is forwarded to the gate: a
-# cross-repository pull request's head, which is also what bin/fm-pr-merge.sh
-# binds the merge to, is forwarded when the pull request's owner and repository
-# are not this worktree's origin. A same-repository pull request, an unverified
-# forge head, or an origin whose repository cannot be isolated forwards none.
-# fm_dod_accept_ship_done binds a named-head or outside-origin pull request to its
-# recorded pr_head when no head is forwarded, and the receipts add-on
-# (fm_receipts_accept_done) picks the candidate from what it is given.
-RECEIPT_CANDIDATE=
-if [ -n "$PR_HEAD" ] && fm_dod_pr_outside_origin "$WT" "$URL"; then
-  RECEIPT_CANDIDATE=$PR_HEAD
-fi
-
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+# The optional receipts add-on chooses the receipt candidate from the worktree,
+# pull request URL, mode, metadata path and verified forge head PR_HEAD (empty
+# when unverified); its output must be empty (no candidate) or exactly PR_HEAD, or
+# the check refuses.
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.
 case "$PROVIDER:$MODE" in
@@ -185,10 +175,22 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
-if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
-  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" "" "$RECEIPT_CANDIDATE"); then
-  echo "error: $GATE_REASON" >&2
-  exit 1
+if [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; then
+  RECEIPT_CANDIDATE=
+  if declare -F fm_receipts_pr_candidate >/dev/null; then
+    if ! RECEIPT_CANDIDATE=$(fm_receipts_pr_candidate "$WT" "$URL" "$MODE" "$META" "$PR_HEAD"); then
+      echo "error: receipts add-on hook fm_receipts_pr_candidate failed; no receipt candidate was chosen" >&2
+      exit 1
+    fi
+    if [ -n "$RECEIPT_CANDIDATE" ] && [ "$RECEIPT_CANDIDATE" != "$PR_HEAD" ]; then
+      echo "error: receipts add-on hook fm_receipts_pr_candidate returned a candidate other than the verified pull request head; no receipt candidate was chosen" >&2
+      exit 1
+    fi
+  fi
+  if ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" "" "$RECEIPT_CANDIDATE"); then
+    echo "error: $GATE_REASON" >&2
+    exit 1
+  fi
 fi
 
 META_TMP=

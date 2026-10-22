@@ -803,12 +803,12 @@ fm_dod_forge_pr_head_live() {  # <provider> <host> <path> <number> <url>
 # same mode-specific declaration and named-head proof, not a new opt-in marker.
 # Optional captured run output preserves an explicit unreturned-custody refusal
 # even when the declared head is already on the forge.
-# The optional trailing <forge-head> is a verified forge head the caller read
-# for a pull request outside the worktree's origin repository. When none is
-# given and the done note names the registered pr= in a named-head mode, or a
-# direct-PR outside that origin, the recorded pr_head stands in, so every caller
-# binds the receipt to the same candidate. The receipts add-on
-# (fm_receipts_accept_done) uses the head it is given.
+# The optional trailing <forge-head> is the receipt candidate a caller chose; the
+# fork passes only the receipts add-on's pick, which must equal the verified
+# forge head (bin/fm-pr-check.sh). When none is given and the done note names the
+# registered pr= in a named-head mode, or a direct-PR outside that origin, the
+# recorded pr_head stands in, so every caller binds the receipt to the same
+# candidate. The receipts add-on (fm_receipts_accept_done) uses the head it is given.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> <run-output> [<forge-head>]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} forge_head=${10:-} url sha gerrit recorded_head
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
