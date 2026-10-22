@@ -228,20 +228,19 @@ test_adopted_draft_red_required_check_after_pause_wakes_once() {
   pass 'each required check that fails on an adopted draft wakes once per latest commit'
 }
 
-test_required_check_appearing_after_optional_failure_wakes() {
+test_optional_failure_is_silent_until_a_required_check_fails() {
   local home
   home=$(new_home optional-then-required)
   task "$home" ship1 pr=https://github.com/o/r/pull/8
   pr "$home" 8 "$HEAD_A" "$BASE_1" true false
   set_pr "$home" 8 '.checks = [{name:"E2E Tests (independent)",conclusion:"FAILURE",required:false}]'
   arm "$home"
-  expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing checks at latest commit aaaaaaa: E2E Tests \(independent\) \(task ship1\)$' \
-    'an optional failure must wake while no required context is reported'
+  expect_silent "$home" 'an optional failure must not wake, even while the base requires no check'
   set_pr "$home" 8 '.checks += [{name:"Backend",conclusion:"FAILURE",required:true}]'
   expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing required checks at latest commit aaaaaaa: Backend \(task ship1\)$' \
     'a required check that appears and fails at the same commit must wake'
   expect_silent "$home" 'the reported required failure must not repeat'
-  pass 'a required check that fails after an optional one at the same commit still wakes'
+  pass 'only a failing required check wakes, whether or not an optional one failed first'
 }
 
 test_replaced_cancelled_run_is_not_failing() {
@@ -376,7 +375,7 @@ test_green_without_reviewer_is_silent() {
   pass 'a green PR without a reviewer never notifies'
 }
 
-test_base_without_required_checks_counts_any_failing_check() {
+test_optional_failures_never_wake() {
   local home
   home=$(new_home no-required)
   task "$home" a pr=https://github.com/o/r/pull/30
@@ -386,9 +385,77 @@ test_base_without_required_checks_counts_any_failing_check() {
   set_pr "$home" 30 '.checks = [{name:"lint",conclusion:"SUCCESS",required:false},{name:"test",conclusion:"FAILURE",required:false}]'
   set_pr "$home" 31 '.checks = [{name:"CI Status",conclusion:"SUCCESS",required:true},{name:"test",conclusion:"FAILURE",required:false}]'
   arm "$home"
-  expect_one "$home" '^pr-health: https://github.com/o/r/pull/30 has failing checks at latest commit aaaaaaa: test' \
-    'a failing check must count when the base requires none, and an optional one must not when it does'
-  pass 'a base with no required checks counts a failing reported check'
+  expect_silent "$home" 'an optional failure must not wake, whether or not the base requires another check'
+  [ "$(grep -c 'pulls/3[01]$' "$home/forge/calls.log")" = 2 ] || fail "both owned PRs must still be read: $(cat "$home/forge/calls.log")"
+  pass 'a check the base does not require never wakes'
+}
+
+test_retired_contribution_is_not_reclaimed_from_the_cached_branch() {
+  local home wt before
+  home=$(new_home retired-cached)
+  wt="$home/copy"
+  git init -q -b feature-12 "$wt"
+  git -C "$wt" remote add origin git@github.com:o/r.git
+  task "$home" early "worktree=$wt"
+  printf '12\n' > "$home/forge/branch-feature-12"
+  pr "$home" 12 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 12 '.checks = [{name:"CI Status",conclusion:null,required:true}]'
+  arm "$home"
+  expect_silent "$home" 'running checks must not wake'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" retire early https://github.com/o/r/pull/12 captain 'handed to another home' >/dev/null \
+    || fail 'could not retire the discovered contribution'
+  set_pr "$home" 12 '.checks[0].conclusion = "FAILURE" | .mergeable = false'
+  before=$(grep -c 'pulls/12$' "$home/forge/calls.log")
+  expect_silent "$home" 'a retired PR must not wake while its branch is still cached'
+  expect_silent "$home" 'a retired PR must stay silent on later passes'
+  [ "$(grep -c 'pulls/12$' "$home/forge/calls.log")" = "$before" ] || fail "a retired PR was read again: $(cat "$home/forge/calls.log")"
+  pass 'a retired contribution is not reclaimed through the cached branch lookup'
+}
+
+test_retired_contribution_is_not_reclaimed_by_a_fresh_branch_lookup() {
+  local home wt out
+  home=$(new_home retired-fresh)
+  wt="$home/copy"
+  git init -q -b feature-12 "$wt"
+  git -C "$wt" remote add origin git@github.com:o/r.git
+  task "$home" early "worktree=$wt"
+  printf '12\n' > "$home/forge/branch-feature-12"
+  pr "$home" 12 "$HEAD_A" "$BASE_1" false false
+  set_pr "$home" 12 '.checks = [{name:"CI Status",conclusion:"FAILURE",required:true}]'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" enroll early https://github.com/o/r/pull/12 >/dev/null || fail 'could not enroll the PR'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" retire early https://github.com/o/r/pull/12 captain 'handed to another home' >/dev/null \
+    || fail 'could not retire the contribution'
+  arm "$home"
+  expect_silent "$home" 'a retired PR found afresh on the task branch must not wake'
+  if grep -E 'pulls/12$|number=12( |$)' "$home/forge/calls.log" >/dev/null; then
+    fail "a retired PR was read: $(cat "$home/forge/calls.log")"
+  fi
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" owned) || fail 'owned PRs could not be listed'
+  printf '%s\n' "$out" | jq -e 'any(.[]; .url == "https://github.com/o/r/pull/12") | not' >/dev/null \
+    || fail "a retired PR became owned again: $out"
+  pass 'a retired contribution is not reclaimed by a fresh branch lookup'
+}
+
+test_unreadable_contribution_record_pauses_the_monitor_once() {
+  local home before
+  home=$(new_home unreadable-record)
+  task "$home" ship1 pr=https://github.com/o/r/pull/8
+  pr "$home" 8 "$HEAD_A" "$BASE_1" false false
+  arm "$home"
+  expect_one "$home" 'conflicts with its base' 'the first conflict must wake'
+  rm -f "$home/state/ship1.meta"
+  expect_silent "$home" 'the durable record must keep the PR owned after cleanup'
+  cp "$home/data/ship1/contributions.json" "$home/contributions.saved"
+  printf 'not a record\n' > "$home/data/ship1/contributions.json"
+  before=$(grep -c 'pulls/8$' "$home/forge/calls.log")
+  expect_one "$home" '^pr-health: owned PRs could not be read: ' 'an unreadable durable record must be reported once'
+  expect_silent "$home" 'the same unreadable record must not be reported again'
+  [ "$(grep -c 'pulls/8$' "$home/forge/calls.log")" = "$before" ] || fail 'a PR was read while ownership was unverified'
+  mv "$home/contributions.saved" "$home/data/ship1/contributions.json"
+  expect_silent "$home" 'a conflict already reported must not repeat once the record is readable again'
+  set_pr "$home" 8 ".head = \"$HEAD_B\""
+  expect_one "$home" 'conflicts with its base at latest commit bbbbbbb' 'the PR must be watched again once the record is readable'
+  pass 'an unreadable durable record pauses the monitor once and keeps its fingerprints'
 }
 
 test_nothing_prints_while_nothing_changed() {
@@ -500,7 +567,7 @@ test_checks_on_later_pages() {
   set_pr "$home" 8 '.checks = ([range(100) | {name:("optional-" + tostring),conclusion:"FAILURE",required:false}]
     + [{name:"required-later",conclusion:"SUCCESS",required:true}])'
   arm "$home"
-  expect_silent "$home" 'a required check on a later page must prevent optional failures from notifying'
+  expect_silent "$home" 'optional failures must not notify while the required check on a later page passes'
   set_pr "$home" 8 '.checks[100].conclusion = "FAILURE"'
   expect_one "$home" 'has failing required checks.*required-later' 'a required failure after page one must notify'
   pass 'all check pages contribute to required-check classification'
@@ -532,11 +599,14 @@ test_all_owned_pr_reads_start_in_one_wave() {
 failures=0
 for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
-  test_required_check_appearing_after_optional_failure_wakes \
+  test_optional_failure_is_silent_until_a_required_check_fails \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
   test_other_homes_red_check_is_silent test_enrolled_before_ready_and_after_cleanup_still_wake \
   test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered \
-  test_green_without_reviewer_is_silent test_base_without_required_checks_counts_any_failing_check \
+  test_green_without_reviewer_is_silent test_optional_failures_never_wake \
+  test_retired_contribution_is_not_reclaimed_from_the_cached_branch \
+  test_retired_contribution_is_not_reclaimed_by_a_fresh_branch_lookup \
+  test_unreadable_contribution_record_pauses_the_monitor_once \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
   test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \

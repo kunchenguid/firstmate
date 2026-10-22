@@ -19,8 +19,9 @@
 # Previously observed or enrolled URLs remain in data/<task>/contributions.json
 # after endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # enroll records one task's supported PR URL as an unobserved record, so a PR
-# the task opened is owned before any pr= exists; it changes nothing
-# when the task already has a record for that URL, retired or not.
+# the task opened is owned before any pr= exists; it changes nothing when the
+# task already has a record for that URL and fails when that record is
+# retired, so a retirement is never undone by rediscovery.
 # owned prints the supported PR URLs this home owns as a JSON array of
 # {url,tasks,final}, where final means a saved observation is merged or closed.
 # It is read-only and never contacts a forge.
@@ -685,6 +686,7 @@ case "${1:-}" in
   arm) arm "${2:-}" ;;
   owned)
     get_input; read_saved
+    [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); ownership is unverified"
     jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
       [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
       | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
@@ -698,6 +700,9 @@ case "${1:-}" in
       || fail 'enroll needs a canonical github.com PR URL'
     acquire; read_saved
     [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); enrollment is unverified"
+    if jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url and .retired != null)' "$TMP/saved.json" >/dev/null; then
+      fail 'contribution is retired for this task; enrollment refused'
+    fi
     if ! jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url)' "$TMP/saved.json" >/dev/null; then
       jq -n --arg url "$url" '{url:$url,kind:"pr",checked_at:null,error:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"

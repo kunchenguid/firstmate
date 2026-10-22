@@ -13,7 +13,9 @@
 # records each new URL through fm-contributions.sh enroll, so ownership
 # outlives the worker: the open PR whose head is a live task copy's current
 # branch (fm_pr_number_from_branch). Drafts and adopted branches count. A PR
-# URL that merely appears in a status line is not owned. A secondmate row's
+# URL that merely appears in a status line is not owned, and a record the
+# captain retired is never re-enrolled, so retirement ends the monitor's
+# ownership even while the copy stays on that branch. A secondmate row's
 # copy is never looked up, because its PR belongs to the secondmate's own home.
 # No PR outside that set is ever read, so another home's PR is dropped without
 # a forge read or a wake.
@@ -25,8 +27,8 @@
 #   - conflict: REST mergeable is false. Null (UNKNOWN) is neither clean nor
 #     conflicting and never clears an already reported condition.
 #   - failing checks: a required context failed (a check run concluded other
-#     than SUCCESS, NEUTRAL or SKIPPED, or a status is FAILURE or ERROR); when
-#     no context is required, any failed context counts. Each name is judged
+#     than SUCCESS, NEUTRAL or SKIPPED, or a status is FAILURE or ERROR). A
+#     context the base does not require never counts. Each name is judged
 #     by its newest run (latest_checks in fm-contributions.jq), because GitHub
 #     keeps a cancelled run beside the passing rerun that replaced it.
 # A conflict wakes once per latest commit, even if the base moves or the
@@ -139,9 +141,7 @@ STEP='
           else {name:.context, started_at:.createdAt, required:(.isRequired == true),
                 failing:(.state | IN("FAILURE","ERROR"))} end]
         | latest_checks as $ctx
-      | any($ctx[]; .required) as $has_required
-      | [$ctx[] | select(.required or ($has_required | not))] as $relevant
-      | ([$relevant[] | select(.failing) | .name] | unique) as $failing
+      | ([$ctx[] | select(.required and .failing) | .name] | unique) as $failing
       | ($p.conflicts // []) as $conflicts | ($p.checks // []) as $checks
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
@@ -153,7 +153,7 @@ STEP='
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
            (select($checks_new)
-            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
+            | "pr-health: \($url) has failing required checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json

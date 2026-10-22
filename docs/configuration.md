@@ -628,9 +628,12 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.
 With the flag present, session start arms `state/pr-health.check.sh`, and the watcher's check sweep then prints one wake line for each new condition on an owned PR: a definite merge conflict or a failing required check.
+A check the base does not mark required never counts, even when the base requires no check at all.
 A conflict is reported once per latest commit, and a failing check once per latest commit and check name, so a check that newly fails at an already reported commit wakes once more while an already reported check never repeats.
 A home owns a PR it recorded, linked, or observed before, and the open PR on a live task copy's current branch, drafts and adopted branches included, until the PR merges or closes.
 A PR URL that only appears in a task's status lines is not owned.
+Retiring a contribution with `bin/fm-contributions.sh retire` ends that task's ownership for the monitor too, and the branch lookup does not reclaim it.
+When a durable contribution record cannot be read, the monitor reports that once, reads nothing and keeps its fingerprints until the record is readable again.
 The monitor reads no other PR, so another home's PR never wakes this home, and it never comments on or changes a PR.
 `bin/fm-pr-health.sh` owns the conditions, the fingerprints in `state/pr-health.json`, and the read budget.
 The monitor only notifies; worker briefs and waiting rules are unchanged by the flag.
