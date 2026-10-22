@@ -793,6 +793,14 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Shell history ignorespace (config/shell-history-ignorespace)
+
+The optional local, gitignored `config/shell-history-ignorespace` presence flag makes `bin/fm-spawn.sh` prefix every setup line and the launch source line it types into a pane shell with a single space.
+Shells and history tools that honor ignorespace, such as zsh `HIST_IGNORE_SPACE`, bash `HISTCONTROL=ignorespace`, and atuin, then keep those automated lines out of the operator's shell history.
+With the file absent, spawn sends the lines unchanged.
+Spawn reads the flag at each launch, so creating or removing it needs no restart.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
 ## PR health monitor (config/pr-health-monitor)
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.

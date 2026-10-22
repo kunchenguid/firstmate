@@ -5488,18 +5488,25 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# config/shell-history-ignorespace opts this home into prefixing every line
+# spawn types into a pane shell with a space, so shells and history tools that
+# honor ignorespace (zsh HIST_IGNORE_SPACE, bash HISTCONTROL, atuin) keep the
+# setup and launch lines out of the operator's shell history.
+SPAWN_SHELL_PREFIX=
+[ ! -f "$CONFIG/shell-history-ignorespace" ] || SPAWN_SHELL_PREFIX=' '
 spawn_send_text_line() { # <target> <text>
+  local text="$SPAWN_SHELL_PREFIX$2"
   case "$BACKEND" in
-  tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
-  herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
-  zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
-  orca) fm_backend_orca_send_text_line "$1" "$2" ;;
-  cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
-  paseo) fm_backend_paseo_send_text_line "$1" "$2" "$W" ;;
-  rex) fm_backend_rex_send_text_line "$1" "$2" "$W" ;;
+  tmux) fm_backend_tmux_send_text_line "$1" "$text" ;;
+  herdr) fm_backend_herdr_send_text_line "$1" "$text" ;;
+  zellij) fm_backend_zellij_send_text_line "$1" "$text" "$W" ;;
+  orca) fm_backend_orca_send_text_line "$1" "$text" ;;
+  cmux) fm_backend_cmux_send_text_line "$1" "$text" "$W" ;;
+  paseo) fm_backend_paseo_send_text_line "$1" "$text" "$W" ;;
+  rex) fm_backend_rex_send_text_line "$1" "$text" "$W" ;;
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
-  tern) fm_backend_tern_send_text_line "$1" "$2" "$W" ;;
-  hc) fm_backend_hc_send_text_line "$1" "$2" "$W" ;;
+  tern) fm_backend_tern_send_text_line "$1" "$text" "$W" ;;
+  hc) fm_backend_hc_send_text_line "$1" "$text" "$W" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -8090,7 +8097,7 @@ else
     # keep an errexit pane shell open in both cases.
     LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
   fi
-  if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
+  if ! spawn_send_literal "$T" "$SPAWN_SHELL_PREFIX$LAUNCH_SOURCE_TEXT"; then
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
     exit 1
   fi
