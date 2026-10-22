@@ -982,7 +982,7 @@ test_idle_reminder_runs_through_installed_pi() {
   set -e
   [ "$status" -eq 0 ] || fail "installed Pi idle reminder lifecycle failed: $out"
   case "$out" in
-    *'"providerCalls":2'*'"networkCalls":0'*'"runtime":"installed AgentSession + DefaultResourceLoader"'*) ;;
+    *'"providerCalls":3'*'"networkCalls":0'*'"runtime":"installed AgentSession + DefaultResourceLoader"'*) ;;
     *) fail "installed Pi idle reminder evidence was incomplete: $out" ;;
   esac
   pass "installed Pi delivers one idle reminder and restores its successful cadence without network access"

@@ -349,12 +349,12 @@ The bound is required rather than cosmetic because churn and pane staleness read
 
 ## Captain Preferences (data/captain.md)
 
-Before changing it, inspect the current file and curate the matching bullet in place under the internal [`stow` skill's](../.agents/stow.md) tiering and archive contract; add a new bullet only for a genuinely new durable preference.
+Before changing it, inspect the current file and curate the matching bullet in place under the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) tiering and archive contract; add a new bullet only for a genuinely new durable preference.
 
 ## Operational learnings (data/learnings.md)
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
-The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/stow.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
+The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
 
 ## Startup memory budget (config/startup-memory-budget)
@@ -369,8 +369,8 @@ The helper's header owns exact parsing, publication, and report output mechanics
 
 ## Stow pass horizon (config/stow-pass-horizon)
 
-`config/stow-pass-horizon` is an optional local, gitignored presence flag that opts this home in to the pass-count decay horizon in the internal [`stow` skill](../.agents/stow.md).
-Without it an internal stow pass decays memory entries on their wall-clock horizons alone - 30 days for `aging`, 7 days for `perishable` - which is the default and unchanged behavior.
+`config/stow-pass-horizon` is an optional local, gitignored presence flag that opts this home in to the pass-count decay horizon in the internal [`/stow` skill](../.agents/skills/stow/SKILL.md).
+Without it a `/stow` pass decays memory entries on their wall-clock horizons alone - 30 days for `aging`, 7 days for `perishable` - which is the default and unchanged behavior.
 With it, an entry is also stale after 10 passes (`aging`) or 3 passes (`perishable`) that evaluated it without reinforcing it, whichever horizon it reaches first.
 Opt in for a home that stows often enough that entries never sit unreinforced for a wall-clock horizon, so memory only grows against the startup-memory budget above; a home that stows rarely already exceeds its date horizon on a single pass and gains nothing.
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
@@ -384,14 +384,14 @@ The recommended initial values are an 86400-second check interval and a 14400-se
 The first due point is the enable-file modification time plus the configured interval; a successful full pass schedules from its completion, a verified no-op schedules from that check, and offline time produces at most one request rather than catch-up runs.
 Unknown fields or versions, malformed JSON, symlinks, unsafe interval values, clock rollback, legacy or pass-horizon conflicts, and corrupt coordinator state disable automatic progress with a concrete diagnostic instead of falling back.
 Setting `enabled` to false stops new automatic maintenance requests and withdraws an unconsumed automatic-only request, while manual, partial, blocked, plan, and receipt evidence remains available for recovery.
-Automatic passes now account for task archival, unfinished-task continuation, and knowledge curation in one heartbeat run, replacing periodic stow while leaving pre-compaction persistence intact.
+Automatic passes now account for task archival, unfinished-task continuation, and knowledge curation in one heartbeat run, replacing periodic stow while leaving manual `/stow` and pre-compaction invocation intact.
 The existing coordinator timer also emits bounded live-task continuation checks while full maintenance is disabled; it creates no second timer or daemon.
 The same timer owns optional idle reminders through the separate [`config/idle-reminder.json`](#idle-reminders-configidle-reminderjson) cadence; an old or active maintenance run does not own or suppress that reminder clock.
 Busy tools, queued input, compaction, and editor input defer the maintenance offer; unchanged duties remain silent and repeated ticks share the same run id.
 After three offers without a verified finish, the coordinator retains the run and starts main-session recovery with persistent pacing and delivery deduplication owned by `bin/fm-stow-run.sh`.
 A handling turn that performs no operation leaves the obligation pending for a later safe tick; original offer counts never reset, and delivery alone cannot complete a duty.
 The heartbeat receipt requires separately bound evidence for all three duties, as specified by `bin/fm-heartbeat-receipt.py`; an incomplete duty retains the run.
-`state/stow/state.json` is the single coordinator-state owner and `data/stow-runs/<run_id>/` holds non-injected plans and receipts; `bin/fm-stow-run.sh --help` owns their mutation interface, and the internal [`stow` skill](../.agents/stow.md) owns all knowledge, decay, budget, open-record, and cascade semantics.
+`state/stow/state.json` is the single coordinator-state owner and `data/stow-runs/<run_id>/` holds non-injected plans and receipts; `bin/fm-stow-run.sh --help` owns their mutation interface, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns all knowledge, decay, budget, open-record, and cascade semantics.
 
 ## Idle reminders (config/idle-reminder.json)
 

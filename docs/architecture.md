@@ -341,8 +341,8 @@ The full ownership rule - what is project-intrinsic versus fleet-private, and ho
 
 ## Operational memory routing
 
-The internal stow pass sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
-Memory writes use inspect-then-update rather than blind append; the internal [`stow` skill](../.agents/stow.md) owns tier markers, decay, cold archival, and offload.
+`/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
+Memory writes use inspect-then-update rather than blind append; the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns tier markers, decay, cold archival, and offload.
 The same pass also persists open-work record state the session is holding - filing a thread that was never recorded and correcting one the session knows went stale - bounded to the open work that session is actually holding.
 It is deliberately not a reconciliation of durable records against repository or PR reality: its input is the volatile context, so it can only preserve what the session still knows, and no reconciliation that outlives a session exists today.
 Task-scoped notes use `bin/fm-tasks-axi.sh show <id> --full` followed by `bin/fm-tasks-axi.sh update <id> --body-file <path>`; the canonical task record retains structured history and artifact links alongside the current body.
@@ -373,7 +373,7 @@ The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill]
 ## Restart-proof
 
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
-Before an intentional reset, the internal stow path persists durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
+Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
 
 ## Development notes
 

@@ -1,5 +1,5 @@
 // Single in-session heartbeat clock; optional full maintenance is default-off.
-// Automatic maintenance replaces periodic stow; precompact retention remains internal.
+// Automatic maintenance replaces periodic stow; manual/precompact retain stow.
 //
 // This extension decides only when one stable run_id may be offered to the
 // lock-owning main Pi session. bin/fm-stow-run.sh owns durable run state and the
@@ -233,7 +233,7 @@ function isDue(config: PeriodicConfig, state: RunState | null, now = Date.now())
 }
 
 function localAutomaticConflict(): string | null {
-  if (existsSync(`${fmHome}/config/stow-pass-horizon`)) return "pass-horizon requires an initial internal pass before automatic full passes";
+  if (existsSync(`${fmHome}/config/stow-pass-horizon`)) return "pass-horizon requires a manual stow before automatic full passes";
   const learnings = `${fmHome}/data/learnings.md`;
   if (!existsSync(learnings)) return null;
   try {
@@ -616,13 +616,13 @@ function promptFor(run: RunState["active"], generation: CoordinatorGeneration): 
     "This is an operational follow-up, not user input and not completion evidence.",
     "User work has priority. If background validation or a write-critical step is currently running, call fm-stow-run.sh defer with this run_id and stop this pass.",
     "For an automatic full pass, preflight every registered home before beginning; an unreachable home or one without a safe receiver is unresolved and must defer the run, never fall back to raw commands.",
-    `Otherwise call fm-stow-run.sh ${action} with the current revision plus the session_id, cutoff_entry_id, and branch_fingerprint above, read .agents/stow.md for the internal stow semantics, and execute ${heartbeat ? "its knowledge curation semantics plus the three duties below" : "its complete semantics"} for the fixed cutoff.`,
+    `Otherwise call fm-stow-run.sh ${action} with the current revision plus the session_id, cutoff_entry_id, and branch_fingerprint above, load the internal stow skill, and execute ${heartbeat ? "its knowledge curation semantics plus the three duties below" : "its complete semantics"} for the fixed cutoff.`,
     "Before every mutation record a prepared step with original and target hashes; read back the effect and record verified. Reuse the original plan and correlations on recovery.",
     ...(heartbeat ? [
       "Account for all three duties in this one durable run: archival, continuation, knowledge. Do not invent work from idle time.",
       "Archival: compare recorded goals with acceptance evidence, retain reports and unresolved decisions, and use only existing guarded backlog-close/teardown owners for confirmed landed work. A refusal retains the work and unfinished duty; never force, discard or delete source to complete a heartbeat.",
       "Continuation: use the canonical per-task business and progress record; route authorized next actions to named executors through the existing lease/handoff/inbox owners and verify receipt/start. Preserve uncertain effects for readback, genuine blockers with their release trigger, and explicit stops. Healthy work stays running.",
-      "Knowledge: read .agents/stow.md for its curation duty only, preserving privacy, pinned preferences, inspect-then-update, provenance and recoverable archives. Its precompact semantics remain unchanged; task archival is the separate guarded duty above.",
+      "Knowledge: load the stow skill for its curation duty only, preserving privacy, pinned preferences, inspect-then-update, provenance and recoverable archives. Its manual/precompact semantics remain unchanged; task archival is the separate guarded duty above.",
       "Supervisor coordinates and judges; authorized executors perform effects. Escalate only actual authority/acceptance decisions. Continue the same run_id after partial work; record each duty as complete or unchanged with evidence_ref and sha256 in receipt.heartbeat. A blocked duty cannot finish succeeded/skipped.",
       "Keep unchanged passes silent. Delivery, plans, reported completion and heartbeat text are never proof that an operation happened.",
     ] : []),

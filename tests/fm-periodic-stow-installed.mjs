@@ -91,13 +91,21 @@ const skillDiscovery = new sdk.DefaultResourceLoader({
   additionalSkillPaths: [path.join(root, ".agents/skills")],
 });
 await skillDiscovery.reload();
-assert.equal(skillDiscovery.getSkills().skills.some((skill) => skill.name === "stow"), false,
-  "installed Pi must not expose the internal stow contract as a skill command");
+assert.equal(skillDiscovery.getSkills().skills.some((skill) => skill.name === "stow"), true,
+  "installed Pi must continue discovering the stow skill");
 const runtime = await sdk.ModelRuntime.create();
 runtime.registerProvider("idle-reminder-local", providerConfig);
 await runtime.refresh({ providers: ["idle-reminder-local"], allowNetwork: false });
 const model = runtime.getModel("idle-reminder-local", "deterministic");
 assert.ok(model, "deterministic provider must be available");
+const skillManager = sdk.SessionManager.create(root, path.join(home, "state/skill-session"));
+const skillSession = await sdk.createAgentSession({
+  cwd: root, agentDir: home, modelRuntime: runtime, model, thinkingLevel: "off",
+  resourceLoader: skillDiscovery, settingsManager: settings, sessionManager: skillManager,
+});
+await skillSession.session.bindExtensions({ mode: "rpc", uiContext: {}, onError: (error) => { throw error.error || error; } });
+await skillSession.session.sendUserMessage("/skill:stow", { expandPromptTemplates: true });
+skillSession.session.dispose();
 
 async function loader() {
   const value = new sdk.DefaultResourceLoader({
@@ -156,7 +164,7 @@ try {
   } catch (error) {
     throw new Error(`${error.message}; calls=${providerCalls}; observed=${JSON.stringify(observed)}; entries=${JSON.stringify(manager.getEntries())}`);
   }
-  assert.equal(providerCalls, 2, "one priming turn and one due reminder must each complete one AgentSession run");
+  assert.equal(providerCalls, 3, "one skill invocation, one priming turn, and one due reminder must each complete one AgentSession run");
   assert.equal(networkCalls, 0, "deterministic provider must remain offline");
   await created.session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
   created.session.dispose();
@@ -170,7 +178,7 @@ try {
   await created.session.bindExtensions({ mode: "tui", uiContext,
     onError: (error) => { throw error.error || error; } });
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(providerCalls, 2, "reload must restore the successful cadence without duplicate delivery");
+  assert.equal(providerCalls, 3, "reload must restore the successful cadence without duplicate delivery");
   console.log(JSON.stringify({
     piVersion: JSON.parse(readFileSync(path.join(piPackageDir, "package.json"), "utf8")).version,
     providerCalls, networkCalls, runtime: "installed AgentSession + DefaultResourceLoader",
