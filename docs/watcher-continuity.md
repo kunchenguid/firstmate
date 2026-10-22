@@ -224,12 +224,15 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
+A re-announcement of a process-event result the watcher already surfaced never opens an episode.
+While any copy of it is still queued, including one drained but not yet acknowledged, the re-announcement adds nothing, because that copy is drained anyway.
+Once a drain has acknowledged every copy without its handled acknowledgement, the re-announcement is queued for the next drain, and no arm check counts that copy as a reason to recover, so it never re-wakes a cycle on its own.
 A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
 
 ### Generation reuse
 
-An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
+An ordinary watcher close attempts to publish downtime, and every durable queue append except such a re-announcement publishes it.
 A handling successor closing to resurface recovery preserves the existing marker instead.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of a pending episode reuses its generation.
