@@ -547,6 +547,9 @@ def parser() -> argparse.ArgumentParser:
     for command in ("start", "done", "reopen", "archive", "unhold"):
         item = sub.add_parser(command); item.add_argument("id")
         item.add_argument("--pr"); item.add_argument("--report"); item.add_argument("--note")
+        if command == "archive":
+            item.add_argument("--expect-updated-at")
+            item.add_argument("--expect-state", choices=("queued", "in_flight"))
     update = sub.add_parser("update"); update.add_argument("id")
     for name in ("title", "body", "body_file", "kind", "repo", "priority", "pr", "report", "note"):
         update.add_argument("--" + name.replace("_", "-"))
@@ -598,6 +601,11 @@ def main() -> int:
                 state = None
             list_records(items, state, args.limit, args.fields); return 0
         record, raw = read(data, args.id)
+        if args.command == "archive" and args.expect_updated_at is not None:
+            if record["state"] == "archived":
+                return 0
+            if record["updated_at"] != args.expect_updated_at or record["state"] != args.expect_state:
+                raise Refusal(f"task {args.id} changed since the dashboard snapshot")
         if args.command == "show": show(record); return 0
         if args.command == "progress":
             print(json.dumps(record, ensure_ascii=False, separators=(",", ":"))); return 0

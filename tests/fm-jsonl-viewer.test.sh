@@ -329,7 +329,7 @@ jq -e '
       | map(.category | if . == "processing" then 0 elif . == "held" then 1 elif . == "completed" then 2 elif . == "history" then 3 else 4 end) as $priorities
       | $priorities == ($priorities | sort))
     and (.tasks | all(.id != "cancelled-task" and .id != "invalid-lifecycle-task"))
-    and (.tasks | all((keys | sort) == (["completionAt","executionHarness","executionModel","executionState","progress","state","category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","updatedAt","wait","warning"] | sort)))
+    and (.tasks | all((keys | sort) == (["completionAt","executionGeneration","executionHarness","executionModel","executionState","progress","state","category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","updatedAt","wait","warning"] | sort)))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve canonical task states or ignore lifecycle-only rows"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
@@ -455,4 +455,79 @@ for endpoint in 'api/sessions' 'api/report?id=task-one' 'api/task-document?id=ta
 done
 mv "$TMP_ROOT/task-one.saved" "$HOME_FIXTURE/data/task-one/task.json"
 
-pass 'token-protected agent viewer confines journal and report roots and preserves existing JSONL behavior'
+# The only write endpoint archives an exact current task snapshot, keeps auth
+# and same-origin boundaries, and remains idempotent after the canonical state
+# is durable. These fixtures intentionally have no resource metadata, so the
+# existing owner reports that no endpoint or Treehouse cleanup is required.
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add api-processing 'API processing archive' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add api-waiting 'API waiting archive' --repo viewer --kind ship >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" hold api-waiting --kind parked --reason 'Waiting for a decision' >/dev/null
+sleep 2.1
+for _ in $(seq 1 100); do
+  curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/archive-tasks.json"
+  jq -e '.tasks | any(.id=="api-processing") and any(.id=="api-waiting")' "$TMP_ROOT/archive-tasks.json" >/dev/null && break
+  sleep 0.05
+done
+processing_body=$(jq -c '.tasks[] | select(.id=="api-processing") | {taskId:.id,state:.state,updatedAt:.updatedAt,executionGeneration:.executionGeneration}' "$TMP_ROOT/archive-tasks.json")
+waiting_body=$(jq -c '.tasks[] | select(.id=="api-waiting") | {taskId:.id,state:.state,updatedAt:.updatedAt,executionGeneration:.executionGeneration}' "$TMP_ROOT/archive-tasks.json")
+[ -n "$processing_body" ] && [ -n "$waiting_body" ] || fail 'archive fixtures were absent from the public task API'
+
+status=$(curl -sS -o "$TMP_ROOT/archive-unauthorized.json" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' -H "Origin: $BASE" --data "$processing_body" "$BASE/api/task-archive")
+[ "$status" = 401 ] || fail "unauthenticated archive returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/archive-cross-origin.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Origin: https://other.invalid' \
+  --data "$processing_body" "$BASE/api/task-archive")
+[ "$status" = 403 ] || fail "cross-origin archive returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/archive-missing-origin.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data "$processing_body" "$BASE/api/task-archive")
+[ "$status" = 403 ] || fail "origin-free archive returned HTTP $status"
+
+stale_body=$(printf '%s' "$processing_body" | jq -c '.updatedAt="2000-01-01T00:00:00Z"')
+status=$(curl -sS -o "$TMP_ROOT/archive-stale.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Origin: $BASE" \
+  --data "$stale_body" "$BASE/api/task-archive")
+[ "$status" = 409 ] || fail "stale archive returned HTTP $status"
+jq -e '.error | contains("changed since")' "$TMP_ROOT/archive-stale.json" >/dev/null || fail 'stale archive lost its conflict explanation'
+
+wrong_generation_body=$(printf '%s' "$processing_body" | jq -c '.executionGeneration="another-generation"')
+status=$(curl -sS -o "$TMP_ROOT/archive-generation.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Origin: $BASE" \
+  --data "$wrong_generation_body" "$BASE/api/task-archive")
+[ "$status" = 409 ] || fail "generation-conflicting archive returned HTTP $status"
+
+for attempt in 1 2; do
+  status=$(curl -sS -o "$TMP_ROOT/archive-processing-$attempt.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Origin: $BASE" \
+    --data "$processing_body" "$BASE/api/task-archive")
+  [ "$status" = 200 ] || fail "processing archive attempt $attempt returned HTTP $status"
+  jq -e '.archive=="archived" and .cleanup=="completed"' "$TMP_ROOT/archive-processing-$attempt.json" >/dev/null \
+    || fail "processing archive attempt $attempt lost its separate cleanup result"
+done
+status=$(curl -sS -o "$TMP_ROOT/archive-waiting.json" -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Origin: $BASE" \
+  --data "$waiting_body" "$BASE/api/task-archive")
+[ "$status" = 200 ] || fail "waiting archive returned HTTP $status"
+jq -e '.archive=="archived" and .cleanup=="completed"' "$TMP_ROOT/archive-waiting.json" >/dev/null \
+  || fail 'waiting archive lost its separate cleanup result'
+
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+: > "$SERVER_LOG"
+FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
+  node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 100); do
+  PORT=$(sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' "$SERVER_LOG")
+  [ -n "${PORT:-}" ] && break
+  sleep 0.05
+done
+[ -n "${PORT:-}" ] || fail 'restarted viewer did not report its bound port'
+BASE="http://127.0.0.1:$PORT"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/archive-restarted.json"
+jq -e '(.tasks | any(.id=="api-processing" and .status=="Archived")) and (.tasks | any(.id=="api-waiting" and .status=="Archived"))' "$TMP_ROOT/archive-restarted.json" >/dev/null \
+  || fail 'archived Waiting or Processing state did not survive viewer restart'
+
+pass 'token-protected viewer confines reads and archives exact current tasks through the bounded owner'

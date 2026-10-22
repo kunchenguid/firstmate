@@ -85,6 +85,8 @@ const elements = {
   taskDetailProgress: document.getElementById("task-detail-progress"),
   taskDetailWait: document.getElementById("task-detail-wait"),
   taskDetailWarning: document.getElementById("task-detail-warning"),
+  archiveTask: document.getElementById("archive-task"),
+  taskArchiveStatus: document.getElementById("task-archive-status"),
   taskDocumentType: document.getElementById("task-document-type"),
   taskDocumentBrief: document.getElementById("task-document-brief"),
   taskDocumentReport: document.getElementById("task-document-report"),
@@ -131,6 +133,23 @@ async function api(path) {
     throw error;
   }
   return body;
+}
+
+async function apiPost(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(body),
+  });
+  const value = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  if (!response.ok) {
+    if (response.status === 401) invalidateCredential("Access token was rejected or expired. Enter a valid token to continue.");
+    const error = new Error(value.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return value;
 }
 
 function storedToken(operation, value) {
@@ -1004,6 +1023,7 @@ function renderTaskDetail() {
   elements.taskDetail.hidden = !task;
   elements.dashboardEmpty.hidden = Boolean(task);
   if (!task) {
+    elements.taskArchiveStatus.hidden = true;
     elements.dashboardEmptyTitle.textContent = state.selectedTaskId ? "Task unavailable" : "Select a task";
     elements.dashboardEmptyCopy.textContent = state.selectedTaskId
       ? `Task ${state.selectedTaskId} is not available in the current inventory.`
@@ -1024,6 +1044,9 @@ function renderTaskDetail() {
   elements.taskDetailWait.textContent = task.wait || "";
   elements.taskDetailWarning.hidden = !task.warning;
   elements.taskDetailWarning.textContent = task.warning || "";
+  elements.archiveTask.hidden = !["Waiting", "Processing"].includes(task.status);
+  elements.archiveTask.disabled = false;
+  elements.taskArchiveStatus.hidden = elements.taskArchiveStatus.dataset.taskId !== task.id;
   const documentTypes = task.documentTypes || (task.documentType ? [task.documentType] : []);
   for (const [source, button, label] of [
     ["brief", elements.taskDocumentBrief, "Brief"],
@@ -1035,6 +1058,38 @@ function renderTaskDetail() {
     button.setAttribute("aria-selected", String(state.selectedTaskDocumentType === source));
   }
   elements.openTaskReport.hidden = !documentTypes.includes("report");
+}
+
+async function archiveSelectedTask() {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  if (!task || !["Waiting", "Processing"].includes(task.status) || elements.archiveTask.disabled) return;
+  const confirmed = window.confirm("Archive this task? This stops further automatic progress. Existing code, reports, and unknown remote effects are preserved. Resource cleanup may remain pending when work cannot be safely returned.");
+  if (!confirmed) return;
+  elements.archiveTask.disabled = true;
+  elements.archiveTask.textContent = "Archiving…";
+  elements.taskArchiveStatus.dataset.taskId = task.id;
+  elements.taskArchiveStatus.hidden = false;
+  elements.taskArchiveStatus.classList.remove("error");
+  elements.taskArchiveStatus.textContent = "Archiving the task and checking its exact resources…";
+  try {
+    const result = await apiPost("/api/task-archive", {
+      taskId: task.id,
+      state: task.state,
+      updatedAt: task.updatedAt,
+      executionGeneration: task.executionGeneration,
+    });
+    elements.taskArchiveStatus.textContent = result.message;
+    state.taskSnapshotGeneration = null;
+    await loadTasks(true);
+  } catch (error) {
+    elements.taskArchiveStatus.classList.add("error");
+    elements.taskArchiveStatus.textContent = error.status === 409
+      ? `Task changed or another owner is acting on it. Refresh and retry. ${error.message}`
+      : `Archive failed: ${error.message}`;
+    elements.archiveTask.disabled = false;
+  } finally {
+    elements.archiveTask.textContent = "Archive task";
+  }
 }
 
 function clearTaskDocument(message) {
@@ -1303,6 +1358,7 @@ elements.openTaskReport.addEventListener("click", () => {
   selectSession({ source: "report", id: task.id, label: task.id });
 });
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
+elements.archiveTask.addEventListener("click", archiveSelectedTask);
 elements.source.addEventListener("change", showSelectedView);
 elements.retryTasks.addEventListener("click", loadTasks);
 elements.sidebarToggle.addEventListener("click", () => {

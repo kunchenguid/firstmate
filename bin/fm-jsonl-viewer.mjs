@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// fm-jsonl-viewer.mjs - token-protected, read-only browser dashboard for the
-// current Firstmate home's tasks and canonical task documents, plus ShortTask
-// journals and supervision branch sessions.
+// fm-jsonl-viewer.mjs - token-protected browser dashboard for the current
+// Firstmate home's tasks and canonical task documents, plus ShortTask journals
+// and supervision branch sessions, with a narrow canonical task archive action.
 //
 // Usage:
 //   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file \
@@ -33,6 +33,7 @@ const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
 const TASK_RECORD_TIMEOUT_MS = 15000;
 const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
+const ARCHIVE_REQUEST_BYTES = 4096;
 const TASK_CATEGORY_PRIORITY = new Map([
   ["processing", 0],
   ["held", 1],
@@ -149,6 +150,35 @@ function authorized(req, token) {
   const supplied = Buffer.from(header.slice(prefix.length));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function sameOrigin(req) {
+  const host = req.headers.host || "";
+  const origin = req.headers.origin || "";
+  if (!host || !origin) return false;
+  try { return new URL(origin).host === host; }
+  catch { return false; }
+}
+
+function requestJson(req) {
+  return new Promise((resolveBody, rejectBody) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", chunk => {
+      size += chunk.length;
+      if (size > ARCHIVE_REQUEST_BYTES) {
+        rejectBody(new Error("request body is too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try { resolveBody(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+      catch { rejectBody(new Error("request body must be JSON")); }
+    });
+    req.on("error", rejectBody);
+  });
 }
 
 function accessToken() {
@@ -356,6 +386,7 @@ function taskOverview(home, roots, codeRoot) {
       blockedBy: record.unresolved_blocker_ids, progress: record.compact_progress,
       executionHarness: task?.harness || task?.provider || null, executionModel: task?.model || null,
       executionState: task?.current_state?.state || null,
+      executionGeneration: task?.spawn_gen || null,
       completionAt: record.completion?.date || null,
       updatedAt: record.updated_at || record.since || null,
       hasDocument: Boolean(document), documentType: document?.source,
@@ -387,6 +418,7 @@ function taskOverview(home, roots, codeRoot) {
       executionHarness: terminal ? null : item.executionHarness,
       executionModel: terminal ? null : item.executionModel,
       executionState: terminal ? null : item.executionState,
+      executionGeneration: terminal ? null : item.executionGeneration,
       hasDocument: Boolean(item.hasDocument),
       documentType: item.documentType || null,
       documentTypes: item.documentTypes || [],
@@ -749,7 +781,6 @@ function serve() {
   };
 
   const server = http.createServer((req, res) => {
-    if (req.method !== "GET") return json(res, 405, { error: "read-only server" });
     let url;
     try { url = new URL(req.url || "/", "http://viewer.invalid"); }
     catch { return json(res, 400, { error: "invalid request URL" }); }
@@ -757,6 +788,7 @@ function serve() {
       return text(res, 200, readFileSync(join(assetRoot, "index.html"), "utf8"), "text/html; charset=utf-8");
     }
     if (Object.hasOwn(assets, url.pathname)) {
+      if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
       const [name, contentType, contentSecurityPolicy] = assets[url.pathname];
       return text(res, 200, readFileSync(join(assetRoot, name), "utf8"), contentType, contentSecurityPolicy);
     }
@@ -764,6 +796,37 @@ function serve() {
       res.setHeader("WWW-Authenticate", 'Bearer realm="Firstmate JSONL viewer"');
       return json(res, 401, { error: "authorization required" });
     }
+    if (url.pathname === "/api/task-archive") {
+      if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+      if (!sameOrigin(req)) return json(res, 403, { error: "same-origin request required" });
+      if (!(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "application/json required" });
+      }
+      requestJson(req).then(body => {
+        if (!body || !taskIdPathSafe(body.taskId)
+          || !["queued", "in_flight"].includes(body.state)
+          || typeof body.updatedAt !== "string" || !body.updatedAt
+          || !(body.executionGeneration === null || typeof body.executionGeneration === "string")) {
+          return json(res, 400, { error: "invalid archive request" });
+        }
+        execFile(join(codeRoot, "bin", "fm-dashboard-archive.sh"), [body.taskId,
+          "--expect-state", body.state, "--expect-updated-at", body.updatedAt,
+          "--expect-spawn-gen", body.executionGeneration || "none"], {
+          encoding: "utf8", env: taskCommandEnvironment(home), timeout: FLEET_SNAPSHOT_TIMEOUT_MS,
+          maxBuffer: 1024 * 1024,
+        }, (error, stdout, stderr) => {
+          taskOverviewCache = null;
+          if (error) {
+            const status = error.code === 75 || error.code === 6 ? 409 : 503;
+            return json(res, status, { error: String(stderr || error.message).trim() || "archive request failed" });
+          }
+          try { return json(res, 200, JSON.parse(stdout)); }
+          catch { return json(res, 503, { error: "archive owner returned an invalid result" }); }
+        });
+      }).catch(error => json(res, 400, { error: error.message }));
+      return;
+    }
+    if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
     if (url.pathname === "/api/sessions") {
       try {
         const inventory = taskRecords(codeRoot, roots.reports || join(home, "data"), home);
