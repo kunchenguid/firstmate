@@ -21,8 +21,8 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 # shellcheck source=tests/rex-test-safety.sh
 . "$ROOT/tests/rex-test-safety.sh"
-rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 trap rex_test_cleanup EXIT
+rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 

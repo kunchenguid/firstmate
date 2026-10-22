@@ -42,8 +42,8 @@ note() { printf '# %s\n' "$1"; }
 
 # shellcheck source=tests/rex-test-safety.sh
 . "$ROOT/tests/rex-test-safety.sh"
-rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 trap rex_test_cleanup EXIT
+rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 
 # The vendors' own auto-update switches: Claude Code, OpenCode, and the Muse
 # launcher read these from the environment, and Cursor Agent takes a flag.

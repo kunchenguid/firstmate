@@ -50,7 +50,7 @@ rex_test_prepare() {
   rex_test_write_guard "$REX_TEST_WORK/guard/rex"
   export REX_BIN_DIR="$REX_TEST_WORK/guard" FM_REX_TEST_REAL="$REX_TEST_REAL" \
     FM_REX_TEST_ENDPOINT="$REX_TEST_ENDPOINT" FM_REX_TEST_ALLOWED="$REX_TEST_WORK/allowed" \
-    FM_REX_TEST_TRIP="$REX_TEST_WORK/tripwire"
+    FM_REX_TEST_TRIP="$REX_TEST_WORK/tripwire" FM_REX_TEST_CALLS="$REX_TEST_WORK/calls"
   fm_backend_rex_version_check read >/dev/null 2>&1 || {
     echo "not ok - private Rex server is below the verified API revision" >&2
     rex_test_cleanup
@@ -63,16 +63,20 @@ rex_test_write_guard() {  # <path>
   cat >"$1" <<'SH'
 #!/usr/bin/env bash
 # Forwarding guard: reads pass through; a state-changing command must name a
-# session the test created, and `new` must be labeled fm-test-*.
+# session the test created, and `new` must be labeled fm-test-*. Each call is
+# logged with whether the caller itself disabled autostart.
 real=${FM_REX_TEST_REAL:?}; allowed=${FM_REX_TEST_ALLOWED:?}; trip=${FM_REX_TEST_TRIP:?}; endpoint=${FM_REX_TEST_ENDPOINT:?}
-args=("$@"); i=0
+calls=${FM_REX_TEST_CALLS:?}
+args=("$@"); i=0; autostart=default
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
+    --autostart=false) autostart=off; i=$((i + 1)) ;;
     --*) i=$((i + 1)) ;;
     -S|-C) i=$((i + 2)) ;;
     *) break ;;
   esac
 done
+printf '%s\t%s\n' "$autostart" "$*" >>"$calls"
 cmd=${args[$i]:-}; sub=${args[$((i + 1))]:-}
 sid=; j=$i
 while [ "$j" -lt "${#args[@]}" ]; do
