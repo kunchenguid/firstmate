@@ -119,6 +119,9 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
       fi ;;
   esac
 fi
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+fm_primary_supervisor_guard "bin/fm-watch-arm.sh" || exit 1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 

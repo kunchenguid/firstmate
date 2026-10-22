@@ -285,6 +285,7 @@ reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
 cp -R "$ROOT/bin" "$INTEGRATION_ROOT/bin"
+fm_test_primary_checkout "$INTEGRATION_ROOT" || fail "could not make the integration root a primary checkout"
 TRACE="$INTEGRATION_ROOT/cleanup.trace"
 cat > "$INTEGRATION_ROOT/bin/fm-herdr-session-cleanup.sh" <<'SH'
 #!/usr/bin/env bash

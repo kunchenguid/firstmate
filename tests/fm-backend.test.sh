@@ -174,6 +174,7 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   tar -xf "$archive" -C "$root" \
     || fail "old-bin shim: could not extract bin/ from $base_ref"
   rm -f "$archive"
+  fm_test_primary_checkout "$root" || fail "old-bin shim: could not qualify its root as a plain primary checkout"
   printf '%s\n' "$root"
 }
 

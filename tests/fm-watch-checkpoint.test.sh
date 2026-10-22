@@ -47,8 +47,10 @@ test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
   fallback_bin="$home/fallback-bin"
   mkdir -p "$home/root/bin" "$fallback_bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$home/root/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
-  for tool in bash dirname mktemp rm perl grep cat; do
+  fm_test_primary_checkout "$home/root" || fail "could not make the Perl fallback fixture a primary checkout"
+  for tool in bash dirname mktemp rm perl grep cat git; do
     tool_path=$(command -v "$tool") || fail "could not locate $tool for the Perl fallback fixture"
     ln -s "$tool_path" "$fallback_bin/$tool"
   done
@@ -237,7 +239,9 @@ make_host_home() {  # <name>
   home=$(make_home "$1")
   mkdir -p "$home/root/bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$home/root/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
+  fm_test_primary_checkout "$home/root" || fail "could not make the host fixture a primary checkout"
   cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'args=%s\nprimary=%s\npark=%s\nlimit=%s\n' "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \

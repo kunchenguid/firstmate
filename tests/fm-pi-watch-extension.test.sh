@@ -4582,7 +4582,7 @@ test_opencode_primary_watch_plugin_runs_the_supervision_host() {  # [away|quiet]
     # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
     # QUIET): the plugin asks the record owner, so the same handback carries no
     # away note.
-    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh fm-primary-scope-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
     FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
       || fail "fixture: could not record quiet mode"
   else

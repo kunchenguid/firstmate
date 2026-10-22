@@ -20,9 +20,6 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LAUNCH="$ROOT/bin/fm-afk-launch.sh"
-START="$ROOT/bin/fm-afk-start.sh"
-CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
 # FM_TEST_HARNESS is the launch path's test-only seam (bin/fm-afk-launch.sh
@@ -47,15 +44,80 @@ SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
+PRIMARY_BASE=
 GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
   rm -rf "$OFF_CONFIG" 2>/dev/null || true
+  rm -rf "${PRIMARY_BASE:-}" 2>/dev/null || true
   local s
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
 }
 trap GLOBAL_CLEANUP EXIT
+
+# Supervisor-only entrypoints refuse a linked worktree, so run them from a
+# temporary primary checkout (tests/primary-checkout-helpers.sh).
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$ROOT/tests/primary-checkout-helpers.sh"
+if ! fm_test_plain_checkout "$ROOT"; then
+  if ! PRIMARY_BASE=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-launch-primary.XXXXXX") ||
+    ! ROOT=$(fm_test_primary_snapshot "$ROOT" "$PRIMARY_BASE"); then
+    printf 'not ok - could not stage a plain primary checkout for this suite\n' >&2
+    exit 1
+  fi
+fi
+LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+START="$ROOT/bin/fm-afk-start.sh"
+CONTRACT="$ROOT/bin/fm-afk-contract.sh"
+
+unit_primary_snapshot_does_not_mutate_git_override_repository() {
+  local tmp caller head snapshot
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-primary-snapshot-isolation.XXXXXX") || {
+    fail "primary snapshot isolation: could not create test directory"
+    return
+  }
+  caller="$tmp/caller"
+  mkdir -p "$tmp/base"
+  head=$(fm_test_git -C "$ROOT" rev-parse HEAD) || {
+    fail "primary snapshot isolation: could not read source HEAD"
+    rm -rf "$tmp"
+    return
+  }
+  if ! fm_test_git clone --quiet --shared "$ROOT" "$caller" \
+    || ! fm_test_git -C "$caller" checkout --quiet -b "fm-test-snapshot-isolation-$$" "$head"; then
+    fail "primary snapshot isolation: could not create caller repository"
+    rm -rf "$tmp"
+    return
+  fi
+  cp "$caller/.git/HEAD" "$tmp/head.before"
+  cp "$caller/.git/index" "$tmp/index.before"
+  cp "$caller/AGENTS.md" "$tmp/worktree.before"
+  fm_test_git -C "$caller" status --porcelain=v1 > "$tmp/status.before"
+
+  if GIT_DIR="$caller/.git" \
+    GIT_WORK_TREE="$caller" \
+    GIT_INDEX_FILE="$caller/.git/index" \
+    GIT_COMMON_DIR="$caller/.git" \
+    GIT_OBJECT_DIRECTORY="$caller/.git/objects" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="$caller/.git/objects" \
+    fm_test_primary_snapshot "$ROOT" "$tmp/base" > "$tmp/snapshot.path"; then
+    IFS= read -r snapshot < "$tmp/snapshot.path" || snapshot=
+    if [ -d "$snapshot/.git" ] \
+      && cmp -s "$tmp/head.before" "$caller/.git/HEAD" \
+      && cmp -s "$tmp/index.before" "$caller/.git/index" \
+      && cmp -s "$tmp/worktree.before" "$caller/AGENTS.md" \
+      && fm_test_git -C "$caller" status --porcelain=v1 > "$tmp/status.after" \
+      && cmp -s "$tmp/status.before" "$tmp/status.after"; then
+      pass "primary snapshot: Git overrides cannot redirect checkout operations into the caller repository"
+    else
+      fail "primary snapshot: Git overrides changed the caller repository"
+    fi
+  else
+    fail "primary snapshot: Git overrides blocked the snapshot"
+  fi
+  rm -rf "$tmp"
+}
 
 enter_posture() {  # <home>
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$CONTRACT" enter >/dev/null 2>&1
@@ -1721,6 +1783,7 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+unit_primary_snapshot_does_not_mutate_git_override_repository
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
