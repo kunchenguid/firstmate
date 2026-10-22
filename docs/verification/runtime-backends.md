@@ -353,7 +353,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 A falsely successful close can let teardown remove every durable record naming a still-live endpoint, so each backend's close return must reflect what it can prove.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
 The table below states the current return contract; the 2026-09-14 measurements cover only the tmux and missing-Orca-CLI paths.
-`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, and Orca with controlled command responses.
+`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, Paseo, and Orca with controlled command responses, and `tests/fm-backend-rex.test.sh` does the same for Rex.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh

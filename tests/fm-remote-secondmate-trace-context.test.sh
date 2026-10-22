@@ -286,6 +286,21 @@ assert_equals gpt-6.1-sol "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.me
 assert_equals gpt-6.1-sol "$(awk -F '\t' '$1 == "model-probe" {print $2; exit}' "$PARENT/state/sol-sessions.tsv")" \
   "the Sol occupancy registry did not reconcile the endpoint's reported model"
 printf 'max=1\nmodels=gpt-5.6-luna\n' > "$PARENT/config/sol-cap"
+# A retry that requests an explicitly capped model refuses while the task's
+# previous claim is still live or still an uncertain delivery (the retry
+# contract docs/configuration.md owns), so this case starts from what a
+# confirmed teardown leaves behind: the prior row's stop evidence (pid -1),
+# which holds no occupancy and cannot be replaced without proof. Admission
+# then reserves this delivery's slot, and publication reconciles it against
+# the endpoint's uncovered report.
+REGISTRY=$PARENT/state/sol-sessions.tsv
+if ! awk -F '\t' -v OFS='\t' '$1 == "model-probe" {$4 = -1} {print}' \
+  "$REGISTRY" > "$REGISTRY.tmp"; then
+  rm -f -- "$REGISTRY.tmp"
+  fail "the model-accounting fixture could not record the prior delivery as confirmed stopped"
+fi
+mv -- "$REGISTRY.tmp" "$REGISTRY" \
+  || fail "the model-accounting fixture could not record the prior delivery as confirmed stopped"
 remote_env "$ROOT/bin/fm-spawn.sh" model-probe --secondmate --model gpt-5.6-luna >/dev/null 2>&1 \
   || fail "owned occupancy with an uncovered endpoint model failed"
 assert_equals gpt-5.6-luna "$(sed -n 's/^model=//p' "$PARENT/state/model-probe.meta")" \
