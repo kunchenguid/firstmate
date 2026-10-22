@@ -1663,6 +1663,31 @@ A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
 [`docs/external-review-forge.md`](external-review-forge.md) is the design.
 
+## GitLab merge-request head (config/gitlab-mr-head)
+
+Off by default. A GitLab merge request publishes its current head in the project repository at `refs/merge-requests/<iid>/head`, but reading it changes published behavior for every existing GitLab project, so a home opts in by creating this empty file:
+
+```sh
+touch "$FM_HOME/config/gitlab-mr-head"
+```
+
+With the file present, `bin/fm-review-diff.sh` compares a task's recorded GitLab `pr=` against that freshly fetched head ref, and `bin/fm-pr-check.sh` records the ref's commit as `pr_head=` when the task is armed, exactly as the GitHub path records `headRefOid`. The ref stays current while the merge request is open and outlives its source branch, and the record stays a fallback: a successful fetch always outranks it, the merge path never treats it as authority, and an unreadable ref records nothing.
+
+Without the file, a GitLab task behaves exactly as before this capability existed: nothing fetches or records the head ref, `bin/fm-review-diff.sh` uses a recorded `pr_head=` when one is present, and otherwise diffs the local branch under its documented warning. GitHub, Forgejo, and Gerrit behavior is unchanged either way.
+[`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md#the-merge-requests-own-head-ref) holds the empirical evidence for the ref and the behavior built on it.
+
+## GitLab merged-results and merge-train merges (config/gitlab-merged-result-merge)
+
+Off by default. A home opts in by creating this empty file:
+
+```sh
+touch "$FM_HOME/config/gitlab-merged-result-merge"
+```
+
+With the file present, `bin/fm-pr-merge.sh` may accept a successful GitLab pipeline whose commit is not the merge request's current head when the pipeline is this merge request's own merged-results or merge-train pipeline and its provenance is proven: the pipeline's ref is the merge request's own merge or train ref, that ref's current tip is exactly the tested commit, the tested commit has exactly two parents with the live source head as its second parent, and its first parent is the current target tip for a merged-results pipeline, while a merge-train car must belong to an exact parent chain, from GitLab's own merge-train listing for the target branch, rooted at the current target tip. It re-reads the merge request and repeats that proof under the away-record lock immediately before merging, and refuses any observed change. `bin/fm-pr-merge.sh` still binds the merge to the verified source head with `--sha`.
+
+Without the file, the guard requires a successful pipeline at the current head exactly as before, reports the same refusal, and reads no provenance. [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md#pipelines-that-run-on-a-merged-result) owns the provenance rules and their evidence.
+
 ## External review tool (config/external-review.md, config/external-review-url, config/external-review-backup)
 
 These optional local, gitignored files configure a home's `forge=external` projects; a home with no such project needs none of them.
