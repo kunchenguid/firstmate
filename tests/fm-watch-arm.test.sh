@@ -1369,6 +1369,87 @@ test_arm_refuses_a_disposable_validation_checkout() {
   pass "watch-arm: a disposable validation checkout refuses to arm"
 }
 
+# The treehouse twin of the disposable-checkout refusal: a task worktree under
+# ~/.treehouse keeps re-arming watchers after its copy is stale, and each one
+# outlives the copy while forking from a path about to be deleted (the
+# fork-storm incident). The fixture runs a real copy of bin/ placed under
+# .treehouse/, with the harness bypass cleared. It copies rather than symlinks so
+# the copy's physical path does not depend on where this checkout lives (a
+# checkout under .no-mistakes/worktrees/ would trip the validation-checkout
+# guard first).
+test_arm_refuses_a_disposable_treehouse_worktree() {
+  local dir home state fakebin armout status link
+  dir=$(make_case treehouse-worktree-refusal)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  link="$dir/.treehouse/pool-1/slot-1/firstmate"
+  mkdir -p "$home/data" "$link"
+  cp -R "$ROOT/bin" "$link/bin"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_GATE_REFUSE_BYPASS='' \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$link/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm from a treehouse worktree never stopped: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "arm from a treehouse worktree reported success: $(cat "$armout")"
+  grep -q '^watcher: FAILED' "$armout" \
+    || fail "arm did not report the typed failure line: $(cat "$armout")"
+  grep -qF 'disposable treehouse worktree' "$armout" \
+    || fail "the refusal did not name the disposable treehouse worktree: $(cat "$armout")"
+  ! grep -q '^watcher: started' "$armout" \
+    || fail "arm reported a started watcher despite the refusal: $(cat "$armout")"
+  [ ! -e "$state/.last-watcher-beat" ] \
+    || fail "a refused watcher still published a liveness beacon"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "a refused watcher still took the singleton lock"
+  pass "watch-arm: a disposable treehouse worktree refuses to arm"
+}
+
+# The one live shape a pool slot may arm from: a firstmate home that lives in the
+# slot itself (bin/fm-home-seed.sh's durable lease). Its home layout and its
+# state root both sit inside the copy, so its watcher belongs to that home and
+# dies with it. This must keep arming, or every secondmate home in a pool slot
+# loses its supervision cycle.
+test_arm_allows_a_home_that_lives_in_a_treehouse_slot() {
+  local dir slot fakebin armout status i
+  dir=$(make_case treehouse-home-slot-arm)
+  fakebin="$dir/fakebin"
+  slot="$dir/.treehouse/pool-2/slot-2/firstmate"
+  armout="$dir/arm.out"
+  mkdir -p "$slot/data" "$slot/state" "$slot/config" "$slot/projects" "$(dirname "$slot")"
+  cp -R "$ROOT/bin" "$slot/bin"
+  fm_test_track_watcher_state "$slot/state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$slot" FM_GATE_REFUSE_BYPASS='' \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=30 "$slot/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -q '^watcher: started' "$armout" 2>/dev/null && break
+    grep -q '^watcher: FAILED' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started' "$armout" \
+    || fail "a home living in a treehouse slot must arm its own watcher: $(cat "$armout")"
+  ! grep -qF 'disposable treehouse worktree' "$armout" \
+    || fail "the treehouse guard refused the home that lives in the slot: $(cat "$armout")"
+  # Close the cycle for real: a status change wakes the watcher, it prints its
+  # reason and exits, and the arm reports that cycle as its own.
+  printf 'done: fixture finished\n' > "$slot/state/demo.status"
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  expect_code 0 "$status" "the home's own arm must close its cycle successfully"
+  grep -q '^signal:' "$armout" \
+    || fail "the home's watcher did not surface its wake through the arm: $(cat "$armout")"
+  pass "watch-arm: a firstmate home that lives in a treehouse slot arms its own watcher"
+}
+
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
 # so the watcher's own exit reason, which it logs to stderr, is readable there.
@@ -1717,6 +1798,8 @@ test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
+test_arm_refuses_a_disposable_treehouse_worktree
+test_arm_allows_a_home_that_lives_in_a_treehouse_slot
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher

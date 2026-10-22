@@ -29,7 +29,7 @@ export FM_ROOT_OVERRIDE="$ROOT"
 WAKE_LOG="$TMP/wakes"
 SLEEP_LOG="$TMP/sleeps"
 wake() { printf '%s\n' "$1" >> "$WAKE_LOG"; return 0; }
-sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
+sleep() { printf 'SLEEP %s\n' "${1:-}" >> "$SLEEP_LOG"; }
 
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
@@ -152,5 +152,54 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+# --- event_wait_or_sleep: an early-returning wait still sleeps the budget -----
+#
+# A wait that returns 1 without blocking is an event stream that came back empty
+# or closed. Falling through with zero delay starts the next cycle at once, and
+# the cycle forks a reader per pass - the fork storm.
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime override returns at once: empty/closed stream.
+fm_backend_wait_transition() { return 1; }
+event_wait_or_sleep
+grep -q '^SLEEP' "$SLEEP_LOG" \
+  || fail "a no-hit wait that returned without blocking must still sleep: $(cat "$SLEEP_LOG")"
+FLOOR=$(sed -n 's/^SLEEP //p' "$SLEEP_LOG" | head -1)
+case "$FLOOR" in
+  ''|*[!0-9]*|0) fail "the backoff sleep must be a positive whole number of seconds, got '$FLOOR'" ;;
+esac
+pass "event_wait_or_sleep: a wait that returns without blocking still sleeps a positive share of the poll budget"
+
+# --- event_wait_or_sleep: a closed event stream cannot tight-loop the cycle ----
+#
+# Real sleeps, real clock: count how many cycles a closed event stream gets in a
+# fixed window. A tight loop runs thousands; the backoff holds it to the poll
+# budget. POLL is 1, so at most a handful of cycles fit in four seconds.
+reset_state
+fm_write_meta "$STATE_DIR/tk7.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+CYCLES=$(bash -c '
+  set -u
+  export FM_STATE_OVERRIDE="$1" FM_ROOT_OVERRIDE="$2" FM_POLL=1
+  # shellcheck disable=SC1090,SC1091
+  . "$2/bin/fm-watch.sh"
+  fm_backend_events_capable() { return 0; }
+  fm_backend_wait_transition() { return 1; }
+  start=$SECONDS
+  n=0
+  while [ $((SECONDS - start)) -lt 4 ]; do
+    event_wait_or_sleep
+    n=$((n + 1))
+  done
+  echo "$n"
+' _ "$STATE_DIR" "$ROOT")
+case "$CYCLES" in
+  ''|*[!0-9]*) fail "the cycle-count probe did not report a number: '$CYCLES'" ;;
+esac
+[ "$CYCLES" -le 10 ] \
+  || fail "a closed event stream tight-looped the supervision cycle: $CYCLES iterations in 4s at POLL=1"
+pass "event_wait_or_sleep: a closed event stream backs off to the poll budget instead of spinning ($CYCLES cycles in 4s)"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
