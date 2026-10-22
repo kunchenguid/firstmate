@@ -1569,6 +1569,27 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# The Treehouse root a task spawn from <home> passes to `treehouse get`, or
+# nothing for Treehouse's own default root.
+#
+# Treehouse names a pool from the repository basename and its origin URL alone,
+# so every clone of one origin on this machine resolves to the same default
+# pool, and each slot in it is a linked worktree of whichever clone grew it. A
+# secondmate home keeps standalone clones of its projects (bin/fm-home-seed.sh),
+# so a slot from that shared pool is a worktree of another home's clone, and the
+# spawn's worktree-of-project checks correctly refuse it. The root home keeps
+# the default pool unchanged; every other local home roots its pools under its
+# own state directory, so its slots are worktrees of its own clones. A remote
+# home is the root of its own machine and keeps the default.
+fm_treehouse_spawn_root() {  # <home> <state-dir>
+  local home=$1 state=$2 resolved root
+  resolved=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  root=$(fm_firstmate_root_home "$resolved") || return 1
+  [ "$root" != "$resolved" ] || return 0
+  state=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  printf '%s/treehouse\n' "$state"
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
