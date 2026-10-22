@@ -27,6 +27,10 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
+#   When config/herdr-lifecycle-spawn-guard exists, a brief naming
+#   bin/fm-herdr-lab.sh or a listed Herdr session/server lifecycle command must
+#   carry the Herdr isolation contract emitted by bin/fm-brief.sh --herdr-lab;
+#   the refusal names the first such match.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -106,19 +110,25 @@
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
-#   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
-#   docs/cmux-backend.md),
+#   environment: $TMUX, HERDR_ENV=1, TERM_PROGRAM=rex with REX_BLOCK, or cmux
+#   runtime signals (via bin/fm-backend.sh's fm_backend_detect, with cmux
+#   fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
-#   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
-#   the task worktree and terminal, so ship/scout Orca spawns do not run
-#   treehouse get; cmux is a session provider only, exactly like herdr/zellij,
-#   so it does. Auto-detected herdr stays silent like tmux; auto-detected cmux
-#   prints a loud stderr notice; zellij and orca are never auto-detected.
+#   adapter, and experimental zellij, orca, cmux, paseo, and rex adapters. Orca owns
+#   both the task worktree and terminal, so ship/scout Orca spawns do not run
+#   treehouse get; cmux, paseo, and rex are session providers only, exactly like
+#   herdr/zellij, so they do. Auto-detected herdr and rex stay silent like tmux;
+#   auto-detected cmux prints a loud stderr notice; zellij, orca, and paseo are
+#   never auto-detected (paseo's markers leak into every descendant process).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux and paseo do not support --secondmate
+#   spawns yet.
+#   A rex crewmate or scout opens one tab in the Rex session the launching
+#   firstmate runs in when it runs directly inside Rex, otherwise in its home's
+#   own Rex session; a --secondmate launch opens its tab in that secondmate
+#   home's own Rex session (bin/backends/rex.sh owns placement).
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -184,7 +194,11 @@
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
+#   leaves no task record restores the pool as it found it: it retakes that lock
+#   once to drop its claim after metadata publication too, and before its launch
+#   is delivered it closes the endpoint whose `treehouse get` shell leases the
+#   slot and removes the wiring, task temp root, and staged launch file it wrote.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -348,7 +362,8 @@
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
-#   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
+#   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION TERM_PROGRAM
+#   REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above, plus the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
@@ -419,7 +434,9 @@
 #   <provider>/<id> for a declared provider and also carries --provider, and a
 #   raw Pi command refuses. The pin is recorded as account= (and Pi's
 #   account_provider=) in the task record and on the spawned line. A local
-#   secondmate reads this launching home's file; pins are never inherited.
+#   secondmate first checks config/secondmate-accounts/<id>/<runner>-account
+#   in this launching home, then falls back to its home-wide pin when absent.
+#   Pins are never inherited; remote per-mate overrides refuse locally.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
@@ -468,6 +485,13 @@
 #     __COMMANDCODEBIN__ resolved Command Code executable
 #     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __POLYTOKENBIN__ resolved, polytoken-verified executable for a polytoken launch
+#     __POLYTOKENCONFIG__ firstmate-owned per-task polytoken config dir (mirrored
+#                  operator config with the unattended permission posture enforced)
+#     __POLYTOKENSESSIONS__ firstmate-owned per-task sessions root (the daemon
+#                  writes the versioned `<root>-v1` sibling beside it)
+#     __POLYTOKENFACETS__ the worktree's `.polytoken/facets` dir carrying the
+#                  generated firstmate-worker facet (the project facet layer)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -529,6 +553,24 @@
 # seen and firstmate cannot answer it. That helper's header owns the structural
 # scope test for both shapes and every refusal; a failed registration stops this
 # spawn rather than launching a worker that would wedge on the dialog.
+# polytoken (the captain-approved TUI-pane-plus-REST hybrid) is the one harness
+# whose worker's unattended permission posture cannot ride a launch flag: a
+# per-task config dir is generated under state/ mirroring the operator's global
+# config with `default_permission_matcher` enforced to `bypass` (a project
+# config.yaml fully replaces the global config and no `new` flag reaches the
+# permission matcher, verified live). Its brief rides `--prompt` (auto-submitted
+# after the TUI attaches), its busy wiring is the worktree `.polytoken/hooks.json`
+# binding the verified pre_user_prompt / pre_model_turn (open) and stop (close)
+# events to a generated no-argv writer (handlers receive no argv, verified live),
+# and its control verbs ride the daemon REST API with the session id, port, and
+# credential recorded into task metadata after launch through
+# `polytoken sessions --format json`. The license dialog is a BLOCKER by captain
+# decision (2026-10-07): `--accept-license-terms` is never passed, and the
+# readiness gate fails loudly on any first-start dialog the launch cannot get
+# past. bin/fm-polytoken-lib.sh owns every generated artifact and the verified
+# facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
+# knowledge record. polytoken is crewmate/scout only and is refused for
+# --secondmate, like agy and devin.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
@@ -738,6 +780,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-polytoken-lib.sh
+. "$SCRIPT_DIR/fm-polytoken-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1071,7 +1115,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1114,7 +1158,7 @@ spawn_remote_secondmate() {
   elif [ -n "$positional" ]; then
     harness=$positional
   else
-    harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+    harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$id")
   fi
   case "$harness" in
   claude | codex | opencode | pi | pi-signed | grok | kimi | cursor) ;;
@@ -1125,15 +1169,26 @@ spawn_remote_secondmate() {
     return 1
     ;;
   esac
+  account_config=$(fm_worker_account_config "$harness" "$CONFIG" "$id") || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  }
+  if [ "$account_config" != "$CONFIG" ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote secondmate $id from this host; configure config/$(fm_worker_account_file "$harness") in its home $home on $host instead" >&2
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
     if [ "$MODEL_SET" -eq 0 ]; then
-      model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+      model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$id")
       [ -n "$model" ] || model=-
     fi
     if [ "$EFFORT_SET" -eq 0 ]; then
-      effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+      effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$id")
       [ -n "$effort" ] || effort=-
     fi
   fi
@@ -1379,6 +1434,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_FRESH_ENDPOINT_OPENED=0
+SPAWN_FRESH_WIRING_PENDING=0
+SPAWN_TASK_TMP_CREATED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1529,19 +1587,74 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
+  # A fresh polytoken spawn that fails and leaves no record must leave the pool
+  # as it found it. Before its launch is delivered, the endpoint it opened holds nothing but
+  # the shell whose `treehouse get` leases the slot, so closing it returns the
+  # slot to the pool and leaves no window or tab for a retry to trip over; the
+  # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
+  # Once a launch was delivered into an endpoint still open, a worker may be
+  # running there, so those stay for the operator, as the refusal says.
+  if [ "$status" -ne 0 ] && [ "${HARNESS:-}" = polytoken ] &&
+    { [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] || [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
+      [ "$SPAWN_TASK_TMP_CREATED" = 1 ] || [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; } &&
+    [ "$RELAUNCH" -eq 0 ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "${T:-}" ]; then
+      SPAWN_FRESH_ENDPOINT_OPENED=0
+      local abort_tab_id=
+      [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
+      if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
+        SPAWN_ENDPOINT_CLOSED=1
+      else
+        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
+      fi
+    fi
+    # These paths are per task id, so the per-id spawn lock is retaken for them
+    # exactly as for the strip dir below: a retry of the same id that took the
+    # lock meanwhile may already be reusing them.
+    if { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+      { [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || [ "$SPAWN_TASK_TMP_CREATED" = 1 ] ||
+        [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; }; then
+      if fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+        if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+          if [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] && [ -n "${WT:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+            SPAWN_FRESH_WIRING_PENDING=0
+            clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND" ||
+              echo "warning: could not remove $HARNESS wiring after the failed spawn of $ID" >&2
+          fi
+          if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "${TASK_TMP:-}" ]; then
+            SPAWN_TASK_TMP_CREATED=0
+            rm -rf -- "$TASK_TMP" 2>/dev/null || true
+          fi
+          if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" != 1 ]; then
+            rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+            rmdir -- "$(dirname "$SPAWN_STAGED_LAUNCH_FILE")" 2>/dev/null || true
+          fi
+        fi
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+      else
+        echo "warning: another spawn of $ID holds its spawn lock; leaving its $HARNESS wiring, temp root, and staged launch file in place" >&2
+      fi
+    fi
+  fi
   # A spawn that aborts after claiming its slot but before its record survives
   # must not leave a claim naming a task no record describes. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
   # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
+  # atomic replacement rather than racing it. A polytoken spawn instead retakes
+  # that lock once for a later failure whose record was rolled back. The
+  # release itself never removes another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
+    elif [ "${HARNESS:-}" = polytoken ] && [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] &&
+      fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
@@ -1651,9 +1764,20 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    if [ "$harness" = polytoken ]; then
+      case "$path" in
+        "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
+      esac
+    fi
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$kind")
+EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -rf -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
 EOF
 }
 
@@ -1908,6 +2032,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=paseo does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
     ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
@@ -1981,7 +2109,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
+  # one into the same endpoint, and only tmux, herdr, and rex have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
@@ -1999,12 +2127,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
+  # inferred from a failed read - and only HERDR and REX can prove it:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
+  #   rex   - the recorded block is re-read on the server the record names
+  #           (rex_server); Rex never reuses an id, so its structured
+  #           not-found there proves the block itself is gone. A Rex
+  #           `unreadable` is rechecked too, because a stopped Rex server
+  #           reads as unreachable to a read that never starts it
+  #           (fm_control_absence_recheck_applies owns that rule).
   #   tmux  - REFUSES, always. A task record carries no socket identity for its
   #           endpoint, and a server-wide inventory describes only the server
   #           this process addresses, so no read available here can tell "gone"
@@ -2017,14 +2151,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
-    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
+  if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
+    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
       dead) RELAUNCH_STATE=dead ;;
       alive) RELAUNCH_STATE=alive ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
+        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads '$RELAUNCH_STATE', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
         exit 1
         ;;
     esac
@@ -2088,6 +2222,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
+  if [ "$BACKEND" = rex ]; then
+    FM_REX_TASK_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" rex_session_id)
+    FM_REX_TASK_WINDOW_ID=$(fm_meta_get "$RELAUNCH_META" rex_window_id)
+    FM_REX_TASK_BLOCK_ID=$(fm_meta_get "$RELAUNCH_META" rex_block_id)
+    FM_REX_TASK_SERVER=$(fm_meta_get "$RELAUNCH_META" rex_server)
+  fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
   # resolution, which would silently move an existing task onto whatever the
@@ -2101,7 +2241,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2429,6 +2569,36 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # polytoken (Polytoken CLI): a pane-attached TUI worker whose control verbs
+  # ride the daemon REST API (the captain-approved hybrid). The launch runs in
+  # the task worktree so the worktree's `.polytoken/` is the project hook and
+  # facet discovery layer (verified live: cwd-project hooks fire while hooks
+  # placed in the root --config-dir do not load). `--config-dir` names a
+  # firstmate-generated per-task config dir whose config.yaml mirrors the
+  # operator's global config with the unattended permission posture enforced,
+  # because a project config.yaml fully replaces the global config and the
+  # global layer never reaches the daemon (verified live) - no launch flag
+  # reaches the permission matcher at all. `--sessions-dir` isolates the
+  # per-task session tree so `polytoken sessions` can bind the pane's session
+  # id, port, and credential into task metadata after launch. `--facet` +
+  # `--facets-dir` carry the worker role contract (a facet IS the system
+  # prompt, and the generated one pins no model so `--model` stays
+  # authoritative); `--prompt` submits the brief after the TUI attaches, so no
+  # keyplane typing starts the work. `--accept-license-terms` is deliberately
+  # NEVER passed (captain decision 2026-10-07): the license dialog is a blocker
+  # that the readiness gate below fails loudly on, never something a fleet
+  # spawn answers. The leading shell loop clears every foreign ORCA_*/FM_*
+  # marker the pane actually carries at launch time (verified live: ORCA_*
+  # values from the launching session's environment reach worker tool
+  # subprocesses through the pane), keeping the three launch-owned names
+  # (FM_TASK_ID, FM_TASK_INBOX, FM_ZELLIJ_SESSION) so the doorbell and backend
+  # plumbing keep working; the fixed `env -u` set clears every harness-identity
+  # marker, because polytoken publishes none of its own and does not clear
+  # inherited ones. There is no `__EFFORTFLAG__`: polytoken encodes reasoning
+  # effort inside the model reference as `<model>(<effort>)`, so the effort
+  # axis rides `__MODELFLAG__` after mapping to the nearest compatible
+  # level in the installed model's selectable set.
+  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Command Code receives the typed launch envelope after -- as its initial
   # message. --yolo bypasses permission prompts, --trust skips the folder-trust
   # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
@@ -2522,7 +2692,7 @@ case "$ARG3" in
   # The launch_template lookup below is the unverified-adapter guard for both
   # kinds: a harness with no template aborts the spawn.
   if [ "$KIND" = secondmate ]; then
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$ID")
     harness_src='config/secondmate-harness (falling back to config/crew-harness)'
   else
     if [ -f "$CONFIG/crew-dispatch.json" ]; then
@@ -2546,7 +2716,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, and commandcode are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, commandcode, and polytoken are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2562,7 +2732,9 @@ esac
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 # commandcode has none either: only its worker busy mod is verified, and
 # docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ]; }; then
+# polytoken has none either: only the crewmate/scout lifecycle is verified;
+# docs/supervision-protocols/ carries no polytoken primary wake protocol.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2577,7 +2749,7 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 # Command Code's idle placeholder reads empty only with a Command Code pane
-# identity, which tmux and Herdr supply and zellij, cmux, and orca do not, so
+# identity, which tmux and Herdr supply and zellij, cmux, orca, and paseo do not, so
 # there the composer would never read empty and steering would stall.
 if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
   echo "error: commandcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
@@ -2661,6 +2833,12 @@ agy)
     exit 1
   }
   ;;
+polytoken)
+  POLYTOKEN_BIN=$(fm_polytoken_binary) || {
+    echo "error: polytoken executable not found; install Polytoken CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2671,11 +2849,11 @@ esac
 # --model/--effort flags still win over the file's tokens.
 if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$ID")
     [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
   fi
   if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID")
     if [ -n "$SM_EFFORT" ]; then
       case "$SM_EFFORT" in
       low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
@@ -2699,13 +2877,26 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+# polytoken's model validation composes firstmate's model and effort axes into
+# the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
+# base model must be concrete and listed, and effort maps to the nearest
+# compatible selectable `<model>(<effort>)` reference. Resolved
+# before the busy wiring arms, so the generated launch command carries the
+# composed reference and task metadata keeps the separate axes.
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  POLYTOKEN_MODEL_REF=$(fm_polytoken_launch_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
+elif [ "$HARNESS" = polytoken ]; then
+  POLYTOKEN_MODEL_REF=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
+fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
+WORKER_ACCOUNT_MATE=
+[ "$KIND" != secondmate ] || WORKER_ACCOUNT_MATE=$ID
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
@@ -2883,6 +3074,13 @@ model_flag_for_harness() {
   case "$harness" in
   claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  # polytoken encodes reasoning effort inside the model reference, so the
+  # flag carries the composed reference fm_polytoken_model_ref validated
+  # above, including the model-scoped reasoning level, never an unpinned
+  # fallback to the bare model axis.
+  polytoken)
+    printf -- '--model %s ' "$(shell_quote "${POLYTOKEN_MODEL_REF:-$model}")"
     ;;
   esac
 }
@@ -3332,6 +3530,12 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
+  git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 &&
+  ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
+  exit 1
+fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -3383,6 +3587,16 @@ fi
   exit 1
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  HERDR_LIFECYCLE_BRIEF_GUARD=$(fm_config_source_present "$CONFIG/herdr-lifecycle-spawn-guard") || exit 1
+  if [ "$HERDR_LIFECYCLE_BRIEF_GUARD" = 1 ]; then
+    HERDR_LIFECYCLE_COMMAND=$(perl -ne '
+      if (m{(bin/fm-herdr-lab\.sh|(?<![[:alnum:]_])herdr[[:space:]]+(?:session|server)[[:space:]]+(?:start|stop|delete|restart|reload-config|live-handoff)(?![[:alnum:]_-]))}) { print $1; exit }
+    ' -- "$BRIEF")
+    if [ -n "$HERDR_LIFECYCLE_COMMAND" ] && ! grep -Fq '# Herdr isolation - HARD SAFETY CONTRACT' "$BRIEF"; then
+      echo "error: $BRIEF names the Herdr lifecycle command \`$HERDR_LIFECYCLE_COMMAND\` but lacks the Herdr isolation contract; regenerate it with bin/fm-brief.sh --herdr-lab" >&2
+      exit 1
+    fi
+  fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
     exit 1
@@ -3700,6 +3914,21 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
+# fresh polytoken spawn closes its endpoint on abort, so only it points away
+# from the window; every other harness keeps the plain inspect pointer.
+spawn_endpoint_closes_on_abort() {
+  [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
+}
+
+spawn_endpoint_hint() {
+  if spawn_endpoint_closes_on_abort; then
+    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
+  else
+    printf 'inspect window %s' "$T"
+  fi
+}
+
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
@@ -3920,7 +4149,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     exit 1
   fi
   spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  if [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
+  if [ "$RELAUNCH" -ne 1 ] && [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
     if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
@@ -3963,6 +4192,48 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = rex ]; then
+    # The recorded endpoint is authoritatively gone, so there is nothing to
+    # adopt: create ONE fresh endpoint for the same task, opened directly in the
+    # recorded worktree. The record published below writes window= and the rex
+    # ids from these values, which is the whole rebind - the task id, brief,
+    # worktree, armed poll and status log are untouched.
+    #
+    # Rex reaches here only on a PROVEN-gone block: its never-reused ids
+    # answer a structured not-found from the server the record names
+    # (fm_control_endpoint_absence_verdict owns that argument). The tab is
+    # re-created in the RECORDED session while that session survives. A Rex
+    # session never survives its server, so when the session itself is gone
+    # the task goes where an ordinary spawn from this seat would put it; that
+    # is the reclaim that recovers a server restart. Both placements open the
+    # tab in reclaim mode, so a bare-shell husk an earlier refused reclaim left
+    # carrying this task's label is replaced rather than blocking every retry.
+    fm_backend_rex_container_ensure || exit 1
+    FM_REX_TASK_SERVER=$(fm_backend_rex_server_endpoint) || {
+      echo "error: could not read the Rex server endpoint to record for $W" >&2
+      exit 1
+    }
+    rex_rebind_status=0
+    REX_TASK_IDS=$(fm_backend_rex_create_task_in_session "$FM_REX_TASK_SESSION_ID" "$W" "$WT") \
+      || rex_rebind_status=$?
+    case "$rex_rebind_status" in
+      0) ;;
+      2) REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" launcher-home reclaim) || exit 1 ;;
+      *)
+        echo "error: task $ID's endpoint could not be re-created in its recorded Rex session $FM_REX_TASK_SESSION_ID; see the refusal above for what failed" >&2
+        exit 1
+        ;;
+    esac
+    read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
+$REX_TASK_IDS
+EOF
+    if [ -z "$FM_REX_TASK_SESSION_ID" ] || [ -z "$FM_REX_TASK_BLOCK_ID" ]; then
+      echo "error: rex did not return a session/block id for $W" >&2
+      exit 1
+    fi
+    T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
+    SES=${T%%:*}
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -3970,11 +4241,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr is the ONLY backend that reaches here: the gate above rebinds only
-    # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
-    # every read is scoped to the session the record names
-    # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
-    # secondmate were already refused, so there is no dispatch left to make.
+    # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
+    # the session the record names (fm_control_endpoint_absence_verdict owns
+    # that argument). tmux and every secondmate were already refused, and rex
+    # took the branch above, so there is no dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4183,8 +4453,13 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            # Opt-in project groups (docs/herdr-backend.md "Project groups"):
+            # an empty key keeps the block-end placement. Off costs one file test.
+            HERDR_GROUP_ORDER_KEY=
+            [ ! -e "$CONFIG/herdr-project-groups" ] || HERDR_GROUP_ORDER_KEY=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+              "$SCRIPT_DIR/fm-herdr-groups.sh" order-key "$ID" "$PROJ_ABS" 2>/dev/null) || HERDR_GROUP_ORDER_KEY=
             fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
+              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_GROUP_ORDER_KEY"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \
@@ -4252,6 +4527,47 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  paseo)
+    fm_backend_paseo_container_ensure || exit 1
+    PASEO_TASK_IDS=$(fm_backend_paseo_create_task "$W" "$PROJ_ABS") || exit 1
+    read -r FM_PASEO_TASK_TERMINAL_ID FM_PASEO_TASK_WORKSPACE_ID <<EOF
+$PASEO_TASK_IDS
+EOF
+    if [ -z "$FM_PASEO_TASK_TERMINAL_ID" ] || [ -z "$FM_PASEO_TASK_WORKSPACE_ID" ]; then
+      echo "error: paseo did not return a terminal/workspace id for $W" >&2
+      exit 1
+    fi
+    T="$FM_PASEO_TASK_TERMINAL_ID:$FM_PASEO_TASK_WORKSPACE_ID"
+    ;;
+  rex)
+    # A --secondmate launch stands up the OTHER home's own Rex session, so it
+    # shadows FM_HOME for the session label exactly as herdr does; every other
+    # kind goes beside this launcher (bin/backends/rex.sh owns placement).
+    fm_backend_rex_container_ensure || exit 1
+    FM_REX_TASK_SERVER=$(fm_backend_rex_server_endpoint) || {
+      echo "error: could not read the Rex server endpoint to record for $W" >&2
+      exit 1
+    }
+    # The session lock follows the shadowed home too, so the secondmate's own
+    # cleanup serializes against this launch on the same lock file.
+    REX_LABEL_HOME=$FM_HOME
+    REX_LABEL_STATE=$STATE
+    REX_LAUNCHER_RELATIONSHIP=launcher-home
+    if [ "$KIND" = secondmate ]; then
+      REX_LABEL_HOME=$PROJ_ABS
+      REX_LABEL_STATE=$PROJ_ABS/state
+      REX_LAUNCHER_RELATIONSHIP=other-home
+    fi
+    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
+    read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
+$REX_TASK_IDS
+EOF
+    if [ -z "$FM_REX_TASK_SESSION_ID" ] || [ -z "$FM_REX_TASK_BLOCK_ID" ]; then
+      echo "error: rex did not return a session/block id for $W" >&2
+      exit 1
+    fi
+    T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -4278,6 +4594,12 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
   esac
+  # Orca and the Herdr projection own their own abort cleanup above; every other
+  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
+  # the spawn ends with no record before its launch is delivered.
+  if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+    SPAWN_FRESH_ENDPOINT_OPENED=1
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -4297,6 +4619,8 @@ spawn_send_text_line() { # <target> <text>
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  paseo) fm_backend_paseo_send_text_line "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_text_line "$1" "$2" "$W" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -4305,6 +4629,8 @@ spawn_current_path() { # <target>
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  paseo) fm_backend_paseo_current_path "$1" "$W" ;;
+  rex) fm_backend_rex_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -4314,6 +4640,8 @@ spawn_send_literal() { # <target> <text>
   zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
   cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+  paseo) fm_backend_paseo_send_literal "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_literal "$1" "$2" "$W" ;;
   esac
 }
 spawn_send_key() { # <target> <key>
@@ -4323,6 +4651,8 @@ spawn_send_key() { # <target> <key>
   zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+  paseo) fm_backend_paseo_send_key "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_key "$1" "$2" "$W" ;;
   esac
 }
 
@@ -4652,6 +4982,101 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
+# rides the launch command (--prompt submits it after the TUI attaches), so
+# readiness is positive proof the brief is being processed rather than proof a
+# key was typed. The proof is semantic, not a screen scrape: the busy record
+# must advance past the fm-spawn seed to a polytoken-hook event (pre_user_prompt
+# fires the moment the brief turn is submitted, verified live), which is exactly
+# the verdict the supervisor reads. A pane parked on a first-start dialog the
+# launch cannot get past - the license dialog, which the captain's decision
+# (2026-10-07) makes a blocker that fleet spawns never auto-accept - never posts
+# the first hook event, so the gate fails loudly there. Session discovery is
+# folded into the same poll: `polytoken sessions --format json` scoped to this
+# task's config and sessions roots binds the pane's session id, port, and
+# credential file (a TUI-attached launch never prints them on the spawning
+# side, verified live).
+POLYTOKEN_SESSION_ID=
+POLYTOKEN_SESSION_PORT=
+POLYTOKEN_SESSION_CREDENTIAL=
+
+polytoken_wait_for_ready() {
+  local discovered record i=0 max=${FM_POLYTOKEN_READY_POLLS:-120} interval=${FM_POLYTOKEN_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    if [ -z "$POLYTOKEN_SESSION_ID" ]; then
+      discovered=$(fm_polytoken_session_for_project "$POLYTOKEN_BIN" \
+        "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+        "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" \
+        "$WT") || discovered=
+      if [ -n "$discovered" ]; then
+        # The listing row carries a fourth field (the daemon pid); a trailing
+        # throwaway variable consumes it so it is never glued onto the
+        # credential path the control verbs address.
+        IFS=$'\t' read -r POLYTOKEN_SESSION_ID POLYTOKEN_SESSION_PORT POLYTOKEN_SESSION_CREDENTIAL _ <<EOF
+$discovered
+EOF
+      fi
+    fi
+    if [ -n "$POLYTOKEN_SESSION_ID" ]; then
+      record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
+      case "$record" in
+        *" polytoken-hook "*) return 0 ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Bind the discovered session into task metadata (the control verbs' durable
+# address), in the same locked-filter-and-publish shape spawn_record_traceparent
+# uses: an idempotent rewrite that drops any prior polytoken_* binding before
+# appending the fresh one.
+spawn_record_polytoken_session() {
+  local meta="$STATE/$ID.meta" status=0 acquired=0
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    acquired=1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
+  if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
+    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential"' "$meta" >"$SPAWN_META_TMP" ||
+    ! {
+      echo "polytoken_session=$POLYTOKEN_SESSION_ID"
+      echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
+      echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
+    } >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    status=1
+    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  fi
+  SPAWN_META_TMP=
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK" || status=1
+    SPAWN_META_LOCK_HELD=0
+  fi
+  return "$status"
+}
+
+polytoken_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  # A failed gate leaves nothing running or recorded: reap this launch's exact
+  # session daemon (scoped to this task's sessions root), retire the per-task
+  # wiring (the sessions roots, config dir, worktree hook layer, facet, and
+  # busy writer), then close the endpoint exactly like the agy gate.
+  if [ -n "$POLYTOKEN_SESSION_ID" ]; then
+    "$POLYTOKEN_BIN" --config-dir "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+      reap "$POLYTOKEN_SESSION_ID" --force \
+      --sessions-dir "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" >/dev/null 2>&1 || true
+  fi
+  clear_relaunch_harness_wiring polytoken "$WT" "$STATE_REAL" "$ID" || true
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -4667,7 +5092,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ]; then
+    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
@@ -4743,11 +5168,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if spawn_endpoint_closes_on_abort; then
+    validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
@@ -4763,7 +5192,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
-      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
     SPAWN_SLOT_CLAIMED=1
@@ -4813,7 +5242,7 @@ claude*)
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
-    echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+    echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
     exit 1
   fi
   ;;
@@ -4839,7 +5268,9 @@ esac
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
 TASK_TMP="/tmp/fm-$ID"
-if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+  [ "$HARNESS" != polytoken ] || SPAWN_TASK_TMP_CREATED=1
+else
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
     [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
     ! chmod 700 "$TASK_TMP"; then
@@ -4880,6 +5311,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
+fi
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  fm_polytoken_require_hooks_free "$WT" || exit 1
+  fm_polytoken_require_handler_path "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")" || exit 1
+fi
+[ "$RELAUNCH" -eq 1 ] || [ "$HARNESS" != polytoken ] || SPAWN_FRESH_WIRING_PENDING=1
+if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=1
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
@@ -4939,7 +5377,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode)
+  gemini | devin | commandcode | polytoken)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -5357,6 +5795,36 @@ EOF
     exclude_path '.fm-kimi-turnend'
     fi
     ;;
+  polytoken)
+    # Semantic busy-state wiring (bin/fm-busy-lib.sh; bin/fm-polytoken-lib.sh
+    # owns every generated artifact's content). Four pieces, all verified live:
+    # the per-task config dir (mirrored operator config with the unattended
+    # permission posture enforced - the one launch-time autonomy surface), the
+    # worker role-contract facet in the worktree's `.polytoken/facets/` (the
+    # project facet discovery layer), the generated no-argv busy writer in
+    # state/ (hook handlers receive no argv, verified live), and the worktree
+    # `.polytoken/hooks.json` binding the three busy events to that writer.
+    # post_model_turn is deliberately NOT wired as a close: it fires per model
+    # response - verified mid-turn, between tool phases - so closing on it
+    # would flap the record idle while a long tool call still runs. The
+    # worktree files stay out of git's view so they never block teardown's
+    # dirty check or leak into a commit; an existing `.polytoken/hooks.json`
+    # refused the spawn above, before any wiring or relaunch cleanup was armed,
+    # rather than clobbering a project's own hook layer.
+    # Gated on the canonical template like gemini and devin, because a raw
+    # launch command never carries this wiring's flags or cwd contract.
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      if ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+        || ! fm_polytoken_write_facet "$WT" "$STATE_REAL/$ID.inbox" \
+        || ! fm_polytoken_write_busy_script "$FM_ROOT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" \
+        || ! fm_polytoken_write_hooks "$WT" "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")"; then
+        echo "error: could not arm the polytoken busy-state wiring for $ID" >&2
+        exit 1
+      fi
+      exclude_path '.polytoken/hooks.json'
+      exclude_path '.polytoken/facets/firstmate-worker.md'
+    fi
+    ;;
   esac
 
 # Per-task git hooksPath that strips AI commit trailers at the commit object.
@@ -5457,7 +5925,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5511,6 +5979,16 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = paseo ]; then
+    echo "paseo_terminal_id=$FM_PASEO_TASK_TERMINAL_ID"
+    echo "paseo_workspace_id=$FM_PASEO_TASK_WORKSPACE_ID"
+  fi
+  if [ "$BACKEND" = rex ]; then
+    echo "rex_server=$FM_REX_TASK_SERVER"
+    echo "rex_session_id=$FM_REX_TASK_SESSION_ID"
+    echo "rex_window_id=$FM_REX_TASK_WINDOW_ID"
+    echo "rex_block_id=$FM_REX_TASK_BLOCK_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -5688,6 +6166,12 @@ commandcode)
   LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+polytoken)
+  LAUNCH=${LAUNCH//__POLYTOKENBIN__/"$(shell_quote "$POLYTOKEN_BIN")"}
+  LAUNCH=${LAUNCH//__POLYTOKENCONFIG__/"$(shell_quote "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")")"}
+  LAUNCH=${LAUNCH//__POLYTOKENSESSIONS__/"$(shell_quote "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")")"}
+  LAUNCH=${LAUNCH//__POLYTOKENFACETS__/"$(shell_quote "$WT/.polytoken/facets")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -5923,6 +6407,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
+    TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_FORWARD_NAMES; do
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -6101,6 +6586,21 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
+# polytoken's gate is semantic and scoped to the canonical template: a raw
+# launch command never carries the generated wiring's flags, so it is gated
+# off exactly like the arm above. The failure detail names the one known
+# first-start blocker (the license dialog) so a supervisor can tell a
+# blocked launch from a wedged one.
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! polytoken_wait_for_ready; then
+    polytoken_spawn_fail "polytoken did not start processing its brief in window $T (a first-start license dialog is the one known blocker; it is never auto-accepted)"
+    exit 1
+  fi
+  if ! spawn_record_polytoken_session; then
+    polytoken_spawn_fail "polytoken session binding could not be recorded for $ID"
+    exit 1
+  fi
+fi
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -6185,4 +6685,7 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
+# new endpoint now rather than at the next watcher poll; off costs one file test.
+[ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

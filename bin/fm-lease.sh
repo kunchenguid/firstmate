@@ -121,10 +121,17 @@ case "$CMD" in
     # provides one (the Pi branch extension passes the session-lock holder),
     # else the session-lock holder (state/.lock is the harness pid), else this
     # shell; without a matching session lock the resulting lease is stale.
+    # A pinned holder that is alive but no longer line 1 was moved off by a
+    # same-session re-anchor (bin/fm-lock.sh), since another session takes the
+    # lock only from a holder that is no longer a live harness, so the claim
+    # records the live line 1.
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
     case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
+    LOCK_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
     if [ -z "$HOLDER_PID" ]; then
-      HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
+      HOLDER_PID=$LOCK_PID
+    elif [ "$HOLDER_PID" != "$LOCK_PID" ] && fm_pid_alive "$HOLDER_PID" && fm_pid_alive "$LOCK_PID"; then
+      HOLDER_PID=$LOCK_PID
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")

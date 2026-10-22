@@ -288,14 +288,52 @@ test_supported_backend_endpoint_records_validate() {
     "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid cmux endpoint refused"
 
-  for backend in tmux herdr zellij orca cmux; do
+  id=paseo-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=terminal-1:wks_1" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=paseo" "paseo_terminal_id=terminal-1" "paseo_workspace_id=wks_1"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid paseo endpoint refused"
+
+  id=rex-task
+  rex_meta() {  # <window> <session-id> <window-id> <block-id> <server>
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=$1" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+      "backend=rex" "rex_server=$5" "rex_session_id=$2" "rex_window_id=$3" "rex_block_id=$4"
+  }
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e "unix:///tmp/rex%20server.sock"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid rex endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_BACKEND:$FM_BACKEND_VALIDATED_TARGET" = \
+    "rex:01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" ] \
+    || fail "rex endpoint validation returned wrong identity"
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a10000-0000-7000-8000-000000000000 "unix:///tmp/rex.sock"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex window= that names a different block than rex_block_id must refuse"
+  fi
+  rex_meta "session:01a161f8-ca97-7d13-9f71-de705f5dc343:block:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e "unix:///tmp/rex.sock"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex window= that keeps the colon-carrying id prefixes must refuse"
+  fi
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e ""
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex record with no rex_server must refuse"
+  fi
+
+  for backend in tmux herdr zellij orca cmux paseo rex; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex records validate, inconsistent Rex records refuse, and every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {

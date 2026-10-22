@@ -31,6 +31,8 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/paseo-backend.md",
+    "docs/rex-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -133,10 +135,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -230,6 +228,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/polytoken.md",
       "audience": "agent-runtime"
     },
     {
@@ -409,6 +411,14 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/paseo-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/rex-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/pi-supervision-branch.md",
       "audience": "maintainer-architecture"
     },
@@ -514,6 +524,10 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/polytoken.md",
       "audience": "maintainer-verification"
     },
     {

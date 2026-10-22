@@ -163,6 +163,17 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# True when pid $1 is one of the lines of ancestry list $2.
+fm_harness_pid_listed() {  # <pid> <ancestry-pids>
+  local pid
+  while IFS= read -r pid; do
+    [ "$pid" = "$1" ] && return 0
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
@@ -274,17 +285,13 @@ fm_session_lock_anchor_pid() {
 # held by a harness outside this ancestry under another (or no) session id, or
 # an ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
-  done <<EOF
-$pids
-EOF
+  fm_harness_pid_listed "$lock_pid" "$pids" && return 0
   fm_session_lock_same_session "$state" "$pids" || return 1
   fm_harness_pid_alive "$lock_pid"
 }
@@ -297,7 +304,7 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
@@ -306,11 +313,7 @@ fm_session_lock_foreign_owner_live() {
   esac
   fm_harness_pid_alive "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 1
-  done <<EOF
-$pids
-EOF
+  fm_harness_pid_listed "$lock_pid" "$pids" && return 1
   fm_session_lock_same_session "$state" "$pids" && return 1
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid

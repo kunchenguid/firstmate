@@ -439,6 +439,9 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
+  # fixture that ever verifies an executable does not source a missing file.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
@@ -703,12 +706,14 @@ arm_count() {  # <dir>
 }
 
 # The recycled chain must still be treated as the owner: arm, no diagnostic,
-# lock accepted, line 1 untouched while the recorded pid lives, sidecar bytes
-# untouched. An owned actionable close records two arm invocations - the
-# foreground arm plus the handling successor the hook starts before the rewake -
-# so the cumulative <expected-arms> grows by two for every owned phase.
-expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
-  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5
+# lock accepted, line 1 naming <expected-lock-pid>, and the sidecar either
+# byte-identical to the one the owner wrote or, when <expected-session-id> is
+# given, re-keyed to that id. An owned actionable close records two arm
+# invocations - the foreground arm plus the handling successor the hook starts
+# before the rewake - so the cumulative <expected-arms> grows by two for every
+# owned phase.
+expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label> [<expected-session-id>]
+  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5 session_id=${6:-}
   expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not rewake"
   [ "$(arm_count "$dir")" = "$arms" ] || fail "$label: expected $arms arm(s), got $(arm_count "$dir")"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "$label: no rewake claim was recorded, got: $(epoch_outcome "$dir")"
@@ -719,8 +724,13 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$lock_pid" ] \
     || fail "$label: lock line 1 is $(phase_value "$dir" "$n" lock-after), expected $lock_pid"
-  cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
-    || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  if [ -n "$session_id" ]; then
+    [ "$(phase_value "$dir" "$n" session-after)" = "$session_id" ] \
+      || fail "$label: the session sidecar names $(phase_value "$dir" "$n" session-after), expected $session_id"
+  else
+    cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
+      || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  fi
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
@@ -776,38 +786,37 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
-  # Phase 2: the same session id over the broken chain - the reported drift.
-  fire_phase "$dir" 2 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  # Phases 2-4: before the spare proves anything, a different id, the right id
+  # from a CLAUDE_PID outside the run, and no id at all are each a non-owner
+  # over the broken chain.
+  fire_phase "$dir" 2 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
   if grep -qx "$frontend" "$dir/state/phase-2/ancestry"; then
-    fail "the recycled chain still reached the front-end, so this phase proves nothing"
+    fail "the recycled chain still reached the front-end, so these phases prove nothing"
   fi
   grep -qx "$spare" "$dir/state/phase-2/ancestry" || fail "the hook's ancestry lost its own spare"
-  expect_phase_owned "$dir" 2 4 "$frontend" "recycled chain, same session"
+  expect_phase_foreign "$dir" 2 2 "$frontend" "recycled chain, different session"
+  fire_phase "$dir" 3 "export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$frontend"
+  expect_phase_foreign "$dir" 3 2 "$frontend" "recycled chain, untrusted id"
+  fire_phase "$dir" 4 ''
+  expect_phase_foreign "$dir" 4 2 "$frontend" "recycled chain, no id"
 
-  # Phases 3-5: a different id, the right id from a CLAUDE_PID outside the run,
-  # and no id at all are each a non-owner over the same broken chain.
-  fire_phase "$dir" 3 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
-  expect_phase_foreign "$dir" 3 4 "$frontend" "recycled chain, different session"
-  fire_phase "$dir" 4 "export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$frontend"
-  expect_phase_foreign "$dir" 4 4 "$frontend" "recycled chain, untrusted id"
-  fire_phase "$dir" 5 ''
-  expect_phase_foreign "$dir" 5 4 "$frontend" "recycled chain, no id"
-
-  # Phase 6: the front-end exits; the same session reclaims its dead anchor
-  # onto the spare - the model-loop process - not onto the outermost pty-host.
-  : > "$dir/state/stop-frontend"
-  i=0
-  while [ "$i" -lt 200 ] && kill -0 "$frontend" 2>/dev/null; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  kill -0 "$frontend" 2>/dev/null && fail "the front-end did not exit"
-  fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_phase_owned "$dir" 6 6 "$spare" "dead front-end, same session"
+  # Phase 5: the same session id over the broken chain - the reported drift. The
+  # confirmation re-anchors line 1 from the live non-ancestor front-end onto the
+  # spare - the model-loop process - not onto the outermost pty-host.
+  fire_phase "$dir" 5 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 5 4 "$spare" "recycled chain, same session"
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
+  kill -0 "$frontend" 2>/dev/null || fail "the front-end exited, so the re-anchor was not over a live owner"
 
+  # Phase 6: /clear - the same spare under a new id while the front-end that
+  # first recorded the lock is still alive. Ancestry still proves ownership and
+  # the sidecar is re-keyed.
+  fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 6 6 "$spare" "same process after a session-id change" S2
+
+  : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
-  pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain"
+  pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
@@ -1099,6 +1108,113 @@ test_verified_reclaim_keeps_new_sidecar() {
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"
 }
 
+# A re-anchor moves leases recorded against the old live line 1 onto the new
+# anchor, so the other supervision actor still cannot claim a held task.
+test_reanchor_keeps_task_leases_live() {
+  local dir front_pid model_pid lease_rc
+  dir="$TMP_ROOT/reanchor-leases"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'branch\t%s\t100\n' "$front_pid" > "$dir/state/.lease-t1"
+  printf 'main\t%s\t200\n' "$front_pid" > "$dir/state/.lease-t2"
+  printf 'branch\t%s\t300\n' "$$" > "$dir/state/.lease-t3"
+  cp "$dir/state/.lease-t3" "$dir/state/lease-t3-before"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.lease-t1")" = "$(printf 'branch\t%s\t100' "$model_pid")" ] \
+    || fail "the branch lease was not moved to the new anchor: $(cat "$dir/state/.lease-t1")"
+  [ "$(cat "$dir/state/.lease-t2")" = "$(printf 'main\t%s\t200' "$model_pid")" ] \
+    || fail "the main lease was not moved to the new anchor: $(cat "$dir/state/.lease-t2")"
+  cmp -s "$dir/state/lease-t3-before" "$dir/state/.lease-t3" \
+    || fail "a lease recorded against another pid changed: $(cat "$dir/state/.lease-t3")"
+  env -u FM_SUPERVISION_ACTOR -u FM_LEASE_HOLDER_PID FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" claim t1 > "$dir/state/main-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "main claimed the branch's task after the re-anchor: $(cat "$dir/state/main-claim.out")"
+  env -u FM_SUPERVISION_ACTOR FM_HOME="$dir" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$model_pid" \
+    "$ROOT/bin/fm-lease.sh" claim t2 > "$dir/state/branch-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "the branch claimed main's task after the re-anchor: $(cat "$dir/state/branch-claim.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor keeps both supervision actors' task leases live"
+}
+
+autoarm_midturn_healthy() {  # <state-dir>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$0"; fm_autoarm_midturn_healthy "$FM_STATE_OVERRIDE" 300' "$ROOT/bin/fm-wake-lib.sh"
+}
+
+# A re-anchor during a rewake handling turn that has outrun grace moves the
+# auto-arm ledger's session_pid with line 1 and keeps the ledger's other bytes
+# and mtime, so the mid-turn guard still sees healthy supervision.
+test_reanchor_keeps_autoarm_midturn_healthy() {
+  local dir front_pid model_pid
+  dir="$TMP_ROOT/reanchor-autoarm"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1\n' \
+    "$front_pid" > "$dir/state/.claude-autoarm-epoch"
+  printf 'acked:handling:g1\n' > "$dir/state/.watcher-down"
+  touch -t 201901010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-mtime"
+  autoarm_midturn_healthy "$dir/state" || fail "the rewake fixture is not healthy before the re-anchor, so this case proves nothing"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.claude-autoarm-epoch")" = "$(printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1' "$model_pid")" ] \
+    || fail "the rewake was not moved to the new anchor intact: $(cat "$dir/state/.claude-autoarm-epoch")"
+  if [ "$dir/state/.claude-autoarm-epoch" -nt "$dir/state/epoch-mtime" ] \
+    || [ "$dir/state/.claude-autoarm-epoch" -ot "$dir/state/epoch-mtime" ]; then
+    fail "the rewake move changed the ledger mtime"
+  fi
+  autoarm_midturn_healthy "$dir/state" \
+    || fail "the mid-turn guard rejects the rewake after the re-anchor: $(cat "$dir/state/reanchor.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1115,3 +1231,5 @@ test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar
 test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
+test_reanchor_keeps_task_leases_live
+test_reanchor_keeps_autoarm_midturn_healthy
