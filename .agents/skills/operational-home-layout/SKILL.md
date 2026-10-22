@@ -136,7 +136,7 @@ state/               runtime records and signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-permanent-* .wedge-terminal-queued-* .wedge-rollback-failed-* .dead-reported-* .writing-* .guard-deferrals-* .waiting-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .secondmate-liveness-tick .secondmate-liveness-*.lock*   watcher internals; never touch. The three wedge-cap markers are written only while FM_WEDGE_MAX_ESCALATIONS is above 0, and are safe to delete (rm STATE/.wedge-permanent-<key> is the immediate-re-engagement escape hatch; docs/configuration.md owns that cap's release boundary): .wedge-permanent-<key> silences that window for FM_CAP_HORIZON_SECS, .wedge-rollback-failed-<key> silences it for FM_ROLLBACK_SENTINEL_TTL_SECS, and .wedge-terminal-queued-<key> marks the one episode that already queued its terminal row; a cap release drops all three, and only the first two re-engage a window when deleted
   .secondmate-relaunch-<id> .secondmate-relaunch-bound-<id>   durable relaunch history and parked-bound state; never touch (bin/fm-secondmate-liveness-lib.sh owns the ledger contract)
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
-  .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .last-watcher-beat watcher liveness beacon, touched at proven progress points in each poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

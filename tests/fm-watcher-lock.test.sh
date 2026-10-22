@@ -22,6 +22,12 @@ ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# Portable mtime in epoch seconds. Detect the platform before invoking stat so
+# the wrong implementation cannot print a partial filesystem dump.
+file_mtime() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
 # Execute the actual disposable-checkout guard before any watcher can start.
 lab="$TMP_ROOT/marked-lab"
 foreign_state="$TMP_ROOT/foreign-state"
@@ -244,6 +250,79 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   wait "$pid" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
+}
+
+test_beacon_stays_fresh_across_recorded_windows() {
+  local dir state fakebin out pid beat n m age
+  dir=$(make_case recorded-window-sweep)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  beat="$state/.last-watcher-beat"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+previous=
+for arg do
+  if [ "$previous" = -t ]; then target=$arg; fi
+  previous=$arg
+done
+case "${1:-}" in
+  capture-pane)
+    case "$target" in
+      *fm-task3|*fm-task4|*fm-task5) exit 1 ;;
+    esac
+    /bin/sleep "${FM_FAKE_CAPTURE_DELAY:-2}"
+    printf 'ctrl+c to stop\n'
+    ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
+  list-windows) printf '%s\n' fm-task0 fm-task1 fm-task2 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  for n in 0 1 2 3 4 5; do
+    fm_write_meta "$state/task$n.meta" \
+      "window=lab:fm-task$n" "backend=tmux" "kind=ship"
+    printf 'working: recorded task %s\n' "$n" > "$state/task$n.status"
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' _ \
+      "$LIB" "$state" "$state/task$n.status" \
+      || fail "could not prime task$n status"
+  done
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_FAKE_CAPTURE_DELAY=2 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_STALE_GRACE=4 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  for n in $(seq 1 100); do
+    [ -e "$beat" ] && break
+    sleep 0.1
+  done
+  [ -e "$beat" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "watcher never published its initial beacon"; }
+  for n in $(seq 1 18); do
+    is_live_non_zombie "$pid" || fail "watcher exited during the recorded-window sweep: $(cat "$out")"
+    m=$(file_mtime "$beat")
+    age=$(( $(date +%s) - m ))
+    if [ "$age" -ge 4 ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "beacon aged ${age}s while recorded windows were still being scanned: $(cat "$out")"
+    fi
+    sleep 0.5
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watcher beacon stays fresh while scanning slow recorded windows and skips gone panes"
 }
 
 test_guard_warnings() {
@@ -1578,6 +1657,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
+test_beacon_stays_fresh_across_recorded_windows
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
