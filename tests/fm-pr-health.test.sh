@@ -228,19 +228,23 @@ test_adopted_draft_red_required_check_after_pause_wakes_once() {
   pass 'each required check that fails on an adopted draft wakes once per latest commit'
 }
 
-test_optional_failure_is_silent_until_a_required_check_fails() {
+test_reported_failure_does_not_hide_a_later_required_failure() {
   local home
   home=$(new_home optional-then-required)
   task "$home" ship1 pr=https://github.com/o/r/pull/8
   pr "$home" 8 "$HEAD_A" "$BASE_1" true false
   set_pr "$home" 8 '.checks = [{name:"E2E Tests (independent)",conclusion:"FAILURE",required:false}]'
   arm "$home"
-  expect_silent "$home" 'an optional failure must not wake, even while the base requires no check'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing checks at latest commit aaaaaaa: E2E Tests \(independent\) \(task ship1\)$' \
+    'a reported failure must wake when no check is required'
+  expect_silent "$home" 'the reported failure must not repeat at the same commit'
   set_pr "$home" 8 '.checks += [{name:"Backend",conclusion:"FAILURE",required:true}]'
   expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing required checks at latest commit aaaaaaa: Backend \(task ship1\)$' \
     'a required check that appears and fails at the same commit must wake'
   expect_silent "$home" 'the reported required failure must not repeat'
-  pass 'only a failing required check wakes, whether or not an optional one failed first'
+  set_pr "$home" 8 '.checks += [{name:"optional-later",conclusion:"FAILURE",required:false}]'
+  expect_silent "$home" 'a newly failing optional check must not wake once a required check has reported'
+  pass 'a fallback notification does not hide a later required failure at the same commit'
 }
 
 test_replaced_cancelled_run_is_not_failing() {
@@ -375,7 +379,7 @@ test_green_without_reviewer_is_silent() {
   pass 'a green PR without a reviewer never notifies'
 }
 
-test_optional_failures_never_wake() {
+test_base_without_required_checks_counts_any_failing_check() {
   local home
   home=$(new_home no-required)
   task "$home" a pr=https://github.com/o/r/pull/30
@@ -385,9 +389,11 @@ test_optional_failures_never_wake() {
   set_pr "$home" 30 '.checks = [{name:"lint",conclusion:"SUCCESS",required:false},{name:"test",conclusion:"FAILURE",required:false}]'
   set_pr "$home" 31 '.checks = [{name:"CI Status",conclusion:"SUCCESS",required:true},{name:"test",conclusion:"FAILURE",required:false}]'
   arm "$home"
-  expect_silent "$home" 'an optional failure must not wake, whether or not the base requires another check'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/30 has failing checks at latest commit aaaaaaa: test \(task a\)$' \
+    'only the base with no required checks must notify for its reported failure'
   [ "$(grep -c 'pulls/3[01]$' "$home/forge/calls.log")" = 2 ] || fail "both owned PRs must still be read: $(cat "$home/forge/calls.log")"
-  pass 'a check the base does not require never wakes'
+  expect_silent "$home" 'the fallback must retain once-per-check deduplication'
+  pass 'a base with no required checks counts a failing reported check'
 }
 
 test_retired_contribution_is_not_reclaimed_from_the_cached_branch() {
@@ -599,11 +605,11 @@ test_all_owned_pr_reads_start_in_one_wave() {
 failures=0
 for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
-  test_optional_failure_is_silent_until_a_required_check_fails \
+  test_reported_failure_does_not_hide_a_later_required_failure \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
   test_other_homes_red_check_is_silent test_enrolled_before_ready_and_after_cleanup_still_wake \
   test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered \
-  test_green_without_reviewer_is_silent test_optional_failures_never_wake \
+  test_green_without_reviewer_is_silent test_base_without_required_checks_counts_any_failing_check \
   test_retired_contribution_is_not_reclaimed_from_the_cached_branch \
   test_retired_contribution_is_not_reclaimed_by_a_fresh_branch_lookup \
   test_unreadable_contribution_record_pauses_the_monitor_once \

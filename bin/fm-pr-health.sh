@@ -27,8 +27,9 @@
 #   - conflict: REST mergeable is false. Null (UNKNOWN) is neither clean nor
 #     conflicting and never clears an already reported condition.
 #   - failing checks: a required context failed (a check run concluded other
-#     than SUCCESS, NEUTRAL or SKIPPED, or a status is FAILURE or ERROR). A
-#     context the base does not require never counts. Each name is judged
+#     than SUCCESS, NEUTRAL or SKIPPED, or a status is FAILURE or ERROR). When
+#     no reported context is required, any failing reported context counts,
+#     matching fm-pr-state.sh for unprotected stacked bases. Each name is judged
 #     by its newest run (latest_checks in fm-contributions.jq), because GitHub
 #     keeps a cancelled run beside the passing rerun that replaced it.
 # A conflict wakes once per latest commit, even if the base moves or the
@@ -141,7 +142,8 @@ STEP='
           else {name:.context, started_at:.createdAt, required:(.isRequired == true),
                 failing:(.state | IN("FAILURE","ERROR"))} end]
         | latest_checks as $ctx
-      | ([$ctx[] | select(.required and .failing) | .name] | unique) as $failing
+      | any($ctx[]; .required) as $has_required
+      | ([$ctx[] | select(.failing and (.required or ($has_required | not))) | .name] | unique) as $failing
       | ($p.conflicts // []) as $conflicts | ($p.checks // []) as $checks
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
@@ -153,7 +155,7 @@ STEP='
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
            (select($checks_new)
-            | "pr-health: \($url) has failing required checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
+            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
