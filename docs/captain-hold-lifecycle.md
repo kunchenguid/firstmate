@@ -111,7 +111,8 @@ Before recording completion, `complete` verifies every listed task against tasks
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
 An entry whose recorded origin differs from the one being completed is refused.
-An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
+An active-backlog entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
+For archived approvals, `bin/fm-captain-hold.sh --help` owns archive lookup and the stricter inventory verification guards.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
 The event names the reviewed inventory.
@@ -525,6 +526,9 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- Answered approvals remain verifiable after tasks-axi archives them, including through a configured archive path, without rewriting the active backlog or archive.
+  Absent, unresolved, open, duplicate, missing-origin, and mismatched-origin archive records refuse; an unresolved active row cannot borrow an archived answer with the same identity.
+- `tests/fm-backlog-read-bound.test.sh` additionally proves that a padded-zero archive-read bound cannot disable the deadline for public `verify` or `complete`, and that a bounded refusal releases the completion metadata lock.
 
 ### Answers, stamps, and deferral
 
@@ -640,6 +644,7 @@ The exact commands and their summarized outputs are recorded in the shipping PR'
 To refresh this record, run:
 
 - The four suites above: `tests/fm-captain-hold-lifecycle.test.sh`, `tests/fm-classify-decision-key.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`, and `tests/fm-bearings-snapshot.test.sh`.
+- `tests/fm-backlog-read-bound.test.sh` for active-backlog and archive-read deadlines.
 - `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, and `tests/fm-procevent.test.sh`.
 - `bin/fm-lint.sh`.
 

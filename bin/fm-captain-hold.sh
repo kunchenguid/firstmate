@@ -140,8 +140,8 @@
 # open keyed status decision. With a non-empty inventory, every listed task is
 # verified durable (captain-held, or carrying a recorded resolution),
 # is never the origin itself, and, when `hold --origin` recorded one, was held
-# for this origin; a hold with no recorded origin is accepted on durability
-# alone and named in the output,
+# for this origin; an active-backlog hold with no recorded origin is accepted
+# on durability alone and named in the output,
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
@@ -150,7 +150,15 @@
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
-# and no keyed status decision may be open.
+# and no keyed status decision may be open. On markdown homes only, these two
+# commands also read the configured done archive when the active exact id is
+# absent. An archived entry must be uniquely identified, Done, carry a recorded
+# resolution, and explicitly name this origin; archive reads never feed answer,
+# hold, or channel intake mutations. Active rows always take precedence.
+# Archive lookup uses `archive` in the top-level or `[markdown]` section of the
+# backlog root's .tasks.toml, then $HOME/.tasks-axi/config.toml, then
+# <data-directory>/done-archive.md. Relative settings resolve from the backlog
+# root. Unsupported or empty archive settings refuse rather than guessing.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -389,6 +397,85 @@ task_show() {  # <id>; sets TASK_SHOW_OUTPUT
   return "$status"
 }
 
+# Resolve the markdown archive setting with tasks-axi's project/home/default
+# precedence. Unsupported string syntax refuses rather than guessing a path.
+captain_archive_setting() {  # <config>; prints path or returns 1 if unset
+  [ -f "$1" ] || return 1
+  perl -MJSON::PP -e '
+    my ($section, $value) = ("", undef);
+    while (<>) {
+      if (/^\s*\[([^]]+)\]\s*(?:#.*)?$/) { $section = $1; next }
+      next unless $section eq "" || $section eq "markdown";
+      next unless /^\s*archive\s*=\s*(.*?)\s*$/;
+      my $raw = $1;
+      if ($raw =~ /^\x27([^\x27]*)\x27\s*(?:#.*)?$/) { $value = $1 }
+      elsif ($raw =~ /^("(?:[^"\\\\]|\\\\.)*")\s*(?:#.*)?$/) {
+        $value = JSON::PP->new->allow_nonref->decode($1);
+      } else { die "unsupported markdown archive setting in $ARGV\n" }
+    }
+    exit 1 unless defined $value;
+    die "empty markdown archive setting\n" unless length $value;
+    print $value;
+  ' "$1"
+}
+
+# Inventory-only fallback. Map dated Done archive batches in a private
+# snapshot, preserving other sections, then let tasks-axi parse and show the row.
+# The original archive and active backlog are never written by this path.
+TASK_INVENTORY_ARCHIVED=0
+task_show_inventory() {  # <id>; sets TASK_SHOW_OUTPUT and archive flag
+  local id=$1 data root backend archive='' config rc=0 tmp output secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  TASK_INVENTORY_ARCHIVED=0
+  if task_show "$id"; then return 0; fi
+  printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -q '^code: NOT_FOUND$' || return 2
+  data=$(fm_backlog_data_absolute "$DATA") || return 2
+  root=$(fm_backlog_root "$data") || return 2
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  [ "$backend" = markdown ] || return 1
+  for config in "$root/.tasks.toml" "${HOME:-}/.tasks-axi/config.toml"; do
+    rc=0
+    archive=$(captain_archive_setting "$config") || rc=$?
+    case "$rc" in 0) break ;; 1) ;; *) return 2 ;; esac
+  done
+  archive=${archive:-$data/done-archive.md}
+  case "$archive" in /*) ;; *) archive="$root/$archive" ;; esac
+  [ -e "$archive" ] || return 1
+  [ -f "$archive" ] && [ -r "$archive" ] || fail "cannot read captain resolution archive $archive"
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-inventory.XXXXXX") || return 2
+  # Match the active row reader: padded zero and invalid bounds must not
+  # disable either the archive scan or the subsequent row read deadline.
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
+  # Duplicate archived identities are ambiguous even if one copy is answered.
+  # tasks-axi prune emits dated Archived batches for Done rows. Only those
+  # headings map to Done; ordinary sections retain their original identity.
+  rc=0
+  fm_run_timed "$secs" awk -v id="$id" '
+    BEGIN { count=0 }
+    /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ { print "## Done"; next }
+    {
+      if (index($0, "- [x] " id " - ") == 1) count++
+      if (index($0, "- [ ] " id " - ") == 1) { count++; open=1 }
+      print
+    }
+    END { if (count > 1 || open) exit 2 }
+  ' "$archive" > "$tmp" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    [ "$rc" -ne 124 ] || { printf 'fm-captain-hold: archive read exceeded its bound for %s\n' "$id" >&2; exit 124; }
+    fail "captain resolution archive has ambiguous or open task identity $id"
+  fi
+  # shellcheck disable=SC2016  # Expansion is deferred to the timed child shell.
+  output=$(fm_run_timed "$secs" bash -c \
+    'cd "$1" || exit 2; exec tasks-axi show "$2" --full --backend markdown --file "$3"' \
+    _ "$root" "$id" "$tmp" 2>&1) || rc=$?
+  rm -f "$tmp"
+  [ "$rc" -ne 124 ] || { printf 'fm-captain-hold: archive read exceeded its bound for %s\n' "$id" >&2; exit 124; }
+  [ "$rc" -eq 0 ] || return "$rc"
+  TASK_SHOW_OUTPUT=$output
+  TASK_INVENTORY_ARCHIVED=1
+}
+
 # Read one row into `show`, failing with <absence-message> only when the read
 # genuinely failed; a read-bound hit (124) stops the command by name instead.
 # task_show must be called in THIS shell, not inside a command substitution:
@@ -525,11 +612,20 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  task_show_inventory "$id" || fail "captain-held task $id is absent from this home's configured backlog and resolution archive (data directory $DATA)"
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
+  if [ "$TASK_INVENTORY_ARCHIVED" = 1 ]; then
+    if [ "$(show_field_value "$show" id)" != "$id" ] || [ "$state" != "done" ] \
+      || ! body_has_resolution_record "$body"; then
+      fail "archived captain task $id is not an exact Done task with a recorded resolution"
+    fi
+    [ -n "$(body_hold_origin "$(decode_shown_value "$body")")" ] \
+      || fail "archived captain task $id has no recorded origin"
+    return 0
+  fi
   if body_has_resolution_record "$body"; then
     return 0
   fi
@@ -737,17 +833,31 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
-  if task_show "$entry"; then
+  local origin=$1 entry=$2 legacy migrated rc inventory=${3:-0}
+  rc=0
+  if [ "$inventory" = 1 ]; then
+    task_show_inventory "$entry" || rc=$?
+  else
+    task_show "$entry" || rc=$?
+  fi
+  if [ "$rc" = 0 ]; then
     printf '%s exact' "$entry"
     return 0
   fi
+  if [ "$inventory" = 1 ] && [ "$rc" != 1 ]; then return "$rc"; fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy"; then
+    rc=0
+    if [ "$inventory" = 1 ]; then
+      task_show_inventory "$legacy" || rc=$?
+    else
+      task_show "$legacy" || rc=$?
+    fi
+    if [ "$rc" = 0 ]; then
       printf '%s legacy' "$legacy"
       return 0
     fi
+    if [ "$inventory" = 1 ] && [ "$rc" != 1 ]; then return "$rc"; fi
   fi
   rc=0
   migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?
@@ -871,7 +981,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
     refuse_self_inventory "$origin" "$entry"
   fi
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
+  resolved=$(resolve_entry "$origin" "$entry" 1) || resolve_status=$?
   if [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
