@@ -2131,7 +2131,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           pane itself did not survive.
   #   rex   - the recorded block is re-read on the server the record names
   #           (rex_server); Rex never reuses an id, so its structured
-  #           not-found there proves the block itself is gone.
+  #           not-found there proves the block itself is gone. A Rex
+  #           `unreadable` is rechecked too, because a stopped Rex server
+  #           reads as unreachable to a read that never starts it
+  #           (fm_control_absence_recheck_applies owns that rule).
   #   tmux  - REFUSES, always. A task record carries no socket identity for its
   #           endpoint, and a server-wide inventory describes only the server
   #           this process addresses, so no read available here can tell "gone"
@@ -2144,14 +2147,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
+  if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
       dead) RELAUNCH_STATE=dead ;;
       alive) RELAUNCH_STATE=alive ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
+        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads '$RELAUNCH_STATE', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
         exit 1
         ;;
     esac
@@ -4188,7 +4191,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # re-created in the RECORDED session while that session survives. A Rex
     # session never survives its server, so when the session itself is gone
     # the task goes where an ordinary spawn from this seat would put it; that
-    # is the reclaim that recovers a server restart.
+    # is the reclaim that recovers a server restart. Both placements open the
+    # tab in reclaim mode, so a bare-shell husk an earlier refused reclaim left
+    # carrying this task's label is replaced rather than blocking every retry.
     fm_backend_rex_container_ensure || exit 1
     FM_REX_TASK_SERVER=$(fm_backend_rex_server_endpoint) || {
       echo "error: could not read the Rex server endpoint to record for $W" >&2
@@ -4199,7 +4204,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       || rex_rebind_status=$?
     case "$rex_rebind_status" in
       0) ;;
-      2) REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" launcher-home) || exit 1 ;;
+      2) REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" launcher-home reclaim) || exit 1 ;;
       *)
         echo "error: task $ID's endpoint could not be re-created in its recorded Rex session $FM_REX_TASK_SESSION_ID; see the refusal above for what failed" >&2
         exit 1

@@ -37,7 +37,9 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
+#              `missing` (or, on Rex, `unreadable`, which is how a stopped Rex
+#              server reads without starting it) is put through the control
+#              plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
 #              is merely unreachable from this seat. That proof exists only on
@@ -123,7 +125,8 @@
 #     postcondition cannot be proven. zellij, orca, cmux, and paseo are refused
 #     rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#     classified state acts (a Rex `unreadable` first goes through the absence
+#     proof `exit` describes, and refuses unless that proof settles it).
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
@@ -674,7 +677,9 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing)
+    *)
+      fm_control_absence_recheck_applies "$BACKEND" "$state" \
+        || die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint"
       # `missing` on its own is not a finding about the endpoint: it conflates
       # "destroyed" with "unreachable from this seat". Route it through the
       # control plane's one absence proof - the same one the relaunch gate uses
@@ -704,11 +709,10 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
+          die "task $ID's endpoint $T reads '$state', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in

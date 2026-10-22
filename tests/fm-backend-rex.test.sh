@@ -355,6 +355,35 @@ test_reclaim_replaces_a_husk_and_refuses_a_live_one() {
   pass "fm_backend_rex_create_task_in_session: closes a bare-shell husk carrying the task label, refuses over a live one"
 }
 
+test_reclaim_fallback_placement_replaces_a_husk() {
+  local dir out sid husk new label
+  dir=$(new_case reclaim-fallback-husk)
+  label=$(home_label "$dir")
+  # The recorded session is gone (a server restart), so the reclaim falls back
+  # to the ordinary placement; its launch then refuses before republishing,
+  # leaving a bare-shell husk there that the retry meets again.
+  rex_env "$dir" 'fm_backend_rex_create_task_in_session session:00000000-0000-7000-8000-0000000000ff fm-beta /tmp' 2>/dev/null
+  expect_code 2 "$?" "a reclaim into a gone session must fall back"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim') || fail "first fallback reclaim failed"
+  read -r sid _ husk <<<"$out"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim') \
+    || fail "a fallback reclaim over a bare-shell husk must succeed"
+  read -r _ _ new <<<"$out"
+  assert_not_equals "$husk" "$new" "the retry must open a fresh block"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[].windows[].blocks[] | select(.block_id == \"$husk\")] | length")" \
+    "the bare-shell husk must be closed"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[].windows[].blocks[] | select(.label == \"fm-$label-beta\")] | length")" \
+    "exactly one block may carry the reclaimed task's label"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp' 2>/dev/null \
+    && fail "an ordinary spawn must still refuse a block carrying the task's label"
+  write_process "$dir" "$new" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"claude\"},\"ancestors\":[],\"last_exit\":null}"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp launcher-home reclaim' 2>/dev/null \
+    && fail "a fallback reclaim over a block running a harness must refuse"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\") | .windows[]] | length")" \
+    "a refused reclaim must open no tab"
+  pass "fm_backend_rex_create_task reclaim: the fallback placement closes a bare-shell husk, refuses a live one, and spawn still refuses duplicates"
+}
+
 # --- reads -------------------------------------------------------------------
 
 test_capture_and_derived_viewport() {
@@ -545,6 +574,63 @@ test_control_absence_verdict_reads_rex_meta() {
   pass "fm_control_endpoint_absence_verdict rex: gone only on a not-found from the recorded server"
 }
 
+# rex_control_task: record task <id> on the fake's block <session-uuid>:<block-uuid>
+# with <server> as its rex_server, for driving bin/fm-control.sh.
+rex_control_task() {  # <dir> <id> <session-id> <window-id> <block-id> <server>
+  local dir=$1 id=$2 sid=$3 wid=$4 bid=$5 server=$6
+  mkdir -p "$dir/wt-$id" "$dir/home/data/$id"
+  printf '# brief for %s\n' "$id" >"$dir/home/data/$id/brief.md"
+  {
+    echo "window=${sid#session:}:${bid#block:}"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/wt-$id"
+    echo "project=$dir/wt-$id"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "backend=rex"
+    echo "rex_server=$server"
+    echo "rex_session_id=$sid"
+    echo "rex_window_id=$wid"
+    echo "rex_block_id=$bid"
+  } >"$dir/home/state/$id.meta"
+}
+
+run_rex_control() {  # <dir> <args...>
+  local dir=$1
+  shift
+  env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$ROOT/bin/fm-control.sh" "$@" 2>&1
+}
+
+test_control_exit_after_a_server_stop() {
+  local dir out rc sid wid bid ep=unix:///fake/rex.sock
+  dir=$(new_case control-exit-stopped)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-t1 /tmp'); read -r sid wid bid <<<"$out"
+  rex_control_task "$dir" t1 "$sid" "$wid" "$bid" "$ep"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-t2 /tmp'); read -r sid wid bid <<<"$out"
+  rex_control_task "$dir" t2 "$sid" "$wid" "$bid" unix:///other.sock
+
+  touch "$dir/fake/unreachable"
+  out=$(run_rex_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a server that cannot be reached or started proves nothing"
+  assert_not_contains "$out" "endpoint-gone" "exit must not claim a stop it could not prove"
+  rm -f "$dir/fake/unreachable"
+
+  touch "$dir/fake/down"
+  out=$(run_rex_control "$dir" t2 exit); rc=$?
+  expect_code 1 "$rc" "a stopped server answering for a different recorded server must refuse"
+  assert_not_contains "$out" "endpoint-gone" "a different server's not-found proves nothing"
+
+  touch "$dir/fake/down"
+  out=$(run_rex_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit after a server stop must reach the absence proof"
+  assert_contains "$out" "endpoint-gone t1" "a stopped server's restarted not-found proves the block gone"
+  pass "fm-control exit on rex: a stopped server goes through the recorded-server absence proof, and refuses when it cannot prove absence"
+}
+
 test_list_live_scopes_to_this_home() {
   local dir out sid bid label
   dir=$(new_case list-live)
@@ -572,6 +658,7 @@ test_create_task_per_home_session_create_then_adopt
 test_create_task_uses_confirmed_launcher_session
 test_create_task_refusals
 test_reclaim_replaces_a_husk_and_refuses_a_live_one
+test_reclaim_fallback_placement_replaces_a_husk
 test_capture_and_derived_viewport
 test_agent_state_from_process_view
 test_native_busy_trusts_live_owner_only
@@ -582,4 +669,5 @@ test_kill_never_retires_a_foreign_session
 test_kill_refuses_without_proof
 test_absence_recheck
 test_control_absence_verdict_reads_rex_meta
+test_control_exit_after_a_server_stop
 test_list_live_scopes_to_this_home

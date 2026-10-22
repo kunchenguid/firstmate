@@ -89,8 +89,9 @@ Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-
 `bin/fm-control.sh` `exit` and `relaunch` work on Rex.
 A session never survives its server, and Rex never reuses an id, so a structured not-found for the recorded block proves it gone, provided the server that answers is the one the task was created on.
 The record therefore carries that server's endpoint as `rex_server=`, and the proof refuses unless the reachable server reports the same endpoint; the proof may start a stopped personal server, whose fresh start then answers not-found with authority.
+Because passive reads never start a server, a stopped server first reads `unreadable`; `exit` and `relaunch` put a Rex `unreadable` through the same proof, and refuse whenever it cannot settle the endpoint.
 A reclaim opens the replacement tab in the exact recorded session, focus-safe, and falls back to ordinary placement only when that session is itself gone.
-A bare-shell block left by an earlier reclaim that refused before its record was republished carries the same block label, and the next reclaim closes it first; a non-shell program in it refuses the reclaim.
+A bare-shell block left by an earlier reclaim that refused before its record was republished carries the same block label, and the next reclaim closes it first, in either placement; a non-shell program in it refuses the reclaim, and an ordinary spawn still refuses any block carrying that label.
 [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the reclaim contract.
 
 ## Away mode
@@ -106,6 +107,18 @@ A Rex-hosted Firstmate can run away and quiet supervision: the supervisor target
 - Command Code is refused on Rex until it is live-verified there.
 - Push events are not wired yet, so supervision polls Rex like a backend without a push stream.
 - There is no Rex CI lane; the real-server tests run where a Rex server is already up.
+
+## Deferred upstream asks
+
+These asks to Superlogical are deliberately unfiled, pending a later decision; each line names the Firstmate impact that would go away.
+
+- **Viewport-only capture**: the viewport would be read directly instead of derived from the last `size.rows` rows of a full capture, removing the resize skew.
+- **Cursor position as a JSON field**: the composer classifier would gain the cursor evidence it currently runs without.
+- **Dropping `working` and `blocked` program-status records when their owner exits**: native busy state could be trusted without cross-checking every record against the live process view.
+- **A documented compatibility floor and machine-readable version output with the API revision**: the version gate would stop parsing `rex version` text.
+- **A per-session or per-block opt-out for the agent hook's automatic session rename**: a harness running in a task tab could not rename the session that holds the captain's or other tasks' tabs.
+- **A configurable default size for unviewed blocks**: spawn would no longer need to resize every new 80x24 task block to 200x50.
+- **`rex` on `PATH` inside blocks even when shell startup files reset it**: the adapter could drop its `REX_BIN_DIR` and server-bundle fallbacks.
 
 ## Regression entry points
 

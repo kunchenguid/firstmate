@@ -336,9 +336,25 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# Whether a raw fm_backend_agent_state reading on <backend> goes through
+# fm_control_endpoint_absence_verdict before a recovery verb (exit, relaunch)
+# acts or refuses. `missing` always does. A Rex `unreadable` does too: Rex's
+# passive reads never start a server, so a stopped server - which ends every
+# session on it - reads as unreachable rather than not-found, and only the
+# recheck (which may start the personal server) can turn that into a proof.
+# Passive readers keep the raw state.
+fm_control_absence_recheck_applies() {  # <backend> <raw-state>
+  case "${2-}" in
+    missing) return 0 ;;
+    unreadable) [ "${1-}" = rex ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
 # that an endpoint reading `missing` is actually GONE rather than merely
-# unreachable from this seat. Call it only for a `missing` raw state.
+# unreachable from this seat. Call it only for a raw state that
+# fm_control_absence_recheck_applies accepts.
 #
 # Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
 # unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty

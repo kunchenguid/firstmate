@@ -331,12 +331,12 @@ fm_backend_rex_home_sessions() {  # <label>
 # one) and other-home for a --secondmate launch, which always uses that other
 # home's own per-home session (the caller shadows FM_HOME). The window label
 # is the task label the captain reads in the tab bar; the block label is the
-# home-scoped name. A live block already carrying that name in the chosen
-# session is refused.
-fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home]
-  local label=$1 cwd=$2 relationship=${3:-launcher-home} name home_label sid wid bid
-  local sessions count out view launcher_rc=2
-  name=$(fm_backend_rex_scoped_name "$label")
+# home-scoped name. <mode> is spawn or reclaim and decides what a block
+# already carrying that name in the chosen session means
+# (fm_backend_rex_open_tab_locked).
+fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spawn|reclaim]
+  local label=$1 cwd=$2 relationship=${3:-launcher-home} mode=${4:-spawn} home_label sid wid bid
+  local sessions count out launcher_rc=2
   home_label=$(fm_backend_rex_home_label)
   fm_backend_rex_session_lock || {
     echo "error: could not take the rex session lock; refusing to create '$label'" >&2
@@ -380,59 +380,54 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home]
     esac
   fi
   if [ -z "$bid" ]; then
-    if ! view=$(fm_backend_rex_session_view "$sid") \
-      || ! printf '%s' "$view" | jq -e '.windows | type == "array"' >/dev/null 2>&1; then
+    fm_backend_rex_open_tab_locked "$sid" "$label" "$cwd" "$mode" || {
+      [ "$?" -ne 2 ] || echo "error: rex session $sid disappeared before a tab for '$label' could be opened" >&2
       fm_backend_rex_session_unlock
-      echo "error: could not read rex session $sid; refusing to create '$label'" >&2
       return 1
-    fi
-    if printf '%s' "$view" | jq -e --arg n "$name" \
-      '[.windows[]?.layers[]?.blocks[]? | select(.label == $n)] | length > 0' >/dev/null 2>&1; then
-      fm_backend_rex_session_unlock
-      echo "error: rex block '$name' already exists in session $sid" >&2
-      return 1
-    fi
-    if ! out=$(fm_backend_rex_cli window new -s "$sid" "$label" --focus=false --cwd "$cwd" --json); then
-      fm_backend_rex_session_unlock
-      echo "error: rex could not open a tab for '$label' in session $sid" >&2
-      return 1
-    fi
-    wid=$(printf '%s' "$out" | jq -r '.window_id // empty' 2>/dev/null)
-    bid=$(printf '%s' "$out" | jq -r '.block_ids[0] // empty' 2>/dev/null)
+    }
+    wid=$FM_BACKEND_REX_NEW_WINDOW
+    bid=$FM_BACKEND_REX_NEW_BLOCK
   fi
   fm_backend_rex_session_unlock
-  if ! fm_backend_rex_id_valid session "$sid" || ! fm_backend_rex_id_valid window "$wid" \
-    || ! fm_backend_rex_id_valid block "$bid"; then
-    echo "error: rex did not return session, window, and block ids for '$label'" >&2
-    return 1
-  fi
-  fm_backend_rex_cli block rename -s "$sid" "$bid" "$name" >/dev/null 2>&1 \
-    || echo "warning: could not label rex block $bid '$name'; routing uses its id, but duplicate detection cannot see it" >&2
-  fm_backend_rex_cli block call -s "$sid" -b "$bid" resize \
-    "{\"columns\":$FM_BACKEND_REX_COLUMNS,\"rows\":$FM_BACKEND_REX_ROWS}" >/dev/null 2>&1 \
-    || echo "warning: could not resize rex block $bid to ${FM_BACKEND_REX_COLUMNS}x$FM_BACKEND_REX_ROWS; harness screens may wrap" >&2
-  printf '%s %s %s' "$sid" "$wid" "$bid"
+  fm_backend_rex_finish_tab "$sid" "$wid" "$bid" "$label"
 }
 
 # fm_backend_rex_create_task_in_session: open a fresh tab for a task in an
 # EXACT existing session, the relaunch reclaim path for a task whose recorded
 # block is proven gone. Prints the same triple. Returns 2, creating nothing,
 # when that session is itself gone (a structured not-found), and 1 on any
-# other failure. A block already carrying the task's scoped label is the husk
-# of an earlier reclaim that refused before its record was republished: a
-# bare shell there is closed first, and anything else refuses.
+# other failure.
 fm_backend_rex_create_task_in_session() {  # <session-id> <label> <cwd>
-  local sid=$1 label=$2 cwd=$3 name out wid bid err rc view husk state
+  local sid=$1 label=$2 cwd=$3 rc=0
   fm_backend_rex_id_valid session "$sid" || return 1
   fm_backend_rex_session_lock || {
     echo "error: could not take the rex session lock; refusing to reclaim '$label'" >&2
     return 1
   }
-  err=$(mktemp "${TMPDIR:-/tmp}/fm-rex-err.XXXXXX") || { fm_backend_rex_session_unlock; return 1; }
+  fm_backend_rex_open_tab_locked "$sid" "$label" "$cwd" reclaim || rc=$?
+  fm_backend_rex_session_unlock
+  [ "$rc" -eq 0 ] || return "$rc"
+  fm_backend_rex_finish_tab "$sid" "$FM_BACKEND_REX_NEW_WINDOW" "$FM_BACKEND_REX_NEW_BLOCK" "$label"
+}
+
+# fm_backend_rex_open_tab_locked: the one tab-opening boundary, run under the
+# session lock. Opens the task's tab focus-safe in EXACT session <sid> and sets
+# FM_BACKEND_REX_NEW_WINDOW and FM_BACKEND_REX_NEW_BLOCK. Returns 2, creating
+# nothing, when that session is gone (a structured not-found), and 1 on any
+# other failure. A block already carrying the task's scoped label refuses a
+# spawn. On reclaim it is the husk of an earlier reclaim that refused before
+# its record was republished, wherever that reclaim placed it: a bare shell
+# there is closed first, and anything else refuses. Call it directly, not in a
+# command substitution, so the globals reach the caller.
+fm_backend_rex_open_tab_locked() {  # <session-id> <label> <cwd> <spawn|reclaim>
+  local sid=$1 label=$2 cwd=$3 mode=$4 name view err rc husk state out
+  FM_BACKEND_REX_NEW_WINDOW=
+  FM_BACKEND_REX_NEW_BLOCK=
+  name=$(fm_backend_rex_scoped_name "$label")
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-rex-err.XXXXXX") || return 1
   view=$(fm_backend_rex_cli api call -s "$sid" session.view 2>"$err")
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    fm_backend_rex_session_unlock
     if [ "$(fm_backend_rex_failure_class "$rc" "$(cat "$err" 2>/dev/null)")" = missing ]; then
       rm -f "$err"
       return 2
@@ -442,22 +437,27 @@ fm_backend_rex_create_task_in_session() {  # <session-id> <label> <cwd>
     return 1
   fi
   rm -f "$err"
-  name=$(fm_backend_rex_scoped_name "$label")
+  printf '%s' "$view" | jq -e '.windows | type == "array"' >/dev/null 2>&1 || {
+    echo "error: could not read rex session $sid" >&2
+    return 1
+  }
   while IFS= read -r husk; do
     [ -n "$husk" ] || continue
+    if [ "$mode" != reclaim ]; then
+      echo "error: rex block '$name' already exists in session $sid" >&2
+      return 1
+    fi
     state=$(fm_backend_rex_agent_state "$(fm_backend_rex_target "$sid" "$husk")")
     case "$state" in
       missing) continue ;;
       dead) ;;
       *)
-        fm_backend_rex_session_unlock
         echo "error: rex block $husk already carries '$name' and is not a bare shell ($state); refusing to open a second tab for it" >&2
         return 1
         ;;
     esac
     fm_backend_rex_cli block close -s "$sid" "$husk" >/dev/null 2>&1 || true
     if [ "$(fm_backend_rex_block_presence "$(fm_backend_rex_target "$sid" "$husk")")" != missing ]; then
-      fm_backend_rex_session_unlock
       echo "error: could not close the leftover rex block $husk carrying '$name'" >&2
       return 1
     fi
@@ -465,22 +465,29 @@ fm_backend_rex_create_task_in_session() {  # <session-id> <label> <cwd>
 $(printf '%s' "$view" | jq -r --arg n "$name" '.windows[]?.layers[]?.blocks[]? | select(.label == $n) | .block_id' 2>/dev/null)
 EOF
   out=$(fm_backend_rex_cli window new -s "$sid" "$label" --focus=false --cwd "$cwd" --json) || {
-    fm_backend_rex_session_unlock
     echo "error: rex could not open a tab for '$label' in session $sid" >&2
     return 1
   }
-  fm_backend_rex_session_unlock
-  wid=$(printf '%s' "$out" | jq -r '.window_id // empty' 2>/dev/null)
-  bid=$(printf '%s' "$out" | jq -r '.block_ids[0] // empty' 2>/dev/null)
-  if ! fm_backend_rex_id_valid window "$wid" || ! fm_backend_rex_id_valid block "$bid"; then
-    echo "error: rex did not return window and block ids for '$label'" >&2
+  FM_BACKEND_REX_NEW_WINDOW=$(printf '%s' "$out" | jq -r '.window_id // empty' 2>/dev/null)
+  FM_BACKEND_REX_NEW_BLOCK=$(printf '%s' "$out" | jq -r '.block_ids[0] // empty' 2>/dev/null)
+}
+
+# fm_backend_rex_finish_tab: validate a freshly opened tab's ids, label its
+# block with the home-scoped name, size it, and print
+# "<session-id> <window-id> <block-id>".
+fm_backend_rex_finish_tab() {  # <session-id> <window-id> <block-id> <label>
+  local sid=$1 wid=$2 bid=$3 label=$4 name
+  if ! fm_backend_rex_id_valid session "$sid" || ! fm_backend_rex_id_valid window "$wid" \
+    || ! fm_backend_rex_id_valid block "$bid"; then
+    echo "error: rex did not return session, window, and block ids for '$label'" >&2
     return 1
   fi
+  name=$(fm_backend_rex_scoped_name "$label")
   fm_backend_rex_cli block rename -s "$sid" "$bid" "$name" >/dev/null 2>&1 \
-    || echo "warning: could not label rex block $bid '$name'" >&2
+    || echo "warning: could not label rex block $bid '$name'; routing uses its id, but duplicate detection cannot see it" >&2
   fm_backend_rex_cli block call -s "$sid" -b "$bid" resize \
     "{\"columns\":$FM_BACKEND_REX_COLUMNS,\"rows\":$FM_BACKEND_REX_ROWS}" >/dev/null 2>&1 \
-    || echo "warning: could not resize rex block $bid" >&2
+    || echo "warning: could not resize rex block $bid to ${FM_BACKEND_REX_COLUMNS}x$FM_BACKEND_REX_ROWS; harness screens may wrap" >&2
   printf '%s %s %s' "$sid" "$wid" "$bid"
 }
 
