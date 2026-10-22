@@ -2,7 +2,7 @@
 # PR health monitor behavior through its registered check and the watcher.
 #
 # Cases drive the registered check against a fake forge, with ownership from
-# real task records, status lines, task copies and durable contributions.
+# real task records, task copies and durable contributions.
 # A barrier at the forge boundary proves reads fan out across owned PRs.
 set -u
 # shellcheck source=tests/lib.sh
@@ -216,11 +216,32 @@ test_adopted_draft_red_required_check_after_pause_wakes_once() {
   printf 'paused [at=1792500000]: Checks are still running on the draft.\n' > "$home/state/slot9999.status"
   expect_silent "$home" 'running checks on a draft must not wake'
   set_pr "$home" 5 '.checks[2].conclusion = "FAILURE" | .checks[1].conclusion = "FAILURE"'
-  expect_one "$home" '^pr-health: https://github.com/o/r/pull/5 has failing required checks at latest commit aaaaaaa: Backend .*slot9999' \
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/5 has failing required checks at latest commit aaaaaaa: Backend \(task slot9999\)$' \
     'a failing required check on an adopted draft must wake once'
-  set_pr "$home" 5 '.checks[0].conclusion = "FAILURE"'
-  expect_silent "$home" 'a second failing required check at the same commits must not wake again'
-  pass 'a draft on an adopted branch whose required check fails after its worker pauses wakes once'
+  expect_silent "$home" 'the same failing required check at the same commit must not wake again'
+  # The worker reruns Backend, it passes, and the slow required check then fails at the same commit.
+  set_pr "$home" 5 '.checks[1].conclusion = "SUCCESS" | .checks[0].conclusion = "FAILURE"'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/5 has failing required checks at latest commit aaaaaaa: CI Status \(task slot9999\)$' \
+    'a required check that newly fails at an already reported commit must wake once'
+  set_pr "$home" 5 '.checks[1].conclusion = "FAILURE"'
+  expect_silent "$home" 'a check already reported at this commit must not repeat when it fails again'
+  pass 'each required check that fails on an adopted draft wakes once per latest commit'
+}
+
+test_required_check_appearing_after_optional_failure_wakes() {
+  local home
+  home=$(new_home optional-then-required)
+  task "$home" ship1 pr=https://github.com/o/r/pull/8
+  pr "$home" 8 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 8 '.checks = [{name:"E2E Tests (independent)",conclusion:"FAILURE",required:false}]'
+  arm "$home"
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing checks at latest commit aaaaaaa: E2E Tests \(independent\) \(task ship1\)$' \
+    'an optional failure must wake while no required context is reported'
+  set_pr "$home" 8 '.checks += [{name:"Backend",conclusion:"FAILURE",required:true}]'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/8 has failing required checks at latest commit aaaaaaa: Backend \(task ship1\)$' \
+    'a required check that appears and fails at the same commit must wake'
+  expect_silent "$home" 'the reported required failure must not repeat'
+  pass 'a required check that fails after an optional one at the same commit still wakes'
 }
 
 test_replaced_cancelled_run_is_not_failing() {
@@ -262,47 +283,46 @@ test_other_homes_red_check_is_silent() {
   cp "$other/forge/pr-20.json" "$home/forge/pr-20.json"
   task "$home" mine pr=https://github.com/o/r/pull/8
   pr "$home" 8 "$HEAD_A" "$BASE_1" true false
-  # A secondmate's status names the PR its own home owns.
-  printf 'kind=secondmate\n' > "$home/state/mate.meta"
-  printf 'working [at=1792500000]: The child home opened https://github.com/o/r/pull/20 for review.\n' > "$home/state/mate.status"
+  # This home's worker mentions the other home's PR in a status line.
+  printf 'working [at=1792500000]: Reviewed https://github.com/o/r/pull/20 for a teammate.\n' > "$home/state/mine.status"
+  # A secondmate's copy sits on a branch whose PR belongs to the secondmate's own home.
+  git init -q -b mate-branch "$home/mate-copy"
+  git -C "$home/mate-copy" remote add origin git@github.com:o/r.git
+  printf 'kind=secondmate\nworktree=%s\n' "$home/mate-copy" > "$home/state/mate.meta"
+  printf '20\n' > "$home/forge/branch-mate-branch"
   arm "$home"
   arm "$other"
   out=$(pass_once "$other")
   printf '%s\n' "$out" | grep -F 'https://github.com/o/r/pull/20 has failing required checks' >/dev/null \
     || fail "the owning home must wake for its own red PR: $out"
   expect_silent "$home" "another home's red PR must wake nothing in this home"
-  if grep -E 'pulls/20$|number=20( |$)' "$home/forge/calls.log" >/dev/null; then
+  if grep -E 'pulls/20$|number=20( |$)|--head mate-branch' "$home/forge/calls.log" >/dev/null; then
     fail "this home read another home's PR: $(cat "$home/forge/calls.log")"
   fi
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" owned) || fail 'owned PRs could not be listed'
+  printf '%s\n' "$out" | jq -e 'any(.[]; .url == "https://github.com/o/r/pull/20") | not' >/dev/null \
+    || fail "a PR named only in a status line became owned: $out"
   pass "a red check on another home's PR wakes nothing in this home"
 }
 
 test_enrolled_before_ready_and_after_cleanup_still_wake() {
-  local home out cmd
+  local home wt
   home=$(new_home enrolled-early)
-  task "$home" early
+  wt="$home/copy"
+  git init -q -b feature-12 "$wt"
+  git -C "$wt" remote add origin git@github.com:o/r.git
+  # The task opened its PR but has recorded no pr= yet.
+  task "$home" early "worktree=$wt"
+  printf '12\n' > "$home/forge/branch-feature-12"
   pr "$home" 12 "$HEAD_A" "$BASE_1" true false
   set_pr "$home" 12 '.checks = [{name:"CI Status",conclusion:null,required:true}]'
-  printf 'working [at=1792500000]: The draft is open at https://github.com/o/r/pull/12 and its checks are running.\n' \
-    > "$home/state/early.status"
   arm "$home"
-  # Run the ownership check exactly as the worker's brief spells it.
-  : > "$home/config/wait-no-turns"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" early sample --mode direct-PR >/dev/null 2>&1 || fail 'could not write a brief'
-  # shellcheck disable=SC2016  # The pattern matches literal backticks.
-  cmd=$(grep -o '`FM_HOME=[^`]*owned <pr-url>`' "$home/data/early/brief.md" | tr -d '`') \
-    || fail 'the brief names no ownership check'
-  out=$(PATH="$home/fakebin:$PATH" FORGE="$home/forge" FM_ROOT_OVERRIDE="$home/root" \
-    bash -c "${cmd%<pr-url>}https://github.com/o/r/pull/12") \
-    || fail "a PR named in a live task's status line must be owned before any ready report: $out"
-  [ "$out" = 'owned: https://github.com/o/r/pull/12' ] || fail "the ownership check printed: $out"
-  out=$(PATH="$home/fakebin:$PATH" FORGE="$home/forge" FM_ROOT_OVERRIDE="$home/root" \
-    bash -c "${cmd%<pr-url>}https://github.com/o/r/pull/13") && fail "an unnamed PR read as owned: $out"
   expect_silent "$home" 'running checks must not wake'
   set_pr "$home" 12 '.checks[0].conclusion = "FAILURE"'
   expect_one "$home" 'pull/12 has failing required checks' 'a PR enrolled before its ready report must wake'
-  # Worker cleanup removes the task record and its status lines.
-  rm -f "$home/state/early.meta" "$home/state/early.status"
+  # Worker cleanup removes the task record and its copy.
+  rm -f "$home/state/early.meta"
+  rm -rf "$wt"
   set_pr "$home" 12 ".head = \"$HEAD_B\" | .mergeable = false | .checks[0].conclusion = null"
   expect_one "$home" 'pull/12 conflicts with its base at latest commit bbbbbbb' 'a PR kept after cleanup must wake'
   pass 'a PR enrolled before any ready report, and one kept after cleanup, both still wake'
@@ -383,16 +403,12 @@ test_absent_flag_changes_nothing() {
   home=$(new_home flag-off)
   rm -f "$home/config/pr-health-monitor"
   task "$home" ship1 pr=https://github.com/o/r/pull/8
-  printf 'working [at=1792500000]: Opened https://github.com/o/r/pull/9 for review.\n' > "$home/state/ship1.status"
   pr "$home" 8 "$HEAD_A" "$BASE_1" false false
   before=$(ls -A "$home/state" "$home/data")
   out=$(with_home "$home" "$ROOT/bin/fm-pr-health.sh" poll 2>&1) || fail "poll failed with the flag absent: $out"
   [ -z "$out" ] || fail "poll printed with the flag absent: $out"
   if with_home "$home" "$ROOT/bin/fm-pr-health.sh" arm >/dev/null 2>&1; then
     fail 'arm succeeded with the flag absent'
-  fi
-  if with_home "$home" "$ROOT/bin/fm-pr-health.sh" owned https://github.com/o/r/pull/9 >/dev/null 2>&1; then
-    fail 'owned claimed a PR with the flag absent'
   fi
   [ "$(ls -A "$home/state" "$home/data")" = "$before" ] \
     || fail "the flag-off monitor wrote records: $(ls -A "$home/state" "$home/data")"
@@ -492,6 +508,7 @@ test_all_owned_pr_reads_start_in_one_wave() {
 failures=0
 for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
+  test_required_check_appearing_after_optional_failure_wakes \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
   test_other_homes_red_check_is_silent test_enrolled_before_ready_and_after_cleanup_still_wake \
   test_green_without_reviewer_is_silent test_base_without_required_checks_counts_any_failing_check \

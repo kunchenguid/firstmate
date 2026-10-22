@@ -628,12 +628,13 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.
 With the flag present, session start arms `state/pr-health.check.sh`, and the watcher's check sweep then prints one wake line for each new condition on an owned PR: a definite merge conflict or a failing required check.
-A home owns a PR it recorded, linked, or observed before, a PR named in a live task's status lines, and the open PR on a live task copy's current branch, drafts and adopted branches included, until the PR merges or closes.
+A conflict is reported once per latest commit, and a failing check once per latest commit and check name, so a check that newly fails at an already reported commit wakes once more while an already reported check never repeats.
+A home owns a PR it recorded, linked, or observed before, and the open PR on a live task copy's current branch, drafts and adopted branches included, until the PR merges or closes.
+A PR URL that only appears in a task's status lines is not owned.
 The monitor reads no other PR, so another home's PR never wakes this home, and it never comments on or changes a PR.
 `bin/fm-pr-health.sh` owns the conditions, the fingerprints in `state/pr-health.json`, and the read budget.
-With the flag present and `config/wait-no-turns` also present, the brief's waiting section permits ending a turn only when awaiting a monitored condition on an owned PR.
-A wait for passing checks still needs the ordinary blocking command or a timed pause.
-With the file absent, nothing is armed, an already armed check prints nothing, and briefs omit that rule.
+The monitor only notifies; worker briefs and waiting rules are unchanged by the flag.
+With the file absent, nothing is armed and an already armed check prints nothing.
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 

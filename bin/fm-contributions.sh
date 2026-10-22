@@ -19,7 +19,7 @@
 # Previously observed or enrolled URLs remain in data/<task>/contributions.json
 # after endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # enroll records one task's supported PR URL as an unobserved record, so a PR
-# the task named or opened is owned before any pr= exists; it changes nothing
+# the task opened is owned before any pr= exists; it changes nothing
 # when the task already has a record for that URL, retired or not.
 # owned prints the supported PR URLs this home owns as a JSON array of
 # {url,tasks,final}, where final means a saved observation is merged or closed.

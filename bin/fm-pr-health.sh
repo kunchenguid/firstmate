@@ -3,19 +3,20 @@
 #
 # Usage:
 #   fm-pr-health.sh poll
-#   fm-pr-health.sh owned <pr-url>
 #   fm-pr-health.sh arm
 #
 # Opt-in: with config/pr-health-monitor absent, poll exits silently without
-# reading or writing anything, and arm and owned refuse (docs/configuration.md).
+# reading or writing anything, and arm refuses (docs/configuration.md).
 #
-# Ownership is fm-contributions.sh owned. poll adds two sources and records
-# each new URL through fm-contributions.sh enroll, so ownership outlives the
-# worker: a github.com PR URL in a live task's status lines, and the open PR
-# whose head is a live task copy's current branch (fm_pr_number_from_branch).
-# Drafts and adopted branches count. A secondmate row never enrolls a PR,
-# because the PR belongs to the secondmate's own home. No PR outside that set
-# is ever read, so another home's PR is dropped without a forge read or a wake.
+# Ownership is fm-contributions.sh owned: each task's recorded pr= and the
+# durable records in data/<task>/contributions.json. poll adds one source and
+# records each new URL through fm-contributions.sh enroll, so ownership
+# outlives the worker: the open PR whose head is a live task copy's current
+# branch (fm_pr_number_from_branch). Drafts and adopted branches count. A PR
+# URL that merely appears in a status line is not owned. A secondmate row's
+# copy is never looked up, because its PR belongs to the secondmate's own home.
+# No PR outside that set is ever read, so another home's PR is dropped without
+# a forge read or a wake.
 #
 # Per owned open PR, poll reads the REST single-PR endpoint, which GitHub
 # documents as starting the mergeability computation, and one GraphQL read for
@@ -28,8 +29,11 @@
 #     no context is required, any failed context counts. Each name is judged
 #     by its newest run (latest_checks in fm-contributions.jq), because GitHub
 #     keeps a cancelled run beside the passing rerun that replaced it.
-# Each condition wakes once per latest commit, even if the base moves or the
-# condition clears and returns. The two conditions have independent histories.
+# A conflict wakes once per latest commit, even if the base moves or the
+# condition clears and returns. A failing check wakes once per latest commit
+# and check name: a check that newly fails at an already reported commit wakes
+# once more, a name already reported there never repeats, and the line names
+# only the newly failing checks. The two conditions have independent histories.
 # A merged or closed PR is final and never read again. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
@@ -42,11 +46,6 @@
 # A line is printed before its fingerprint is saved, so a pass killed between
 # the two repeats one wake rather than losing it. An unreadable fingerprint
 # file is reported once and replaced.
-#
-# owned is read-only and never contacts a forge. It prints "owned: <url>" and
-# exits 0 when the flag is present, the monitor check is registered, and the
-# URL is owned or named in a live task's status lines; otherwise it prints
-# "not owned: <url>" and exits 1.
 #
 # arm writes state/pr-health.check.sh, binds it through fm-check-register.sh,
 # and arms the contribution observer that reads the PRs poll enrolls.
@@ -63,8 +62,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh
-. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -96,16 +93,6 @@ live_tasks() { # id <TAB> worktree, for each task that is not a secondmate
     [ "$(meta_value "$meta" kind)" != secondmate ] || continue
     printf '%s\t%s\n' "$id" "$(meta_value "$meta" worktree)"
   done
-}
-
-status_urls() { # id <TAB> url, for each PR URL in a live task's status lines
-  local id wt url
-  while IFS=$'\t' read -r id wt; do
-    [ -f "$STATE/$id.status" ] || continue
-    grep -oE "$PR_URL_RE" "$STATE/$id.status" 2>/dev/null | sort -u | while IFS= read -r url; do
-      printf '%s\t%s\n' "$id" "$url"
-    done
-  done < <(live_tasks)
 }
 
 owned_json() { # -> $TMP/owned.json
@@ -157,15 +144,16 @@ STEP='
       | ([$relevant[] | select(.failing) | .name] | unique) as $failing
       | ($p.conflicts // []) as $conflicts | ($p.checks // []) as $checks
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
-      | (($failing | length) > 0 and ($checks | index($head) | not)) as $checks_new
+      | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
+      | (($new_failing | length) > 0) as $checks_new
       | ("at latest commit " + $head[:7]) as $where
       | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
-             checks:($checks + if $checks_new then [$head] else [] end)},
+             checks:($checks + [$new_failing[] | {head:$head,name:.}])},
          lines:([
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
            (select($checks_new)
-            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($failing[:3] | join(", "))\(if ($failing | length) > 3 then " and \(($failing | length) - 3) more" else "" end) (task \($owners))")])}
+            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
@@ -208,11 +196,10 @@ lookup_branch_pr() { # worktree branch deadline -> url
   printf '%s\n' "$url" | grep -Ex "$PR_URL_RE"
 }
 
-enroll_new() { # deadline : enroll status and branch PRs not yet owned
+enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
   local deadline=$1 id wt url branch default cached pid
   local pids=()
   : > "$TMP/enroll.tsv"
-  status_urls >> "$TMP/enroll.tsv"
   jq -r --slurpfile health "$TMP/health.json" '
     .[] | select($health[0].prs[.url] == null) | .url as $url | .tasks[] | [., $url] | @tsv' \
     "$TMP/owned.json" >> "$TMP/enroll.tsv"
@@ -271,7 +258,7 @@ poll() {
   LOCK_HELD=1
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-health.XXXXXX")
   if [ -e "$HEALTH" ] && ! jq -e '.schema == "fm-pr-health.v1" and (.prs | type == "object") and (.branches | type == "object")
-    and all(.prs[]; ((.conflicts // []) | type == "array") and ((.checks // []) | type == "array"))' \
+    and all(.prs[]; ((.conflicts // []) | type == "array") and ((.checks // []) | type == "array" and all(.[]; type == "object")))' \
     "$HEALTH" > /dev/null 2>&1; then
     printf 'pr-health: unreadable fingerprint record replaced; conditions already reported may wake once more\n'
     rm -f -- "$HEALTH"
@@ -326,19 +313,6 @@ poll() {
   done < "$TMP/urls"
 }
 
-owned() {
-  local url=$1
-  TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-health.XXXXXX")
-  if flag_on && fm_custom_check_registered "$STATE" pr-health \
-    && { status_urls | cut -f2 | grep -Fx "$url" >/dev/null \
-      || { owned_json && jq -e --arg url "$url" 'any(.[]; .url == $url and (.final | not))' "$TMP/owned.json" >/dev/null; }; }; then
-    printf 'owned: %s\n' "$url"
-    return 0
-  fi
-  printf 'not owned: %s\n' "$url"
-  return 1
-}
-
 arm() {
   local staged
   flag_on || fail 'config/pr-health-monitor is absent; the PR health monitor stays off'
@@ -360,7 +334,6 @@ arm() {
 
 case "${1:-}" in
   poll) [ "$#" -eq 1 ] || fail 'poll takes no arguments'; poll ;;
-  owned) [ "$#" -eq 2 ] || fail 'owned needs one PR URL'; owned "$2" ;;
   arm) [ "$#" -eq 1 ] || fail 'arm takes no arguments'; arm ;;
   *) usage >&2; exit 2 ;;
 esac
