@@ -763,7 +763,7 @@ fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
     fm_afk_launch_close_recorded || true
     return 1
   fi
-  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return 1
+  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return $?
   fm_afk_launch_log "daemon launched in dedicated rex session $sid (block $target), supervising $captain_target"
 }
 
