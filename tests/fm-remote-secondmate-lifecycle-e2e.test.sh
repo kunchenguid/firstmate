@@ -1309,10 +1309,15 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
-  sleep 0.02
-  watch_wait=$((watch_wait + 1))
+# The relaunch inside the watcher may spend FM_SECONDMATE_LIVENESS_TIMEOUT
+# (default 120s) waiting for the relaunch lock and as long again on the spawn
+# before it gives up and exits on a failure wake naming the cause. This wait
+# outlasts both, so a slow relaunch is diagnosed from the watcher's own output
+# instead of being killed mid-flight: the former 30s bound sat on top of the
+# 30-34s this leg takes on CI runners and failed with empty output.
+watch_deadline=$(( $(date +%s) + 300 ))
+while kill -0 "$watch_pid" 2>/dev/null && [ "$(date +%s)" -lt "$watch_deadline" ]; do
+  sleep 0.1
 done
 if kill -0 "$watch_pid" 2>/dev/null; then
   kill "$watch_pid" 2>/dev/null || true

@@ -8,7 +8,7 @@
 # config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
 # since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
-# either a paused: external wait or a verified captain-held transfer, is the
+# either a paused: external wait or a captain-held declaration, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
@@ -26,7 +26,7 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause or verified captain-held transfer is
+#                          external-wait pause or captain-held declaration is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
@@ -56,8 +56,8 @@
 #                          reasons below keep their wording.
 #                          Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
-#                          wait or a verified `captain-held` transfer its worker
-#                          declared, a backlog captain hold on its task, or,
+#                          wait its worker declared or a `captain-held`
+#                          declaration on its log, a backlog captain hold on its task, or,
 #                          where config/wedge-defer-worker-wait arms it, its own
 #                          still-open newest `blocked:` or `needs-decision:`
 #                          line, or, where config/wedge-defer-parked-gate
@@ -86,7 +86,7 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
+#                          wait or captain-held declaration uses the long
 #                          pause recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
@@ -435,8 +435,8 @@ afk_present() { [ -e "$STATE/.afk" ]; }
 # their condition-aware cadence in both postures.
 away_record_present() { fm_afk_contract_away_present "$STATE"; }
 
-# captain_held_silenced <status-line>: 0 when the line declares a captain-held
-# transfer and an away record exists, so every stale path absorbs the pane
+# captain_held_silenced <status-line>: 0 when the line is a captain-held
+# declaration and an away record exists, so every stale path absorbs the pane
 # silently instead of rechecking it.
 captain_held_silenced() {  # <status-line>
   status_is_captain_held "$1" && away_record_present
@@ -1495,14 +1495,15 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
 # read at the one moment it decides anything: when an escalation is about to
-# fire. Two records answer it, and they are independent: the worker's own status
-# line - a declared `paused:` external wait, or a verified `captain-held`
-# transfer - and, when that line explains nothing, the crew's authoritative
-# current state. Between them sits the backlog record of the same captain hold
-# (task_captain_call_open), which a worker's line never shows once firstmate
-# hands the call to the captain; it is read only here, at the threshold. That
-# line predates the hold, so it is no record of when the hold began and the hold
-# publishes no wait age.
+# fire. Two records answer it, and they are independent: the lane's own status
+# line - a declared `paused:` external wait, or a `captain-held` line, whether
+# the hold's own declaration or a verified transfer - and, when that line
+# explains nothing, the crew's authoritative current state. Between them sits
+# the backlog record of the same captain hold
+# (task_captain_call_open), the only record left when the hold's own status-log
+# declaration was never written or a later worker line replaced it; it is read
+# only here, at the threshold. That line predates the hold, so it is no record
+# of when the hold began and the hold publishes no wait age.
 #
 # The generated brief promises that declaring one buys the long recheck cadence
 # instead of a wedge, and the wedge timer is reachable while that declaration
@@ -1585,7 +1586,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$last"; then
-    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
+    wait_record 'captain-held' 'awaiting the captain - the hold is recorded' \
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
@@ -2156,7 +2157,7 @@ busy_turn_over_age() {  # <task>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
+# dead-agent captain-held declaration, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -2185,14 +2186,14 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task")
   if status_is_captain_held "$last"; then
     if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
       return 0
     fi
     detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    reason="captain-held ${age}s, awaiting the captain - the hold is recorded, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
@@ -2223,7 +2224,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
 # foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
+# captain-held declaration instead identifies that live foreground call as
 # the expected external wait. The caller has already confirmed liveness through
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
@@ -2250,22 +2251,23 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # decoration overrides the daemon's own pause verdict for the pane: the
       # ladder then climbs on every re-arm, escalating a crew that declared the
       # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
-      # never on the pane hash: a busy pane's harness footer ticks on every
-      # capture, so a hash-keyed one-shot would re-fire on every poll and the
-      # daemon, which relaunches the watcher after each handled wake, would be
-      # woken in a loop for the whole declared wait. The suppressor therefore
-      # advances to the declaration rather than the hash, and the daemon is woken
-      # once per distinct declaration. The wedge timer, escalation count and
-      # write-deferral chain are cleared exactly as handle_paused_stale clears
-      # them, so an undeclared busy phase that had already started the timer does
-      # not resume its count the moment the declaration is lifted. Normal-mode
-      # pause tracking stays unwritten here, exactly as the idle away-mode handoff
-      # leaves it, because the daemon owns that bookkeeping.
+      # The one-shot is keyed on the DECLARATION (stale_wait_declaration below
+      # owns that identity), never on the pane hash: a busy pane's harness
+      # footer ticks on every capture, so a hash-keyed one-shot would re-fire on
+      # every poll and the daemon, which relaunches the watcher after each
+      # handled wake, would be woken in a loop for the whole declared wait. The
+      # suppressor therefore advances to the declaration rather than the hash,
+      # and the daemon is woken once per distinct declaration. The wedge timer,
+      # escalation count and write-deferral chain are cleared exactly as
+      # handle_paused_stale clears them, so an undeclared busy phase that had
+      # already started the timer does not resume its count the moment the
+      # declaration is lifted. Normal-mode pause tracking stays unwritten here,
+      # exactly as the idle away-mode handoff leaves it, because the daemon owns
+      # that bookkeeping.
       key=$(window_key "$win")
       wedge_episode_end "$key"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(status_declared_wait_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -2389,7 +2391,7 @@ pause_state_class() {  # <window> <task>
   # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
   # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
   # read and so cannot supply that confirmation. Without the mate case a mate's
-  # status-declared `captain-held` transfer - which has no current-state mapping
+  # status-declared `captain-held` line - which has no current-state mapping
   # and so arrives as `none` - would be silenced by every caller rather than taking
   # the bounded re-surface cadence, and a forgotten declaration would rot invisibly.
   [ "$class" = none ] && class=paused
@@ -2402,12 +2404,15 @@ pause_state_class() {  # <window> <task>
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
 #
-# status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
+# status_is_paused_or_captain_held reads the status log's last LINE, which is
 # the only record when the worker itself is waiting. It is not the only record
-# there is: once firstmate hands work to the captain, the wait is written into the
-# BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
-# was - routinely `done` after a PR delivery, which no line predicate can
-# read as a wait. An alarm bounded only by the line therefore re-fires for the
+# there is: once firstmate hands work to the captain, bin/fm-captain-hold.sh
+# writes the wait into the BACKLOG and mirrors it onto a lane's log as a
+# `captain-held` line, but that line stops being the last one as soon as the
+# worker writes anything newer, and a hold recorded before the mirror existed
+# never reached the log at all. Either way the last line is whatever the worker
+# wrote - routinely `done` after a PR delivery, which no line predicate can
+# read as a wait. An alarm bounded only by the line would then re-fire for the
 # captain's whole thinking time, on exactly the work they already have in hand.
 #
 # `open` is that record's own read-only predicate and owns its semantics: exit 0
@@ -2436,12 +2441,13 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
+# The identity a re-surface throttle is bound to: the task's status-log
+# signature as its worker left it (status_worker_signature). Any new worker
+# event - a replacement wait, a fresh delivery, a blocker - changes it and so
+# starts its own window instead of inheriting the silence of the one before it,
+# while the hold-command lines firstmate records itself do not.
 stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'declared:%s' "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -2453,7 +2459,7 @@ stale_wait_declaration() {  # <task>
 # waiting on the captain that is never surfaced is invisible, where a delivery
 # announced twice is merely noise.
 captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'captain-hold:%s:%s' "$2" "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -3723,8 +3729,18 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
+    # A lane whose declaration is gone gives up its pause bookkeeping. Which half
+    # goes depends on WHO lifted it: a worker append is new evidence about the
+    # pane, so the stale suppressor and wedge timer reset with the pause state,
+    # but a hold this home settled itself changed nothing the pane shows
+    # (docs/captain-hold-lifecycle.md), and dropping the suppressor there would
+    # re-surface the unchanged hash the watcher already alarmed on.
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if status_hold_settled "$STATE/$task.status"; then
+        clear_pause_state "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded
