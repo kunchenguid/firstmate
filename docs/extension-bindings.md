@@ -101,6 +101,9 @@ Retirement disables discovery and invocation without deleting the content-addres
 
 The host invokes one exact package entrypoint directly with `shell=false`, the package root as its fixed working directory, a minimal environment, and one verb argument.
 It never uses `source`, `eval`, a shell command string, or package-supplied argv.
+The host's internal lifecycle calls to tracked `bin/fm-procevent.sh` are separate from package invocation: they resolve and probe an absolute Bash executable, then pass the script path as an argv argument with `shell=false`, preserving literal lifecycle arguments and the existing failure mapping.
+On POSIX hosts the candidate comes only from the sanitized `PATH`, as the script's `env bash` shebang resolved it before.
+On Windows, the host tries the exported `BASH` before `PATH`, and the probe accepts only Bash reporting an MSYS or Cygwin `OSTYPE`, so an unrelated `bash.exe` such as WSL Bash is refused.
 The entrypoint reads exactly one UTF-8 JSON document from stdin and writes exactly one UTF-8 JSON document to stdout.
 Logs must use stderr.
 
@@ -218,7 +221,7 @@ The process-event durability boundary remains owned by [`configuration.md`](conf
 The host runs in the Firstmate home that owns the source, never in a task worker or its session container.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and Rovo therefore expose no package-loading surface for this capability.
 The result reaches every supported primary through the existing bounded `check` wake path, including the unknown-protocol fallback used where no specialized primary continuation exists.
-The tmux, Herdr, Zellij, Orca, cmux, and Paseo session providers are not consulted because a process-event source has no task endpoint.
+Runtime session providers are not consulted because a process-event source has no task endpoint.
 Remote and local secondmate homes bind and install independently, and the primary never executes a missing remote-home package locally. `remote-bind` carries one canonical `firstmate.extension-package-transfer.v1` JSON envelope over the existing bounded `fm-on` stdin/stdout job. Its hashed manifest pins the extension id, version, complete package-tree digest, entry count, total bytes, and byte-sorted entries. Entries are limited to normalized relative directories at mode 0755 and single regular files at mode 0644 or 0755, each with an exact size and SHA-256 payload digest. The receiver accepts at most 128 entries, 256 KiB per file, 512 KiB of package bytes, and 900,000 serialized bytes; it rejects malformed or truncated JSON, duplicate keys or paths, collisions, absolute or traversing names, links and special files, noncanonical modes, hash or size mismatches, and duplicate transfer identities.
 
 The receiver creates the package in a private temporary directory below `data/extensions/staging`, validates ownership, permissions, the package manifest, executable, and complete reconstructed tree, then atomically publishes the transfer before the normal bind handshake and binding publication.
