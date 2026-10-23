@@ -71,13 +71,19 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # attached through a grouped session (`new-session -t <session>`) would be
 # named instead. The third field of $TMUX is the id of the session the pane was
 # created in, which stays unambiguous across the group; fall back to the
-# untargeted lookup when it is absent or malformed.
+# untargeted lookup when it is absent, malformed, or stale (tmux answers a
+# killed session's id with empty output and exit 0).
 fm_backend_tmux_own_session() {
-  local sid=${TMUX##*,}
+  local sid=${TMUX##*,} name=
   case "$sid" in
-  ''|*[!0-9]*) tmux display-message -p '#S' ;;
-  *) tmux display-message -p -t "\$$sid" '#S' 2>/dev/null || tmux display-message -p '#S' ;;
+  ''|*[!0-9]*) ;;
+  *) name=$(tmux display-message -p -t "\$$sid" '#S' 2>/dev/null) ;;
   esac
+  if [ -n "$name" ]; then
+    printf '%s\n' "$name"
+  else
+    tmux display-message -p '#S'
+  fi
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
