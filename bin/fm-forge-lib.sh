@@ -74,7 +74,7 @@ fm_forge_safe_ssh_config() {
 fm_forge_safe_ssh_config_file() {
   local config=${1:-} depth=${2:-0} dir line key rest pattern condition candidate included
   local -a conditions
-  local in_host=0 in_match=0 match_safe=1
+  local in_match=0 match_safe=1
 
   [ -r "$config" ] || return 0
   [ "$depth" -lt 16 ] || return 0
@@ -89,7 +89,6 @@ fm_forge_safe_ssh_config_file() {
     key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
     case "$key" in
       host)
-        in_host=1
         in_match=0
         match_safe=1
         printf '%s\n' "$line"
