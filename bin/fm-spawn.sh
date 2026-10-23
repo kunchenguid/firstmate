@@ -5759,7 +5759,41 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" != t3code ]; then
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    # Delimit this command's output so old errors in scrollback cannot abort it.
+    # The failure marker proves get returned unsuccessfully; a successful get
+    # still enters its interactive shell exactly as before.
+    wt_output_marker="FM_TH_GET_$$"
+    spawn_send_text_line "$WT_TARGET" "printf '\\n%s\\n' '${wt_output_marker}'; treehouse get || printf '\\n%s\\n%s\\n' \"\$COLUMNS\" '${wt_output_marker}_FAILED'"
+
+    # Captures can contain visual rows rather than logical lines. Rejoin rows
+    # filling the reported pane width, restoring a trimmed wrap-boundary space.
+    wt_get_failure() {  # <marker>
+      awk -v marker="$1" '
+        { sub(/[[:space:]]+$/, "") }
+        $0 == marker { active=1; n=0; next }
+        active && $0 == marker "_FAILED" {
+          cols = (n > 0 && rows[n] ~ /^[0-9]+$/) ? rows[n] + 0 : 0
+          if (n > 0) n--
+          first=""; error=""
+          for (i = 1; i <= n; i++) {
+            line = rows[i]
+            while (cols > 1 && i < n && rows[i + 1] != "" && (length(rows[i]) == cols || length(rows[i]) == cols - 1)) {
+              sep = (length(rows[i]) == cols - 1) ? " " : ""
+              i++
+              line = line sep rows[i]
+            }
+            if (line == "") continue
+            if (first == "") first = line
+            if (error == "" && (tolower(line) ~ /(^|[[:space:]])error:/ || index(line, "worktrees are in use or dirty"))) error = line
+          }
+          if (error != "") print error
+          else if (first != "") print first
+          else print "treehouse get failed without an error message"
+          exit
+        }
+        active { rows[++n] = $0 }
+      '
+    }
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -5810,6 +5844,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       else
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      fi
+      if [ "$BACKEND" = tmux ]; then
+        # Join terminal soft wraps so long treehouse diagnostics stay verbatim.
+        wt_pane=$(tmux capture-pane -p -J -t "$WT_TARGET" -S -200 2>/dev/null || true)
+      else
+        wt_pane=$(fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null || true)
+      fi
+      wt_error=$(printf '%s\n' "$wt_pane" | wt_get_failure "$wt_output_marker")
+      if [ -n "$wt_error" ]; then
+        printf 'error: %s\n' "$wt_error" >&2
+        case "$wt_error" in
+          *'worktrees are in use or dirty'*)
+            printf "Run 'treehouse status' in %s and free or return a slot, or increase max_trees in treehouse.toml.\n" "$PROJ_ABS" >&2 ;;
+          *) printf 'Check that treehouse itself is working in %s, then retry.\n' "$PROJ_ABS" >&2 ;;
+        esac
+        exit 1
       fi
       sleep 1
     done

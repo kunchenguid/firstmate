@@ -67,7 +67,24 @@ case "${1:-}" in
     exit 0 ;;
   kill-window) : > "$window_file"; exit 0 ;;
   has-session|new-session) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          *'treehouse get'*) COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >> "$FM_FAKE_TREEHOUSE_OUTPUT" 2>&1 ;;
+        esac
+      done
+    fi
+    exit 0 ;;
+  capture-pane)
+    if [ -f "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
+      if [ -n "${FM_FAKE_COLUMNS:-}" ]; then
+        fold -w "$FM_FAKE_COLUMNS" "$FM_FAKE_TREEHOUSE_OUTPUT"
+      else
+        cat "$FM_FAKE_TREEHOUSE_OUTPUT"
+      fi
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -231,6 +248,49 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
+
+test_treehouse_failure_and_timeout() {
+  local rec id out status message cols
+  id=settle-pool-full
+  rec=$(make_settle_case pool-full "$id" 0)
+  read_settle_record "$rec"
+  WT_DIR="$PROJ_DIR"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_TREEHOUSE_ERROR:-}" ] && exit 0
+printf '%s\n' "$FM_TEST_TREEHOUSE_ERROR" >&2
+exit 1
+SH
+  message="all 16 worktrees are in use or dirty (max_trees = 16). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml"
+  for cols in 70 80; do
+    rm -f "$COUNTFILE" "$COUNTFILE.window"
+    out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_COLUMNS="$cols" \
+      FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "pool exhaustion should stop spawn"
+    assert_contains "$out" "error: $message" "wrapped treehouse diagnostic was not preserved"
+    assert_contains "$out" "Run 'treehouse status' in $PROJ_DIR" "missing recovery hint"
+    [ "$(< "$COUNTFILE")" = 1 ] || fail "failed get was not detected on the first poll"
+    assert_absent "$HOME_DIR/state/$id.meta" "failed get published metadata"
+  done
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  message='Error: cannot read treehouse.toml: permission denied'
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "other treehouse failures should stop spawn"
+  assert_contains "$out" "error: $message" "generic error was not preserved"
+  assert_not_contains "$out" "free or return a slot" "non-capacity error suggested freeing slots"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "generic failure was not immediate"
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  # Previous failures remain in scrollback but must not abort this quiet get.
+  out=$(FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "quiet get should time out"
+  assert_contains "$out" "did not enter an isolated worktree within 60s" "timeout diagnostic changed"
+  [ "$(< "$COUNTFILE")" = 60 ] || fail "quiet get did not receive all 60 polls"
+  pass "treehouse failures are immediate and verbatim; quiet get retains its timeout"
+}
+
+test_treehouse_failure_and_timeout
 
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
