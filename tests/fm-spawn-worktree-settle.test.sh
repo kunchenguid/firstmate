@@ -271,6 +271,18 @@ test_worktree_wait_defaults_to_60_and_honors_override() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
   assert_contains "$out" "within 60s" "a non-numeric window did not fall back to 60s"
+
+  id=settle-wait-zero-z9
+  rec=$(make_primary_case settle-wait-zero "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(FM_SPAWN_WORKTREE_WAIT_SECS=00 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 60s" "a zero-padded zero window did not fall back to 60s"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -ge 60 ] && [ "$reads" -le 63 ] || fail "a zero-padded zero window took $reads reads instead of about 60"
   pass "the worktree window defaults to 60s and FM_SPAWN_WORKTREE_WAIT_SECS overrides it"
 }
 

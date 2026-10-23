@@ -202,7 +202,7 @@
 #   slot and removes the wiring, task temp root, and staged launch file it wrote.
 #   After `treehouse get` is sent, the spawn polls once a second for the pane to
 #   enter an isolated worktree for up to FM_SPAWN_WORKTREE_WAIT_SECS seconds
-#   (default 60; blank, zero, or non-numeric uses the default), and the timeout
+#   (default 60; blank, zero such as 0 or 00, or non-numeric uses the default), and the timeout
 #   error names the wait used and that variable.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
@@ -5261,10 +5261,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # The window is a count of 1-second polls, FM_SPAWN_WORKTREE_WAIT_SECS of them
   # (default 60): a loaded host can need minutes for treehouse to install a large
   # project's dependencies before the pane enters the worktree.
+  # Read the value as decimal so a zero-padded zero such as 00 falls back too,
+  # rather than reaching seq as an empty window.
   worktree_wait_secs=${FM_SPAWN_WORKTREE_WAIT_SECS:-60}
   case $worktree_wait_secs in
-    '' | *[!0-9]* | 0) worktree_wait_secs=60 ;;
+    '' | *[!0-9]*) worktree_wait_secs=60 ;;
+    *) worktree_wait_secs=$((10#$worktree_wait_secs)) ;;
   esac
+  [ "$worktree_wait_secs" -gt 0 ] || worktree_wait_secs=60
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
