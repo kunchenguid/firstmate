@@ -1722,6 +1722,7 @@ bin/fm-heavy-admission.sh defaults > config/heavy-admission
 ```
 
 The defaults are proposed starting thresholds, not validated boundaries.
+The readings come from Linux `/proc`, including pressure stall information, so on a host without them, such as macOS, every check holds with `unreadable:` once the policy is on; leave the policy off there.
 The root Firstmate home's file sets the machine's policy for every local secondmate home, and a home's own file overrides it; with neither present the policy is off and every check admits at once.
 When the policy is on, ship and scout briefs tell workers to wait for admission before each heavy phase and to pass the configured Jest and Playwright worker bounds; `bin/fm-heavy-admission.sh check --dry-run` prints a decision without recording an admission.
 The script's header owns the keys, the decision and hysteresis rules, the ramp record, and the evidence line.
