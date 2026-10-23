@@ -203,15 +203,29 @@ fm_pending_reply_text_has_corr() {  # <text> <corr_id>
   [[ $text =~ $re ]]
 }
 
-# Sanitize a short request summary: single line, bounded, no control chars.
+# Byte length of the first <keep> UTF-8 characters of <text> when it holds more
+# than <max> characters, else -1. Counts lead bytes from od output, so the
+# verdict is the same under every caller locale and never splits a character.
+fm_pending_reply_char_cut() {  # <text> <max> <keep>
+  printf '%s' "$1" | LC_ALL=C od -An -v -tu1 | awk -v max="$2" -v keep="$3" '
+    { for (i = 1; i <= NF; i++) {
+        if ($i < 128 || $i >= 192) { chars++; if (chars == keep + 1) cut = n }
+        n++
+      } }
+    END { print (chars > max ? cut : -1) }'
+}
+
+# Sanitize a short request summary: single line, bounded, no ASCII control chars.
+# Preserve UTF-8 characters, including accents; cap at 120 characters in any locale.
 fm_pending_reply_summarize() {  # <text>
-  local text=$1 cleaned
-  cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | tr -cd '\11\12\15\40-\176' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  local text=$1 cleaned cut
+  cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   # Drop an already-present marker/corr prefix so the durable summary stays short.
   cleaned=${cleaned#"$FM_FROMFIRST_MARK"}
   cleaned=$(printf '%s' "$cleaned" | sed -E "s/^corr=[A-Fa-f0-9]{16}[[:space:]]*//")
-  if [ "${#cleaned}" -gt 120 ]; then
-    cleaned="${cleaned:0:117}..."
+  cut=$(fm_pending_reply_char_cut "$cleaned" 120 117)
+  if [ "$cut" -ge 0 ]; then
+    cleaned="$(printf '%s' "$cleaned" | head -c "$cut")..."
   fi
   printf '%s' "$cleaned"
 }

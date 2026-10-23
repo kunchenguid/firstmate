@@ -27,6 +27,7 @@ while [ "\$#" -gt 0 ]; do
   case "\$1" in -S) shift 2 ;; --autostart=*) shift ;; *) break ;; esac
 done
 case "\$1 \${2:-}" in
+  'version '*) printf 'rex 0.0.1-fake\napi: revision %s (supports 0 to %s)\n' "$2" "$2" ;;
   'server status') printf '{"endpoint":"unix:///fake/rex.sock","api_revision":$2,"instance_id":"inst-1"}\n' ;;
   'api list') printf '%s\n' block.close session.new_window session.set_block_label com.superlogical.terminal.process com.superlogical.terminal.format ;;
   *) exit 1 ;;

@@ -68,6 +68,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the Rex block identity an operator's terminal exports. Run directly
+# inside a Rex block, the suite would otherwise auto-detect the rex backend
+# (bin/fm-backend.sh's fm_backend_detect) and place fixture tasks into the
+# operator's live Rex session. REX_BIN_DIR stays so the real-server smoke test
+# can find the CLI; a case that verifies detection sets these itself.
+unset REX_SESSION REX_BLOCK
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the

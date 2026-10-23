@@ -86,7 +86,7 @@ discover_supervisor_target() {
 
 # discover_supervisor_backend: resolve the supervisor pane's BACKEND, independent
 # of the target string so an explicit FM_SUPERVISOR_TARGET override still knows
-# which primitives (tmux vs herdr) to dispatch through. Priority mirrors
+# which primitives (tmux, herdr, or rex) to dispatch through. Priority mirrors
 # discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
 #   2. $TMUX_PANE set - tmux.
