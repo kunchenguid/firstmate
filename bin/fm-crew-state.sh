@@ -70,7 +70,10 @@
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
 #      anchored by the row immediately before it having ended at exactly this
 #      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
-#      bin/fm-nm-run-lib.sh). The coarse runs-ledger fallback has NO
+#      bin/fm-nm-run-lib.sh), which also covers a rebased head this copy did
+#      fetch. A terminal record never outranks a NEWER live ledger row for the
+#      same branch: when that row cannot be tied to this worktree, the
+#      superseded record leaves HAVE_RUN=0. The coarse runs-ledger fallback has NO
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
 #      never answers on branch name alone. A record whose daemon has ANSWERED
@@ -1068,7 +1071,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        ledger=$(nm_runs_list)
+        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$ledger")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -1076,6 +1080,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         else
           if [ "$(fm_nm_run_status_class "$ledger_status")" = live ]; then
             emit unknown run-step "replacement run identity unavailable; run ids: $(strip_quotes "$(nm_field id)"), replacement unavailable"
+          elif [ -z "$ledger_status" ] \
+            && [ "$(fm_nm_run_status_class "$(fm_nm_runs_newest_status_for_branch "$CREW_BRANCH" "$ledger")")" = live ]; then
+            # A newer live run on this branch supersedes the terminal record
+            # even when the ledger cannot tie it to this worktree, so the
+            # older outcome is history; the pane and status log answer.
+            HAVE_RUN=0
           elif [ -n "$ledger_status" ] \
             && [ "$ledger_status" != "$(strip_quotes "$(nm_field status)")" ] \
             && [ "$ledger_status" != "$(strip_quotes "$(nm_field outcome)")" ]; then
@@ -1090,7 +1100,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        # A record naming this branch must be the newest row the ledger
+        # attributes, so another run's detail never answers for it.
+        record_head=""
+        [ "$run_branch" != "$CREW_BRANCH" ] || record_head=$(strip_quotes "$(nm_field head)")
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$record_head")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's

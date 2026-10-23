@@ -4688,10 +4688,10 @@ branch_sync:
 
 # A commit the task copy HAS but that is neither the local head, an ancestor,
 # nor a descendant of it: exactly what a pipeline rebase leaves as the run head.
-make_rebased_head() {  # <worktree> -> echoes the diverged commit's short sha
+make_rebased_head() {  # <worktree> [message] -> echoes the diverged commit's short sha
   local wt=$1 tree commit
   tree=$(git -C "$wt" hash-object -t tree -w /dev/null)
-  commit=$(git -C "$wt" commit-tree "$tree" -m 'pipeline rebased head')
+  commit=$(git -C "$wt" commit-tree "$tree" -m "${2:-pipeline rebased head}")
   git -C "$wt" merge-base --is-ancestor HEAD "$commit" && fail "rebased head must not descend from local head"
   git -C "$wt" merge-base --is-ancestor "$commit" HEAD && fail "rebased head must not be an ancestor of local head"
   git -C "$wt" rev-parse --short=8 "$commit"
@@ -5541,11 +5541,12 @@ EOF
   pass "a coarse live row over an open decision keeps the original supersede note"
 }
 
-# Coarse negative control (axi answers another branch): a live row on the task's
-# branch at a rebased head is not tied to this worktree by anything but the
-# branch name, so the ledger must not answer for it and the older failed row
-# must not answer either.
-test_coarse_live_rebased_row_is_not_attributed() {
+# The fm-crew-state-run-attribution pair on the coarse route (axi answers
+# another branch): the newest row is a live run whose rebased head this copy
+# fetched, and the row immediately before it is an older FAILED run at exactly
+# the local head. That anchor proves the live run continues this worktree's
+# submitted head, so the live run answers and the older failure never does.
+test_coarse_anchored_rebased_live_row_reads_working() {
   reset_fakes
   local d rebased short out; d=$(new_case coarse-live-rebased)
   make_repo_on_branch "$d/wt" fm/feat-rebased2
@@ -5564,10 +5565,123 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-rebased2
   out=$(run_crew_state "$d" feat-rebased2)
+  assert_contains "$out" 'state: working' 'the anchored live run at a rebased head reads working'
+  assert_contains "$out" 'source: run-step' 'the anchored live run is the attributed run'
+  assert_not_contains "$out" 'state: failed' 'the older failed row at the local head must not answer'
+  pass 'a coarse live row at a rebased head anchored at the local head reads working'
+}
+
+# Coarse negative control: the same live row at a rebased head with NO anchor
+# at the local head (the row before it ended elsewhere) is tied to this
+# worktree by nothing but the branch name, so the ledger must not answer for
+# it and no older row answers either.
+test_coarse_unanchored_rebased_live_row_is_not_attributed() {
+  reset_fakes
+  local d rebased other out; d=$(new_case coarse-live-rebased-unanchored)
+  make_repo_on_branch "$d/wt" fm/feat-rebased3
+  rebased=$(make_rebased_head "$d/wt")
+  other=$(make_rebased_head "$d/wt" 'an unrelated earlier head')
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased3.meta" "window=fm:fm-feat-rebased3" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-rebased3.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-rebased3 ${rebased}  2026-08-23 13:53
+  failed     fm/feat-rebased3 ${other}  2026-08-23 12:09
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rebased3
+  out=$(run_crew_state "$d" feat-rebased3)
   assert_not_contains "$out" 'source: run-step' 'a branch-name-only live row must not bind'
   assert_not_contains "$out" 'state: failed' 'the older failed row must not answer either'
   assert_contains "$out" 'source: status-log' 'the status log answers without an attributable run'
-  pass 'a coarse live row at a rebased head is not attributed'
+  pass 'a coarse live row at a rebased head without an anchor is not attributed'
+}
+
+# The fm-crew-state-run-attribution failure itself, on the legacy bare-status
+# surface: `axi status` names the OLDER failed run because its head equals the
+# local head, while the ledger's newest row for the branch is the live run at
+# the rebased head this copy fetched. The newer live run supersedes the failed
+# record, so the task never reads as failed while it validates.
+test_legacy_failed_record_yields_to_newer_rebased_live_row() {
+  reset_fakes
+  local d rebased short out; d=$(new_case legacy-failed-vs-rebased-live)
+  make_repo_on_branch "$d/wt" fm/feat-rebased4
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased4.meta" "window=fm:fm-feat-rebased4" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on the no-mistakes run\n' > "$d/state/feat-rebased4.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-rebased4)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-rebased4 ${rebased}  2026-09-19 01:10
+  failed     fm/feat-rebased4 ${short}  2026-09-18 23:40
+EOF
+)"
+  out=$(run_crew_state "$d" feat-rebased4)
+  assert_not_contains "$out" 'state: failed' 'an older failed record must not outrank the newer live run'
+  assert_contains "$out" 'replacement run identity unavailable' 'the live replacement is named as the reason'
+  pass 'a legacy failed record yields to a newer live run at a rebased head'
+}
+
+# A terminal record never outranks a NEWER live row for its branch, even when
+# the ledger cannot tie that row to this worktree (here an intervening
+# cancelled row breaks the anchor): the record is history, so the pane and
+# status log answer instead of the old failure.
+test_legacy_failed_record_yields_to_unattributed_newer_live_row() {
+  reset_fakes
+  local d rebased other short out; d=$(new_case legacy-failed-vs-unanchored-live)
+  make_repo_on_branch "$d/wt" fm/feat-rebased5
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  rebased=$(make_rebased_head "$d/wt")
+  other=$(make_rebased_head "$d/wt" 'an unrelated earlier head')
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased5.meta" "window=fm:fm-feat-rebased5" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on the no-mistakes run\n' > "$d/state/feat-rebased5.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-rebased5)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-rebased5 ${rebased}  2026-09-19 01:10
+  cancelled  fm/feat-rebased5 ${other}  2026-09-19 00:30
+  failed     fm/feat-rebased5 ${short}  2026-09-18 23:40
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rebased5
+  out=$(run_crew_state "$d" feat-rebased5)
+  assert_not_contains "$out" 'state: failed' 'an older failed record must not outrank a newer live row'
+  assert_not_contains "$out" 'source: run-step' 'neither the superseded record nor the unattributed row binds'
+  assert_contains "$out" 'state: paused' 'the status log answers'
+  pass 'a legacy failed record yields to an unattributed newer live row'
+}
+
+# A branch-named record the strict head rule rejected binds through the ledger
+# only as the ledger's own newest row: an anchored live row for a DIFFERENT run
+# must not lend its attribution to an older terminal record at a rebased head.
+test_rejected_record_does_not_borrow_another_rows_anchor() {
+  reset_fakes
+  local d live old short out; d=$(new_case rejected-record-borrowed-anchor)
+  make_repo_on_branch "$d/wt" fm/feat-rebased6
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  live=$(make_rebased_head "$d/wt")
+  old=$(make_rebased_head "$d/wt" 'an older rebased head')
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased6.meta" "window=fm:fm-feat-rebased6" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-rebased6.status"
+  FM_FAKE_RUN_HEAD=$old
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-rebased6)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-rebased6 ${live}  2026-09-19 01:10
+  failed     fm/feat-rebased6 ${short}  2026-09-18 23:40
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rebased6
+  out=$(run_crew_state "$d" feat-rebased6)
+  assert_not_contains "$out" 'state: failed' 'the rejected record must not report through another row'
+  assert_contains "$out" 'source: status-log' 'the status log answers'
+  pass 'a rejected record does not borrow another row anchor'
 }
 
 # Negative control: once the rebased run has FAILED it is finished history on a
@@ -5969,7 +6083,11 @@ test_daemon_probe_requires_positive_running_answer
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict
 test_coarse_live_row_keeps_the_original_supersede_note
-test_coarse_live_rebased_row_is_not_attributed
+test_coarse_anchored_rebased_live_row_reads_working
+test_coarse_unanchored_rebased_live_row_is_not_attributed
+test_legacy_failed_record_yields_to_newer_rebased_live_row
+test_legacy_failed_record_yields_to_unattributed_newer_live_row
+test_rejected_record_does_not_borrow_another_rows_anchor
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
