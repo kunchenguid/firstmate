@@ -129,9 +129,9 @@ test_per_home_roots_acquire_concurrently_without_contention() {
   out_a="$base/a.out"
   out_b="$base/b.out"
 
-  root_a=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$base/home-a") \
+  root_a=$(fm_treehouse_home_root "$base/home-a") \
     || fail "could not derive the first home's worktree root"
-  root_b=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$base/home-b") \
+  root_b=$(fm_treehouse_home_root "$base/home-b") \
     || fail "could not derive the second home's worktree root"
   [ "$root_a" != "$root_b" ] || fail "the two homes derived one worktree root"
 
@@ -179,7 +179,7 @@ test_a_worktree_from_another_root_still_returns() {
 
   # The home has since moved to its own root. The return still has to find that
   # worktree, or cleanup could not release work that is already in flight.
-  root=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$base/home-a") \
+  root=$(fm_treehouse_home_root "$base/home-a") \
     || fail "could not derive the home's worktree root"
   ( cd "$clone" && treehouse --root "$root" return --force "$legacy" ) >/dev/null 2>&1 \
     || fail "a worktree leased under the legacy shared root could not be returned once the home moved roots"
@@ -198,7 +198,7 @@ test_interactive_get_honors_the_root_it_is_given() {
   local base clone root entered
   base=$(build_fleet interactive)
   clone="$base/home-a/projects/proj"
-  root=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$base/home-a") \
+  root=$(fm_treehouse_home_root "$base/home-a") \
     || fail "could not derive the home's worktree root"
 
   # bin/fm-spawn.sh does not lease: it sends the INTERACTIVE form into the

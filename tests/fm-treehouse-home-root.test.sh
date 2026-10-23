@@ -33,17 +33,17 @@ test_root_is_per_home_and_spelling_independent() {
   base="$TMP_ROOT/derive"
   home_a="$base/homes/alpha"
   home_b="$base/homes/beta"
-  mkdir -p "$home_a" "$home_b" "$base/treehouse-base"
+  mkdir -p "$home_a" "$home_b"
 
-  root_a=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$home_a") \
+  root_a=$(fm_treehouse_home_root "$home_a") \
     || fail "no root derived for the first home"
-  root_b=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$home_b") \
+  root_b=$(fm_treehouse_home_root "$home_b") \
     || fail "no root derived for the second home"
   [ "$root_a" != "$root_b" ] \
     || fail "two homes derived the same worktree root, so they would still share one pool: $root_a"
   case "$root_a" in
-    "$base/treehouse-base"/*) : ;;
-    *) fail "the operator's own TREEHOUSE_ROOT base was not honored: $root_a" ;;
+    "$base/homes/.firstmate-worktrees"/*) : ;;
+    *) fail "the fixed root-home base was not used: $root_a" ;;
   esac
 
   # Every process that knows a home must derive the identical root, however that
@@ -52,178 +52,15 @@ test_root_is_per_home_and_spelling_independent() {
   # written beside each worktree assume.
   link="$base/link-to-alpha"
   ln -s "$home_a" "$link"
-  [ "$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$link")" = "$root_a" ] \
+  [ "$(fm_treehouse_home_root "$link")" = "$root_a" ] \
     || fail "a symlinked spelling of one home derived a different root"
-  [ "$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$home_a/")" = "$root_a" ] \
+  [ "$(fm_treehouse_home_root "$home_a/")" = "$root_a" ] \
     || fail "a trailing-slash spelling of one home derived a different root"
-  relative=$(cd "$base/homes" && TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root alpha) \
+  relative=$(cd "$base/homes" && fm_treehouse_home_root alpha) \
     || fail "a relative spelling of one home derived no root"
   [ "$relative" = "$root_a" ] || fail "a relative spelling of one home derived a different root"
 
-  # Two spellings of the BASE must agree too, or one home would allocate from two
-  # roots depending only on how the operator exported it.
-  [ "$(TREEHOUSE_ROOT="$base/treehouse-base/" fm_treehouse_home_root "$home_a")" = "$root_a" ] \
-    || fail "a trailing-slash TREEHOUSE_ROOT derived a different root for one home"
   pass "the worktree root is per home and independent of how the home or base is spelled"
-}
-
-test_root_falls_back_to_home_and_fails_closed() {
-  local base fallback
-  base="$TMP_ROOT/fallback"
-  mkdir -p "$base/home" "$base/user"
-
-  fallback=$(TREEHOUSE_ROOT='' HOME="$base/user" fm_treehouse_home_root "$base/home") \
-    || fail "no root derived with TREEHOUSE_ROOT unset"
-  case "$fallback" in
-    "$base/user"/*) : ;;
-    *) fail "an unset TREEHOUSE_ROOT did not fall back to Treehouse's own base: $fallback" ;;
-  esac
-
-  if TREEHOUSE_ROOT='' HOME="$base/user" fm_treehouse_home_root "$base/absent" >/dev/null 2>&1; then
-    fail "a home that does not exist still produced a worktree root"
-  fi
-  if TREEHOUSE_ROOT='relative/base' HOME="$base/user" fm_treehouse_home_root "$base/home" >/dev/null 2>&1; then
-    fail "a non-absolute base still produced a worktree root"
-  fi
-  if TREEHOUSE_ROOT='' HOME='' fm_treehouse_home_root "$base/home" >/dev/null 2>&1; then
-    fail "an unresolvable base still produced a worktree root"
-  fi
-  pass "the worktree root falls back to Treehouse's own base and otherwise refuses"
-}
-
-test_root_rejects_bases_inside_active_or_root_home() {
-  local base root_home active_home err
-  base="$TMP_ROOT/reject"
-  root_home="$base/root-home"
-  active_home="$root_home/secondmate"
-  mkdir -p "$root_home/treehouse-base" "$active_home/treehouse-base"
-  printf '%s\n' \
-    'schema=fm-secondmate-parent.v1' \
-    'route=local' \
-    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
-
-  err="$base/active.err"
-  if FM_HOME="$active_home" TREEHOUSE_ROOT="$active_home/treehouse-base" \
-    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
-    fail "a derived root inside the active home was accepted"
-  fi
-  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
-    "the active-home rejection did not explain the unsafe derived root"
-
-  err="$base/root.err"
-  if FM_HOME="$active_home" TREEHOUSE_ROOT="$root_home/treehouse-base" \
-    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
-    fail "a derived root inside the root home was accepted"
-  fi
-  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
-    "the root-home rejection did not explain the unsafe derived root"
-  pass "the derived worktree root stays outside the active and root Firstmate homes"
-}
-
-test_root_rejects_base_via_symlinked_ancestor_into_home() {
-  local base root_home active_home link err
-  base="$TMP_ROOT/reject-symlink"
-  root_home="$base/root-home"
-  active_home="$root_home/secondmate"
-  mkdir -p "$active_home"
-  printf '%s\n' \
-    'schema=fm-secondmate-parent.v1' \
-    'route=local' \
-    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
-
-  # The base's leaf directory does not exist yet, but an existing ancestor is a
-  # symlink into the active home. The OS resolves that symlink when the base is
-  # eventually created, so the derivation must resolve it too, or the lexical
-  # prefix check below is compared against an unresolved path that never
-  # matches even though the base physically lands inside the home.
-  link="$base/link-into-active"
-  ln -s "$active_home" "$link"
-
-  err="$base/symlink.err"
-  if FM_HOME="$active_home" TREEHOUSE_ROOT="$link/not-yet-created" \
-    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
-    fail "a not-yet-created base reached through a symlinked ancestor into the active home was accepted"
-  fi
-  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
-    "the symlinked-ancestor rejection did not explain the unsafe derived root"
-  pass "a not-yet-created base reached through a symlinked ancestor into a home is still rejected"
-}
-
-test_root_rejects_existing_pool_symlink_into_home() {
-  local base root_home active_home pool err
-  base="$TMP_ROOT/reject-existing-pool-symlink"
-  root_home="$base/root-home"
-  active_home="$root_home/secondmate"
-  mkdir -p "$active_home" "$base/treehouse-base"
-  printf '%s\n' \
-    'schema=fm-secondmate-parent.v1' \
-    'route=local' \
-    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
-  pool="$base/treehouse-base/.firstmate-worktrees"
-  ln -s "$active_home" "$pool"
-
-  err="$base/symlink.err"
-  if FM_HOME="$active_home" TREEHOUSE_ROOT="$base/treehouse-base" \
-    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
-    fail "an existing pool symlink into the active Firstmate home was accepted"
-  fi
-  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
-    "the existing pool symlink rejection did not explain the unsafe derived root"
-  pass "an existing pool symlink into a home is rejected"
-}
-
-test_root_rejects_existing_derived_symlink_into_home() {
-  local base root_home active_home derived err
-  base="$TMP_ROOT/reject-existing-derived-symlink"
-  root_home="$base/root-home"
-  active_home="$root_home/secondmate"
-  mkdir -p "$active_home" "$base/treehouse-base"
-  printf '%s\n' \
-    'schema=fm-secondmate-parent.v1' \
-    'route=local' \
-    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
-  derived=$(FM_HOME= TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$active_home")
-  mkdir -p "$(dirname "$derived")"
-  ln -s "$active_home" "$derived"
-
-  err="$base/symlink.err"
-  if FM_HOME="$active_home" TREEHOUSE_ROOT="$base/treehouse-base" \
-    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
-    fail "an existing derived root symlink into the active Firstmate home was accepted"
-  fi
-  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
-    "the existing derived-root symlink rejection did not explain the unsafe root"
-  pass "an existing derived root symlink into a home is rejected"
-}
-
-test_root_refuses_dot_segments_in_absent_base() {
-  local base root_home active_home out err
-  base="$TMP_ROOT/reject-dots"
-  root_home="$base/root-home"
-  active_home="$root_home/secondmate"
-  mkdir -p "$active_home" "$base/outside"
-  printf '%s\n' \
-    'schema=fm-secondmate-parent.v1' \
-    'route=local' \
-    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
-
-  err="$base/dots.err"
-  if out=$(FM_HOME="$active_home" TREEHOUSE_ROOT="$root_home/absent/../treehouse-base" \
-    fm_treehouse_home_root "$active_home" 2>"$err"); then
-    fail "an absent base with a .. segment was accepted"
-  fi
-  [ -z "$out" ] || fail "a refused base with .. printed a derived root"
-  assert_contains "$(cat "$err")" "without dot segments" "the .. refusal did not explain the fix"
-
-  if out=$(TREEHOUSE_ROOT="$base/outside/absent/./leaf" fm_treehouse_home_root "$active_home" 2>/dev/null); then
-    fail "an absent base with a . segment was accepted"
-  fi
-  [ -z "$out" ] || fail "a refused base with . printed a derived root"
-
-  out=$(TREEHOUSE_ROOT="$base/outside/absent/leaf" fm_treehouse_home_root "$active_home") ||
-    fail "an ordinary absent base outside the homes was refused"
-  assert_contains "$out" "$base/outside/absent/leaf/.firstmate-worktrees/" "ordinary absent base did not derive"
-  pass "absent bases with dot segments are refused while ordinary absent bases derive"
 }
 
 # Build a spawn fixture under <case>/ and echo "<home> <project> <pool> <fakebin>".
@@ -235,7 +72,7 @@ make_spawn_case() {  # <name> <id>
   pool="$case_dir/pool"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/treehouse-base"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
@@ -252,7 +89,7 @@ spawn_pane_command() {  # <name> <id>
   read -r home project pool fakebin < "$case_dir/record"
   pane_log="$case_dir/pane.log"
   : > "$pane_log"
-  out=$(FM_FAKE_PANE_LOG="$pane_log" TREEHOUSE_ROOT="$case_dir/treehouse-base" \
+  out=$(FM_FAKE_PANE_LOG="$pane_log" \
     fm_test_run_spawn "$home" "$pool" "$fakebin" \
     "$id" "$project" --mode local-only --yolo off) \
     || fail "spawn failed for $id"$'\n'"$out"
@@ -270,9 +107,9 @@ test_spawn_allocates_from_its_own_home_root() {
   cmd_a=$(spawn_pane_command spawn-a root-spawn-a)
   cmd_b=$(spawn_pane_command spawn-b root-spawn-b)
 
-  root_a=$(TREEHOUSE_ROOT="$TMP_ROOT/spawn-a/treehouse-base" fm_treehouse_home_root "$TMP_ROOT/spawn-a/home") \
+  root_a=$(fm_treehouse_home_root "$TMP_ROOT/spawn-a/home") \
     || fail "could not derive the first home's root"
-  root_b=$(TREEHOUSE_ROOT="$TMP_ROOT/spawn-b/treehouse-base" fm_treehouse_home_root "$TMP_ROOT/spawn-b/home") \
+  root_b=$(fm_treehouse_home_root "$TMP_ROOT/spawn-b/home") \
     || fail "could not derive the second home's root"
   [ "$root_a" != "$root_b" ] || fail "the two spawn fixtures share one worktree root"
 
@@ -289,7 +126,7 @@ test_home_seed_leases_from_the_seeding_home_root() {
   err="$base/seed.err"
   home="$base/home"
   acquired="$base/acquired"
-  mkdir -p "$home/projects" "$home/data" "$home/state" "$base/treehouse-base"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$base/remotes/alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
@@ -298,14 +135,14 @@ test_home_seed_leases_from_the_seeding_home_root() {
   log="$base/fake/tmux.log"
   root_file="$base/fake/root"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" TREEHOUSE_ROOT="$base/treehouse-base" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" \
     FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_ROOT_FILE="$root_file" \
     FM_SECONDMATE_CHARTER='seed root scope' FM_SECONDMATE_SCOPE='seed root scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err" \
     || fail "seed failed for a treehouse-acquired home"$'\n'"$(cat "$err")"
 
-  expected=$(TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$home") \
+  expected=$(fm_treehouse_home_root "$home") \
     || fail "could not derive the seeding home's root"
   [ -f "$root_file" ] || fail "the seed lease carried no worktree root"
   [ "$(cat "$root_file")" = "$expected" ] \
@@ -319,7 +156,7 @@ test_home_seed_return_resolves_from_the_path() {
   home="$base/home"
   acquired="$base/acquired"
   err="$base/seed.err"
-  mkdir -p "$home/projects" "$home/data" "$home/state" "$base/treehouse-base"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$base/remotes/alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
@@ -329,7 +166,7 @@ test_home_seed_return_resolves_from_the_path() {
   fakebin=$(make_fake_tmux "$base/fake")
   log="$base/fake/tmux.log"
 
-  if PATH="$fakebin:$PATH" FM_HOME="$home" TREEHOUSE_ROOT="$base/treehouse-base" \
+  if PATH="$fakebin:$PATH" FM_HOME="$home" \
     FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_SECONDMATE_CHARTER='seed return scope' FM_SECONDMATE_SCOPE='seed return scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
@@ -344,12 +181,6 @@ test_home_seed_return_resolves_from_the_path() {
 }
 
 test_root_is_per_home_and_spelling_independent
-test_root_falls_back_to_home_and_fails_closed
-test_root_rejects_bases_inside_active_or_root_home
-test_root_rejects_base_via_symlinked_ancestor_into_home
-test_root_rejects_existing_pool_symlink_into_home
-test_root_rejects_existing_derived_symlink_into_home
-test_root_refuses_dot_segments_in_absent_base
 test_spawn_allocates_from_its_own_home_root
 test_home_seed_leases_from_the_seeding_home_root
 test_home_seed_return_resolves_from_the_path
