@@ -2770,17 +2770,41 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
 }
 
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
-  local dir state url rc last
+  local dir state url rc last head
   url=https://github.com/o/r/pull/1
 
   dir=$(make_case self-merge-auto-teardown)
   state="$dir/home/state"
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
   git -C "$dir/wt" checkout -q -b fm/task
-  write_poll_meta "$state" task-a "$url" \
-    'kind=ship' 'mode=no-mistakes' 'branch=fm/task' \
-    'pr_head=0123456789abcdef0123456789abcdef01234567' "project=$dir/wt"
+  git -C "$dir/wt" remote add origin "$dir/origin.git"
+  git -C "$dir/wt" push -q origin fm/task:refs/heads/main
+  git -C "$dir/wt" fetch -q origin
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/tmux"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'branch=fm/task' \
+    'spawn_gen=teardown-test-task-a' \
+    "pr_head=$head" \
+    "project=$dir/wt" \
+    "pr=$url"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   seed_canonical_poll "$dir" task-a "$url"
+  touch "$state/.last-watcher-beat"
 
   set +e
   FM_TEST_GH_STATE=MERGED FM_TEST_NM_WORKTREE="$dir/wt" \
@@ -2793,16 +2817,11 @@ test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
     "self-merge: the durable merge notice lost the canonical merge identity"
   last=$(grep -F "merged-task-a-$url" "$state/.wake-queue" | tail -n 1)
   case "$last" in
-    *'lane automatically cleaned up'*)
-      [ ! -e "$state/task-a.meta" ] \
-        || fail "self-merge: the cleanup reported success but the task record survived"
-      ;;
-    *'automatic cleanup refused: '*)
-      [ -f "$state/task-a.meta" ] \
-        || fail "self-merge: a refused cleanup removed the task record"
-      ;;
-    *) fail "self-merge: the entrypoint skipped the guarded cleanup of a finished direct report: $last" ;;
+    *'; lane automatically cleaned up'*) ;;
+    *) fail "self-merge: a merge of a finished direct report was not cleaned up: $last | $(cat "$dir/merge.err")" ;;
   esac
+  [ ! -e "$state/task-a.meta" ] \
+    || fail "self-merge: the cleanup published success but the task record survived"
   pass "a merge this home performs itself runs the guarded cleanup of a finished direct report and publishes its outcome durably"
 }
 
