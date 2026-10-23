@@ -5314,6 +5314,17 @@ claude*)
     exit 1
   fi
   ;;
+codex*)
+  if [ "$KIND" = secondmate ]; then
+    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  else
+    spawn_trust_args=("$WT" "$PROJ_ABS")
+  fi
+  if ! "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    echo "error: could not pre-register Codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
+    exit 1
+  fi
+  ;;
 agy)
   if [ "$KIND" != secondmate ]; then
     if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
@@ -6468,6 +6479,12 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = codex ] && [ -n "${CODEX_HOME:-}" ]; then
+  case "$CODEX_HOME" in
+    /*) LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME") $LAUNCH" ;;
+    *) echo "error: CODEX_HOME must be absolute for a Codex worker launch" >&2; exit 1 ;;
+  esac
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
