@@ -208,6 +208,12 @@
 #   once to drop its claim after metadata publication too, and before its launch
 #   is delivered it closes the endpoint whose `treehouse get` shell leases the
 #   slot and removes the wiring, task temp root, and staged launch file it wrote.
+#   After `treehouse get` is sent, the spawn polls once a second for the pane to
+#   enter an isolated worktree for up to FM_SPAWN_WORKTREE_WAIT_SECS seconds
+#   (default 600; blank, zero, or non-numeric uses the default), so a loaded host
+#   has time to install a large project's dependencies. The timeout error names
+#   the wait used and this variable; a non-polytoken harness leaves its endpoint
+#   for inspection, as before.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -5162,7 +5168,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  # The wait is a count of 1-second polls, FM_SPAWN_WORKTREE_WAIT_SECS of them
+  # (default 600): a loaded host can need minutes for treehouse to install a
+  # large project's dependencies before the pane enters the worktree.
+  worktree_wait_secs=${FM_SPAWN_WORKTREE_WAIT_SECS:-600}
+  case $worktree_wait_secs in
+    '' | *[!0-9]* | 0) worktree_wait_secs=600 ;;
+  esac
+  for _ in $(seq 1 "$worktree_wait_secs"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -5180,7 +5193,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${worktree_wait_secs}s (raise FM_SPAWN_WORKTREE_WAIT_SECS to wait longer; last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
     exit 1
   fi
 
