@@ -25,6 +25,7 @@ See [`docs/examples/usage-warner`](examples/usage-warner) for a starting point t
 
 `check` is the one read with two callers - a human or another script running `fm-usage-warner.sh check` directly (on demand), and the watcher polling the registered shim on its normal `FM_CHECK_INTERVAL` cadence once armed (periodic).
 Both hit the identical function, so this is one program with two callers, not two programs, and there is no daemon and no schedule of its own.
+When the two overlap, they are serialized on `state/.usage-warner.lock`, and a check that finds that lock held exits quietly, so one crossing still warns once.
 
 A window that crosses a configured threshold notifies once, stays quiet while it remains at or above that threshold, and re-arms the moment it next reads back below threshold (an account-level window's own reset does exactly this).
 Each directive is tracked on its own, so tiered thresholds on one window such as `five_hour:80` and `five_hour:95` each warn on their own crossing.

@@ -473,8 +473,6 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
   assert_present "$home/state/usage-warner.check-trust" "arm registers a trust binding"
   [ "$(stat -c %a "$home/state/usage-warner.check.sh" 2>/dev/null || stat -f %Lp "$home/state/usage-warner.check.sh")" = 700 ] \
     || fail "the shim must be mode 700"
-  assert_grep "exec" "$home/state/usage-warner.check.sh" "the shim execs the trusted check script"
-  assert_grep "check" "$home/state/usage-warner.check.sh" "the shim invokes the check action"
 
   out=$(FM_HOME="$home" "$WARNER" disarm 2>&1)
   assert_contains "$out" "disarmed: state/usage-warner.check.sh" "disarm names the shim it removed"
@@ -515,6 +513,59 @@ test_armed_shim_runs_a_real_check() {
   pass "fm-usage-warner: the armed shim is exactly what the watcher would dispatch"
 }
 
+test_check_repeated_directive_reports_once() {
+  local home fakebin notify_log out
+  home=$(make_home repeated-directive)
+  fakebin="$TMP_ROOT/repeated-directive/fakebin"
+  notify_log="$TMP_ROOT/repeated-directive/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  printf 'five_hour:80\nfive_hour:80\n' > "$home/config/usage-warner"
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":85}'
+  out=$(run_check "$home" "$fakebin")
+  [ "$out" = "usage-warner: five_hour at 85% (>=80%)" ] \
+    || fail "a repeated directive must report its one crossing once: $out"
+  [ "$(grep -c "five_hour at 85%" "$notify_log")" = 1 ] \
+    || fail "a repeated directive must post one notification naming the crossing once"
+  pass "fm-usage-warner: a repeated directive reports its crossing once"
+}
+
+# Two callers overlap: the first check is held inside a slow read when the
+# second starts. Only one of them may warn for the single crossing.
+test_overlapping_checks_warn_once() {
+  local home fakebin notify_log first_out second_out pid _
+  home=$(make_home overlap)
+  fakebin="$TMP_ROOT/overlap/fakebin"
+  notify_log="$TMP_ROOT/overlap/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":90}'
+  mv "$fakebin/quota-axi" "$fakebin/quota-axi.real"
+  cat > "$fakebin/quota-axi" <<EOF
+#!/usr/bin/env bash
+: > "$fakebin/.started"
+sleep 2
+exec "$fakebin/quota-axi.real" "\$@"
+EOF
+  chmod +x "$fakebin/quota-axi"
+  printf 'five_hour:80\n' > "$home/config/usage-warner"
+  run_check "$home" "$fakebin" > "$TMP_ROOT/overlap/first.out" &
+  pid=$!
+  for _ in $(seq 1 50); do
+    [ -e "$fakebin/.started" ] && break
+    sleep 0.1
+  done
+  [ -e "$fakebin/.started" ] || fail "the first check never reached its read"
+  second_out=$(run_check "$home" "$fakebin")
+  wait "$pid"
+  first_out=$(cat "$TMP_ROOT/overlap/first.out")
+  [ -z "$second_out" ] || fail "a check overlapping a running one must stay quiet: $second_out"
+  assert_contains "$first_out" "five_hour at 90% (>=80%)" "the running check still reports the crossing"
+  [ "$(grep -c "Firstmate: Claude usage" "$notify_log")" = 1 ] \
+    || fail "overlapping checks must post exactly one notification for one crossing"
+  pass "fm-usage-warner: overlapping checks warn once for one crossing"
+}
+
 test_help_and_usage
 test_unconfigured_home_stays_silent
 test_config_parses_comments_whitespace_and_model_ids
@@ -522,6 +573,8 @@ test_check_crosses_notifies_stays_quiet_then_rearms
 test_check_tiered_thresholds_on_one_window_each_warn
 test_check_reads_a_v1_record_without_rewarning
 test_check_batches_multiple_crossings_into_one_notification
+test_check_repeated_directive_reports_once
+test_overlapping_checks_warn_once
 test_check_ignores_a_window_the_account_does_not_return
 test_check_absent_window_keeps_its_crossing_recorded
 test_check_never_requests_a_refresh

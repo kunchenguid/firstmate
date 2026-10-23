@@ -74,6 +74,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/usage-warner"
 RECORD="$STATE/.usage-warner"
 RECORD_SCHEMA=fm-usage-warner-v2
 RECORD_SCHEMA_V1=fm-usage-warner-v1
+CHECK_LOCK="$STATE/.usage-warner.lock"
 CHECK_ID=usage-warner
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
@@ -131,9 +132,10 @@ READ_TIMEOUT_SECS=$((CHECK_TIMEOUT - 3))
 # --- config -------------------------------------------------------------
 # Prints "<window-id>\t<percent>" once per valid directive in config/usage-warner,
 # or nothing at all when the file is absent, empty, or has no valid directive.
-# That "nothing" is the opt-in gate every other action checks.
+# That "nothing" is the opt-in gate every other action checks. A repeated
+# directive is printed once.
 config_thresholds() {
-  local line id percent
+  local line id percent seen=""
   [ -f "$CONFIG" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
@@ -146,6 +148,9 @@ config_thresholds() {
     [ -n "$id" ] || continue
     case "$percent" in ''|*[!0-9]*) continue ;; esac
     [ "$percent" -ge 1 ] && [ "$percent" -le 100 ] || continue
+    ! id_in_list "$seen" "${id}:${percent}" || continue
+    seen="${seen}${id}:${percent}
+"
     printf '%s\t%s\n' "$id" "$percent"
   done < "$CONFIG"
 }
@@ -292,10 +297,24 @@ record_write() {  # <reported-line> <notified-newline-list>
 }
 
 # --- check ------------------------------------------------------------------
+# Overlapping checks (the watcher's cadence and an on-demand run) are
+# serialized on state/.usage-warner.lock so both cannot read the same record
+# and warn for one crossing. A check that finds the lock held exits quietly:
+# the holder is already doing this read.
 action_check() {
-  local thresholds windows_out status_line="" read_out read_rc=0
+  local thresholds
   thresholds=$(config_thresholds)
   [ -n "$thresholds" ] || return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_lock_try_acquire "$CHECK_LOCK" || return 0
+  check_locked "$thresholds"
+  fm_lock_release "$CHECK_LOCK"
+  return 0
+}
+
+check_locked() {
+  local thresholds=$1 windows_out status_line="" read_out read_rc=0
 
   record_read "$thresholds"
 
