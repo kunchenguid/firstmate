@@ -3482,6 +3482,14 @@ while :; do
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+  # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
+  # "Attention marks"): display and desktop notification only, never a wake.
+  # Off (no config file and no cached record) costs two file tests and a glob.
+  if [ -e "$CONFIG/rex-status-marks" ] || [ -e "$CONFIG/rex-tint" ] \
+    || compgen -G "$STATE/.rex-mark-*" >/dev/null || compgen -G "$STATE/.rex-progress-*" >/dev/null \
+    || compgen -G "$STATE/.rex-tint-*" >/dev/null; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 || true
+  fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

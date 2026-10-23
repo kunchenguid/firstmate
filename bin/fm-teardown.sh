@@ -3873,6 +3873,12 @@ elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+  # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
+  # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
+  # a stale request. A task with no cached record costs nothing.
+  if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
+  fi
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi

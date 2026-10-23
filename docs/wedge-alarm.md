@@ -16,6 +16,7 @@ It lists channel directives, one per non-empty, non-comment line, and every list
   Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
+- `rex` writes a blocked `id=fm-wedge` program-status record plus a desktop notification on Firstmate's own Rex pane, and removes the record after the next delivered digest; it needs a Rex supervisor pane, and `auto` never selects it.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.

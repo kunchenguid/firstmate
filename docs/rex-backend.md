@@ -112,9 +112,53 @@ Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-
 `bin/fm-control.sh` `exit` and `relaunch` work on Rex; [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recorded-server absence proof, stopped-server recovery, reclaim placement, and reclaim-only shell-husk cleanup.
 An ordinary spawn refuses any block carrying the task's scoped label.
 
+## Attention marks
+
+Opt-in: with `config/rex-status-marks` set to `on`, the captain sees which worker needs them from Rex itself.
+`bin/fm-rex-marks.sh` turns each Rex task's latest status into one program-status record (OSC 7501, `app=firstmate`, `id=fm`) on that worker's pane, so Rex badges its tab, session, and Activity entry while the worker's own agent keeps the pane's root status.
+
+| Worker status | Record | Message |
+| --- | --- | --- |
+| `needs-decision`, or a captain hold | `blocked`, kind `question` | `Needs your decision: <note>` |
+| `blocked` naming a credential or login | `blocked`, kind `auth` | `Blocked: <note>` |
+| other `blocked` | `blocked`, kind `permission` | `Blocked: <note>` |
+| `failed` | `error` | `Failed: <note>` |
+| `done` with a PR URL | `done` | `PR ready: <note>` |
+| other `done` | `done` | `Done: <note>` |
+| anything else | removed | |
+
+Each record's title is the task's tab label, `fm-<id>`, so Rex labels it with the name Firstmate gave the tab rather than a branch or the agent's terminal title.
+Each new record that needs the captain also carries an OSC 777 desktop notification titled with the tab label, because Rex sounds and notifications follow each pane's root program status, not a child record.
+Firstmate never writes the root record: the harness owns it, and a second root report for the same turn makes Rex notify twice.
+Firstmate's own records never count as the worker's state, for busy detection or for push escalation.
+The notification fires once per change, never on a repeated sync.
+Rex has no API to set a record, so the mark is one small write to the pane's terminal device; a `working` or `blocked` record is dropped when the agent's shell prints its next prompt or exits, and the next sync writes it again.
+The watcher runs `fm-rex-marks.sh sync` once per poll only while `config/rex-status-marks` or `config/rex-tint` exists or a cached record remains, and cleanup clears a cached mark before closing the pane.
+Every write addresses the task's recorded block id, so a mark never lands on another pane.
+
+`config/rex-status-marks` turns the marks `on` or `off` (the default when the file is absent, so a home that never creates it sees no change); turning them off clears every mark and progress record already shown.
+`state/.rex-mark-<id>` caches the last mark so a sync writes only on change.
+
+### Validation progress
+
+While marks are on and a ship validates through no-mistakes with no mark, its pane carries a second record, `id=fm/validate` in state `working`, whose progress is the share of pipeline steps done and whose message names the active step, for example `Validating: review 3/9, auto-fix 1/3`.
+Rex shows it in the tab and pane hover cards, so the captain can see how far each validation is without opening the worker.
+The sync reads the run on the task's branch with one bounded `no-mistakes axi status` at most every 30 seconds per task (`FM_REX_PROGRESS_INTERVAL`), and removes the record when the run ends or the task gets a mark; clearing the mark also removes the record beneath it.
+`state/.rex-progress-<id>` caches the last plan.
+
+### State tint
+
+`config/rex-tint` opts in to a subtle background tint on a worker that waits on the captain or on help (a `blocked` mark) or has failed (an `error` mark): `off` (the default when the file is absent), `subtle` for a dark theme, or `subtle-light` for a light theme.
+A running or finished worker is never tinted, and the tint is reset when the mark leaves that state, at cleanup, and when the tint is turned off.
+Rex applies a theme set through its API only to a pane no client owns, and the app owns every pane it shows, so the tint is an in-band OSC 11 written to the pane's terminal and the reset is OSC 111.
+It changes only cells the program leaves at the default background, a harness that picked its colors from the background at startup keeps them, and a tint left by a stopped watcher stays until the next sync.
+Firstmate never sends an OSC 11 query, because the answer would arrive in the worker as typed text.
+`state/.rex-tint-<id>` records the tint written, since a tint cannot be read back.
+
 ## Away mode
 
 A Rex-hosted Firstmate can run away and quiet supervision: the supervisor target is discovered from `REX_SESSION` and `REX_BLOCK`, and the away daemon runs in its own dedicated Rex session, never as a tab or split in yours, which `/afk` exit kills by its exact recorded id.
+Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's own pane: a blocked `id=fm-wedge` record plus a desktop notification, removed after the next delivered digest; `auto` never adds it.
 
 ## Active limits
 

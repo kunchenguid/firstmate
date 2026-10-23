@@ -2351,6 +2351,18 @@ Real harness edges on that build, each captured by `fm_backend_wait_transition r
 - Grok 1.0.67's workspace-trust dialog reported `blocked` with kind `permission`, and the wait returned `...|blocked|grok-build|permission: Trust this folder?`.
 - Codex 0.163.0's workspace-trust dialog reported no program status, so it reached no push edge.
 
+### Attention marks
+
+Checked on 2026-10-23 on `rex 0.0.1792607779-g171246`, macOS, and jq.
+Rex attributes a record written to a pane's terminal to that pane's foreground process, so without the `app=firstmate` exclusion an opt-in attention mark would read as the worker's own blocked state.
+
+```text
+$ bash tests/fm-backend-rex-eventwait-smoke.test.sh
+ok - real rex: an opt-in attention mark is one app=firstmate record on the task's pane, titled with its tab label
+ok - real rex: a Firstmate mark rewritten during a wait never escalates, through the real event reader
+ok - real rex: the pane's own blocked report still escalates beside a mark, and clear removes only Firstmate's record
+```
+
 ### Worker tools on Rex
 
 Rechecked on 2026-10-22 on the same Rex build.
