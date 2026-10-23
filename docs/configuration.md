@@ -361,6 +361,9 @@ Either would place a row In flight without a task record, status file, or inbox,
 The wrapper still passes through the documented direct transition `tasks-axi start <id>`.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 
+When a fresh dispatch's In flight move fails after the worker launched, spawn removes the task record and fails loudly.
+It also closes the unowned worker endpoint, returning the claimed slot to the pool, but only while the local copy has no uncommitted change and no commit that exists on no remote; otherwise the endpoint and copy stay for the operator to close out by hand ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh) `spawn_close_unowned_endpoint`).
+
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 
 ### Which backlog receives a transition
