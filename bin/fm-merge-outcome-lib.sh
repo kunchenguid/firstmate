@@ -14,8 +14,10 @@
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
 # The merge entrypoint and the main watcher may each run the guarded teardown
-# for a finished direct report once the merge outcome is recorded; this library
-# owns that eligibility check, the teardown call, and the resulting notice text.
+# for a finished direct report once the merge outcome is recorded: a main-home
+# kind=ship task whose current state is done and whose recorded PR is exactly
+# the merged one. This library owns that eligibility check, the teardown call,
+# and the resulting notice text; every other lane keeps the plain notice.
 # The merge outcome adds no new transport; a cleanup outcome rides the merge
 # notice this library emits.
 #
