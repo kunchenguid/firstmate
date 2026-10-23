@@ -343,7 +343,8 @@ pane_readable() {  # <target>
 # crew_agent_gone: positive recovery-grade evidence that a readable endpoint
 # contains only its shell, not the recorded harness. Tmux first confirms its
 # foreground command is a shell so a transient process-table read cannot turn a
-# live agent into a dead one; Herdr owns that distinction in its own classifier.
+# live agent into a dead one; Herdr and Rex own that distinction in their
+# classifiers.
 # A dead agent must outrank stale busy or status-log evidence, but every
 # ambiguous, unreadable, or unverified result preserves the existing fallback.
 crew_agent_gone() {
@@ -357,7 +358,7 @@ crew_agent_gone() {
         *) return 1 ;;
       esac
       ;;
-    herdr) ;;
+    herdr|rex) ;;
     *) return 1 ;;
   esac
   state=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")
