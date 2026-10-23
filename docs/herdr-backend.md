@@ -651,9 +651,15 @@ When the selected named server is not running, the adapter launches it without t
 - Firstmate home and directory overrides.
 - Harness identity markers.
 - The supervision-model override.
+- Per-call `FM_SNAPSHOT_*` and `FM_CREW_STATE_*` tuning values.
 
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
 An already-running server is reused without restart or environment changes.
+
+When an operator service owns a session's server, list that session name in the home's local `config/herdr-server-external` file, with names separated by whitespace.
+For a listed session the adapter never starts a server: it waits the same bounded time for the service to bring the server back, then refuses with an error that names the external owner.
+Unlisted sessions, such as isolated lab sessions, keep the default start behavior.
+The file is inherited into secondmate homes, which run inside the primary's session.
 Explicit named-session routing and unrelated launch environment remain intact.
 
 ### Sending text and keys
