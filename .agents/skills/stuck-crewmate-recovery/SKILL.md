@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -18,6 +18,12 @@ Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> inte
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
+
+## Managed approval failover
+
+After observing a Codex command-approval prompt under bypass or a Claude policy refusal of a bypass session, ask the captain for explicit approval to change the owning home's worker permission posture and relaunch the worker.
+Only after that explicit word, load `harness-adapters` and use `FM_HOME=<owning-home> bin/fm-approval-failover.sh apply <id>`; its header owns persistent configuration and guarded recovery, with no automatic detection.
+Report the saved model-reviewed remedy and actual recovery result, preserving explicit settings and work rather than changing vendor policy or answering approval or hook-trust prompts.
 
 ## Session-start reconciliation for a dead ordinary direct report
 

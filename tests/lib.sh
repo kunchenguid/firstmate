@@ -289,6 +289,11 @@ fm_test_reap_watchers() {
 # its owner's guard reaps it.
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
+# The suite's own pid, for a polling fixture to stop once its suite is gone
+# (`kill -0 "$FM_TEST_SUITE_PID"` in its loop condition), which bounds it to one
+# poll past a runner killed too hard for any cleanup to run.
+FM_TEST_SUITE_PID=$$
+export FM_TEST_SUITE_PID
 
 # Remove a fixture tree even when it holds a read-only directory, such as the
 # spawn-owned state/<id>.git-hooks strip directory.
@@ -300,6 +305,40 @@ fm_test_remove_tree() {
   rm -rf "$dir"
 }
 
+# --- fixture-root process reaping -------------------------------------------
+#
+# A fixture process whose command line names a fixture root - a stub, a script
+# run from a fixture checkout whose bin links back here, or a fake harness
+# session - can reparent to init and keep polling after its test ends, and
+# removing the root only turns its wait into one that can never finish. Before a
+# root is removed, every process naming that exact mktemp root is signalled,
+# TERM and then KILL, each followed by a bounded 2s wait. The match is the
+# unique per-run root path, never a script or process name, so it cannot reach
+# another home's processes; this shell and its ancestors are never signalled.
+fm_test_reap_root_processes() {  # <root>
+  local root=${1%/} chain pid pids signal i
+  [ -n "$root" ] && [ "$root" != / ] || return 0
+  chain=" "
+  pid=$$
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    chain="$chain$pid "
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  done
+  for signal in TERM KILL; do
+    i=0
+    while [ "$i" -lt 20 ]; do
+      pids=$(ps -ww -eo pid=,args= 2>/dev/null \
+        | FM_TEST_REAP_ROOT="$root/" awk -v chain="$chain" \
+          'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }')
+      [ -n "$pids" ] || return 0
+      # shellcheck disable=SC2086 # one argument per pid
+      [ "$i" -gt 0 ] || kill -s "$signal" $pids 2>/dev/null
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_watchers
@@ -309,7 +348,9 @@ fm_test_cleanup() {
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && fm_test_remove_tree "$d"
+      [ -n "$d" ] || continue
+      fm_test_reap_root_processes "$d"
+      fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -363,6 +404,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    fm_test_reap_root_processes "$dir"
     fm_test_remove_tree "$dir"
   done
 }

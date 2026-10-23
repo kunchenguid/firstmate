@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1086,6 +1086,18 @@ Hook entries merge across settings files rather than replacing each other, so th
 The CLI reference documents the one file-or-JSON flag, the settings page documents session precedence, and the hooks page documents the hooks merge: <https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/settings>, <https://code.claude.com/docs/en/hooks>.
 [`fm-spawn.sh`](../bin/fm-spawn.sh) owns the file and the flag.
 
+### Codex automatic approval review
+
+Codex crewmate, scout, and secondmate launches default to `--dangerously-bypass-approvals-and-sandbox`.
+The local, gitignored `config/codex-approval-mode` accepts one whitespace-trimmed token: absent or `bypass` retains that default; `approve-for-me` selects `--approve-for-me`.
+Malformed values and unreadable files refuse before spawn mutation, and the setting applies to relaunches and is inherited into secondmate homes.
+The fallback uses a model reviewer in the workspace-write sandbox, which starts with network access disabled and reviews writes outside the working directory.
+It remedies a managed policy that leaves bypass launches with user-reviewed approvals even when its sandbox bypass applies.
+Firstmate targets current CLIs rather than detecting versions or emulating older approval flags.
+Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
+A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
+See the [current verification and limits](verification/runtime-backends.md#codex-automatic-approval-review) for observed task-channel and network access.
+
 ## Claude permission mode (config/claude-permission-mode)
 
 The optional local, gitignored `config/claude-permission-mode` selects the permission flag for every Claude worker launch: crewmates, scouts, Claude secondmates, and control-plane relaunches.
@@ -1096,11 +1108,12 @@ The token is the file's whitespace-trimmed content.
 
 | Token | Launch permission flag |
 | --- | --- |
-| `bypass` | `claude --dangerously-skip-permissions` |
 | `auto` | `--permission-mode auto` |
+| `bypass` | `claude --dangerously-skip-permissions` |
 
-An absent file defaults to bypass, so an unconfigured home launches with the bypass permission flag.
-Auto is Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode.
+An absent file defaults to bypass, preserving `--dangerously-skip-permissions` for unconfigured homes.
+Auto uses a model reviewer and avoids managed policies that block bypass-permission sessions.
+It is selected by an explicit setting or the firstmate-invoked failover below.
 Only the permission flag changes between the two modes.
 The environment prefix, session settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
@@ -1115,9 +1128,21 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 ### When changes apply and inheritance
 
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
-The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
+Both approval-mode files follow the primary-authoritative [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Persistent managed-policy failover
+
+After firstmate observes a Codex command-approval prompt under its bypass flag or a Claude managed-policy refusal of a bypass session, it asks the captain for explicit approval to save a lasting worker permission setting and relaunch the worker.
+Only after that approval does firstmate invoke `bin/fm-approval-failover.sh`; the script's header and help own the command and recovery mechanics.
+There is no automatic detection, polling, startup window, or approval-prompt answering.
+The command saves Codex's `approve-for-me` or Claude's `auto` in the owning home's absent mode file, so later launches use the model-reviewed remedy without retrying bypass.
+Existing explicit settings are never overwritten, including invalid or empty files, directories and dangling symlinks; a concurrent setting wins too.
+To retain a secondmate's remedy across convergence, select it in the primary home under the [inherited-local-material contract](../.agents/skills/secondmate-provisioning/SKILL.md).
+Recovery uses the existing [lifecycle control plane](agent-control.md), respecting its leases and supported-runtime limits; incomplete recovery is reported with the saved setting and work preserved.
+Generic login failures do not establish a defeated bypass, and managed hook review remains a separate operator decision.
+Neither fallback is unrestricted execution, and Firstmate does not change vendor or security-agent settings.
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
@@ -1841,6 +1866,30 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
+
+## Local Claude usage warner (config/usage-warner)
+
+`config/usage-warner` is an optional local, gitignored set of Claude usage-window thresholds.
+It is opt-in and load-bearing: an unconfigured home sees no behaviour change, and [`bin/fm-usage-warner.sh`](../bin/fm-usage-warner.sh) refuses to arm without at least one valid threshold.
+This is a threshold warner, not a usage viewer - it runs the existing `quota-axi` read (`--no-credential-refresh`, never a credential-refreshing flag) and speaks only once when a configured window crosses a configured percentage, batching several crossings from the same read into one notification and re-arming once a window reads back below its threshold.
+Warnings post through macOS Notification Center, the same OS-level path the away-mode wedge alarm resolves to on this platform, without sourcing or coupling to that daemon's away-mode-specific config or rate limiting.
+
+This section is the single owner of the canonical schema.
+`bin/fm-usage-warner.sh` owns read, notification, and de-dupe mechanics.
+
+```
+<window-id>:<percent>
+```
+
+One directive per non-empty, non-comment line, split on the last colon so a per-model window id such as `model:fable` still parses.
+`<window-id>` is exactly the `id` field `quota-axi`'s own `--json` output already uses.
+`<percent>` is how much of that window has been CONSUMED, a whole number from 1 to 100, compared against the window's own `percentUsed`: `seven_day:90` warns once the weekly window is 90% used, with 10% of it left.
+See [`usage-warner.md`](usage-warner.md) for the full behaviour reference and [`docs/examples/usage-warner`](examples/usage-warner) for a starting point to copy into local `config/usage-warner`.
+
+Arm the check once per home with `bin/fm-usage-warner.sh arm`.
+That writes `state/usage-warner.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns a crossing into a `check:` wake; no separate schedule is involved.
+`arm` refuses on any platform other than macOS.
+`bin/fm-usage-warner.sh disarm` removes the shim, its trust binding, and the de-dupe record (`state/.usage-warner`).
 
 ## Mail plane (.env)
 

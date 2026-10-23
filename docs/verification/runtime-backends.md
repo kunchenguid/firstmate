@@ -742,9 +742,10 @@ hooks                                    stable             false
 Error: Unknown feature flag: no_such_feature
 ```
 
-The last arm is what makes the control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag fails the launch loudly instead of silently restoring the modal.
+The last arm is what makes the requested control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag stops the launch rather than silently restoring the modal.
+A managed policy can still override the requested disablement, so the effective hook state is not a portable guarantee.
 
-The same launch with the hook layer disabled reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
+The same launch with the hook disablement requested reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
 
 ```sh
 codex --dangerously-bypass-approvals-and-sandbox --disable hooks \
@@ -758,10 +759,27 @@ $ ls "$TURNEND"
 <turn-end file present>
 ```
 
-`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
-It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
-It spends no model tokens, so it runs by default wherever Codex is installed.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+`tests/fm-codex-hook-layer-live-e2e.test.sh` checks current flag acceptance; it does not repeat the composer and notification probe above.
+It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the installed Codex accepts the requested hook-disablement flag.
+It does not claim that a managed policy cannot re-enable hooks after launch.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
+
+## Codex automatic approval review
+
+Verified 2026-10-06 with codex-cli 0.160.1.
+`codex --help` describes `--approve-for-me` as `Route approval requests through automatic review using the workspace-write sandbox`.
+A managed-settings reproduction showed that `--dangerously-bypass-approvals-and-sandbox --disable hooks` could leave user-reviewed approvals active even while the sandbox bypass applied.
+Replacing that flag with `--approve-for-me --disable hooks` selected automatic approval review and the workspace-write sandbox.
+
+A real worker in that posture appended its authorized Firstmate status channel, inspected its steering channel, queried the no-mistakes service, completed `git push --dry-run`, and completed a GitHub read.
+The networked operations initially required automatic review because the workspace-write sandbox begins with network access disabled, then completed after that review.
+This confirms unattended progress through the reviewer, not unrestricted network or external-write access.
+
+`tests/fm-spawn-dispatch-profile.test.sh` pins unchanged bypass defaults and explicit `approve-for-me` launches for ships and scouts, plus hook and secondmate launch wiring.
+`tests/fm-approval-failover.test.sh` exercises the firstmate-invoked command through real filesystem publication and the existing lease owner, substituting lifecycle control to avoid touching real workers.
+It covers writing once, preserving explicit and concurrent settings, invoking guarded relaunch, retaining the remedy on recovery failure, and local/remote inheritance precedence.
+These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
+There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
 ## Composer classification matrix
 

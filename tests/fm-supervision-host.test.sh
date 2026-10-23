@@ -1217,7 +1217,8 @@ start_hook_session() {  # <home>
         [ -f "$seed" ] || continue
         "$FM_HOME/bin/fm-host-mirror.sh" hook claude < "$seed"
       done
-      while [ ! -e "$FM_HOME/session.stop" ]; do
+      while [ ! -e "$FM_HOME/session.stop" ] && [ -d "$FM_HOME" ] \
+        && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null; do
         if [ -e "$FM_HOME/stop.go" ]; then
           rm -f "$FM_HOME/stop.go"
           if [ -e "$FM_HOME/hook.own-group" ]; then
@@ -2890,7 +2891,8 @@ start_session() {  # <home>
     MIRROR_ROOT="$MIRROR_ROOT" "$FAKE_CLAUDE" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
       printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
-      while [ ! -e "$FM_HOME/session.stop" ]; do
+      while [ ! -e "$FM_HOME/session.stop" ] && [ -d "$FM_HOME" ] \
+        && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null; do
         if [ -e "$FM_HOME/park.go" ]; then
           rm -f "$FM_HOME/park.go"
           for seed in "$FM_HOME"/mirror-seed.*; do

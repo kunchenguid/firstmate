@@ -211,7 +211,7 @@ require_branch_eligible_rows() {
 # unseen. 0 when nothing is on record.
 presented_max_row() { # <rows-file>
   if rows_file_valid "$1" 2>/dev/null; then
-    awk '$1 ~ /^[0-9]+$/ && $1 > max { max=$1 } END { print max + 0 }' "$1"
+    awk '$1 ~ /^[0-9]+$/ && $1 > max { max=$1 } END { print (max == "" ? 0 : max) }' "$1"
   else
     printf '0\n'
   fi
@@ -1052,7 +1052,7 @@ awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
 RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1
 DRAIN_VIEW_TMP=
-ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || exit 1
+ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print (max == "" ? 0 : max) }') || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
