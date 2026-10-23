@@ -1474,6 +1474,11 @@ fm_pr_poll_retirement_recover_all() {
 # matching identity is a no-op; a different PR for the same task reaches its
 # role-routed supervision destination and replaces the marker when its first
 # outcome is published.
+#
+# The marker is the durable record that this merge's outcome was already
+# published, so it outlives the task record: a cleanup that removed it would
+# let a late duplicate report publish a second, plainer notice over the
+# cleanup's own notice.
 fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
   local version provider host path number
@@ -1527,15 +1532,4 @@ fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <num
     rm -f -- "$tmp"
     return 1
   fi
-}
-
-# Removed at teardown alongside the other per-task PR-poll artifacts
-# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
-fm_pr_poll_merge_notified_remove() {  # <state> <id>
-  local state=$1 id=$2 marker
-  fm_pr_task_id_valid "$id" || return 1
-  marker="$state/$id.pr-poll-merge-notified"
-  [ -e "$marker" ] || [ -L "$marker" ] || return 0
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  rm -f -- "$marker"
 }
