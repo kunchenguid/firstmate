@@ -388,7 +388,9 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      # control_relaunch_tx is allowlisted post-pr= for records written
+      # before fm-spawn moved the key ahead of the preserved block.
+      control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
