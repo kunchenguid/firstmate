@@ -43,7 +43,8 @@ When the guard acts, the harness integration must do one of two things:
 - Block the turn end.
 - Force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 
-The mid-turn pull warning uses the model-aware supervision verdict described below. At turn end, the guard first requires the PID-strict watcher predicate; only on Linux when the primary harness resolves positively to Codex may it then use the read-only cross-namespace observation described below. Every other platform and harness keeps the strict predicate.
+The mid-turn pull warning uses the model-aware supervision verdict described below.
+The turn-end watcher verdict follows the [strict check](#strict-watcher-check-at-the-turn-boundary) and its [Linux/Codex fallback](#linuxcodex-cross-namespace-observation).
 
 Away and quiet mode are the one place the turn-end guard accepts a different supervisor.
 While `state/.afk` exists, in either mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`), the daemon owns supervision.
@@ -96,7 +97,12 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 #### Linux/Codex cross-namespace observation
 
-If the strict check fails, the turn-end guard has one narrow fallback: Linux plus a positive `fm-harness.sh` result of `codex`. The read-only observer maps the lock's namespace-local PID through `/proc`'s `NSpid`, then requires the recorded namespace, current boot ID, home, watcher path, start-time and command-line identity, a fresh beacon, and an unchanged lock snapshot to agree. It holds a pidfd while rechecking the process and lock; missing, unreadable, ambiguous, or changing evidence rejects the fallback. Same-namespace and legacy lock records stay with the strict check. The observer never signals a process, acquires a lock, or grants lifecycle authority.
+If the strict check fails, the turn-end guard has one narrow fallback: Linux plus a positive `fm-harness.sh` result of `codex`.
+Every other platform and harness keeps the strict predicate.
+The read-only observer maps the lock's namespace-local PID through `/proc`'s `NSpid`, then requires the recorded namespace, current boot ID, home, watcher path, start-time and command-line identity, a fresh beacon, and an unchanged lock snapshot to agree.
+It holds a pidfd while rechecking the process and lock; missing, unreadable, ambiguous, or changing evidence rejects the fallback.
+Same-namespace and legacy lock records stay with the strict check.
+The observer never signals a process, acquires a lock, or grants lifecycle authority.
 
 ### Foreign session-lock owner
 
@@ -570,7 +576,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Generation and legacy claim cases that must block or clear instead of allowing a blind stop.
 - Away-mode daemon ownership between watcher cycles and over a watcher lock left behind by an exited watcher, plus its dead, pid-reused, absent, stale-beacon, and away-mode-off negatives.
 - The away-mode beacon's poll-derived grace widening for a live daemon still mid-cycle and its bound against a dead daemon, a beacon older than that wider grace, and FM_POLL's inapplicability with away mode off.
-- The capability-gated Linux PID-namespace guard fixture for the Codex-only fallback and its stale-beacon, identity-mismatch, non-Linux, other-harness, and dead-holder negatives; the separate foreground-checkpoint regression verifies production watcher metadata publication. Neither establishes Codex's native Stop execution.
+- The capability-gated Linux PID-namespace guard fixture for the Codex-only fallback and its stale-beacon, identity-mismatch, non-Linux, other-harness, and dead-holder negatives; the separate foreground-checkpoint regression verifies production watcher metadata publication.
+  See the [verification record](verification/supervision.md#linuxcodex-pid-namespace-fallback-2026-10-23) for live-evidence limits.
 - Pi logical-run latching.
 - Missing-`jq` behavior.
 - All five primary registrations.

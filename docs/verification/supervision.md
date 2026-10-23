@@ -278,9 +278,13 @@ bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-watcher-lock.test.sh 
 # FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0
 ```
 
-The Codex-only fixture accepts a fresh, identity-matched watcher across distinct PID namespaces and rejects stale or mismatched evidence, a dead holder, non-Linux, and other harnesses. The checkpoint regression also starts the production watcher with a scoped Codex harness pin, then verifies that `FM_HOME` reaches the watcher environment and its lock records the process PID namespace and boot ID. `bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` passed on the same source state.
+The Codex-only fixture accepts a fresh, identity-matched watcher across distinct PID namespaces and rejects stale or mismatched evidence, a dead holder, non-Linux, and other harnesses.
+The checkpoint regression also starts the production watcher with a scoped Codex harness pin, then verifies that `FM_HOME` reaches the watcher environment and its lock records the process PID namespace and boot ID.
+`bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` passed on the same source state.
 
-Native Codex Stop visibility remains unverified. The installed codex-cli was 0.163.0, but `codex login status` reported `Not logged in`, so a native hook run was unavailable. The fixture and manual host-side reproduction do not establish what `/proc` exposes from a real Codex sandbox at the Stop boundary; retain this as an evidence gap, not a live-validation claim.
+Native Codex Stop visibility remains unverified.
+The installed codex-cli was 0.163.0, and `codex login status` reported `Not logged in`; that result alone does not establish whether the configured provider could run a native hook test.
+The fixture and manual host-side reproduction do not establish what `/proc` exposes from a real Codex sandbox at the Stop boundary; retain this as an evidence gap, not a live-validation claim.
 
 ### Cursor primary park, 2026-08-13
 
