@@ -1672,6 +1672,9 @@ fm_treehouse_home_root() {  # <home>
     pool_root=$(CDPATH='' cd -- "$pool_root" 2>/dev/null && pwd -P) || return 1
   fi
   derived="$pool_root/$slug-${hash:0:12}"
+  if [ -d "$derived" ]; then
+    derived=$(CDPATH='' cd -- "$derived" 2>/dev/null && pwd -P) || return 1
+  fi
   if [ -n "${FM_HOME:-}" ]; then
     active_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
     root_home=$(fm_firstmate_root_home "$active_home") || return 1
