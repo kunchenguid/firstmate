@@ -746,6 +746,11 @@ if [ "$READ_ONLY" -eq 0 ]; then
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  # A Claude primary's independent wake backstop starts here as well as at
+  # every Stop, so it never depends on a Stop hook having run.
+  if [ "$PRIMARY_HARNESS" = claude ]; then
+    "$SCRIPT_DIR/fm-wake-backstop.sh" ensure >/dev/null 2>&1 || true
+  fi
 fi
 
 # --- 2. bootstrap --------------------------------------------------------

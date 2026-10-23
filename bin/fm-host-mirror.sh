@@ -16,8 +16,10 @@
 # assistant message), never tool traffic, as said, with only the whitespace at
 # the very end of the message trimmed. A prompt the shared operational-input
 # protocol classifies
-# (bin/fm-operational-input.sh: watcher wakes, guard follow-ups, launch briefs)
-# is fleet machinery, not dialog, and is dropped, and so is a prompt that opens
+# (bin/fm-operational-input.sh: watcher wakes, guard follow-ups, launch briefs),
+# or a record-backed doorbell whose record exists (the carrier a Claude primary
+# receives, such as the wake backstop's), is fleet machinery, not dialog, and is
+# dropped, and so is a prompt that opens
 # with the wrapper a harness puts around a turn it started itself: Claude
 # submits its Stop-hook rewake inside <task-notification>, with no other field
 # to tell it from a typed prompt (tests/fm-host-mirror-live-e2e.test.sh proves
@@ -155,7 +157,8 @@ writer_in_scope() {
 }
 
 operational() {  # <text>
-  printf '%s' "$1" | "$SCRIPT_DIR/fm-operational-input.sh" classify >/dev/null 2>&1
+  printf '%s' "$1" | "$SCRIPT_DIR/fm-operational-input.sh" classify >/dev/null 2>&1 && return 0
+  printf '%s' "$1" | "$SCRIPT_DIR/fm-operational-input.sh" doorbell-kind >/dev/null 2>&1
 }
 
 # Append one entry. The caller holds nothing; this takes the mirror lock.

@@ -1337,6 +1337,75 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
   pass "host+hook: a successor that closes during a held engine turn does not suppress the branch-outcome rewake"
 }
 
+# The live failure (2026-10-23): during a routine engine turn the handling
+# successor queued a main-only close, and the turn's drain then began handling
+# on the same recovery generation. The host passed that close through with the
+# marker still in handling beside a healthy successor, so the Stop hook refused
+# the rewake and exited 0, leaving an idle primary blind for hours.
+# The fixture models the drain's begin-handling after the close, as the
+# mid-engine-turn case above does.
+start_main_only_close_during_engine_turn() {  # <home>
+  local home=$1 successor
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "drain race: the Stop hook never started a watcher cycle"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "drain race: the engine did not reach its hold: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
+    || fail "drain race: the handling successor did not close on the main-only wake"
+  FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
+    || fail "fixture: could not model the engine drain entering handling after the close"
+  assert_re '^pending:handling:' "$home/state/.watcher-down" \
+    "fixture: the engine drain must leave the marker in handling before the pass-through"
+}
+
+test_claude_stop_hook_delivers_a_main_only_close_queued_before_the_engine_drain() {
+  local home
+  home=$(make_primary_home hook-main-only-drain-race)
+  start_main_only_close_during_engine_turn "$home"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 250 hook_exited "$home" || fail "drain race: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	handled	turn=' "$home/state/.supervision-host.log" "fixture: the first wake was not handled on the engine"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "fixture: the queued close was not a main-only pass-through"
+  assert_rewoke_main "$home" "drain race"
+  assert_re '^signal: .*demo.status' "$home/hook.err" "the rewake must carry the main-only close"
+  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
+    "the pass-through must hand main a deliverable downtime episode"
+  watcher_live "$home" || fail "drain race: the pass-through left no successor watcher"
+  pass "host+hook: a main-only close queued before the engine's drain still rewakes main"
+}
+
+test_claude_stop_hook_notifies_when_pass_through_downtime_restore_fails() {
+  local home real_mktemp
+  home=$(make_primary_home hook-main-only-drain-race-restore-fails)
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  start_main_only_close_during_engine_turn "$home"
+  : > "$home/fail-downtime-write"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 250 hook_exited "$home" || fail "restore failure: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	pass-through	downtime-unrestored	signal:' "$home/state/.supervision-host.log" "the ledger must record the failed restoration"
+  expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main when the pass-through cannot restore downtime"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "the refused rewake must turn into a delivered failure notice"
+  assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=failed ' "$home/state/.claude-autoarm-epoch" \
+    "the failed hand-back must be committed"
+  [ ! -s "$home/state/.supervision-host-left" ] || fail "restore failure: the host must not leave a successor beside a refused hand-back"
+  pass "host+hook: a pass-through that cannot restore downtime becomes a delivered failure notice"
+}
+
 # The live repro (2026-09-28): a quiet record live with no daemon flag parked a
 # present Claude captain, whose worker's captain outcomes waited for a return.
 # Through the real Stop hook the outcome now rewakes main, with no away note.
@@ -2971,6 +3040,8 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
 test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
+test_claude_stop_hook_delivers_a_main_only_close_queued_before_the_engine_drain
+test_claude_stop_hook_notifies_when_pass_through_downtime_restore_fails
 test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main

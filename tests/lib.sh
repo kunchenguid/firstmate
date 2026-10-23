@@ -52,6 +52,11 @@ export FM_GATE_REFUSE_BYPASS=1
 # leaked harness pin alone stays inert outside a suite.
 export FM_TEST_SEAM=1
 
+# Keep the detached wake backstop (bin/fm-wake-backstop.sh) from starting in
+# every fixture that fires a Claude Stop hook or a session start; its own suite
+# turns it back on.
+export FM_WAKE_BACKSTOP_SECS=0
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary

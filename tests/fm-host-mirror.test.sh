@@ -155,10 +155,14 @@ test_writers_are_inert_on_a_home_that_opted_out() {
 }
 
 test_operational_foreign_and_unowned_input_is_dropped() {
-  local home other
+  local home other doorbell
   home=$(make_home dropped)
-  as_session "$home" '
+  doorbell=$(printf 'firstmate wake backstop - fixture' | FM_HOME="$home" "$ROOT/bin/fm-operational-input.sh" record watcher) \
+    || fail "fixture: could not write a doorbell record"
+  DOORBELL=$doorbell as_session "$home" '
     printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\342\201\243FIRSTMATE_OP: v1 watcher: signal: demo.status\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    jq -cn --arg prompt "$DOORBELL" "{hook_event_name: \"UserPromptSubmit\", prompt: \$prompt}" \
       | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
     printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"from cursor\",\"cursor_version\":\"x\"}" \
       | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
@@ -170,7 +174,7 @@ test_operational_foreign_and_unowned_input_is_dropped() {
       | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
   ' || fail "a writer failed"
   assert_equals "captain|kept" "$(entries "$home")" \
-    "operational input, a harness-started turn, a Cursor payload on the Claude registration, and a non-dialog event must not be mirrored"
+    "operational input, a live record-backed doorbell, a harness-started turn, a Cursor payload on the Claude registration, and a non-dialog event must not be mirrored"
 
   other=$(make_home unowned)
   sleep 30 &

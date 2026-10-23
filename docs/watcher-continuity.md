@@ -11,6 +11,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 | --- | --- |
 | Which component re-arms the watcher on each harness | [Ownership](#ownership) |
 | What happens between an actionable close and the wake reaching the model | [Actionable wake ordering](#actionable-wake-ordering) |
+| What recovers a Claude session whose rewake was lost while it sat idle | [Wake backstop](#wake-backstop) |
 | How a watcher-downtime episode is announced and retired | [Recovery episode acknowledgement](#recovery-episode-acknowledgement) |
 | How each actor consumes the wake queue | [Per-actor acknowledgement](#per-actor-acknowledgement) |
 | What `bin/fm-watch-arm.sh` guarantees about each cycle | [Arm-layer cycle contract](#arm-layer-cycle-contract) |
@@ -195,6 +196,20 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+Both backstops act only at a Stop; a Claude session that is already idle when its rewake is lost is covered by the [wake backstop](#wake-backstop) instead.
+
+### Wake backstop
+
+Every re-arm and rewake of a Claude primary hangs off a Stop, so a Stop chain that drops its wake leaves an idle session blind until someone types.
+`bin/fm-wake-backstop.sh` is the one recovery path that does not wait for a Stop; its header owns the exact predicate, lifetime, state files, and tunables.
+
+- It runs as one detached loop per Claude primary session, started at session start and re-ensured at every owned Stop of a home that needs supervision, so it never depends on the Stop chain that failed.
+- It judges wakes stranded when the oldest durable wake has waited past a threshold (ten minutes by default) on two consecutive passes, the session lock names a live harness, away and quiet mode are off, and no live Stop-hook generation claim is open.
+- Watcher health alone does not clear it: the successor cycle a pass-through leaves for main is healthy and still has no owner that can reach an idle session.
+- It recovers by ringing the primary's own pane once with a record-backed watcher doorbell, through the away daemon's backend primitives and guards (pane present, not mid-turn, composer confirmed empty); the turn that follows drains, handles, and acknowledges, and its end re-arms supervision through the ordinary Stop hook.
+- It never starts, stops, or attaches to a watcher, never touches the auto-arm ledger or the wake queue, acts on other processes only through its own recorded pid and identity, and is inert in a secondmate home, under away or quiet mode, and with `FM_WAKE_BACKSTOP_SECS=0`.
+
+The incident that motivated it is a lost host hand-back on 2026-10-23: [supervision-host.md](supervision-host.md#attended) owns the downtime restoration that closed its root cause.
 
 ### Manual recovery and other harnesses
 
@@ -208,7 +223,7 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
 The Claude hook's detached handling successor is launched by the hook itself, which waits for the successor's status line before it exits.
 
-The turn-end guard remains the final backstop rather than the normal continuity mechanism.
+The turn-end guard remains the turn-boundary backstop rather than the normal continuity mechanism.
 In its `--claude` mode it cooperates with the auto-arm.
 
 ## Recovery episode acknowledgement
@@ -512,6 +527,15 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 3. Completes two tokenless cycles.
 4. Checks the competing-live-owner negative control.
 
+`tests/fm-wake-backstop.test.sh` replays the 2026-10-23 state (an hour-old queued wake, an auto-arm epoch stuck at arming under a dead owner, a stale beacon, and no watcher) and covers:
+
+- The stranded verdict and its inert and clear negatives: no live primary, away mode, the zero-threshold opt-out, a secondmate home, an empty queue, and a young wake.
+- An open Stop-hook claim keeping it clear until the claim's owner dies, and a healthy ownerless watcher not clearing it.
+- The detached loop ringing once after a confirming pass, holding while a claim is open, changing no supervision state, ending with its session, and being replaced through its record by a new session.
+- Pane delivery waiting for a present, idle pane with an empty composer and ringing a record-backed watcher doorbell, over fake backend primitives.
+
+`tests/fm-claude-stop-autoarm.test.sh` also proves that every owned Stop of a home that needs supervision ensures the backstop and an idle home does not.
+
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including:
 
 - Monotonic failed-epoch progression.
@@ -529,7 +553,7 @@ OpenCode support targets persistent TUI sessions rather than headless `opencode 
 
 The other harnesses rely on these mechanisms:
 
-- Claude depends on the Stop `asyncRewake` rewake.
+- Claude depends on the Stop `asyncRewake` rewake, with the [wake backstop](#wake-backstop) as its independent recovery; that recovery can ring only a pane it proved at start (tmux, herdr, or Rex), so a session outside those terminals keeps only the backstop's logged alarm.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
 - Codex retains bounded foreground checkpoints.
