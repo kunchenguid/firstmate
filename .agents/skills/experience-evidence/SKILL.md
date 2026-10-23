@@ -26,17 +26,41 @@ Do not wait for `/stow` to create the first durable candidate.
 Decide whether the evidence is likely to change a later intake, diagnosis, or bounded execution choice beyond this one task.
 If it is not reusable, leave the task report as ordinary evidence and do not add a candidate.
 
-### Asynchronous identity-continuation pilot disposition
+### Capture disposition
 
-For the asynchronous execution-identity continuation pilot, record one capture disposition in the owning task report for every trigger above, including when no candidate is created.
+Record one capture disposition in the owning task report for every trigger above, including when no candidate is created.
 Use one `## Experience capture dispositions` section with a compact table containing the stable event key, accepted event and evidence locator, disposition, and reason.
 The disposition is exactly one of `candidate:<id>`, `reason-not-reusable`, or `evidence-pending`.
 An accepted success, an accepted reliable correction, or a validated negative lesson from a failed path may use `candidate:<id>` when the evidence is reusable; keep the candidate's execution outcome truthful and never turn a failed or uncertain execution into success.
 Use `reason-not-reusable` when the accepted event adds no lesson beyond this task, and `evidence-pending` when acceptance or the reusable claim still lacks required evidence.
-The event key is derived from the accepted event and evidence identity rather than the handling attempt.
+Derive the event key from the source task, event class, and stable accepted-evidence identity rather than the handling attempt, model, message time, or task duration.
 Repeated handling updates the same disposition row and the same stable candidate id, if any, instead of appending another row, section, or candidate block.
-When a pilot disposition creates or updates a candidate, keep the v1 stable `data/<task-id>/report.md` evidence reference and exclude absolute worktree or transient fixture paths.
-This pilot record is a coverage receipt, not another candidate schema, and does not promote or activate a rule.
+When a disposition creates or updates a candidate, keep the v1 stable `data/<task-id>/report.md` evidence reference and exclude absolute worktree or transient fixture paths.
+The disposition is a coverage receipt, not another candidate schema, and does not promote or activate a rule.
+
+Do not infer a capture trigger from worker `done` or exit, a PR, merge, provider success, task age, token use, or model-call count.
+These are evidence or delivery events until Firstmate accepts the result, reliable diagnosis, or evidenced correction.
+A failed or blocked task with an accepted causal boundary may yield a validated negative candidate while preserving its true execution outcome.
+An undiagnosed failure uses `evidence-pending`, and cancellation or archive without an already accepted reusable lesson uses `reason-not-reusable` or `evidence-pending` without changing the business disposition.
+
+### Complex-task closure reconciliation
+
+After Firstmate semantically accepts a complex task, reconcile the complete owning report in the same handling turn after immediate event capture.
+Treat a task as complex only when its original goal and actual evidence cross responsibility, execution-identity, or result-state boundaries, recover from a real failing path, require separate multi-stage completeness proof, or disambiguate apparently conflicting sources by conditions such as version, region, namespace, or snapshot.
+Elapsed time, token use, transcript length, and model-call count do not establish complexity.
+Simple but reliable reusable corrections continue to trigger capture even when the task is not complex.
+
+Closure reconciliation reads the existing dispositions and candidates, adds only an omitted accepted event, and completes an existing candidate only when the same report contains the needed evidence.
+An unchanged event, claim, conditions, evidence, and conclusion is a no-op that keeps the same event key, candidate id, and version.
+When new evidence changes the same candidate's claim or applicability boundary, keep one current structured candidate block under the original candidate id, increment its version, and preserve the prior version, evidence, and reason in adjacent audit prose rather than a second live candidate block.
+Do not merge candidates across tasks merely because their words are similar.
+Reference an existing candidate or promoted owner when claim and evidenced conditions are the same, keep different conditions separate, and preserve both sources as `conflict-pending-diagnosis` when the same conditions conflict.
+
+Closure reconciliation may end with `reason-not-reusable` or `evidence-pending`; it never requires a candidate or skill.
+It must not delay or reverse an accepted business result, clear a business gap, rewrite a failed, blocked, cancelled, or archived outcome, change cleanup eligibility, or create another review or completion gate.
+If the report write or knowledge handoff fails, report that knowledge-maintenance gap separately and retain the original business outcome and evidence.
+Recovery and authorized `/stow` handling may reconcile known omissions within their existing scope, but they do not scan all history, create a scheduler, or assert that an older report without a disposition was reviewed.
+The observable gap between semantic acceptance and the first durable disposition remains a possible missed-capture window; treat an absent disposition as `unknown` and add no periodic scan, daemon, or second ledger unless measured losses justify a separately reviewed design.
 
 When the report owner is still active and the existing task scope permits evidence maintenance, steer that owner to update the report before acceptance.
 Otherwise Firstmate may maintain this private task evidence directly without changing project code or the task record.
@@ -232,9 +256,9 @@ Honcho may supplement discovery only when an already available official Honcho t
 Treat a Honcho result only as a lead to a local report path and repeat the local report readback above before using the claim.
 If Honcho is absent, unavailable, or cannot resolve a local source, continue with local lookup without blocking and do not copy its data into another store.
 
-### 4. Hand off and record pilot consumption
+### 4. Hand off and record consumption
 
-For an asynchronous execution-identity continuation pilot task, MAIN may put at most three originally verified applicable experience pointers in the ordinary brief's existing `## Firstmate spec`.
+For a task with applicable prior evidence, MAIN may put at most three originally verified applicable experience pointers in the ordinary brief's existing `## Firstmate spec`.
 Each pointer states the candidate id and version, owning report and evidence locators, claim, applicability and anti-conditions, authority available in the present task, and the explicit boundary between the present execution identity and every historical identity.
 Use the existing spec slot; do not copy full report evidence into the brief or treat the pointer as authority to submit, replay, cancel, request permission, or change an asset.
 
@@ -247,6 +271,8 @@ Preserve both source pointers for unresolved conflicts, qualify unknown evidence
 An older report with no consumption record is `unknown`, never proof that no experience was used.
 Repeated handling of the same current task and candidate version updates the same row rather than adding another consumption artifact.
 MAIN retains final applicability judgment and semantic acceptance of the current task; a worker action, provider success, or model self-rating does not establish goal acceptance by itself.
+Consumption does not mean promotion.
+Mark a candidate `promoted` only after its existing knowledge or skill owner has completed the normal delivery boundary and the active runtime copy can discover the result.
 
 ### 5. Empty result fallback
 
