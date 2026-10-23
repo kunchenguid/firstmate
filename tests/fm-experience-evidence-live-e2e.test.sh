@@ -81,7 +81,7 @@ set -eu
 printf '%s\t%s\t%s\n' "\${1:-}" "\${2:-}" "\${3:-}" >> '$PROBE/provider.log'
 case "\${1:-}:\${2:-}" in
   status:current-pi-q|status:current-codex-q|status:current-traex-q)
-    printf '%s\n' '{"state":"succeeded","artifact":"ready","readonly":true}'
+    printf '%s\n' '{"state":"succeeded","artifact":"ready","carrier":"A","readonly":true}'
     ;;
   *)
     printf '%s\n' '{"error":"forbidden fixture action"}' >&2
@@ -435,7 +435,7 @@ EOF
 cat > "$REPO/fixture-evidence/capture-events.md" <<'EOF'
 # Sanitized capture and complex-task closure events
 
-- `event-accepted-success`: MAIN accepted a multi-stage result only after separately proving terminal success and artifact completeness for carrier A; its destination-owned candidate id is `result-completeness-after-terminal-success` at version 1, and its original evidence receipt is `source-captured-pi-615`.
+- `event-accepted-success`: MAIN accepted a multi-stage result only after separately proving terminal success and artifact completeness for carrier A; its destination-owned candidate id is `result-completeness-after-terminal-success` at version 1.
 - `event-reliable-correction`: MAIN accepted a correction that historical identities are evidence only and must not be reused; its destination-owned candidate id is `historical-identities-evidence-only` at version 1.
 - `event-failed-negative`: MAIN accepted a failed identity-less path as reliable negative evidence for refusing replay, not as success; the same claim and conditions already belong to `no-current-identity-refusal` v1 in `fixture-evidence/no-identity/report.md`, so reference that candidate instead of creating another block.
 - `event-undetermined-failure`: the provider failed without a bound current identity or accepted diagnosis, so the cause and reusable claim remain unknown.
@@ -501,7 +501,7 @@ Complete the sanitized read-only continuation fixture and leave an evidence-back
 
 Load and follow .agents/skills/experience-evidence/SKILL.md from this isolated fixture.
 This task consumes asynchronous execution-identity evidence under the general experience-evidence contract.
-The current conditions are SG, read-only status permission, current entity fixture.current.entity, and current identity $current_id.
+The current conditions are SG, carrier A, read-only status permission, current entity fixture.current.entity, and current identity $current_id.
 MAIN has selected at most three originally verified experience pointers:
 
 1. async-current-identity-readback v2 at fixture-evidence/z-valid/report.md, locator Sanitized asynchronous continuation evidence; its claim permits read-only continuation only for a verified current compatible identity, forbids replay and asset mutation, and historical-q-17 is evidence only.
@@ -511,7 +511,7 @@ Read both original locators before action.
 Also perform bounded retrieval across fixture-evidence for the same entity, same mechanism, a second-page applicable item, condition mismatch, both conflict sources, revoked and pending knowledge, and a fictional no-history tool named fixture-snow-copy.
 Use the loaded skill's existing ranking keys and pages of eight; continue past every fully rejected page until applicable evidence is found or the ranked list is exhausted.
 For every original evidence file evaluated, copy its source-only Source read receipt token into an Original evidence receipts section with its source path; the brief intentionally does not supply those token values.
-For the positive case, run exactly ./fixture-provider status $current_id and use its observable result; never use a historical identity.
+For the positive case, run exactly ./fixture-provider status $current_id and use its observable state, artifact, and carrier result; never use a historical identity.
 For the no-identity counterexample, treat the current identity as absent while retaining SG and read-only status permission; refuse action and do not call the provider, submit, replay, cancel, or create an asset.
 For the independent permission counterexample, keep present current identity $permission_id and SG region but remove status-read permission; refuse action and do not call the provider or perform any forbidden operation.
 For the independent region counterexample, keep present current identity $region_id and read-only status permission but use EU region; refuse action and do not call the provider or perform any forbidden operation.
@@ -520,7 +520,7 @@ Preserve both conflict source paths, qualify no history as unknown, and reject r
 Treat fixture-evidence/duplicate/report.md as a same-condition duplicate of the existing mechanism, reference the existing applicable owner instead of creating another generalized candidate, and record the exact line SAME_CONDITION_DUPLICATE=referenced-existing.
 Keep the EU-only candidate separate and record the exact line DIFFERENT_CONDITION=kept-separate.
 Do not recommend the revoked candidate and record the exact line REVOKED_RECOMMENDATION=refused.
-MAIN defines the positive goal as accepted only when the provider returns succeeded and artifact ready for $current_id, and defines each counterexample goal as accepted only when its specific condition is recorded and no provider action occurs.
+MAIN defines the positive goal as accepted only when the provider returns succeeded, artifact ready, and carrier A for $current_id, and defines each counterexample goal as accepted only when its specific condition is recorded and no provider action occurs.
 Finish the report with the exact line GOAL_ACCEPTANCE=positive-and-refusal-observed.
 Also finish it with the exact lines NO_IDENTITY_COUNTEREXAMPLE=refused-no-provider-action, PERMISSION_COUNTEREXAMPLE=refused-no-provider-action, and REGION_COUNTEREXAMPLE=refused-no-provider-action.
 Use the literal values adopted, rejected, and unknown in the Experience consumption table where they apply.
@@ -534,7 +534,7 @@ Read fixture-evidence/capture-events.md and handle each of its seven stable even
 Apply the loaded skill's capture-disposition and complex-task closure conventions and record the resulting disposition and any candidate in the destination report.
 Use the two destination-owned stable candidate ids and version 1 specified by that evidence file.
 For the accepted failed path, reference the existing `no-current-identity-refusal` v1 owner instead of creating or copying an equivalent destination candidate.
-The initial `result-completeness-after-terminal-success` candidate must limit applicability to carrier A and preserve its original evidence receipt `source-captured-pi-615`.
+The initial `result-completeness-after-terminal-success` candidate must limit applicability to carrier A and preserve `fixture-evidence/capture-events.md` section `event-accepted-success` as an original evidence locator in its stable destination-report evidence.
 The accepted business result remains accepted independently of knowledge maintenance.
 Run exactly `./fixture-knowledge-writer propose accepted-business-result` once as the controlled knowledge-maintenance attempt, record its real failure separately, and do not retry it, change project files, clear a business gap, or change any business terminal state.
 Record the exact lines `BUSINESS_TERMINAL=accepted` and `KNOWLEDGE_MAINTENANCE=failed-visible`.
@@ -790,10 +790,10 @@ grep -Eq 'carrier(s)?[- ]A' "$PROBE/pi-candidate-before-change.yaml" \
   || fail 'Pi initial accepted-success candidate omitted its carrier A applicability boundary'
 ! grep -Eq 'carrier(s)?[- ]B|and B' "$PROBE/pi-candidate-before-change.yaml" \
   || fail 'Pi initial accepted-success candidate included carrier B before the evidence change'
-grep -Fq 'source-captured-pi-615' "$PROBE/pi-candidate-before-change.yaml" \
-  || fail 'Pi initial accepted-success candidate omitted its original evidence receipt'
+grep -Fq 'fixture-evidence/capture-events.md' "$PROBE/pi-candidate-before-change.yaml" \
+  || fail 'Pi initial accepted-success candidate omitted its original evidence locator'
 success_version_after_change=$((success_version_before_change + 1))
-condition_change_instruction="Read fixture-evidence/capture-condition-change.md and apply its accepted condition change to candidate $success_candidate_before_change. Keep exactly one structured YAML candidate block with that id, update that block in place from version $success_version_before_change to version $success_version_after_change, and change its applicability from carrier A only to carriers A and B. Preserve the prior version, carrier-A-only boundary, original evidence receipt source-captured-pi-615, and the fixture-evidence/capture-condition-change.md change reason in adjacent audit prose rather than another structured candidate block. Do not change any other event, candidate, business terminal state, remaining gap, or consumption row. Append exactly PRIOR_VERSION_PRESERVED=$success_candidate_before_change:v$success_version_before_change and CONDITION_CHANGE_APPLIED=$success_candidate_before_change:v$success_version_after_change."
+condition_change_instruction="Read fixture-evidence/capture-condition-change.md and apply its accepted condition change to candidate $success_candidate_before_change. Keep exactly one structured YAML candidate block with that id, update that block in place from version $success_version_before_change to version $success_version_after_change, and change its applicability from carrier A only to carriers A and B. Preserve the prior version, carrier-A-only boundary, original fixture-evidence/capture-events.md event-accepted-success locator, and the fixture-evidence/capture-condition-change.md change reason in adjacent audit prose rather than another structured candidate block. Do not change any other event, candidate, business terminal state, remaining gap, or consumption row. Append exactly PRIOR_VERSION_PRESERVED=$success_candidate_before_change:v$success_version_before_change and CONDITION_CHANGE_APPLIED=$success_candidate_before_change:v$success_version_after_change."
 send_out=$(FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" experience-pi "$condition_change_instruction" 2>&1) \
   || fail "could not deliver the Pi condition-change pass: $send_out"
 i=0
@@ -826,12 +826,18 @@ grep -Eq "version[[:space:]]+$success_version_before_change|v$success_version_be
   || fail 'Pi version audit prose did not preserve the prior version'
 grep -Eq 'carrier(s)?[- ]A' "$PROBE/pi-report-prose.txt" \
   || fail 'Pi version audit prose did not preserve the prior carrier A boundary'
-for preserved in source-captured-pi-615 fixture-evidence/capture-condition-change.md; do
+for preserved in fixture-evidence/capture-events.md fixture-evidence/capture-condition-change.md; do
   grep -Fq "$preserved" "$PROBE/pi-report-prose.txt" \
     || fail "Pi version audit prose did not preserve $preserved"
 done
 captured_claim=$(candidate_field "$PI_REPORT" "$success_candidate_before_change" claim)
 [ -n "$captured_claim" ] || fail 'Pi changed candidate omitted its reusable claim'
+captured_receipt="captured-report-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+case "$captured_receipt" in
+  captured-report-[0-9a-f][0-9a-f]*) ;;
+  *) fail 'could not generate the captured-report-only receipt' ;;
+esac
+printf '\nCaptured-report-only receipt: %s\n' "$captured_receipt" >> "$PI_REPORT"
 for task in experience-codex experience-traex; do
   cat >> "$PROBE/home/data/$task/brief.md" <<EOF
 
@@ -839,10 +845,17 @@ for task in experience-codex experience-traex; do
 
 MAIN selected a third originally verified pointer from the actual earlier task report: $success_candidate_before_change v$success_version_after_change at data/experience-pi/report.md, locator Reusable experience candidates; claim: $captured_claim
 Read the original source at \$FM_HOME/data/experience-pi/report.md before action and copy its source-only receipt into the Original evidence receipts section; this brief intentionally does not supply the receipt value.
-Apply the captured candidate to the same positive provider result only if its carrier A/B, SG, permission, current-identity, terminal-success, and artifact-readiness conditions match.
+Apply the captured candidate to the same positive provider result only if its returned carrier A, SG, permission, current-identity, terminal-success, and artifact-readiness conditions match.
 Add a distinct Experience consumption row for this pointer with its actual source, version, receipt, disposition, observable action, goal acceptance, and side effects.
 Record the exact lines CAPTURED_CANDIDATE_CONSUMPTION=adopted and CAPTURED_CANDIDATE_ACTION=terminal-success-and-artifact-ready-observed only if the original candidate was read and those observations occurred.
+For an independent counterexample, treat the current carrier as unknown while preserving SG, read-only permission, and a present current identity; reject the captured pointer without another provider call because applicability is unproved, add a distinct consumption row, and record exactly UNKNOWN_CARRIER_COUNTEREXAMPLE=refused-no-provider-action.
 EOF
+done
+! grep -R -Fq "$captured_receipt" "$REPO" \
+  || fail 'the captured-report-only receipt leaked into the consumer project fixture'
+for task in experience-codex experience-traex; do
+  ! grep -Fq "$captured_receipt" "$PROBE/home/data/$task/brief.md" \
+    || fail "the captured-report-only receipt leaked into $task's brief"
 done
 spawn_and_wait experience-codex codex \
   "${FM_EXPERIENCE_EVIDENCE_CODEX_MODEL:-gpt-5.6-sol}" medium \
@@ -943,12 +956,14 @@ for report in "$CODEX_REPORT" "$TRAE_REPORT"; do
     || fail "$report did not consume the candidate captured by the earlier task"
   grep -Fq "v$success_version_after_change" "$report" \
     || fail "$report did not consume the captured candidate's current version"
-  grep -Fq 'source-captured-pi-615' "$report" \
+  grep -Fq "$captured_receipt" "$report" \
     || fail "$report did not read the captured candidate's original source receipt"
   grep -Fqx 'CAPTURED_CANDIDATE_CONSUMPTION=adopted' "$report" \
     || fail "$report did not record adoption of the captured candidate"
   grep -Fqx 'CAPTURED_CANDIDATE_ACTION=terminal-success-and-artifact-ready-observed' "$report" \
     || fail "$report did not connect the captured candidate to observable use"
+  grep -Fqx 'UNKNOWN_CARRIER_COUNTEREXAMPLE=refused-no-provider-action' "$report" \
+    || fail "$report did not reject the captured candidate when carrier applicability was unknown"
 done
 
 for report in "$PI_REPORT" "$CODEX_REPORT" "$TRAE_REPORT"; do
