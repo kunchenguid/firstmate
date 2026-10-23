@@ -302,6 +302,166 @@ record_watcher_lock() {
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
+test_hook_codex_linux_cross_namespace_liveness() {
+  local dir home
+  if [ "$(uname -s)" != Linux ]; then
+    pass "cross-namespace watcher regression skipped outside Linux"
+    return
+  fi
+  if ! command -v unshare >/dev/null 2>&1 \
+    || ! unshare -rpf --mount-proc true >/dev/null 2>&1; then
+    pass "cross-namespace watcher regression skipped without an unprivileged PID namespace"
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1 \
+    || ! python3 -c 'import os; fd=os.pidfd_open(os.getpid()); os.close(fd)' >/dev/null 2>&1; then
+    pass "cross-namespace watcher regression skipped without jq or Python pidfd support"
+    return
+  fi
+
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-cross-namespace")
+  home=$(cd "$dir" && pwd -P)
+  : > "$dir/state/task1.meta"
+  FM_TEST_HOME="$home" python3 - <<'PY' || fail "cross-namespace liveness regression"
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+
+home = Path(os.environ['FM_TEST_HOME'])
+state = home / 'state'
+ready = state / '.namespace-ready'
+stop = state / '.namespace-stop'
+nonlinux_bin = home / '.test-nonlinux-bin'
+nonlinux_bin.mkdir()
+(nonlinux_bin / 'uname').write_text('#!/usr/bin/env bash\nprintf "Darwin\\n"\n')
+(nonlinux_bin / 'uname').chmod(0o755)
+inner = r'''set -eu
+home=$1 state=$2 lib=$3 ready=$4 stop=$5
+export FM_HOME=$home FM_STATE_OVERRIDE=$state
+. "$lib"
+/bin/sleep 300 &
+holder=$!
+identity=$(fm_pid_identity "$holder")
+lock="$state/.watch.lock"
+mkdir -m 700 -p "$lock"
+printf '%s\n' "$holder" > "$lock/pid"
+printf '%s\n' "$home" > "$lock/fm-home"
+printf '%s\n' "$home/bin/fm-watch.sh" > "$lock/watcher-path"
+printf '%s\n' "$identity" > "$lock/pid-identity"
+readlink /proc/self/ns/pid > "$lock/pid-namespace"
+cat /proc/sys/kernel/random/boot_id > "$lock/boot-id"
+touch "$state/.last-watcher-beat"
+printf '%s\n%s\n' "$holder" "$identity" > "$ready"
+while [ ! -e "$stop" ]; do sleep 0.05; done
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+'''
+base_env = os.environ.copy()
+for key in ('FM_ROOT_OVERRIDE', 'FM_STATE_OVERRIDE', 'FM_HOME'):
+    base_env.pop(key, None)
+base_env.update(FM_HOME=str(home), FM_STATE_OVERRIDE=str(state))
+proc = None
+try:
+    proc = subprocess.Popen(
+        ['unshare', '-rpf', '--mount-proc', 'bash', '-c', inner, '_', str(home), str(state),
+         str(home / 'bin/fm-wake-lib.sh'), str(ready), str(stop)],
+        env=base_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.is_file():
+        if proc.poll() is not None:
+            out, err = proc.communicate()
+            raise SystemExit(f'namespace holder exited early ({proc.returncode}): {out}{err}')
+        time.sleep(0.02)
+    if not ready.is_file():
+        raise SystemExit('namespace holder did not publish its lock')
+    pid, identity = ready.read_text().splitlines()
+    namespace = (state / '.watch.lock/pid-namespace').read_text().strip()
+    host_matches = []
+    for entry in Path('/proc').glob('[0-9]*'):
+        try:
+            if os.readlink(entry / 'ns/pid') != namespace:
+                continue
+            nspids = next(line.split()[1:] for line in (entry / 'status').read_text().splitlines()
+                          if line.startswith('NSpid:'))
+            if nspids and nspids[-1] == pid:
+                host_matches.append(int(entry.name))
+        except (OSError, StopIteration):
+            continue
+    if len(host_matches) != 1 or host_matches[0] == int(pid):
+        raise SystemExit(f'fixture did not create one distinct host/namespace PID mapping: {host_matches}')
+
+    def hook(harness, path=None):
+        env = base_env.copy()
+        env.update(FM_SUPERVISION_ACTOR='branch', FM_SUPERVISION_PRIMARY_HARNESS=harness,
+                   FM_GUARD_GRACE='300')
+        if path:
+            env['PATH'] = str(path) + os.pathsep + env['PATH']
+        return subprocess.run(
+            ['bash', str(home / 'bin/fm-turnend-guard.sh')],
+            input='{"stop_hook_active":false}', text=True, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
+        )
+
+    strict = subprocess.run(
+        ['bash', '-c', '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"',
+         '_', str(home / 'bin/fm-wake-lib.sh'), str(state), str(home / 'bin/fm-watch.sh'), str(home)],
+        env=base_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+    )
+    if strict.returncode == 0:
+        raise SystemExit('ordinary strict liveness unexpectedly accepted the namespace-local PID')
+
+    def expect_block(harness, reason, path=None):
+        result = hook(harness, path)
+        if result.returncode != 2 or 'TURN WOULD END BLIND' not in result.stdout:
+            raise SystemExit(f'{reason}: rc={result.returncode} {result.stdout}')
+
+    result = hook('codex')
+    if result.returncode != 0 or result.stdout:
+        raise SystemExit(
+            f'live Codex/Linux namespace holder was not accepted: rc={result.returncode} {result.stdout}'
+        )
+    for harness in ('claude', 'opencode', 'pi', 'pi-signed', 'grok', 'kimi', 'cursor',
+                    'gemini', 'muse', 'rovo', 'omp', 'agy', 'devin', 'commandcode', 'polytoken'):
+        expect_block(harness, f'{harness} path did not retain the strict block')
+
+    identity_key, identity_values = identity.split('=', 1)
+    start_time, command_line = identity_values.split(' ', 1)
+    stale_identity = f'{identity_key}={int(start_time) + 1} {command_line}'
+    (state / '.watch.lock/pid-identity').write_text(stale_identity + '\n')
+    expect_block('codex', 'PID-reuse start-time mismatch was accepted')
+    (state / '.watch.lock/pid-identity').write_text(identity + '\n')
+
+    beat = state / '.last-watcher-beat'
+    old = time.time() - 400
+    os.utime(beat, (old, old))
+    expect_block('codex', 'stale namespace holder was accepted')
+    os.utime(beat, None)
+
+    beat.unlink()
+    expect_block('codex', 'non-Linux guard accepted the namespace holder', nonlinux_bin)
+    beat.touch()
+
+    stop.touch()
+    os.killpg(proc.pid, signal.SIGKILL)
+    proc.communicate(timeout=3)
+    proc = None
+    expect_block('codex', 'dead namespace holder was accepted')
+finally:
+    if proc is not None:
+        stop.touch()
+        try:
+            proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=3)
+PY
+  pass "fm-turnend-guard: Codex/Linux fallback accepts only a live, fresh, identity-matched cross-namespace holder"
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -2392,3 +2552,4 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+test_hook_codex_linux_cross_namespace_liveness

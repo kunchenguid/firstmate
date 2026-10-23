@@ -269,6 +269,19 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
 
+### Linux/Codex PID-namespace fallback, 2026-10-23
+
+The focused regression run covered the shared guard, watcher-lock behavior, and foreground checkpoint/watcher integration:
+
+```sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-watcher-lock.test.sh tests/fm-watch-checkpoint.test.sh
+# FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0
+```
+
+The Codex-only fixture accepts a fresh, identity-matched watcher across distinct PID namespaces and rejects stale or mismatched evidence, a dead holder, non-Linux, and other harnesses. The checkpoint regression also starts the production watcher with a scoped Codex harness pin, then verifies that `FM_HOME` reaches the watcher environment and its lock records the process PID namespace and boot ID. `bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` passed on the same source state.
+
+Native Codex Stop visibility remains unverified. The installed codex-cli was 0.163.0, but `codex login status` reported `Not logged in`, so a native hook run was unavailable. The fixture and manual host-side reproduction do not establish what `/proc` exposes from a real Codex sandbox at the Stop boundary; retain this as an evidence gap, not a live-validation claim.
+
 ### Cursor primary park, 2026-08-13
 
 Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway firstmate home on a private tmux socket, never against a live home and never with a user-scope hook.
