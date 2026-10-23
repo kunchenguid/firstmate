@@ -37,12 +37,15 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
+#              `missing` (or, on Rex, `unreadable`, which is how a stopped Rex
+#              server reads without starting it) is put through the control
+#              plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
 #              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
+#              HERDR, whose reads are scoped to the session the record names,
+#              and REX, whose never-reused ids answer a structured not-found
+#              from the server the record names: proven gone reports `endpoint-gone` rather than
 #              `already-stopped`, because the endpoint this verb normally
 #              preserves did not survive; a pane that turns out to be there and
 #              idle is the ordinary `already-stopped`; one whose agent is back
@@ -56,12 +59,14 @@
 #              still exists - on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
 #              of this verb. When the recorded endpoint is instead proven gone -
-#              a Herdr pane or workspace destroyed in churn - the launch owner
-#              re-creates one in that worktree, in the herdr session the record
-#              names, and the task's record rebinds to it; that is how a task
+#              a Herdr pane or workspace destroyed in churn, or a Rex block or
+#              session gone with its server - the launch owner re-creates one in
+#              that worktree, in the herdr session the record names (Rex: the
+#              recorded session while it survives, otherwise the ordinary Rex
+#              placement), and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
+#              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
 #              a tmux `missing` cannot be proven absent from a task record, so
 #              it refuses.
 #              An explicit `default` model or effort clears that
@@ -116,11 +121,12 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
+#     classifier (tmux, herdr, rex), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, cmux, and paseo are refused
 #     rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#     classified state acts (a Rex `unreadable` first goes through the absence
+#     proof `exit` describes, and refuses unless that proof settles it).
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
@@ -671,12 +677,14 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing)
+    *)
+      fm_control_absence_recheck_applies "$BACKEND" "$state" \
+        || die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint"
       # `missing` on its own is not a finding about the endpoint: it conflates
       # "destroyed" with "unreachable from this seat". Route it through the
       # control plane's one absence proof - the same one the relaunch gate uses
       # - and report what that proof actually established, never more.
-      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META")
       case "${absence%%$'\t'*}" in
         gone)
           # Proven gone, so the agent that lived in it went with it: exit's
@@ -701,11 +709,10 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
+          die "task $ID's endpoint $T reads '$state', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
