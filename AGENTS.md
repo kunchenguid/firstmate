@@ -180,8 +180,8 @@ Treat file or subsystem overlap as a risk signal rather than an automatic reason
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
-Before dispatch, resolve the captain's request into an intended outcome, explicit acceptance evidence, allowed scope and exclusions, and a concrete hard-block condition in that durable brief.
-Clarify only ambiguity that materially changes one of those four fields; routine authorized reversible next steps do not need another permission check.
+Before dispatch, resolve the captain's request into an intended outcome, the requested delivery form and precision, proportionate acceptance evidence, allowed scope and exclusions, and a concrete hard-block condition in that durable brief.
+Clarify with one concise question only when ambiguity in the goal, delivery form or precision, or acceptance boundary would materially change the work; otherwise proceed directly, and never rewrite a higher Firstmate-imposed bar as captain intent.
 
 On an opted-in Pi primary, prefer `fm_short_submit` for an independent read-only analysis, concretely authorized supported operation, or finite per-task Bash grant that fits [the short-task guide](docs/short-agents.md); MAIN submits, judges, and accepts the returned outcome without executing the task's individual commands, while branch-backed delivery and work outside that boundary retain the ordinary fleet dispatch path below.
 
@@ -251,7 +251,8 @@ Resume fleet supervision immediately after the decision lands.
 
 Historical validation records remain readable through `bin/fm-crew-state.sh` and teardown so an old active or parked run is never duplicated or discarded. Fresh tasks do not require that executable or start new runs through it.
 These runtime states establish delivery milestones, not semantic acceptance of the original goal.
-On every returned artifact or terminal-looking event, compare the actual result with the task's goal and acceptance method: accept and continue the selected delivery path when they are satisfied, route one specific bounded continuation when an authorized gap remains, or record the precise hard blocker when no authorized recovery path remains.
+On every returned artifact or terminal-looking event, compare the actual result with the latest accepted goal and its proportionate acceptance method: accept and continue the selected delivery path when they are satisfied, disclose limits that affect only extra precision, broader explanation, or later observation without extending the task, route one specific bounded continuation when an authorized core gap remains, or record the precise hard blocker when no authorized recovery path remains.
+A core conclusion that may be wrong, unusable requested functionality, or a missing explicit requirement still blocks acceptance; a negative feasibility finding may complete an investigation but never proves implementation, and a missing requested sample remains a missing sample rather than a renamed research result.
 In the same handling turn after semantic acceptance, an accepted reliable diagnosis, or a reliable user correction, load `experience-evidence` to decide whether the task report needs a reusable candidate; do not wait for `/stow` to make the first record.
 
 ### PR ready, landing, and teardown
@@ -286,7 +287,7 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 At each actionable review, re-read the task's durable goal contract, compare its acceptance evidence with the current artifacts, identify the remaining gap, and take or route the next authorized action before yielding.
-At intake, make the canonical `data/<task>/task.json` title state the goal and record its acceptance method, current state, remaining gap and next step through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
+At intake, make the canonical `data/<task>/task.json` title state the goal and record an acceptance method proportionate to the requested delivery form and precision, plus current state, remaining gap and next step, through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
 Update that canonical task record only after material changes; [goal-directed continuation](docs/task-continuation.md) owns progress recovery while the existing operation owners retain archive and residual-cleanup responsibilities.
 An empty worker inbox, process exit, provider success, status `done`, implementation commit, report, or intermediate milestone never closes that comparison by itself.
 Do not broaden authority to close a goal gap: stop only at a genuine permission boundary, a decision the captain must make, an explicit stop, or an evidenced external blocker whose bounded retries and materially different authorized recovery path are exhausted.
@@ -392,7 +393,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 `bin/fm-brief.sh` and its help own scaffold syntax and generated variants; the generated text points to each conditional contract's owner.
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
-Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, explicitly stating the intended outcome, observable acceptance evidence or checks, allowed scope and exclusions, and the concrete condition for stopping as hard-blocked.
+Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, explicitly stating the intended outcome, requested delivery form and precision, proportionate observable acceptance evidence or checks, allowed scope and exclusions, and the concrete condition for stopping as hard-blocked.
 Name what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
 `bin/fm-dod-lib.sh` owns intent extraction, provenance markers, and the generated native-review trigger; `bin/fm-native-review.sh` owns exact base/candidate and task-contract delivery to the supported harness review command.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.

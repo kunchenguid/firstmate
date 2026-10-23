@@ -7,6 +7,26 @@ MAIN compares each material result with those fields and routes the next authori
 
 A worker return, process exit, report, passing test, pull request, merge, or empty inbox is evidence. None of those events accepts the goal by itself.
 
+## Define a proportionate goal before work
+
+At intake, MAIN records the intended outcome together with the delivery form and precision the request actually requires.
+An estimate, a research conclusion, a code change, and working runtime behavior are different deliverables and therefore need different evidence.
+The same brief records proportionate acceptance evidence, allowed scope and exclusions, and the condition that would genuinely block the work.
+MAIN asks one concise question only when ambiguity in the goal, delivery form or precision, or acceptance boundary would materially change the work.
+A clear task proceeds without a confirmation round, and a stricter standard introduced by Firstmate belongs in `## Firstmate spec`, never in the captain's intent.
+
+MAIN judges the result against the latest accepted goal, not against every unknown discovered along the way.
+A limitation that affects only additional precision, source completeness, broader explanation, or later observation is disclosed and does not automatically become a continuation or a new task.
+Supplementary research continues only when it has value and existing authority; otherwise its remaining uncertainty stays in the result as a limitation.
+A gap still blocks acceptance when it could make the core conclusion wrong, leaves requested functionality unusable, or violates an explicit requirement.
+The acceptance bar cannot silently weaken either: requested full text is not satisfied by titles, a requested first-party category is not satisfied by an external proxy, and requested runtime success is not satisfied by a build.
+
+For example, an illustrative request for a rough market-size estimate can complete with a bounded estimate, assumptions, and a clear source limitation when those are the accepted deliverable.
+Unknown extra decimal precision does not keep that task open.
+An investigation of whether an integration is feasible can complete with an evidenced negative conclusion and limits, but that result must not claim the integration succeeded.
+A task to deliver a named sample remains incomplete when no sample was found, and a task to make a function work still needs observable functional evidence.
+Explicit cancellation or archive remains terminal and is never reopened by this comparison.
+
 ## One ordinary progress record
 
 [`fm-task-record.py`](../bin/fm-task-record.py) owns the canonical task record and its atomic writes.
@@ -47,7 +67,7 @@ Supervision routes that action to the correct existing worker.
 The passing test did not erase the gap.
 If the worker exits, the session compacts, or the conversation changes topic, `progress-list` scans the canonical records once and `progress` reads the named task record directly.
 
-After review and any corrections, MAIN compares the final artifacts with the acceptance method.
+After review and any corrections, MAIN compares the final artifacts with the latest accepted goal and its proportionate acceptance method.
 Only MAIN may clear both `remaining_gap` and `next_step`, and it clears them once the requested outcome is semantically accepted even when delivery or resource cleanup remains pending.
 Delivery, merge authority, decisions, and cleanup retain their own records and guards instead of becoming a new business goal gap.
 A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.

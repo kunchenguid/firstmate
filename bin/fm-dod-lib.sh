@@ -46,9 +46,12 @@ Project instructions still govern the work wherever they do not conflict with th
 
 # Goal-directed task lifecycle
 Treat the durable task brief as the contract for the result, not as a list of steps to perform.
-Before acting, identify from `## Captain's intent` and `## Firstmate spec` the intended outcome, the evidence or acceptance checks that prove it, the allowed scope and exclusions, and the conditions that would be a genuine hard block; if a material ambiguity prevents a safe dispatch, ask firstmate before beginning.
+Before acting, identify from `## Captain's intent` and `## Firstmate spec` the intended outcome, requested delivery form and precision, proportionate evidence or acceptance checks, allowed scope and exclusions, and the conditions that would be a genuine hard block.
+Ask firstmate one concise question only when ambiguity in the goal, delivery form or precision, or acceptance boundary would materially change the work; otherwise begin directly.
 At the start of every resumed turn and after each material result, compare the current evidence with that outcome, name the remaining gap, take the next authorized task-local action, and verify its effect.
 An implementation commit, report, provider success, process exit, PR, or intermediate milestone is evidence or a delivery checkpoint only; none substitutes for the brief's accepted outcome.
+Judge completion against the latest accepted goal instead of trying to remove every unknown: a limitation that affects only extra precision, broader explanation, or later observation is disclosed without extending the task, while a possibly wrong core conclusion, unusable requested function, or missing explicit requirement remains a real gap.
+An evidenced negative feasibility conclusion can complete an investigation but does not prove an implementation succeeded, and failing to find a requested sample does not turn the work into a sample delivery.
 An empty steering inbox means there is no new instruction, not that goal-directed work should pause; continue authorized task-local work while a gap remains.
 Do not ask for permission for routine reversible steps already inside the brief's boundary, and do not expand that boundary in the name of completing the goal.
 Stop only for a required decision above your authority, a real permission boundary, an explicit cancellation or stop, or an external failure after bounded retries and a genuinely different authorized diagnostic or recovery path have both been exhausted.
