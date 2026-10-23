@@ -8,9 +8,9 @@
 # Stop hook fires inside the lock-owning primary session before it may arm or
 # rewake. Two signals decide ownership, either one sufficient: the recorded pid
 # is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
+# Claude session identity below matches the id recorded beside a live lock. Neither
 # signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# recorded id without verified continuation leaves the ancestry verdict as it was.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -201,9 +201,24 @@ fm_harness_pid_alive() {
 # and must never own a lock with them. Ids are read from the environment only,
 # never from ps argv, where prompts and briefs are visible.
 #
-# A --fork-session successor mints a new id, so it stays a foreign live owner
-# until the pre-fork process exits; that is the safe direction and a documented
-# non-goal. Two genuinely different live sessions sharing one id is not a
+# An ordinary --fork-session successor stays foreign. A direct Linux background
+# handoff can retain ownership under its new id only with all of these proofs:
+# the trusted current model-loop pid and the recorded live frontend have native
+# Claude registry records matching their kernel process start times, session ids,
+# pid namespace, cwd, and interactive/bg roles; the frontend names this exact
+# parked job and the model loop names that job; and exactly one source transcript
+# records the corresponding continued-in link with no later conversation event.
+# The frontend and model-loop process environments must bind both processes to
+# this exact home's state and the same native Claude config root. Caller-supplied
+# config, transcript paths, child markers, pane identity, and daemon ancestry
+# carry no continuation authority. Symlinked, malformed, ambiguous, stale, or
+# moved/cyclic records fail closed. bin/fm-claude-continuation.py retains the
+# verified process identities and native records in state/.lock-continuation;
+# re-keying the same live model preserves ownership with the retained frontend,
+# process births, home/config and direct handoff revalidated on every proof.
+# Missing Python or Linux procfs leaves the existing refusal.
+# This proves one direct handoff, never arbitrary fork or transitive lineage.
+# Two genuinely different live sessions sharing one id is not a
 # supported state (Claude refuses to resume a running session under its id).
 
 # Print the Claude session id this process may own with, or return 1. $1 is the
@@ -245,13 +260,19 @@ fm_session_lock_recorded_session_id() {  # <state>
 }
 
 # True when the lock in state dir $1 was recorded by this same Claude session:
-# the trusted id equals the id recorded beside the lock. No trusted id, no
-# sidecar, or a different recorded id is false.
+# the trusted id equals the id recorded beside the lock, or proves the direct
+# background continuation above. No trusted id or sidecar is false.
 fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
   local state=$1 trusted recorded
   trusted=$(fm_session_lock_trusted_session_id "${2:-}") || return 1
   recorded=$(fm_session_lock_recorded_session_id "$state") || return 1
-  [ "$recorded" = "$trusted" ]
+  [ "$recorded" = "$trusted" ] && return 0
+  local lock_pid
+  lock_pid=$(cat "$state/.lock" 2>/dev/null) || return 1
+  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  python3 "${BASH_SOURCE[0]%/*}/fm-claude-continuation.py" \
+    "$state" "$lock_pid" "$CLAUDE_PID" "$recorded" "$trusted" >/dev/null 2>&1
 }
 
 # Print the pid bin/fm-lock.sh records on lock line 1 for this session. For a

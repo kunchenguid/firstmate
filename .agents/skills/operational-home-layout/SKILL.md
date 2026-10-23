@@ -131,6 +131,7 @@ state/               runtime records and signals; gitignored
   afk-contracts/     archived away and quiet records; bin/fm-afk-contract.sh owns their archive contract
   .afk               durable away/quiet-mode daemon flag on the harnesses that still launch the daemon (never on Pi); present = sub-supervisor may inject escalations, first line `away` (default, set by /afk, cleared on user return) or `quiet` (set by /quiet, cleared only on explicit /quiet off) per the single owner fm_afk_mode() in bin/fm-wake-lib.sh
   .lock-session      trusted Claude session-lock sidecar; written only by bin/fm-lock.sh; never touch
+  .lock-continuation verified Claude direct-handoff binding; written by bin/fm-claude-continuation.py; never touch
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .paseo-workspace.lock  Paseo backend lock serializing a spawn's workspace choice and tab creation against retiring an emptied workspace; bin/backends/paseo.sh owns it; never touch
   .rex-session.lock  Rex backend lock serializing a spawn's or reclaim's session choice and tab creation against killing an emptied per-home session; bin/backends/rex.sh owns it; never touch

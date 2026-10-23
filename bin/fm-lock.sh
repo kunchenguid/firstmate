@@ -15,19 +15,25 @@
 # sidecar written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
-# and left byte-identical when it already names that id. A same-session
+# and left byte-identical when it already names that id. When the trusted id
+# differs, publication first runs the shared same-session proof so a verified
+# direct handoff is bound in state/.lock-continuation before the sidecar
+# advances. A same-session
 # confirmation keeps a live line 1 that is in this session's harness ancestry,
 # because bin/fm-startup-network.sh compares that pid across its deferred
 # sweeps; a dead recorded pid is reclaimed and rewritten to this session's
-# anchor. A live line 1 outside the ancestry, owned only through the trusted
-# id, is rewritten to the anchor under the claim lock and then the
-# lease-command lock, and task leases recorded against the old pid move to the
+# anchor. A live line 1 outside the ancestry, owned through same-id equality
+# without a verified state/.lock-continuation binding, is rewritten to the
+# anchor under the claim lock and then the lease-command lock, and task leases
+# recorded against the old pid move to the
 # anchor in that same section (fm_lease_rekey_holder in bin/fm-lease-lib.sh),
 # as does a Claude auto-arm rewake bound to the old pid, under
 # state/.claude-autoarm.lock (fm_autoarm_rekey_session in bin/fm-wake-lib.sh).
 # A later /clear re-key in the same process is then still proven by ancestry
 # after the id changes, a held lease stays live, and the mid-turn guard still
-# accepts that rewake. A lease or rewake that cannot be moved, including when
+# accepts that rewake. A verified continuation binding keeps that live line 1 as
+# the retained frontend, including after the sidecar advances, and only
+# refreshes the sidecar. A lease or rewake that cannot be moved, including when
 # the auto-arm lock stays busy past LEASE_LOCK_WAIT seconds, is reported as a
 # warning and the re-anchor still completes. When the lease-command
 # lock stays busy past LEASE_LOCK_WAIT seconds, the confirmation only refreshes
@@ -158,13 +164,15 @@ remember_lock_session() {
 # Record the trusted session id beside the lock, or remove a sidecar that no
 # trusted id backs. Called only while the claim lock is held. A sidecar already
 # naming this id is left untouched, so a same-session confirmation keeps it
-# byte-identical.
+# byte-identical. A different trusted id first proves same-session identity so
+# the continuation binding is captured before this rewrite.
 publish_lock_session() {
   local trusted recorded tmp
   if trusted=$(fm_session_lock_trusted_session_id); then
     if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ]; then
       return 0
     fi
+    fm_session_lock_same_session "$STATE" || true
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
     if ! { printf '%s\n' "$trusted" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
@@ -187,11 +195,12 @@ publish_lock_session_or_die() {
 }
 
 # This session already holds the lock, recorded as pid $1. Line 1 stays exactly
-# as recorded while that pid is alive and in this session's ancestry; only the
-# sidecar is refreshed, under the claim lock, so a /clear re-key inside the same
-# process replaces the old id. A live line 1 outside the ancestry is re-anchored
-# as the header describes: REANCHOR records it and the caller keeps both locks
-# for the guarded write below.
+# as recorded while that pid is alive and in this session's ancestry, or while a
+# verified continuation binding authorizes this confirmation; only the sidecar
+# is refreshed, under the claim lock, so a /clear re-key inside the same process
+# replaces the old id. A live line 1 outside the ancestry owned only through
+# same-id equality is re-anchored as the header describes: REANCHOR records it
+# and the caller keeps both locks for the guarded write below.
 # A same-session confirmation waits for the claim lock so the sidecar refresh
 # completes. After the wait, the lock is re-read and the sidecar is refreshed
 # only when this session still owns it; otherwise the claim lock is released
@@ -199,7 +208,7 @@ publish_lock_session_or_die() {
 # prior-session-sweep-is-finishing refusal is a takeover rule and does not
 # apply here.
 confirm_own_lock() {  # <recorded-pid>
-  local recorded pids waited=0
+  local recorded pids waited=0 trusted rec_id
   if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
     fm_lock_acquire_wait "$CLAIM_LOCK"
     CLAIM_LOCK_HELD=1
@@ -208,11 +217,16 @@ confirm_own_lock() {  # <recorded-pid>
   recorded=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
     if [ "$recorded" != "$me" ] && pids=$(fm_harness_ancestry_pids) \
-      && ! fm_harness_pid_listed "$recorded" "$pids" \
-      && fm_lock_acquire_wait_max "$LEASE_LOCK" "$LEASE_LOCK_WAIT"; then
-      LEASE_LOCK_HELD=1
-      REANCHOR=$recorded
-      return 0
+      && ! fm_harness_pid_listed "$recorded" "$pids"; then
+      trusted=$(fm_session_lock_trusted_session_id "$pids" || true)
+      rec_id=$(fm_session_lock_recorded_session_id "$STATE" || true)
+      if [ -n "$trusted" ] && [ "$trusted" = "$rec_id" ] \
+        && ! python3 "$SCRIPT_DIR/fm-claude-continuation.py" "$STATE" "$recorded" "$me" >/dev/null 2>&1 \
+        && fm_lock_acquire_wait_max "$LEASE_LOCK" "$LEASE_LOCK_WAIT"; then
+        LEASE_LOCK_HELD=1
+        REANCHOR=$recorded
+        return 0
+      fi
     fi
     publish_lock_session_or_die
     commit_lock_session
