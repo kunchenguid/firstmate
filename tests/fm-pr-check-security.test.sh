@@ -2761,7 +2761,7 @@ test_watcher_surfaces_guarded_auto_teardown_refusal() {
 }
 
 test_merged_notice_auto_teardown_is_done_only_and_guarded() {
-  local dir state url status_line teardown_args
+  local dir state url teardown_args
   url=https://github.com/o/r/pull/1
 
   fm_merge_outcome_current_state() {
@@ -2798,12 +2798,10 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     || fail "a finished direct ship lane did not auto-teardown"
   [ "$(cat "$dir/teardown.log")" = "$dir/home $state task-a" ] \
     || fail "auto-teardown did not use the guarded task-only cleanup command"
-  [ -f "$state/task-a.status" ] || fail "successful auto-teardown left no routine status outcome"
-  status_line=$(tail -n 1 "$state/task-a.status")
-  [ "$(status_line_verb "$status_line")" = note ] \
-    || fail "successful auto-teardown was not recorded as a routine status note"
+  [ ! -e "$state/task-a.status" ] && [ ! -e "$state/task-a.meta" ] \
+    || fail "successful auto-teardown recreated retired task state"
   [ -z "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" ] \
-    || fail "routine cleanup status could not be recorded safely: $FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+    || fail "a routine cleanup reported a spurious detail: $FM_MERGE_OUTCOME_CLEANUP_DETAIL"
   case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
     *'lane automatically cleaned up'*) ;;
     *) fail "successful auto-teardown was omitted from the merge notification" ;;
@@ -2869,7 +2867,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
     || fail "a lane in a secondmate home was auto-torn down"
   [ ! -s "$dir/teardown.log" ] || fail "a secondmate home's lane reached teardown"
-  pass "merged notices auto-clean only finished direct reports with recorded deliverables, record routine outcomes, and surface guarded refusals without force"
+  pass "merged notices auto-clean only finished direct reports with recorded deliverables, leave no retired task state, and surface guarded refusals without force"
 }
 
 test_different_merged_pr_for_same_task_is_not_absorbed() {
