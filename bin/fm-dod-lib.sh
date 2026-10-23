@@ -144,6 +144,16 @@
 # launch copy of its charter; every other backend's launch text is unchanged.
 FM_BRIEF_REX_RENAME_GUARD='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
 
+fm_brief_rex_charter_copy() {  # <charter> <dest>
+  local src=$1 dest=$2 tmp
+  tmp="$dest.tmp.${BASHPID:-$$}"
+  if { cat "$src" && printf '\n%s\n' "$FM_BRIEF_REX_RENAME_GUARD"; } >"$tmp" && mv "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root> [backend]
   local state=$1 task_id=$2 root=$3 backend=${4:-}
   cat <<'EOF'

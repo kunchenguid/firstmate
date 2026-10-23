@@ -506,6 +506,23 @@ test_worker_role_guards_rex_session_rename_only_on_rex() {
   pass "only a Rex task's role tells it to ignore the session-rename prompt"
 }
 
+test_rex_charter_copy_is_charter_plus_guard_and_leaves_charter_alone() {
+  local dir=$TMP_ROOT/rex-charter guard
+  guard='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
+  mkdir -p "$dir"
+  printf 'charter line one\ncharter line two\n' >"$dir/charter.md"
+  cp "$dir/charter.md" "$dir/charter.before"
+  fm_brief_rex_charter_copy "$dir/charter.md" "$dir/launch-charter.md" || fail "charter copy failed"
+  cmp -s "$dir/charter.md" "$dir/charter.before" || fail "the original charter was rewritten"
+  [ "$(cat "$dir/launch-charter.md")" = "$(cat "$dir/charter.before")"$'\n\n'"$guard" ] ||
+    fail "the launch copy is not the charter plus one guard line"
+  [ "$(grep -cxF "$guard" "$dir/launch-charter.md")" -eq 1 ] || fail "guard line is not exactly one line"
+  ls "$dir" | grep -q 'tmp' && fail "a temp file was left behind"
+  fm_brief_rex_charter_copy "$dir/missing.md" "$dir/out.md" 2>/dev/null && fail "a missing charter was copied"
+  [ ! -e "$dir/out.md" ] || fail "a failed copy published a launch charter"
+  pass "the Rex second-mate launch copy is the charter plus one guard line"
+}
+
 # forge=external: a review tool uploads its own snapshot, so nothing is pushed.
 # The fixtures name an invented tool and an RFC 6761 reserved host only.
 EXT_CFG="$TMP_ROOT/external-config"
@@ -617,5 +634,6 @@ test_external_review_done_with_backup_needs_the_copy
 
 test_worker_role_names_skill_and_fallback_file
 test_worker_role_guards_rex_session_rename_only_on_rex
+test_rex_charter_copy_is_charter_plus_guard_and_leaves_charter_alone
 
 echo "all fm-dod-lib tests passed"

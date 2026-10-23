@@ -3727,11 +3727,7 @@ elif [ "$KIND" = secondmate ] && [ "$BACKEND" = rex ]; then
   # never rewritten, and other backends launch from the charter unchanged.
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-charter.md"
-  BRIEF_TMP="$DATA/$ID/.launch-charter.md.${BASHPID:-$$}"
-  if ! { mkdir -p "$DATA/$ID" &&
-    { cat "$SOURCE_BRIEF" && printf '\n%s\n' "$FM_BRIEF_REX_RENAME_GUARD"; } >"$BRIEF_TMP" &&
-    mv "$BRIEF_TMP" "$BRIEF"; }; then
-    rm -f -- "$BRIEF_TMP"
+  if ! { mkdir -p "$DATA/$ID" && fm_brief_rex_charter_copy "$SOURCE_BRIEF" "$BRIEF"; }; then
     echo "error: could not render the Rex launch copy of $SOURCE_BRIEF" >&2
     exit 1
   fi
