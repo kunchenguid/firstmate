@@ -26,9 +26,97 @@ The live run below returned exactly that choice shape.
 
 Each provider needs a dated section here with real request and response captures and a calibration note.
 
-### `systemone` (pending)
+### `systemone` against Clef on Cloudflare Workers AI
 
-Pending as of 2026-10-23, not yet run: a System One-compatible host, such as a local llama.cpp server serving a Clef model, with its request body, response body, latency against the 10-second timeout, and the no-key header path.
+Run 2026-10-23 (21:20 UTC) with `FM_DISPATCH_PROVIDER=systemone` and model `clef`, served by Cloudflare Workers AI as `@cf/cloudflare/clef`, resolver commit `8d01fe8d`, confidence floor 0.6, timeout 10 s.
+Workers AI serves the System One shape at `POST /client/v4/accounts/<account>/ai/run/@cf/cloudflare/clef` inside a `{result, success, errors, messages}` envelope rather than at `/v1/systemone`, so the run reached it through a local test-only relay on `127.0.0.1`.
+The relay forwarded each request body unchanged, added the Cloudflare bearer token itself, and returned the envelope's `result` verbatim; it renamed and filled in nothing, and the resolver accepted all 25 responses without adaptation.
+The resolver ran with no dispatch key, so it sent no `Authorization` header; a post-run scan found neither the token, the account id, nor a bearer header in any captured file.
+A direct Workers AI option (a configurable path plus envelope unwrapping in the resolver) is out of scope for this provider and not part of this change.
+Rules, briefs, hand labels, and the constant quota snapshot are the same as the `openai` run below.
+
+| Measure | Result |
+| --- | --- |
+| Top rule matched the hand label | 23 of 25 |
+| Outcomes: clear / ambiguous / escalate / error | 18 / 3 / 4 / 0 |
+| Clear results with a profile other than the hand label | 0 |
+| Resolver latency (min / median / max) | 151 / 281 / 513 ms |
+| Workers AI round trip at the relay (min / median / max) | 137 / 266 / 498 ms |
+| Input tokens per brief (min / median / max) | 397 / 419 / 443 |
+| Output tokens | 0 on every response |
+| HTTP errors and malformed answers | 0 / 0 |
+
+The four escalations were the hardest-tier briefs, picked at confidence 0.86 to 0.94 and escalated by the rule's `approval: captain` as designed.
+All three ambiguous results fell below the 0.6 floor, and two of them had a top pick other than the label, so the floor withheld both misses.
+The on-call scheduling brief, labeled `default`, led with the trivial-edit rule at probability 0.67 and confidence 0.41.
+The copywriting brief, labeled `default`, led with `default` at probability 0.30 and confidence 0.11.
+The large-file-split brief, labeled routine work, led with the approval-gated hardest-tier rule at probability 0.48 and confidence 0.21; had it cleared the floor, that rule would still have escalated rather than dispatched.
+
+Calibration note: Clef's `confidence` ran 0.02 to 0.27 below the top option's probability, with the widest gaps on the three ambiguous briefs, and every clear pick had confidence 0.81 or higher.
+Compared with `gpt-6-luna` on the same set, Clef was less confident on the two no-rule briefs, which `gpt-6-luna` resolved to `default` and Clef handed back to firstmate, and it put the split brief's top pick on the hardest tier instead of routine work.
+On this set the 0.6 floor admitted no wrong pick; 25 synthetic briefs are a smoke test of the provider path, not a basis for per-rule `min_confidence` values.
+
+Request for the bug-fix brief, as the resolver sent it (the relay forwarded it unchanged):
+
+```json
+{
+  "model": "clef",
+  "state": {
+    "task": {
+      "project": "web-app",
+      "brief": "## Captain's intent\nFix the pagination bug on the orders list: the last page repeats the first item of the previous page. Root cause: the offset is computed with <= instead of < in orders_query.go.\n\n## Firstmate spec\nChange the comparison, add a regression test for the last page, and do not refactor the query builder.\n"
+    }
+  },
+  "questions": {
+    "rule": {
+      "type": "choice",
+      "instructions": "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule's own matching condition; pick `default` when no rule's condition is met, including when a rule's own exemption text excludes this task.",
+      "criteria": {
+        "rule_1": "Work the brief itself calls unusually difficult or high-risk, such as a security-sensitive redesign or a migration where a mistake is costly; routine builds, ports, and installers do not qualify.",
+        "rule_2": "Routine feature work, a port, or an installer build inside an existing codebase.",
+        "rule_3": "A bug fix whose root cause the brief states.",
+        "rule_4": "A trivial mechanical edit such as a rename, typo, version bump, or wording fix.",
+        "rule_5": "A read-only investigation, diagnosis, or audit whose deliverable is a written report, not a code change.",
+        "default": "No listed rule applies to this task."
+      }
+    }
+  }
+}
+```
+
+Workers AI response envelope, as received (HTTP 200, 137 ms at the relay, 145 ms end to end); the resolver received exactly the `result` object:
+
+```json
+{
+  "result": {
+    "model": "clef",
+    "answers": {
+      "rule": {
+        "type": "choice",
+        "choice": "rule_3",
+        "probabilities": {
+          "rule_1": 0.0018,
+          "rule_2": 0.01,
+          "rule_3": 0.9682,
+          "rule_4": 0.0118,
+          "rule_5": 0.0014,
+          "default": 0.0068
+        },
+        "confidence": 0.9252
+      }
+    },
+    "usage": {
+      "input_tokens": 433,
+      "output_tokens": 0
+    }
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}
+```
+
+The resolver mapped it to `status: clear`, `rule: rule_3` at confidence 0.9252, and the rule's `cursor-grok-4.6-medium` profile.
 
 ### `openai` against the Decisions API
 
@@ -38,7 +126,7 @@ Quota came from one constant fake `quota-axi` snapshot, as in the 2026-09-17 run
 
 Rules: a generic five-rule file - an `approval: captain` hardest-tier rule that excludes routine builds, ports, and installers; routine feature, port, or installer work with one `all_models` floor; bug fixes with a stated root cause; trivial mechanical edits; and read-only investigations or audits - plus the shipped neutral none option.
 Briefs: 25 synthetic briefs in the scaffold's task-section shape, hand-labeled before the run: four per rule, four of them scouts carrying the scout contract line, two that match no rule, and three borderline ones (a large file split, a rounding fix, and a routine signed Linux installer).
-The 25 real and synthetic briefs of the Jev run are not reproduced here, so the two runs compare in shape only.
+The 25 real and synthetic briefs of the Jev run are not reproduced here, so these runs compare with it in shape only.
 
 | Measure | Result |
 | --- | --- |
