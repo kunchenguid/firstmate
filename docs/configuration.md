@@ -469,7 +469,7 @@ The compatibility helper `fm_backend_agent_alive` continues to collapse those de
 
 - A paseo spawn additionally version-gates against the installed `paseo` binary's version, requires `jq`, and starts the daemon with `paseo start` only when it is simply not up yet (see [`docs/paseo-backend.md`](paseo-backend.md) "Setup"), refusing loudly on a missing CLI, an old version, or an unreachable daemon.
 
-- A rex spawn additionally gates on the Rex API revision and the block methods the adapter calls, requires `jq`, and requires the selected Rex server to be reachable; it never starts a server (see [`docs/rex-backend.md`](rex-backend.md) "Setup").
+- A rex spawn additionally gates both the `rex` CLI and the selected Rex server at API revision 5 or newer and on the block methods the adapter calls, requires `jq`, and requires that server to be reachable; it never starts a server (see [`docs/rex-backend.md`](rex-backend.md) "Setup").
 
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 
