@@ -709,13 +709,6 @@ fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "duplicate schema 6 key returned: $err"
 ok "schema 6 requires accountKey on every row and uniqueness on provider + accountKey"
 
-SCHEMA6_ALIAS="$LAB/schema6-alias.json"
-jq '(.providers[] | select(.provider == "codex" and .accountKey == "openai-codex-work")) |=
-  (.accountKeys = ["openai-codex-work", "codex-home"])' "$SCHEMA6" > "$SCHEMA6_ALIAS"
-out=$(call_choose --snapshot "$SCHEMA6_ALIAS" --candidate codex:default --candidate cursor:default)
-[ "$out" = "codex default" ] || fail "schema 6 accountKeys alias did not bind: $out"
-ok "a schema 6 row binds a lane named in its accountKeys aliases"
-
 cat > "$SCHEMA6_TOON" <<'TOON'
 bin: ~/.local/bin/quota-axi
 description: Report local agent-provider quota windows for routing-aware agents

@@ -994,28 +994,13 @@ done
 cp "$LANE_RULES" "$RULES"
 pass "Pi native adapters bind to codex-home with existing fallbacks and schema 5 compatibility"
 
-SCHEMA6_ALIAS="$TMP_ROOT/schema6-alias.json"
-jq '(.providers[] | select(.provider == "codex" and .accountKey == "openai-codex")) |=
-  (.accountKey = "codex-home" | .accountKeys = ["codex-home", "openai-codex"] |
-   .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 80 | .runway.status = "through_reset" | .selection.spendPriority = 0.8))' \
-  "$SCHEMA6" > "$SCHEMA6_ALIAS"
-ALIAS_RULES="$TMP_ROOT/alias-rules.json"
-printf '%s\n' '{"rules":[{"when":"Codex work.","use":[{"harness":"pi","model":"openai-codex/gpt-5.6-sol","provider":"codex"}]}]}' > "$ALIAS_RULES"
-cp "$ALIAS_RULES" "$RULES"
-reset_log
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_ALIAS" run code out err "$BRIEF"
-expect_code 0 "$code" "schema 6 alias snapshot exits 0"
-assert_contains "$out" '  status: clear' "an accountKeys alias row resolves"
-assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "a Pi lane binds to a row naming it in accountKeys"
-assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the alias-bound lane is chosen"
-
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a schema 6 row without accountKey is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "keyless schema 6 row is named as an invalid snapshot"
 cp "$BASE_RULES" "$RULES"
-pass "schema 6: each candidate binds to its account row or accountKeys alias; schema 5 is unchanged"
+pass "schema 6: each candidate binds to its account row; schema 5 is unchanged"
 
 # --- quota-axi is read exactly once --------------------------------------------
 reset_log

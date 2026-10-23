@@ -30,9 +30,7 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #                                  is identified by the contract.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
-#                                  matching accountKey or one alias in the
-#                                  row's accountKeys list, or null; schema 5
-#                                  ignores $lane.
+#                                  or null; schema 5 ignores $lane.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -43,7 +41,7 @@ FM_QUOTA_ROW_JQ='
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
-      (([$rows[] | select(.accountKey == $lane or (if (.accountKeys | type) == "array" then ((.accountKeys | index($lane)) != null) else false end))] | first) //
+      (([$rows[] | select(.accountKey == $lane)] | first) //
        ([$rows[] | select(.accountKey == "default")] | first) // null)
     else ($rows | first) // null
     end;
