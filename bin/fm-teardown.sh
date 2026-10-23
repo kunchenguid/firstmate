@@ -2279,7 +2279,7 @@ task_process_identity() {  # <pid>
     printf 'starttime=%s\n' "$starttime"
     return 0
   fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   value=$(fm_nm_trim "$value")
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac

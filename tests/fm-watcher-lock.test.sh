@@ -1438,6 +1438,35 @@ SH
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_timezone_invariant() {
+  # Force the portable ps fallback even on Linux, and prove the raw timestamps
+  # differ so the cross-timezone equality cannot pass without exercising the bug.
+  local dir state baseline checked raw_utc raw_est
+  dir=$(make_case timezone-identity)
+  state="$dir/state"
+  raw_utc=$(LC_ALL=C TZ=UTC0 ps -p "$$" -o lstart= 2>/dev/null) || {
+    pass "timezone check skipped where ps -o lstart= is unsupported"
+    return
+  }
+  raw_est=$(LC_ALL=C TZ=EST5 ps -p "$$" -o lstart=) || fail "EST5 ps read failed"
+  [ "$raw_utc" != "$raw_est" ] || fail "timezone fixture did not change raw ps lstart"
+  baseline=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" TZ=UTC0 bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$$") || fail "UTC identity read failed"
+  checked=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" TZ=EST5 bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$$") || fail "EST5 identity read failed"
+  [ -n "$baseline" ] && [ "$baseline" = "$checked" ] \
+    || fail "watcher ps identity changed across timezones"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$baseline" > "$state/.watch.lock/pid-identity"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" TZ=EST5 bash -c \
+    '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$WATCH" "$$" "$dir" \
+    || fail "live watcher recorded in UTC failed its identity check under EST5"
+  pass "watcher ps identity recorded in UTC still matches under EST5"
+}
+
 test_pid_identity_is_terminal_width_invariant() {
   # The portable fallback records its identity from a wide shell (the arm or
   # watcher process) but re-reads it inside a narrow-COLUMNS hook, where ps cuts
@@ -1571,6 +1600,7 @@ test_msys_pid_identity_uses_proc() {
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_timezone_invariant
 test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc

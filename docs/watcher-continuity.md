@@ -110,6 +110,7 @@ The stale-owner claim occurs only after the existing AFK and supervision-need ga
 ### Claude arm failures
 
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
+Watchers started with the current identity implementation keep matching across timezone changes, including on macOS.
 The beacon is `state/.last-watcher-beat`, which only the watcher process touches.
 
 - A cycle-end failure is benign when that live-watcher predicate is true.
@@ -481,6 +482,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 
 `tests/fm-watcher-lock.test.sh` covers:
 
+- Watcher identity matching across timezones through the portable `ps` fallback.
 - Verified-successor attach.
 - Recovery publication before stale-lock removal.
 - The typed self-eviction failure.

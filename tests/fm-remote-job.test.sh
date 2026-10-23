@@ -252,6 +252,23 @@ if [ -n "$IDENTITY_LOCALE" ]; then
   pass "lock and claim owner identity stays locale-invariant ($IDENTITY_LOCALE)"
 fi
 
+# A timezone change must not make a live recorded lock/claim owner look dead.
+RAW_UTC_START=$(LC_ALL=C TZ=UTC0 ps -p "$$" -o lstart=) || fail "UTC ps read failed"
+RAW_EST_START=$(LC_ALL=C TZ=EST5 ps -p "$$" -o lstart=) || fail "EST5 ps read failed"
+[ "$RAW_UTC_START" != "$RAW_EST_START" ] || fail "timezone fixture did not change raw ps lstart"
+RECORDED_START=$(TZ=UTC0 fm_remote_job_process_start "$$") || fail "UTC owner read failed"
+CHECKED_START=$(TZ=EST5 fm_remote_job_process_start "$$") || fail "EST5 owner read failed"
+[ -n "$RECORDED_START" ] && [ "$RECORDED_START" = "$CHECKED_START" ] \
+  || fail "remote job owner identity changed across timezones"
+IDENTITY_RECORD="$TMP_ROOT/timezone-identity-record"
+mkdir -p "$IDENTITY_RECORD"
+printf '%s\n' "$$" > "$IDENTITY_RECORD/pid"
+printf '%s\n' "$RECORDED_START" > "$IDENTITY_RECORD/start"
+fm_remote_job_process_command "$$" > "$IDENTITY_RECORD/command"
+TZ=EST5 fm_remote_job_recorded_owner_alive "$IDENTITY_RECORD" \
+  || fail "live remote job owner recorded in UTC looked dead under EST5"
+pass "remote job owner identity recorded in UTC still matches under EST5"
+
 LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
 LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
 mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"

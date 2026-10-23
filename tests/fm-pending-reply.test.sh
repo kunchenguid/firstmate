@@ -532,13 +532,16 @@ test_recovery_attempt_is_never_reinjected() {
   fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
   live_rec=$(fm_pending_reply_path "$state" "$live_corr")
   live_pid=${BASHPID:-$$}
-  live_identity=$(fm_pending_reply_pid_identity "$live_pid") \
+  live_identity=$(TZ=UTC0 fm_pending_reply_pid_identity "$live_pid") \
     || fail "live sender identity should be observable"
   fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
   fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
   fm_pending_reply_set "$live_rec" recovery_sender_identity "$live_identity" \
     || fail "live sender identity commit failed"
   fm_pending_reply_set "$live_rec" phase recovery_sending || fail "live sending phase failed"
+  TZ=EST5 fm_pending_reply_sender_alive "$live_rec" \
+    || fail "live recovery sender recorded in UTC looked dead under EST5"
+  pass "pending-reply sender identity recorded in UTC still matches under EST5"
   fm_pending_reply_tick_one "$state" "$live_corr" unknown || fail "live recovery tick failed"
   [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
     || fail "live recovery must remain in progress without elapsed-time inference"
