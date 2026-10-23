@@ -26,7 +26,10 @@ unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
+# omp 18.1.11), and a substring match would claim ompd or comp. A `bun
+# install -g` omp instead runs as `comm=bun` with the omp script path in argv
+# (verified 2026-10-19), so the bun arm below keys on that same anchored
+# script token rather than the regex.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -55,6 +58,16 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# True for a bun-shim omp: the process is bun and the first argv token after it
+# is a script whose basename is exactly `omp`. ompd/comp and an `omp` path in a
+# later argument never match.
+fm_harness_bun_omp_args() {  # <comm> <args>
+  local script
+  [ "$(basename -- "${1:-}")" = bun ] || return 1
+  read -r _ script _ <<<"${2:-}"
+  [ "$(basename -- "${script:-}")" = omp ]
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -65,8 +78,10 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   3. a bare interpreter (node, python, bun) running a harness script path.
+#   bun carries only the omp script token (the first argv token after bun, with
+#   basename exactly `omp`): a *omp* glob would claim ompd/comp, so no other
+#   harness rides the bun arm.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -81,7 +96,11 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (node, python): match the harness name in its script path.
+  # bun: match only an omp script as the first argv token after bun, never the
+  # regex - a `bun install -g` omp runs as `comm=bun` (verified 2026-10-19) and
+  # the regex's ^omp$ never fires inside a full command line, while *omp* would
+  # claim ompd/comp.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
@@ -90,6 +109,7 @@ fm_harness_process_matches() {  # <comm> <args>
       fi
       ;;
   esac
+  fm_harness_bun_omp_args "$comm" "$args" && return 0
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the

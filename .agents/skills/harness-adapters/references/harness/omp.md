@@ -8,7 +8,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 
 | Fact | Value |
 |---|---|
-| Binary | `omp`, a single Bun-compiled executable resolved from `PATH` by `../../../bin/fm-spawn.sh`; a missing binary refuses the spawn. |
+| Binary | `omp`, a single Bun-compiled executable (or a `bun install -g` shim, see Detection) resolved from `PATH` by `../../../bin/fm-spawn.sh`; a missing binary refuses the spawn. |
 | Launch | Foreign markers cleared (`CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `GEMINI_CLI`, Cursor's), `FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1`, then `omp --config <.omp/fm-worker-overlay.yml> --auto-approve --cwd <worktree> [--model] [--thinking] -e state/<id>.omp-ext.ts <one positional brief>`; a secondmate passes that same `-e` for the busy extension and still relies on auto-discovery for its primary extensions. |
 | Busy state | `../../../bin/fm-busy-lib.sh` source `omp-ext`: the per-task extension marks busy at `agent_start` and idle at `agent_end` only when `willContinue` is not true; `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end` (`session_stop` is awaited before settle). |
 | Exit command | `/quit` (`/exit` and `/q` are aliases). |
@@ -17,7 +17,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Model flag | `--model <provider>/<id>` (fuzzy patterns are accepted by omp but bypass Firstmate's pre-launch check). |
 | Effort flag | `--thinking <off\|minimal\|low\|medium\|high\|xhigh\|max\|auto>`, a superset of the shared vocabulary, so every level including `max` maps straight across. |
 | Model discovery | `omp models [--json]` lists built-in and auto-discovered providers only; extension-registered providers such as `claude-bridge` never appear, so those models pass through the spawn unvalidated with a stderr notice. `omp usage` shows provider windows; `quota-axi` covers the `claude` provider when the bridge is in use. |
-| Marker | None of omp's own (verified: `PI_CODING_AGENT` absent from the binary, no `PI_CODING_AGENT_DIR` or `OMP_PROFILE` in the default profile). `FM_OMP_HARNESS=omp` is Firstmate's launch marker; ancestry matches the exact process name `omp`. |
+| Marker | None of omp's own (verified: `PI_CODING_AGENT` absent from the binary, no `PI_CODING_AGENT_DIR` or `OMP_PROFILE` in the default profile). `FM_OMP_HARNESS=omp` is Firstmate's launch marker; ancestry matches the exact process name `omp` or a bun-shim `omp` (see Detection). `OMP_PROFILE` and `PI_CODING_AGENT_DIR` name the selected profile, never the harness, and a live bun-shim session carries both. |
 | Composer | Pinned to `composer.shape: borderless` by the overlay, a bare `❯` (U+276F) row the shared classifier already reads; busy text is `Working…` (U+2026), the only spelling the omp busy regex accepts (the three-dot form its headless `-p` mode writes never reaches a supervised pane), with the status row's braille spinner plus elapsed cell as the second signal. |
 | Autonomy | `--auto-approve` owns approval (omp forces `tools.approvalMode: yolo` for the session under it); the overlay pins `plan.defaultOnStartup: false`, `prewalk.enabled: false`, `retry.usageReservePolicy: auto`. |
 | Trust | No project-trust gate at all; a fresh profile shows a provider-login wizard instead, suppressed by `OMP_SKIP_SETUP=1`. |
@@ -30,8 +30,11 @@ omp cold start is roughly twenty seconds to the first agent turn, paid once per 
 ## Detection
 
 `../../../bin/fm-harness.sh` tests `FM_OMP_HARNESS=omp` before `CLAUDECODE`, like Cursor's markers, and its ancestry walk matches the anchored process name `omp` above the interpreter fallback.
+A `bun install -g` omp is a `#!/usr/bin/env bun` script, so the live process is `comm=bun` with the omp script as the first argv token (`bun <...>/bin/omp ...`); it counts as omp only when that first token's basename is exactly `omp`, so `ompd`, `comp`, and an `omp` path in a later argument (`bun run dev --cwd /x/omp`) never match.
+Such a launcher outranks an inherited marker like a structural ancestor.
 The omp template in `../../../bin/fm-spawn.sh` clears every foreign marker at its own launch boundary, and `FM_OMP_HARNESS=omp` counts only under a real `omp` ancestor, so the marker inherited by any other launch is inert: an omp secondmate's workers keep their own identity and an inherited `CLAUDECODE` cannot outrank a worker that omp launched.
-`../../../bin/fm-session-lock-lib.sh` matches the same anchored name for session-lock ownership, and `../../../bin/backends/tmux.sh` classifies it `agent` for liveness.
+`../../../bin/fm-session-lock-lib.sh` owns the shared bun-shim matcher and applies the same anchored name for session-lock ownership, and `../../../bin/backends/tmux.sh` classifies the native `omp` name `agent` for liveness.
+`../../../bin/fm-agent-process-lib.sh` applies the matcher to a full command line, so the Herdr liveness probe, which passes args, also classifies a bun-shim omp `agent`; tmux's name-only probe sees only `bun` for the shim.
 The optional claude-bridge extension runs a nested executable literally named `claude` as a sibling of tool execution, never an ancestor of it, so omp's own tool calls detect as omp; that subtree is never walked by a Firstmate script.
 
 ## Worker posture overlay

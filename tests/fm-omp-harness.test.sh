@@ -90,11 +90,52 @@ test_detection_anchored_name_and_marker_precedence() {
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
+# A `bun install -g` omp is `comm=bun` running a script file named `omp`. Build
+# that shape with real processes: a `bun` symlink to the system shell plus
+# script files whose body runs the harness probe as a child (the trailing no-op
+# keeps bash from exec-optimizing the child away).
+test_detection_bun_shim_process_tree() {
+  local dir=$TMP_ROOT/bunshim out name
+  mkdir -p "$dir/bin"
+  ln -sf /bin/bash "$dir/bun"
+  for name in omp ompd run; do
+    printf '%s\n' "\"\$FM_PROBE\"; :" >"$dir/bin/$name"
+  done
+  export FM_PROBE=$HARNESS
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/bun" "$dir/bin/omp" --profile x)
+  [ "$out" = omp ] || fail "a bun-shim omp must outrank an inherited CLAUDECODE, got '$out'"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$dir/bun" "$dir/bin/omp" --profile x)
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS under a bun-shim omp must detect as omp, got '$out'"
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/bun" "$dir/bin/run" dev /x/omp)
+  [ "$out" = claude ] || fail "a bun process with an omp path in a later argument must not detect as omp, got '$out'"
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$dir/bun" "$dir/bin/ompd" --root /y/omp)
+  [ "$out" = claude ] || fail "a bun-shim ompd must not detect as omp, got '$out'"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$dir/bun" "$dir/bin/run" dev /x/omp)
+  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS under a non-omp bun process must not relabel a claude worker, got '$out'"
+  unset FM_PROBE
+  pass "fm-harness: a bun-shim omp detects through the real process tree and only omp does"
+}
+
 test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches omp '' || fail "session-lock identity must accept the exact omp name"
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
+  # A `bun install -g` omp runs as `comm=bun` with the omp script path in
+  # argv (live: `bun ~/.bun/bin/omp ...`). Pure argv verdicts - no `ps`, no
+  # live tree, so the outer session can never leak in.
+  fm_harness_process_matches bun "bun /Users/tien/.bun/bin/omp --profile x" || fail "session-lock identity must accept a bun-shim omp argv"
+  ! fm_harness_process_matches bun "bun /x/ompd --y" || fail "session-lock identity must not accept a bun-shim ompd"
+  ! fm_harness_process_matches bun "bun /x/comp --y" || fail "session-lock identity must not accept a bun-shim comp"
+  ! fm_harness_process_matches bun "bun run dev" || fail "session-lock identity must not accept an unrelated bun process"
+  ! fm_harness_process_matches bun "bun run dev --cwd /Users/x/omp" || fail "session-lock identity must not accept an omp path in a later bun argument"
+  ! fm_harness_process_matches bun "bun /x/ompd --root /y/omp" || fail "session-lock identity must not accept a decoy script with an omp later argument"
+  ! fm_harness_process_matches /home/ubuntu/bin/x "/home/ubuntu/bin/x /repo/omp --y" || fail "session-lock identity must not treat a path containing bun as the bun interpreter"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -102,7 +143,29 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name /opt/omp/bin/omp)" = agent ] || fail "tmux liveness must classify an omp path as an agent"
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
+  [ "$(fm_agent_process_classify bun '' 'bun /Users/tien/.bun/bin/omp --profile x')" = agent ] || fail "pane liveness must classify a bun-shim omp as an agent"
+  [ "$(fm_agent_process_classify /opt/bin/bun bun '/opt/bin/bun /x/bin/omp')" = agent ] || fail "pane liveness must classify a bun-shim omp reported by path as an agent"
+  [ "$(fm_agent_process_classify bun '' 'bun /x/ompd --root /y/omp')" != agent ] || fail "pane liveness must not classify a bun-shim ompd as an agent"
+  [ "$(fm_agent_process_classify bun '' 'bun run dev --cwd /Users/x/omp')" != agent ] || fail "pane liveness must not classify an omp path in a later bun argument as an agent"
+  [ "$(fm_agent_process_classify node '' 'node /x/bin/omp')" != agent ] || fail "pane liveness must not classify a non-bun interpreter running omp as an agent"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
+}
+
+# The bun-shim script-token matcher is a pure function on argv strings - no
+# `ps`, no live tree. `bun <...>/bin/omp` matches; ompd/comp and bare `bun`
+# never do.
+test_detection_bun_shim_script_token() {
+  fm_harness_bun_omp_args bun "bun /Users/tien/.bun/bin/omp --profile opencode-free --prewalk-into @dev" \
+    || fail "the script token must match a live bun-shim omp argv"
+  fm_harness_bun_omp_args bun "bun /x/omp" || fail "the script token must match a bare bun /x/omp argv"
+  ! fm_harness_bun_omp_args bun "bun /x/ompd --y" || fail "the script token must not match a bun-shim ompd"
+  ! fm_harness_bun_omp_args bun "bun /x/comp --y" || fail "the script token must not match a bun-shim comp"
+  ! fm_harness_bun_omp_args bun "bun run dev --cwd /Users/x/omp" || fail "the script token must not match an omp path in a later argument"
+  ! fm_harness_bun_omp_args bun "bun test /repo/omp --watch" || fail "the script token must not match an omp path in a later argument"
+  ! fm_harness_bun_omp_args bun "bun /x/ompd --root /y/omp" || fail "the script token must not match a decoy script with an omp later argument"
+  ! fm_harness_bun_omp_args bun "bun run dev" || fail "the script token must not match an unrelated bun process"
+  ! fm_harness_bun_omp_args node "node /x/omp --y" || fail "the script token must not match a non-bun interpreter"
+  pass "fm-harness: the bun-shim script token matches omp and only omp"
 }
 
 # --- 2. Launch ---------------------------------------------------------------
@@ -862,6 +925,8 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_bun_shim_script_token
+test_detection_bun_shim_process_tree
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
