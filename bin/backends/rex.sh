@@ -17,7 +17,8 @@
 # launcher session. Otherwise, and for a secondmate's own home, the tab goes
 # into ONE session per home labeled with the home tag
 # (bin/fm-backend-hometag-lib.sh), adopted when exactly one session carries
-# that label, created once when none does, and refused when several do. A
+# that label or the recorded per-home session id, created once when none
+# does, and refused when several do. A
 # created session's first window becomes the first task's tab, and cleanup
 # kills that per-home session once its last window closes. `rex window new`
 # rather than `rex run` opens the tab because `rex run` requires a command
@@ -318,14 +319,21 @@ fm_backend_rex_session_unlock() {
   fm_lock_release "$(fm_backend_rex_session_lock_path)" || true
 }
 
-# fm_backend_rex_home_sessions: ids of the live sessions labeled <label>, one
-# per line. Fails when the inventory cannot be read, so a caller about to
-# create a session never mistakes an unreadable list for "none".
+fm_backend_rex_home_session_path() {
+  printf '%s/.rex-home-session' "${STATE:-$FM_HOME/state}"
+}
+
+# fm_backend_rex_home_sessions: ids of the live sessions labeled <label> or
+# carrying the recorded per-home id, one per line. Fails when the inventory
+# cannot be read, so a caller about to create a session never mistakes an
+# unreadable list for "none".
 fm_backend_rex_home_sessions() {  # <label>
-  local list
+  local list recorded
   list=$(fm_backend_rex_cli ls --json 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e '.sessions | type == "array"' >/dev/null 2>&1 || return 1
-  printf '%s' "$list" | jq -r --arg want "$1" '.sessions[] | select(.label == $want) | .session_id'
+  recorded=$(cat "$(fm_backend_rex_home_session_path)" 2>/dev/null)
+  printf '%s' "$list" | jq -r --arg want "$1" --arg rec "$recorded" \
+    '.sessions[] | select(.label == $want or (.session_id == $rec and $rec != "")) | .session_id'
 }
 
 # fm_backend_rex_create_task: open the task's tab and print
@@ -382,10 +390,12 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
       1) sid=$sessions ;;
       *)
         fm_backend_rex_session_unlock
-        echo "error: $count rex sessions are labeled '$home_label'; refusing to guess which one belongs to this home" >&2
+        echo "error: $count rex sessions are labeled '$home_label' or recorded as this home's; refusing to guess which one belongs to this home" >&2
         return 1
         ;;
     esac
+    printf '%s\n' "$sid" >"$(fm_backend_rex_home_session_path)" 2>/dev/null \
+      || echo "warning: could not record Rex session $sid as this home's; a renamed session will not be reused or retired" >&2
   fi
   if [ -z "$bid" ]; then
     fm_backend_rex_open_tab_locked "$sid" "$label" "$cwd" "$mode" || {
@@ -947,18 +957,20 @@ fm_backend_rex_kill() {  # <target> [unused] [expected-label]
 }
 
 # fm_backend_rex_retire_session: kill a per-home session once it holds no
-# window. Only a session labeled with THIS home's label is ever killed, never
-# the launcher's own session, and an unreadable view skips the cleanup. Runs
-# under the session lock so a concurrent spawn cannot open a tab between the
-# empty check and the kill.
+# window. Only a session labeled with THIS home's label or recorded as its
+# per-home session is ever killed, never the launcher's own session, and an
+# unreadable view skips the cleanup. Runs under the session lock so a
+# concurrent spawn cannot open a tab between the empty check and the kill.
 fm_backend_rex_retire_session() {  # <session-id>
-  local sid=$1 view
+  local sid=$1 view recorded
   [ -n "$sid" ] || return 0
   [ "$sid" != "${REX_SESSION:-}" ] || return 0
   fm_backend_rex_session_lock || return 0
+  recorded=$(cat "$(fm_backend_rex_home_session_path)" 2>/dev/null)
   if view=$(fm_backend_rex_session_view "$sid") \
-    && printf '%s' "$view" | jq -e --arg want "$(fm_backend_rex_home_label)" \
-      '.label == $want and ((.windows // []) | type == "array" and length == 0)' >/dev/null 2>&1; then
+    && printf '%s' "$view" | jq -e --arg want "$(fm_backend_rex_home_label)" --arg rec "$recorded" \
+      '(.label == $want or (.session_id == $rec and $rec != ""))
+        and ((.windows // []) | type == "array" and length == 0)' >/dev/null 2>&1; then
     fm_backend_rex_cli kill "$sid" >/dev/null 2>&1 || true
   fi
   fm_backend_rex_session_unlock

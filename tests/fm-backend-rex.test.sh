@@ -70,7 +70,7 @@ has_block() {
 }
 cmd=${1:-}; shift
 sub=
-case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
+case "$cmd" in window|block|api|session) sub=${1:-}; shift ;; esac
 sid=; bid=; fmt=text; wlabel=; pos=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -117,6 +117,9 @@ case "$cmd:$sub" in
       '(.sessions[] | select(.session_id == $s) | .windows) += [{window_id: $w, label: $l,
         blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]'
     printf '{"window_id":"%s","block_ids":["%s"]}\n' "$w" "$b" ;;
+  session:rename)
+    has_session "$p0" || notfound "session"
+    save --arg s "$p0" --arg l "$p1" '(.sessions[] | select(.session_id == $s) | .label) = $l' ;;
   block:rename)
     has_block "$sid" "$p0" || notfound "block"
     save --arg s "$sid" --arg b "$p0" --arg l "$p1" \
@@ -705,6 +708,33 @@ test_kill_never_retires_a_foreign_session() {
   pass "fm_backend_kill rex: never kills a session this home does not own, even when it is empty"
 }
 
+test_renamed_per_home_session_is_reused_and_retired() {
+  local dir out sid1 sid2 sid3 bid1 bid2 bid3
+  dir=$(new_case renamed-home)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid1 _ bid1 <<<"$out"
+  fake_rex "$dir" session rename "$sid1" alpha-task-name
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp') || fail "create_task after a rename failed"
+  read -r sid2 _ bid2 <<<"$out"
+  assert_equals "$sid1" "$sid2" "a renamed per-home session must still be adopted"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "a rename must not cause a session per task"
+  fake_rex "$dir" session rename "$sid1" beta-task-name
+  fake_rex "$dir" new other-task-name --window keep --cwd /tmp --json >/dev/null
+  fake_rex "$dir" block close -s "$(state_json "$dir" '.sessions[1].session_id')" "$(state_json "$dir" '.sessions[1].windows[0].blocks[0].block_id')"
+  rex_env "$dir" "fm_backend_kill rex '${sid1#session:}:${bid1#block:}'" || fail "kill of the first task must succeed"
+  rex_env "$dir" "fm_backend_kill rex '${sid2#session:}:${bid2#block:}'" || fail "kill of the last task must succeed"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid1\")] | length")" \
+    "the emptied per-home session must be retired even after a rename"
+  assert_equals other-task-name "$(state_json "$dir" '[.sessions[].label] | join(" ")')" \
+    "an empty session this home did not create must survive"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-gamma /tmp') || fail "create_task after retirement failed"
+  read -r sid3 _ bid3 <<<"$out"
+  assert_not_equals "$sid1" "$sid3" "a retired per-home session must be replaced by a fresh one"
+  assert_equals "$(home_label "$dir")" "$(state_json "$dir" ".sessions[] | select(.session_id == \"$sid3\") | .label")" \
+    "the fresh per-home session must carry the home label"
+  [ -n "$bid3" ] || fail "the fresh tab must have a block"
+  pass "fm_backend_rex: a renamed per-home session is still adopted and retired once empty; foreign empty sessions survive"
+}
+
 test_kill_refuses_without_proof() {
   local dir out sid bid
   dir=$(new_case kill-noop)
@@ -896,6 +926,7 @@ test_current_path_follows_foreground
 test_send_literal_and_keys
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
+test_renamed_per_home_session_is_reused_and_retired
 test_kill_refuses_without_proof
 test_teardown_retires_the_secondmate_session
 test_absence_recheck
