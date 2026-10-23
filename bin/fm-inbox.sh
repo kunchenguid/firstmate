@@ -120,6 +120,8 @@ export PATH
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$SELF_DIR/fm-home-drift-lib.sh" ]; then . "$SELF_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 INBOX="$STATE/inbox"

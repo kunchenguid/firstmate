@@ -35,6 +35,8 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 
 `bin/fm-send.sh` requires `FM_HOME` to be set before resolving a target.
 Unlike most scripts, it does not use the general fallback, because a steer must not silently resolve against the wrong home.
+For the same reason, every `bin/fm-*.sh` entrypoint sources `bin/fm-home-drift-lib.sh` after resolving `FM_HOME` and warns on stderr when the resolved home differs from the firstmate checkout enclosing the caller's working directory - the signature of a sibling home's `FM_HOME` leaking into a shell where the cwd still looks right.
+A nonempty `FM_*_OVERRIDE` marks deliberate cross-home addressing and stays quiet.
 These variables override individual operational directories for tests and specialized harness setup:
 
 | Variable | Directory selected |

@@ -84,6 +84,8 @@ if [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-secondmate-restart refuses to resolve second mates without an explicit firstmate home" >&2
   exit 1
 fi
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$SCRIPT_DIR/fm-home-drift-lib.sh" ]; then . "$SCRIPT_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 [ -d "$FM_HOME" ] || { echo "error: FM_HOME '$FM_HOME' is not a directory" >&2; exit 1; }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 [ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing; fm-secondmate-restart cannot resolve second mates for FM_HOME '$FM_HOME'" >&2; exit 1; }
