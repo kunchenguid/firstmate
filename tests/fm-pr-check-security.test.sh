@@ -2761,7 +2761,7 @@ test_watcher_surfaces_guarded_auto_teardown_refusal() {
 }
 
 test_merged_notice_auto_teardown_is_done_only_and_guarded() {
-  local dir state url teardown_args
+  local dir state url teardown_args notice
   url=https://github.com/o/r/pull/1
 
   fm_merge_outcome_current_state() {
@@ -2778,6 +2778,10 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
         ;;
       refused)
         printf '%s\n' 'REFUSED: landed-work safety check declined' >&2
+        return 1
+        ;;
+      refusing)
+        printf '%s\n' "error: task task-a's record has no spawn_gen that identifies one exact incarnation; refusing automatic teardown - relaunch the task" >&2
         return 1
         ;;
     esac
@@ -2805,6 +2809,23 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
     *'lane automatically cleaned up'*) ;;
     *) fail "successful auto-teardown was omitted from the merge notification" ;;
+  esac
+
+  dir=$(make_case merged-auto-teardown-slot-lost)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_TEARDOWN_RESULT=slot-lost \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = cleaned ] \
+    || fail "a cleanup that lost its returned pool slot was not reported as cleaned"
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'lane automatically cleaned up; cleanup completed, but the returned worktree pool slot needs repair'*) ;;
+    *) fail "the pool-slot repair outcome was not added to the merge notification: $notice" ;;
   esac
 
   dir=$(make_case merged-auto-teardown-inflight)
@@ -2844,6 +2865,24 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     *) fail "the cleanup refusal reason was not added to the surfaced notice" ;;
   esac
 
+  dir=$(make_case merged-auto-teardown-refusing-record)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_TEARDOWN_RESULT=refusing \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = refused ] \
+    || fail "a no-change teardown refusal was not reported as refused"
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'; automatic cleanup refused: error: task task-a'*) ;;
+    *) fail "a refusal worded 'refusing' was reported as an incomplete cleanup: $notice" ;;
+  esac
+  [ -f "$state/task-a.meta" ] || fail "a no-change teardown refusal removed the task record"
+
   dir=$(make_case merged-auto-teardown-no-deliverable)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -2867,6 +2906,23 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
     || fail "a lane in a secondmate home was auto-torn down"
   [ ! -s "$dir/teardown.log" ] || fail "a secondmate home's lane reached teardown"
+
+  dir=$(make_case merged-auto-teardown-already-recorded)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=true
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    fm_merge_outcome_cleanup_and_publish "$dir/home" "$state" task-a "$url"
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  [ -e "$state/task-a.meta" ] \
+    || fail "a merge whose outcome another owner already recorded was cleaned up a second time"
+  [ ! -s "$dir/teardown.log" ] \
+    || fail "a merge whose outcome another owner already recorded ran a second teardown"
+
+  unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown
   pass "merged notices auto-clean only finished direct reports with recorded deliverables, leave no retired task state, and surface guarded refusals without force"
 }
 
