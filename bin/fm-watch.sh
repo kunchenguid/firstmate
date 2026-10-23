@@ -2538,7 +2538,7 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
-  local win=$1 h=$2 dialog=${3-} key task last declared=1 bounded=1 throttled=1 until now reason=''
+  local win=$1 h=$2 dialog=${3-} key task last declared=1 bounded=1 throttled=1 until now mtime reason=''
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(status_declared_wait_line "$STATE/$task.status")
@@ -2549,8 +2549,14 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
+      mtime=$(stat_mtime "$STATE/$task.status")
+      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
       if [ "$now" -lt "$until" ]; then
-        throttled=0
+        if [ $(( now - mtime )) -lt "$PAUSE_RESURFACE_SECS" ]; then
+          throttled=0
+        else
+          stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+        fi
       else
         STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
         stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
