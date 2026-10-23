@@ -1434,6 +1434,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "when": "<natural-language condition describing a kind of task>",
       "approval": "captain",
       "min_confidence": 0.85,
+      "until": "<optional ISO 8601 UTC instant, YYYY-MM-DDTHH:MM:SSZ>",
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
@@ -1459,10 +1460,13 @@ This section is the single owner of the canonical schema and its per-field seman
 
 **Fields applied only by typed resolution**
 
-Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `min_confidence`, `until`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 
 - `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
+
+`until` is an ISO 8601 UTC instant (`YYYY-MM-DDTHH:MM:SSZ`).
+The resolver drops a rule once that instant has passed, before the model sees the option list, so a date-gated rule expires on its own instead of depending on the model reading dates out of `when` text; a malformed `until` is an actionable configuration error.
 
 `min_confidence` is a number from 0 through 1.
 The rule's own probability in the answer must reach it, replacing the resolver's global 0.6 floor on the answer's confidence.
@@ -1585,7 +1589,7 @@ After the answer, code applies all remaining checks and ranking:
 
 - The confidence floor and the matched rule's `approval` and `floor`.
 - Each candidate's `provider` and `floor`.
-- Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
+- Every applicable account-wide and model/product row from one `quota-axi --json` snapshot, read with bounded reuse (`--max-age 2m`) after a best-effort bounded refresh of each Pi provider session the live rules name, since Pi renews a token only on use.
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
@@ -1605,6 +1609,9 @@ When the picked rule declares its own floor but its probability falls below it, 
 
 No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
 
+An answer below the global 0.6 floor with no declared floor on the picked rule still resolves: the tool takes the most probable option that clears its own declared floor, resolves its profiles, and marks the result note low confidence.
+A top-probability tie stays `ambiguous`, and an approval-gated rule still escalates, so the hand pick remains only where the captain reserved it.
+
 **Candidate eligibility and evidence**
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
@@ -1615,8 +1622,8 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 | Result | Meaning |
 | --- | --- |
-| `clear` | A `profile:` line ready for `fm-spawn.sh`. |
-| `ambiguous` | Confidence below the floor with no runner-up taken. |
+| `clear` | A `profile:` line ready for `fm-spawn.sh`; a low-confidence note marks an answer that resolved below the global floor. |
+| `ambiguous` | A rule-declared `min_confidence` missed with no qualifying runner-up, a runner-up tie, or a below-floor answer whose top options tie. |
 | `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
 | `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
 
@@ -1631,7 +1638,7 @@ Every result above exits 0.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 
-Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
+Firstmate passes its profile line unchanged, changing it only for a current captain instruction or a hard blocker such as a failed spawn or a login refusal and recording that reason in the task's dispatch note; every non-clear result returns to the full existing intake.
 
 **Key handling and provider settings**
 
