@@ -1752,6 +1752,93 @@ test_working_note_not_working_surfaced() {
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
 
+wait_file() {  # <file> [limit-ticks]: 0 once <file> exists
+  local f=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$f" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Routine-signal batching (FM_SIGNAL_BATCH_SECS / config/signal-batch-secs): a
+# surfaced signal with no captain-relevant event is queued at once but its host
+# wake waits for the batch window, while done, blocked, failed and needs-decision
+# still wake at once and carry the held rows with them.
+test_routine_signal_batched_until_window() {
+  local dir state fakebin cfg out first other pid
+  ( unset FM_SIGNAL_BATCH_SECS
+    cfg=$(mktemp -d "$TMP_ROOT/batch-cfg.XXXXXX")
+    [ "$(fm_signal_batch_secs "$cfg")" = 0 ] || fail "absent config did not keep batching off"
+    printf '180\n' > "$cfg/signal-batch-secs"
+    [ "$(fm_signal_batch_secs "$cfg")" = 180 ] || fail "config/signal-batch-secs was not read"
+    [ "$(FM_SIGNAL_BATCH_SECS=0 fm_signal_batch_secs "$cfg")" = 0 ] || fail "the environment did not win"
+  ) || return 1
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
+
+  # 1. A routine note is queued but held; the host wakes once the window passes.
+  dir=$(make_case batch-window); state="$dir/state"; fakebin="$dir/fakebin"
+  cfg="$dir/config"; mkdir -p "$cfg"; printf '300\n' > "$cfg/signal-batch-secs"
+  out="$dir/watch.out"; first="$state/first.status"
+  printf 'working: compiling step 2\n' > "$first"
+  FM_CONFIG_OVERRIDE="$cfg" watch_bg "$state" "$fakebin" "$out" env -u FM_SIGNAL_BATCH_SECS
+  pid=$!
+  wait_file "$state/.signal-batch" || { reap "$pid"; fail "a routine signal was not held for the batch window: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || fail "a held routine signal woke the host before its window: $(cat "$out")"
+  wait_poll_cycle "$state" "$pid" || fail "a held routine signal woke the host before its window: $(cat "$out")"
+  [ ! -s "$out" ] || { reap "$pid"; fail "a held routine signal printed a wake: $(cat "$out")"; }
+  grep -F "$(printf 'first.status\tsignal: %s' "$first")" "$state/.signal-batch" >/dev/null \
+    || { reap "$pid"; fail "the held batch did not keep its row: $(cat "$state/.signal-batch")"; }
+  sed "1s/.*/$(( $(date +%s) - 301 ))/" "$state/.signal-batch" > "$state/.signal-batch.new"
+  mv -f "$state/.signal-batch.new" "$state/.signal-batch"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a held routine signal did not wake after its window"; }
+  grep -F "signal: $first" "$out" >/dev/null || fail "the batch wake lost its reason: $(cat "$out")"
+  grep -F "$(printf 'signal\tfirst.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+    || fail "the fired batch did not queue its row"
+  [ ! -e "$state/.signal-batch" ] || fail "a fired batch left its marker"
+
+  # 2. A done: event wakes at once and clears the held batch with it.
+  dir=$(make_case batch-urgent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; first="$state/first.status"; other="$state/other.status"
+  printf 'working: compiling step 2\n' > "$first"
+  watch_bg "$state" "$fakebin" "$out" env FM_SIGNAL_BATCH_SECS=300
+  pid=$!
+  wait_file "$state/.signal-batch" || { reap "$pid"; fail "the routine signal was not held"; }
+  printf 'done: shipped\n' > "$other"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a done: event waited for the batch window"; }
+  grep -F "signal: $other" "$out" >/dev/null || fail "the done: wake lost its reason: $(cat "$out")"
+  grep -F "$(printf 'signal\tfirst.status\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the held routine row was not left for the same drain"
+  [ ! -e "$state/.signal-batch" ] || fail "an urgent wake left the held batch marker"
+
+  # 3. A batch still held when batching is turned off fires at once.
+  dir=$(make_case batch-off); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; first="$state/first.status"
+  printf '%s\nsignal: %s\nfirst.status\tsignal: %s\n' "$(date +%s)" "$first" "$first" > "$state/.signal-batch"
+  watch_bg "$state" "$fakebin" "$out" env FM_SIGNAL_BATCH_SECS=0
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a held batch did not fire with batching off"; }
+  grep -F "signal: $first" "$out" >/dev/null || fail "the held batch fired with the wrong reason: $(cat "$out")"
+  grep -F "$(printf 'signal\tfirst.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+    || fail "the held batch row was not queued"
+
+  # 4. Any other wake, here an away-mode heartbeat, carries a held batch into its drain.
+  dir=$(make_case batch-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; first="$state/first.status"
+  : > "$state/.afk"
+  printf '%s\nsignal: %s\nfirst.status\tsignal: %s\n' "$(date +%s)" "$first" "$first" > "$state/.signal-batch"
+  watch_bg "$state" "$fakebin" "$out" env FM_SIGNAL_BATCH_SECS=300 FM_HEARTBEAT=2
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the heartbeat did not wake"; }
+  grep -F "heartbeat" "$out" >/dev/null || fail "the wake was not the heartbeat: $(cat "$out")"
+  grep -F "$(printf 'signal\tfirst.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+    || fail "the heartbeat wake left the held batch row out of its drain"
+  [ ! -e "$state/.signal-batch" ] || fail "the heartbeat wake left the held batch marker"
+  unset FM_FAKE_CREW_STATE
+  pass "routine signals wait for the batch window, done: wakes at once with them, a held batch survives turning batching off, and any wake carries a held batch"
+}
+
 test_secondmate_status_note_surfaced_despite_busy_agent() {
   local dir state fakebin out drain_out pid
   dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2486,6 +2573,65 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# --- the wedge threshold from config/stale-escalate-secs ---------------------
+# A home sets the threshold durably without an environment variable; a valid
+# FM_STALE_ESCALATE_SECS still wins, and an unusable file keeps the default.
+test_stale_escalate_secs_from_home_config() {
+  local dir state fakebin cfg capture_file window key pid round expect out envset
+  ( unset FM_STALE_ESCALATE_SECS
+    cfg=$(mktemp -d "$TMP_ROOT/stale-cfg.XXXXXX")
+    [ "$(fm_stale_escalate_secs "$cfg")" = 240 ] || fail "absent config did not keep the 240s default"
+    printf '900\n' > "$cfg/stale-escalate-secs"
+    [ "$(fm_stale_escalate_secs "$cfg")" = 900 ] || fail "config/stale-escalate-secs was not read"
+    printf ' 600 \n' > "$cfg/stale-escalate-secs"
+    [ "$(fm_stale_escalate_secs "$cfg")" = 600 ] || fail "surrounding whitespace was not tolerated"
+    printf '15m\n' > "$cfg/stale-escalate-secs"
+    [ "$(fm_stale_escalate_secs "$cfg")" = 240 ] || fail "a non-numeric config value did not fall back"
+    printf '900' > "$cfg/stale-escalate-secs"
+    [ "$(fm_stale_escalate_secs "$cfg")" = 900 ] || fail "a value without a trailing newline was not read"
+    [ "$(FM_STALE_ESCALATE_SECS=30 fm_stale_escalate_secs "$cfg")" = 30 ] || fail "the environment did not win"
+    [ "$(FM_STALE_ESCALATE_SECS=soon fm_stale_escalate_secs "$cfg")" = 900 ] || fail "an invalid env value was not ignored"
+  ) || return 1
+
+  # Behavior: the same provably-working pane idle 500s escalates or absorbs
+  # according to the home file, and the environment overrides the file.
+  for round in 'file-999:absorb' 'file-240:escalate' 'env-999-over-file-240:absorb'; do
+    expect=${round#*:}; round=${round%%:*}
+    dir=$(make_case "stale-cfg-$round"); state="$dir/state"; fakebin="$dir/fakebin"
+    cfg="$dir/config"; mkdir -p "$cfg"; out="$dir/watch.out"; capture_file="$dir/pane.txt"
+    window="test:fm-cfgquiet"; key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'idle building output' > "$capture_file"
+    printf 'window=%s\nkind=ship\n' "$window" > "$state/cfgquiet.meta"
+    printf 'working: still compiling\n' > "$state/cfgquiet.status"
+    printf '%s' "$(seen_sig "$state/cfgquiet.status")" > "$state/.seen-cfgquiet_status"
+    printf '%s' "$(hash_text "idle building output")" > "$state/.hash-$key"
+    printf '%s' "$(hash_text "idle building output")" > "$state/.stale-$key"
+    printf '1\n' > "$state/.count-$key"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    case "$round" in
+      file-999) printf '999\n' > "$cfg/stale-escalate-secs" ;;
+      *) printf '240\n' > "$cfg/stale-escalate-secs" ;;
+    esac
+    envset='-u FM_STALE_ESCALATE_SECS'
+    [ "$round" != env-999-over-file-240 ] || envset='FM_STALE_ESCALATE_SECS=999'
+    # shellcheck disable=SC2086 # envset is one deliberate env(1) argument list.
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$cfg" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' \
+      watch_bg "$state" "$fakebin" "$out" env $envset
+    pid=$!
+    if [ "$expect" = absorb ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "[$round] escalated below the configured threshold: $(cat "$out")"; }
+      [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "[$round] queued a wake below the configured threshold"; }
+      reap "$pid"
+      ack_stopped_cycle "$state" || fail "[$round] could not acknowledge the intentional stop"
+    else
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "[$round] did not escalate past the configured threshold"; }
+      grep -F "possible wedge" "$out" >/dev/null || fail "[$round] escalation did not flag a possible wedge: $(cat "$out")"
+    fi
+  done
+  pass "config/stale-escalate-secs sets the wedge threshold, the environment wins, and bad values keep the default"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -7358,6 +7504,7 @@ test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
+test_routine_signal_batched_until_window
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_routine_progress_absorbed_then_note_surfaced
 test_secondmate_buried_block_wakes_despite_busy_agent
@@ -7407,6 +7554,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
+test_stale_escalate_secs_from_home_config
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

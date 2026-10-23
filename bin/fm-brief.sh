@@ -470,7 +470,8 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 # How a crewmate or scout waits. Every model turn resends the whole context, so
 # a wait must cost no turns: a decision wait ends the turn, and an external
 # wait sleeps in one bounded blocking shell command sized to the harness.
-# Emitted only when config/wait-no-turns is present.
+# Emitted only when config/wait-no-turns is present; without it the default
+# BACKGROUND_WAIT_SECTION below is emitted instead.
 IFS= read -r -d '' WAIT_SECTION <<'EOF' || true
 # Waiting
 Every turn you take resends your whole context, so a wait must cost no turns.
@@ -485,7 +486,22 @@ The one exception is `respond`: it sent its answer before it began waiting, so r
 A wait your shell can watch this way needs no `paused:` line, except your own pipeline run, a long foreground command, or your own validation round, which you declare once just before its blocking hold: append `paused:` once just before its first blocking command, then stay in the command, and never append it again as you reissue that command.
 EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
-WAIT_BLOCK=
+# The default wait: one background command, a declared pause with an ETA so the
+# idle pane is not taken for a wedge, no polling, and one completion wake; plus
+# a resume note firstmate can hand to `fm-control.sh relaunch --note-file`.
+IFS= read -r -d '' BACKGROUND_WAIT_SECTION <<EOF || true
+# Waiting
+Every turn you take resends your whole context, so a wait must cost one turn, not one per check.
+Run any gate, merge-train, qa, or no-mistakes wait as ONE background command that exits when the wait ends.
+Just before you end your turn, append \`$PAUSED_VERB [at=<epoch>]: {what you wait for} until <YYYY-MM-DDTHH:MMZ>\` with your best ETA in UTC, so firstmate does not take your idle pane for a wedge.
+Never poll the wait: no Monitor loops, no \`sleep\` followed by a check, and no status reads in between.
+Then end your turn; the command's completion wakes you once.
+If your harness does not wake you when a background command finishes, wait in one blocking shell command instead.
+After you push a PR or finish a phase, and before a long wait, write a short resume note to \`$DATA/$ID/resume.md\`: what is done, what is next, and the exact commands to continue.
+Firstmate can then pass it to \`fm-control.sh $ID relaunch --note-file\` and continue the task in a fresh session instead of carrying your large context into the wait.
+EOF
+BACKGROUND_WAIT_SECTION=${BACKGROUND_WAIT_SECTION%$'\n'}
+WAIT_BLOCK="$BACKGROUND_WAIT_SECTION"$'\n\n'
 if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi

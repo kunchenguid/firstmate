@@ -372,6 +372,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 **Conversation and input**
 
 - The conversation starts with `--session-id` and continues with `--resume`.
+- A configured effort is passed as `--effort` on every turn; Claude Code 2.1.309 accepts `low` there and only warns on an unknown value, so the home's engine line is validated before the flag is passed.
 - The prompt is the first argument and stdin is `/dev/null`, because an open stdin costs a three-second wait.
 - The engine runs from the tracked code root.
   So its session files land in Claude's own project store for that directory and appear in that directory's resume list.

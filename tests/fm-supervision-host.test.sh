@@ -2289,6 +2289,7 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   assert_re '^arg=--safe-mode$' "$first" "the engine must load none of the home's hooks"
   assert_re '^arg=dontAsk$' "$first" "the engine must never prompt"
   assert_re '^arg=sonnet$' "$first" "the engine must default to its default model"
+  assert_no_re '^arg=--effort$' "$first" "an engine line without an effort must leave the engine's own default"
   assert_re '^arg=--session-id$' "$first" "the first turn must open a new conversation"
   assert_re '^POSTURE: AWAY\.' "$first" "the wake must carry the away tail"
   assert_grep 'keep the export worker on low effort' "$home/state/.host-mirror.jsonl" "fixture: the captain's dialog was not mirrored"
@@ -3118,6 +3119,34 @@ test_unverified_engine_hands_every_away_wake_to_main() {
   pass "host: a home naming an unverified engine hands every away wake to main with the reason"
 }
 
+test_engine_line_effort_reaches_every_turn() {
+  local home first pid watcher
+  home=$(make_home engine-effort away 'claude sonnet low')
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "effort: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "effort: the wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  first="$home/engine-call.1"
+  assert_re '^arg=sonnet$' "$first" "the engine line's model must reach the engine"
+  grep -x -A1 'arg=--effort' "$first" | grep -qx 'arg=low' \
+    || fail "the engine line's effort must reach the engine as --effort low: $(cat "$first")"
+  pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM "$pid"
+  wait_until 200 host_exited "$home" || fail "effort: the host did not stop on TERM"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "effort: a stopped host left its watcher running"
+
+  home=$(make_home engine-bad-effort away 'claude sonnet turbo')
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "bad effort: the host never started a watcher cycle"
+  append_status "$home" 'anything'
+  wait_until 200 host_exited "$home" || fail "bad effort: the wake did not reach main"
+  assert_re "^supervision-host: no supervision engine runs here: config/supervision-host names an effort 'turbo' that the claude engine does not take" \
+    "$home/host.out" "an effort the engine does not take must be named on the wake it hands to main"
+  ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "bad effort: an engine ran"
+  pass "host: an engine line's effort reaches every turn, and an effort the engine does not take hands wakes to main"
+}
+
 test_host_outside_the_lock_owner_stands_down() {
   local home out rc other
   home=$(make_home not-owner attended)
@@ -3282,6 +3311,7 @@ test_park_limit_lets_a_turn_outlive_the_boundary
 test_first_cycle_status_streams_and_owner_options_reach_it
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
+test_engine_line_effort_reaches_every_turn
 test_host_outside_the_lock_owner_stands_down
 test_tagged_lock_holder_reaches_the_engine_whole
 test_superseded_host_leaves_the_owner_untouched

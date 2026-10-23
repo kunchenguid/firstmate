@@ -356,7 +356,13 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+STALE_ESCALATE_SECS=$(fm_stale_escalate_secs "$CONFIG")  # idle secs before a provably-working stale escalates as a possible wedge (fm-classify-lib.sh owns the env, config and default)
+# Routine-signal batching (fm-classify-lib.sh owns the env, config and 0 default).
+# A surfaced signal batch with no captain-relevant event is held out of the
+# queue for up to SIGNAL_BATCH_SECS, or until any other wake, so several routine
+# turn-ends cost one host turn; signal_batch_hold below owns the marker.
+SIGNAL_BATCH_SECS=$(fm_signal_batch_secs "$CONFIG")
+SIGNAL_BATCH="$STATE/.signal-batch"
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -3006,6 +3012,69 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# Routine-signal batch marker: line 1 is the epoch the first held batch was
+# classified, line 2 the wake reason covering every held file, and each later
+# line one held queue row (<key> TAB <payload>). Held rows stay out of the
+# durable queue until the batch fires, because a queued row that no wake
+# delivers is a watcher-downtime episode the recovery marker resurfaces at once.
+# The marker lives in state/, so a successor watcher fires a batch its
+# predecessor held; signal_batch_flush moves the rows into the queue.
+signal_batch_hold() {  # <space-separated files> <rows>
+  local since='' held='' rows='' line f merged
+  if [ -f "$SIGNAL_BATCH" ]; then
+    { IFS= read -r since; IFS= read -r held
+      while IFS= read -r line; do rows="${rows}${line}"$'\n'; done
+    } < "$SIGNAL_BATCH" 2>/dev/null || true
+  fi
+  case "$since" in ''|*[!0-9]*) since=$(date +%s) ;; esac
+  merged=${held#signal:}
+  # shellcheck disable=SC2086  # $1 is a space-separated status-path list (ids carry no spaces)
+  for f in $1; do
+    case " $merged " in *" $f "*) ;; *) merged="$merged $f" ;; esac
+  done
+  printf '%s\nsignal:%s\n%s%s' "$since" "$merged" "$rows" "$2" > "$SIGNAL_BATCH.tmp" \
+    && mv -f "$SIGNAL_BATCH.tmp" "$SIGNAL_BATCH"
+}
+
+# Queue every held row and drop the marker. Prints the held wake reason, empty
+# when nothing was held. A failed append keeps only the rows not yet queued, so
+# a successor watcher never queues a row twice. Every wake() runs it first, so
+# any wake carries the held rows into the same drain.
+signal_batch_flush() {
+  local since held key payload rest='' failed=0
+  [ -f "$SIGNAL_BATCH" ] || return 0
+  {
+    IFS= read -r since; IFS= read -r held
+    while IFS=$(printf '\t') read -r key payload; do
+      [ -n "$key" ] || continue
+      if [ "$failed" -eq 0 ] && fm_wake_append signal "$key" "${payload:-$held}"; then
+        continue
+      fi
+      failed=1
+      rest="${rest}${key}"$'\t'"${payload}"$'\n'
+    done
+  } < "$SIGNAL_BATCH" || return 1
+  if [ "$failed" -ne 0 ]; then
+    printf '%s\n%s\n%s' "$since" "$held" "$rest" > "$SIGNAL_BATCH.tmp" \
+      && mv -f "$SIGNAL_BATCH.tmp" "$SIGNAL_BATCH"
+    return 1
+  fi
+  rm -f "$SIGNAL_BATCH"
+  case "$held" in signal:?*) printf '%s\n' "$held" ;; *) printf 'signal: held routine signals\n' ;; esac
+}
+
+# 0 when a held batch should wake the host now: its window has passed, its
+# marker is unreadable, or batching was turned off with a batch still held.
+signal_batch_due() {
+  local since=''
+  [ -f "$SIGNAL_BATCH" ] || return 1
+  IFS= read -r since < "$SIGNAL_BATCH" 2>/dev/null || true
+  case "$since" in ''|*[!0-9]*) return 0 ;; esac
+  [ $(( $(date +%s) - since )) -ge "$SIGNAL_BATCH_SECS" ]
+}
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WAKE_PRE_OUTPUT_ACTION=signal_batch_flush
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -3749,14 +3818,30 @@ EOF
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      # A routine batch (no captain-relevant event, no needs-decision) is held for
+      # the batch window; done, blocked, failed and needs-decision wake at once
+      # and carry any held rows into the same drain.
+      signal_hold=0; held_rows=''
+      if [ "$SIGNAL_BATCH_SECS" -gt 0 ] && [ "$signal_actionable" -ne 0 ] && ! afk_present; then
+        signal_hold=1
+      else
+        signal_batch_flush >/dev/null || exit 1
+      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        if [ "$signal_hold" -eq 1 ]; then
+          held_rows="${held_rows}$(basename "$f")"$'\t'"${file_reason}"$'\n'
+        else
+          fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        fi
       done <<EOF
 $pending
 EOF
+      if [ "$signal_hold" -eq 1 ]; then
+        signal_batch_hold "$files" "$held_rows" || exit 1
+      fi
       # The wake signature advances for every file in this batch, including one
       # whose span could not be classified: it has now been reported, and this is
       # what bounds an unreadable log to one report per distinct file state. Only
@@ -3781,7 +3866,11 @@ EOF
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
-      wake "$reason"
+      if [ "$signal_hold" -eq 1 ]; then
+        triage_log "held routine $reason for the ${SIGNAL_BATCH_SECS}s signal batch window"
+      else
+        wake "$reason"
+      fi
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
@@ -3808,6 +3897,10 @@ EOF
       fi
       triage_log "absorbed benign $reason"
     fi
+  fi
+  if signal_batch_due; then
+    batch_reason=$(signal_batch_flush) || exit 1
+    wake "$batch_reason"
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy

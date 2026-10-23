@@ -1230,6 +1230,7 @@ test_workers_wait_without_spending_turns() {
   assert_grep "issue the same foreground call again" "$brief" \
     "the no-mistakes DOD must reattach with the same foreground call"
   assert_no_grep "background the drive call" "$brief" "the no-mistakes DOD still backgrounds the drive call"
+  assert_no_grep "Never poll the wait: no Monitor loops" "$brief" "the flag kept the default background wait"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wait-sm --secondmate --no-projects >/dev/null 2>&1 \
@@ -1241,9 +1242,11 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
-# Without config/wait-no-turns the scaffold matches the pre-flag brief and drive text.
-test_wait_no_turns_absent_keeps_the_previous_brief() {
-  local home brief
+# Without config/wait-no-turns the scaffold keeps the backgrounded drive text and
+# carries the default background wait: one background command, a declared pause
+# with an ETA, no polling, one completion wake, and a resume note.
+test_wait_no_turns_absent_keeps_the_background_wait() {
+  local home brief id
   home="$TMP_ROOT/wait-off"
   mkdir -p "$home/data"
   [ ! -e "$home/config/wait-no-turns" ]
@@ -1256,7 +1259,20 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   assert_grep "background the drive call" "$brief" "an absent flag replaced the backgrounded drive text"
   assert_no_grep "issue the same foreground call again" "$brief" \
     "an absent flag still asked for the foreground reattach"
-  pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wait-off-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  for id in brief-wait-off brief-wait-off-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "no-mistakes wait as ONE background command that exits when the wait ends" "$brief" \
+      "$id: a long wait must run as one background command"
+    assert_grep "append \`paused [at=<epoch>]: {what you wait for} until <YYYY-MM-DDTHH:MMZ>\`" "$brief" \
+      "$id: a background wait must declare a pause with an ETA"
+    assert_grep "Never poll the wait: no Monitor loops" "$brief" "$id: polling a background wait is not forbidden"
+    assert_grep "the command's completion wakes you once" "$brief" "$id: the wait must end the turn until its completion"
+    assert_grep "write a short resume note to \`$home/data/$id/resume.md\`" "$brief" \
+      "$id: a phase end must leave a resume note for a fresh session"
+  done
+  pass "fm-brief: without config/wait-no-turns the drive text stays backgrounded and the brief carries the background wait"
 }
 
 test_worker_role_scope() {
@@ -1666,7 +1682,7 @@ test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
-test_wait_no_turns_absent_keeps_the_previous_brief
+test_wait_no_turns_absent_keeps_the_background_wait
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm

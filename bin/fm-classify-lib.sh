@@ -123,6 +123,42 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
 
+# fm_home_secs_setting <env-value> <config-file> <default>: the one resolution
+# rule for a home-settable seconds knob. A non-negative integer env value wins,
+# then the first line of the home's config file, then the shared default. Unlike
+# config/watch.env, a config file also reaches the watchers the Codex checkpoint
+# route and the away-mode daemon start directly, and the daemon itself. Any other
+# value is ignored rather than reaching the arithmetic.
+fm_home_secs_setting() {  # <env-value> <config-file> <default> -> seconds on stdout
+  local v=$1 f=$2
+  case "$v" in ''|*[!0-9]*) v='' ;; esac
+  if [ -z "$v" ] && [ -f "$f" ]; then
+    IFS= read -r v < "$f" 2>/dev/null || true
+    v=${v//[[:space:]]/}
+    case "$v" in ''|*[!0-9]*) v='' ;; esac
+  fi
+  printf '%s\n' "${v:-$3}"
+}
+
+# The wedge threshold: idle seconds before a provably-working stale pane
+# escalates as a possible wedge (FM_STALE_ESCALATE_SECS, then
+# config/stale-escalate-secs). The watcher and the daemon both resolve it here.
+FM_STALE_ESCALATE_SECS_DEFAULT=240
+fm_stale_escalate_secs() {  # <config-dir> -> seconds on stdout
+  fm_home_secs_setting "${FM_STALE_ESCALATE_SECS-}" "$1/stale-escalate-secs" \
+    "$FM_STALE_ESCALATE_SECS_DEFAULT"
+}
+
+# The routine-signal batch window: seconds the watcher holds a surfaced signal
+# that carries no captain-relevant event before it wakes the supervision host
+# (FM_SIGNAL_BATCH_SECS, then config/signal-batch-secs). 0, the shared default,
+# wakes at once; bin/fm-watch.sh owns the batching itself.
+FM_SIGNAL_BATCH_SECS_DEFAULT=0
+fm_signal_batch_secs() {  # <config-dir> -> seconds on stdout
+  fm_home_secs_setting "${FM_SIGNAL_BATCH_SECS-}" "$1/signal-batch-secs" \
+    "$FM_SIGNAL_BATCH_SECS_DEFAULT"
+}
+
 # fm_utc_iso_to_epoch <YYYY-MM-DDTHH:MM[:SS]Z>: the one portable UTC ISO 8601
 # reader shared by the declared-wait vocabulary and the away-posture record
 # (bin/fm-afk-contract.sh). Prints epoch seconds; returns 1 on any other shape

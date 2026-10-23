@@ -83,6 +83,13 @@ fm_supervision_engine_verified() {  # <engine>
   return 1
 }
 
+fm_supervision_engine_effort_valid() {  # <engine> <effort>
+  case "$1:$2" in
+    claude:low | claude:medium | claude:high | claude:xhigh | claude:max) return 0 ;;
+  esac
+  return 1
+}
+
 fm_supervision_engine_default_model() {  # <engine>
   case "$1" in
     claude) printf 'sonnet\n' ;;
@@ -93,25 +100,28 @@ fm_supervision_engine_default_model() {  # <engine>
 # fm_supervision_host_config <config-dir> <primary-harness>
 # Returns 1 when the home does not run the host (fm_supervision_host_enabled).
 # Otherwise returns 0 and sets
-# FM_SUPERVISION_ENGINE and FM_SUPERVISION_ENGINE_MODEL for a usable engine, or
-# leaves both empty and sets FM_SUPERVISION_ENGINE_PROBLEM to one plain
-# sentence naming why this home has no engine.
+# FM_SUPERVISION_ENGINE, FM_SUPERVISION_ENGINE_MODEL, and
+# FM_SUPERVISION_ENGINE_EFFORT (empty for the engine's own default) for a
+# usable engine, or leaves all three empty and sets
+# FM_SUPERVISION_ENGINE_PROBLEM to one plain sentence naming why this home has
+# no engine.
 # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_supervision_host_config() {
-  local config=$1 primary=${2:-} line engine model extra
+  local config=$1 primary=${2:-} line engine model effort extra
   FM_SUPERVISION_ENGINE=''
   FM_SUPERVISION_ENGINE_MODEL=''
+  FM_SUPERVISION_ENGINE_EFFORT=''
   FM_SUPERVISION_ENGINE_PROBLEM=''
   fm_supervision_host_enabled "$config" "$primary" || return 1
   line=
   [ ! -f "$config/supervision-host" ] \
     || IFS= read -r line < "$config/supervision-host" 2>/dev/null || true
-  engine='' model='' extra=''
-  read -r engine model extra <<EOF
+  engine='' model='' effort='' extra=''
+  read -r engine model effort extra <<EOF
 $line
 EOF
   if [ -n "$extra" ]; then
-    FM_SUPERVISION_ENGINE_PROBLEM="config/supervision-host holds more than '<engine> [<model>]'"
+    FM_SUPERVISION_ENGINE_PROBLEM="config/supervision-host holds more than '<engine> [<model> [<effort>]]'"
     return 0
   fi
   case "$engine" in
@@ -136,8 +146,13 @@ EOF
       return 0
       ;;
   esac
+  if [ -n "$effort" ] && ! fm_supervision_engine_effort_valid "$engine" "$effort"; then
+    FM_SUPERVISION_ENGINE_PROBLEM="config/supervision-host names an effort '$effort' that the $engine engine does not take"
+    return 0
+  fi
   FM_SUPERVISION_ENGINE=$engine
   FM_SUPERVISION_ENGINE_MODEL=$model
+  FM_SUPERVISION_ENGINE_EFFORT=$effort
   return 0
 }
 
@@ -335,7 +350,9 @@ _fm_engine_reap() {
 # run). <result-file> receives the engine's machine-readable result and
 # <error-file> its diagnostics. While the turn runs, <pid-file> (when given)
 # holds the bounded process's pid and identity, so a restarted host can stop
-# an engine its crashed predecessor left running.
+# an engine its crashed predecessor left running. A non-empty
+# FM_SUPERVISION_ENGINE_EFFORT (fm_supervision_host_config) sets the turn's
+# effort; empty leaves the engine's own default.
 fm_supervision_engine_turn() {
   local engine=$1 model=$2 prompt=$3 message=$4 session=$5 mode=$6 timeout=$7 result=$8 errors=$9
   local pid_file=${10:-} bin grace i ledger watched rc home_phys root_phys state_phys identity recorded
@@ -352,6 +369,7 @@ fm_supervision_engine_turn() {
       args=(-p "$(cat "$message")" --safe-mode --system-prompt-file "$prompt"
         --tools Bash,Read --permission-mode dontAsk --allowedTools Bash Read
         --model "$model" --output-format json)
+      [ -z "${FM_SUPERVISION_ENGINE_EFFORT:-}" ] || args+=(--effort "$FM_SUPERVISION_ENGINE_EFFORT")
       root_phys=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_phys=$FM_ROOT
       home_phys=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_phys=$FM_HOME
       state_phys=$(cd "$STATE" 2>/dev/null && pwd -P) || state_phys=$STATE

@@ -319,16 +319,17 @@ Grok's arm command is rendered at session start, so a change to its host mode ta
 
 ### Engine selection
 
-`config/supervision-host` may be empty or hold one line `<engine> [<model>]`:
+`config/supervision-host` may be empty or hold one line `<engine> [<model> [<effort>]]`:
 
 - empty or `default` selects the primary harness's own engine at that engine's default model (`sonnet` for the Claude engine);
-- `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model.
+- `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model;
+- a third word sets the engine's reasoning effort for every host turn, for example `claude sonnet low`; the Claude engine takes `low`, `medium`, `high`, `xhigh`, or `max`, and without the word the engine runs at its own default effort.
 
 Only Claude has a verified engine of its own, so a Cursor, OpenCode, omp, Grok, or Codex home names `claude` in the file.
 
 ### Failures, when changes apply, and inheritance
 
-An unverified engine, a primary without a verified engine, or a malformed line leaves the host without an engine.
+An unverified engine, a primary without a verified engine, an effort the engine does not take, or a malformed line leaves the host without an engine.
 It takes no wake, so every wake reaches main as it would without the host.
 Each away-posture wake includes a line naming the problem.
 The running host reads both files at every wake, so an engine change or an opt-out takes effect at the next wake without a restart.
@@ -621,7 +622,8 @@ The receipt prevents accidental publication through supported paths; it proves c
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.
 With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
-With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
+With the file absent, generated briefs omit the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
+Their `# Waiting` section then asks for the background wait instead: one background command per gate, merge-train, qa, or no-mistakes wait, a `paused:` line with an ETA before the turn ends, no polling, one completion wake, and a short resume note at `data/<id>/resume.md` after a pushed PR or a finished phase, which firstmate can pass to `bin/fm-control.sh <id> relaunch --note-file data/<id>/resume.md` to continue the task in a fresh session.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
 ## PR health monitor (config/pr-health-monitor)
@@ -733,6 +735,32 @@ The bound is required rather than cosmetic because churn and pane staleness read
 
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
+
+## Wedge threshold (config/stale-escalate-secs)
+
+The optional local, gitignored `config/stale-escalate-secs` file sets this home's wedge threshold without an environment variable.
+Its first line is a non-negative whole number of idle seconds before a provably-working stale pane escalates as a possible wedge, in place of the shared default of 240.
+A valid `FM_STALE_ESCALATE_SECS` in the environment still wins, and an absent file, an empty line, or any other value keeps the default.
+
+Unlike tuning through `config/watch.env`, the file reaches every watcher, including the ones the Codex checkpoint route and the away-mode daemon start directly, and the daemon's own stale recheck.
+A watcher reads it when it starts and the daemon reads it on every housekeeping tick.
+The file is home-local and not inherited by secondmate homes.
+`fm_stale_escalate_secs` in `bin/fm-classify-lib.sh` owns the resolution order and validation.
+
+## Routine-signal batching (config/signal-batch-secs)
+
+The optional local, gitignored `config/signal-batch-secs` file lets this home batch routine worker signals into fewer supervision wakes.
+Its first line is a non-negative whole number of seconds; 120 to 300 suits a busy fleet.
+A valid `FM_SIGNAL_BATCH_SECS` in the environment still wins, and an absent file, an empty line, or any other value keeps the shared default of 0, which wakes at once as before.
+
+A routine signal is a status append or turn-end that the watcher would surface but that carries no captain-relevant event: a bare turn-end or a `working:` or `paused:` note whose crew has no proof it is still executing.
+The watcher holds such a signal in `state/.signal-batch` instead of waking, adds later routine signals to the same batch, and wakes the supervision host once when the first held signal is that many seconds old.
+A `done:`, `blocked:`, `failed:`, or `needs-decision:` event, and any other captain-relevant event, still wakes at once and carries the held rows into the same drain.
+Any other watcher wake, such as a stale pane, a check, or a heartbeat, also carries the held rows into its drain.
+Held rows enter the durable wake queue only when a wake fires, and a successor watcher fires a batch its predecessor held.
+Away mode never batches, because the away-mode daemon owns triage there.
+The file reaches every watcher route, is read when a watcher starts, and is not inherited by secondmate homes.
+`fm_signal_batch_secs` in `bin/fm-classify-lib.sh` owns the resolution order and validation, and `bin/fm-watch.sh` owns the batch.
 
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
@@ -2806,11 +2834,12 @@ FM_WATCH_EXTENSION_LOG_KEEP_LINES=0   # opt-in Pi extension diagnostic log (stat
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds before a fresh arm refuses a live holder's stale beacon (attached arms: FM_WATCHER_STALL_BOUND)
 FM_WATCHER_STALL_BOUND=       # live-holder stall bound; default and arm/re-arm behavior: docs/turnend-guard.md "Guard grace and the poll cadence"
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_SIGNAL_BATCH_SECS=0  # seconds to hold routine signals before one batched wake (overrides config/signal-batch-secs); 0 wakes at once
 FM_WATCHER_CLEANUP_LOCK_BOUND=   # optional watcher EXIT marker-lock wait; default and validation: docs/watcher-continuity.md
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading declared-wait status verb; bin/fm-classify-lib.sh owns its meaning and legacy external-wait label; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, its task is held for the captain in the backlog, or, where config/wedge-defer-worker-wait arms it, its worker's own newest line is a still-open `blocked:` or `needs-decision:` line, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, or, where config/wedge-defer-validating arms it, that pane's crew has an attributed no-mistakes run whose step is running or fixing, any of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates (overrides config/stale-escalate-secs, which every watcher route and the away-mode daemon read), unless that pane's own worker declared a wait that has not elapsed, its task is held for the captain in the backlog, or, where config/wedge-defer-worker-wait arms it, its worker's own newest line is a still-open `blocked:` or `needs-decision:` line, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, or, where config/wedge-defer-validating arms it, that pane's crew has an attributed no-mistakes run whose step is running or fixing, any of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, an attended backlog captain hold on the crew's task, or - where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it - the worker's own still-open newest `blocked:` or `needs-decision:` line or a validation gate of the crew's own awaiting the supervisor's still-unanswered decision, or - where config/wedge-defer-validating arms it - an attributed validation run that is running or fixing, takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog captain hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered supervisor-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a captain-held transfer or backlog captain hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180

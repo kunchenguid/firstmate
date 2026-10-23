@@ -1533,6 +1533,30 @@ test_housekeeping_persistent_stale_escalates() {
   pass "persistent stale escalates after threshold and clears its marker"
 }
 
+# The home's config/stale-escalate-secs sets the daemon's wedge threshold too, so
+# a stale marker 500s old stays pending under a 900s home threshold and
+# escalates under the shared default once the file is gone.
+test_housekeeping_stale_threshold_from_home_config() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-home-threshold)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-cfg-w5"; pane="$dir/pane.txt"
+  mkdir -p "$dir/config"
+  printf '900\n' > "$dir/config/stale-escalate-secs"
+  printf 'working\n' > "$state/cfg-w5.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "cfg-w5" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_STALE_ESCALATE_SECS='' housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a stale marker below the home threshold was escalated"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a stale marker below the home threshold was dropped"
+  rm "$dir/config/stale-escalate-secs"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_STALE_ESCALATE_SECS='' housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "the default threshold did not escalate once the home file was gone"
+  pass "housekeeping reads the wedge threshold from config/stale-escalate-secs"
+}
+
 test_housekeeping_resumed_stale_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-resumed)
@@ -3317,6 +3341,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_threshold_from_home_config
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
