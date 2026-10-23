@@ -216,7 +216,7 @@ set -eu
 # Print the header comment as usage before any FM_HOME check or target
 # resolution, so the contract this header owns is reachable through --help.
 case "${1:-}" in
-  -h|--help)
+  --help)
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
     exit 0
     ;;

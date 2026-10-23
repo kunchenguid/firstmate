@@ -111,20 +111,18 @@ test_exact_lane_id_send_still_works() {
 }
 
 test_help_prints_usage() {
-  local home="$TMP_ROOT/help" flag out err rc
+  local home="$TMP_ROOT/help" out err rc
   mkdir -p "$home/state"
   out="$TMP_ROOT/help.out"; err="$TMP_ROOT/help.err"
-  for flag in --help -h; do
-    env -u FM_HOME "$SEND" "$flag" >"$out" 2>"$err"; rc=$?
-    expect_code 0 "$rc" "fm-send $flag without FM_HOME should print usage and exit 0"
-    assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "$flag should print the header usage line"
-    assert_contains "$(cat "$out")" "--resolve-key" "$flag should print the header contract"
-    [ ! -s "$err" ] || fail "fm-send $flag wrote to stderr: $(cat "$err")"
-    FM_HOME="$home" "$SEND" "$flag" >"$out" 2>"$err"; rc=$?
-    expect_code 0 "$rc" "fm-send $flag with FM_HOME should not treat the flag as a target"
-    assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "$flag with FM_HOME should print usage"
-  done
-  pass "fm-send --help/-h print the header usage before FM_HOME and target resolution"
+  env -u FM_HOME "$SEND" --help >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "fm-send --help without FM_HOME should print usage and exit 0"
+  assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "--help should print the header usage line"
+  assert_contains "$(cat "$out")" "--resolve-key" "--help should print the header contract"
+  [ ! -s "$err" ] || fail "fm-send --help wrote to stderr: $(cat "$err")"
+  FM_HOME="$home" "$SEND" --help >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "fm-send --help with FM_HOME should not treat the flag as a target"
+  assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "--help with FM_HOME should print usage"
+  pass "fm-send --help prints the header usage before FM_HOME and target resolution"
 }
 
 test_unset_fm_home_fails() {
