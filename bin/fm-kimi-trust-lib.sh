@@ -8,7 +8,7 @@
 #
 # Every function takes one plain pane capture as $1 and prints nothing.
 # The wordings recognized here were recorded from the real CLI:
-#   2.0.0 (2026-09-17) and 2.1.1: the options read `❯ Trust this folder` and
+#   2.0.0 (2026-09-17): the options read `❯ Trust this folder` and
 #     `Don't trust`.
 #   2.3.0 (2026-10-23): the options read `❯ Trust and continue` and `Exit`,
 #     and a directory that declares project MCP servers, in a root `.mcp.json`
