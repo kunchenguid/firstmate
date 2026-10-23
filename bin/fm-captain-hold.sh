@@ -204,7 +204,7 @@
 #
 # `answered` is the read-only predicate bin/fm-tasks-axi.sh asks before it lets a
 # `[captain-ask]` row leave the backlog: exit 0 when the task body carries a
-# recorded captain answer (an evidence-only `reconciled` record does not count),
+# recorded captain answer (an evidence-only `reconciled` record or an open hold-set stamp does not count),
 # 1 when it does not, and any other non-zero status when the task cannot be read.
 # It prints nothing.
 #
@@ -379,6 +379,8 @@ tasks_axi() {
   fi
 }
 
+# shellcheck source=bin/fm-captain-ask-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-captain-ask-lib.sh"
 require_tasks_axi() {
   fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
   tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
@@ -520,6 +522,15 @@ recorded_resolution_mode() {  # <task-body>
   rest=${rest%%\\n*}
   rest=${rest%%$'\n'*}
   printf '%s' "$rest"
+}
+
+recorded_resolution_completed() {  # <task-body>
+  local rest
+  rest=$(decode_shown_value "$1") || return 1
+  case "$rest" in *"Resolution mode: "*) ;; *) return 1 ;; esac
+  rest=${rest#*"Resolution mode: "}
+  rest=${rest#*$'\n'}
+  [ "${rest%%$'\n'*}" = "Resolution completed: yes" ]
 }
 
 closed_answer_replay_mode_compatible() {  # <mode> <task-body>
@@ -1123,7 +1134,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
-  local id=$1 show body existing tmp
+  local id=$1 show body existing tmp head rest mode
   task_show_or_fail "$id" "task $id disappeared after closing"
   body=$(decode_shown_value "$(show_field "$show" body)") \
     || fail "could not decode the closed body for $id"
@@ -1133,6 +1144,16 @@ remove_interrupted_answer_stamp() {  # <task-id>
   case "$body" in
     $'\n\n'*) body=${body#$'\n\n'} ;;
     $'\n'*) body=${body#$'\n'} ;;
+  esac
+  case "$body" in
+    *"Resolution mode: "*)
+      head=${body%%"Resolution mode: "*}
+      rest=${body#"$head"}
+      rest=${rest#"Resolution mode: "}
+      mode=${rest%%$'\n'*}
+      rest=${rest#"$mode"}
+      body="${head}Resolution mode: ${mode}"$'\n'"Resolution completed: yes${rest}"
+      ;;
   esac
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
@@ -1214,8 +1235,10 @@ command_answer() {
     # its own record on top. Either way the close mode is the caller's flag,
     # checked against an interrupted close's recorded mode so a retry cannot
     # silently flip a release into a close.
+    [ "$release" = 1 ] || guard_captain_ask_archive "done" "" "$id"
     if body_has_resolution_record "$body" \
-      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+      && ! recorded_resolution_completed "$body"; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
@@ -1694,8 +1717,11 @@ reconcile_close() {
   fi
   [ "$hold_kind" = captain ] \
     || fail "task $id is not held for the captain; there is no captain call to reconcile"
+  guard_captain_ask "$id"
+  guard_captain_ask_archive "done" "" "$id"
   if body_has_resolution_record "$body" \
-    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+    && ! recorded_resolution_completed "$body"; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$recorded_mode" = reconciled ] \
       || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a reconciliation retry"
@@ -2016,6 +2042,8 @@ command_answered() {  # <task-id>
   task_show "$1" || exit 2
   show=$TASK_SHOW_OUTPUT
   body=$(show_field "$show" body)
+  # A newly set hold precedes every historical resolution, even a release.
+  [ -z "$(body_hold_set_timestamp "$(decode_shown_value "$body")")" ] || return 1
   body_has_resolution_record "$body" || return 1
   [ "$(recorded_resolution_mode "$body" || true)" != reconciled ]
 }

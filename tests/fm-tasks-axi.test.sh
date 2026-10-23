@@ -302,6 +302,110 @@ EOF
   pass "fm-tasks-axi.sh keeps [captain-ask] items until answered or merged and leaves other items alone"
 }
 
+test_captain_ask_guard_gaps() {
+  local dir home out rc
+  dir=$(make_split captain-gaps)
+  home="$dir/home"
+  printf 'Ship the first choice.\n' > "$dir/answer.txt"
+  wrapper_from_code "$dir" add reheld "[captain-ask] choose again" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold reheld --reason choose >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer reheld --release --decision-file "$dir/answer.txt" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold reheld --reason "choose again" >/dev/null
+  expect_captain_refusal "$dir" reheld "done" reheld
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" bind board >/dev/null
+  printf 'reheld\n' | FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" reconcile-requests --source-id board --source test >/dev/null
+  printf 'The original choice is moot.\n' > "$dir/evidence.txt"
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" reconcile close reheld --evidence-file "$dir/evidence.txt" 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "reconcile closed an unanswered ask"
+  assert_contains "$out" "reheld" "reconcile refusal did not name the ask"
+  out=$(wrapper_from_code "$dir" show reheld --full)
+  assert_contains "$out" 'held: yes' "reconcile released the ask"
+  assert_not_contains "$out" 'Resolution mode: reconciled' "refused reconcile changed the history"
+
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer reheld --release --decision-file "$dir/evidence.txt" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answered reheld || fail "newest answer was not recognized"
+  wrapper_from_code "$dir" "done" reheld >/dev/null || fail "a newly answered ask could not close"
+
+  (cd "$home" && tasks-axi add legacy "[captain-ask] unanswered legacy row" >/dev/null && tasks-axi "done" legacy --no-prune >/dev/null)
+  wrapper_from_code "$dir" add ordinary ordinary >/dev/null
+  expect_captain_refusal "$dir" legacy "done" ordinary --keep 0
+  assert_grep legacy "$home/data/backlog.md" "auto-prune archived an unanswered ask"
+  expect_captain_refusal "$dir" legacy prune --keep 0
+  wrapper_from_code "$dir" "done" ordinary --no-prune >/dev/null || fail "explicit no-prune close was blocked"
+  pass "current holds, reconcile close, auto-prune and explicit prune preserve unanswered asks"
+}
+
+# A raw hold of a released ask must not revive the old answer: the sanctioned hold writes the new hold set.
+test_raw_rehold_of_a_released_ask_is_refused() {
+  local dir home
+  dir=$(make_split raw-rehold)
+  home="$dir/home"
+  printf 'Ship the first choice.\n' > "$dir/answer.txt"
+  wrapper_from_code "$dir" add raw-rehold "[captain-ask] choose once" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold raw-rehold --reason choose >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer raw-rehold --release --decision-file "$dir/answer.txt" >/dev/null
+  expect_captain_refusal "$dir" raw-rehold hold raw-rehold --reason "choose again" --kind captain
+  expect_captain_refusal "$dir" raw-rehold hold raw-rehold --reason "choose again"
+  expect_captain_refusal "$dir" raw-rehold hold --kind=external raw-rehold --reason "choose again"
+  pass "a raw wrapper hold of a released [captain-ask] item is refused"
+}
+
+# Only the rows tasks-axi would archive are inspected, and a refused preflight records nothing.
+test_captain_hold_preflights_archive_candidates_only() {
+  local dir home out rc
+  dir=$(make_split captain-archive)
+  home="$dir/home"
+  printf 'Ship the first choice.\n' > "$dir/answer.txt"
+  (cd "$home" && tasks-axi add legacy "[captain-ask] unanswered legacy row" >/dev/null && tasks-axi "done" legacy --no-prune >/dev/null) \
+    || fail "could not seed the legacy unanswered ask"
+  for id in call-held call-reconciled ordinary; do wrapper_from_code "$dir" add "$id" "$id call" >/dev/null; done
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold call-held --reason decide >/dev/null || fail "could not hold call-held"
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer call-held --decision-file "$dir/answer.txt" >/dev/null \
+    || fail "a legacy ask within keep blocked a fresh captain answer"
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold call-reconciled --reason decide >/dev/null || fail "could not hold call-reconciled"
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" bind board >/dev/null
+  printf 'call-reconciled\n' | FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" reconcile-requests --source-id board --source test >/dev/null
+  printf 'The original choice is moot.\n' > "$dir/evidence.txt"
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" reconcile close call-reconciled --evidence-file "$dir/evidence.txt" >/dev/null \
+    || fail "a legacy ask within keep blocked reconciling unrelated work"
+  wrapper_from_code "$dir" "done" ordinary >/dev/null || fail "a legacy ask within keep blocked an ordinary done"
+  out=$(wrapper_from_code "$dir" public-followup record-delivery nobody 2>&1) || true
+  assert_not_contains "$out" "no recorded captain answer" "a legacy ask within keep blocked public-followup delivery"
+
+  printf 'backend = "markdown"\r\n\r\n[markdown] # backlog\r\npath = "data/backlog.md"\r\narchive = "data/done-archive.md"\r\n  done_keep = 0 # surplus\r\n' > "$home/.tasks.toml"
+  wrapper_from_code "$dir" add call-surplus "captain call past keep" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold call-surplus --reason decide >/dev/null || fail "could not hold call-surplus"
+  rc=0
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer call-surplus --decision-file "$dir/answer.txt" >/dev/null 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "answer closed a call while the legacy unanswered ask would be archived"
+  out=$(wrapper_from_code "$dir" show call-surplus --full)
+  assert_not_contains "$out" "Resolution mode:" "a refused answer left a resolution record"
+  assert_contains "$out" "held: yes" "a refused answer released the call"
+  expect_captain_refusal "$dir" legacy "done" ordinary
+  out=$(wrapper_from_code "$dir" show legacy --full)
+  assert_contains "$out" "state: done" "a refused done archived the legacy ask"
+  pass "captain answer, reconcile, done and public-followup preflight only the rows an archive would take"
+}
+
+# A released answer does not satisfy a later hold: the new hold's answer closes the call.
+test_rehold_answer_closes_as_the_new_hold() {
+  local dir home out
+  dir=$(make_split captain-rehold)
+  home="$dir/home"
+  printf 'Ship the first choice.\n' > "$dir/answer.txt"
+  wrapper_from_code "$dir" add rehold "[captain-ask] choose again" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold rehold --reason choose >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer rehold --release --decision-file "$dir/answer.txt" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold rehold --reason "choose again" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" answer rehold --decision-file "$dir/answer.txt" >/dev/null \
+    || fail "the new hold's answer was refused as a replay of the released answer"
+  out=$(wrapper_from_code "$dir" show rehold --full)
+  assert_contains "$out" "state: done" "the new hold's answer did not close the call"
+  assert_contains "$out" "Resolution mode: answered" "the new hold's answer was not recorded as an answer"
+  pass "an answer under a new hold closes the call even when the same decision was released before"
+}
+
 # The optional task-priority add-on check refuses an add before tasks-axi runs; absent, it does nothing.
 test_wrapper_runs_the_task_priority_check() {
   local dir stub rc
@@ -340,6 +444,10 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refuses_add_start
   test_wrapper_single_home
   test_wrapper_captain_ask_guard
+  test_captain_ask_guard_gaps
+  test_raw_rehold_of_a_released_ask_is_refused
+  test_captain_hold_preflights_archive_candidates_only
+  test_rehold_answer_closes_as_the_new_hold
   test_wrapper_runs_the_task_priority_check
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"

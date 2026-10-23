@@ -50,13 +50,11 @@
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
 #     this command exists to prevent. Lifecycle transitions refuse the same file.
-#   - `rm`/`delete`, `done`/`close`, `hold --kind parked`, or `update` or
-#     `edit --title` that drops `[captain-ask]` from a row whose title carries it,
-#     unless `bin/fm-captain-hold.sh answered <id>` finds a recorded captain
-#     answer or the row's `pr:` link is a merged PR. Not covered: reconcile
-#     close, tasks-axi auto-prune of Done rows, `fm-tasks-axi.sh prune`, and
-#     direct tasks-axi calls. The automatic dispatch and teardown transitions
-#     use bin/fm-backlog-transition-lib.sh, not this wrapper.
+#   - `rm`/`delete`, `done`/`close`, or `update`/`edit --title` dropping `[captain-ask]`,
+#     unless `bin/fm-captain-hold.sh answered <id>` finds an answer or a merged `pr:` link.
+#     A raw `hold` is always refused. Done auto-prune, `prune`, and record-delivery/waive
+#     refuse only an unanswered ask an archive would move past keep (`--no-prune` skips
+#     the done prune).
 #   - `add` (or `create`) that the optional task-priority add-on check refuses,
 #     e.g. no `--priority 0-3`; its message and exit status are returned and
 #     nothing runs. The check is ${XDG_DATA_HOME:-~/.local/share}/fm-task-priority/check.sh
@@ -157,48 +155,48 @@ fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
 
-# A [captain-ask] row leaves the backlog only with the captain's answer or a merged PR.
-guard_captain_ask() {  # <id>
-  local show pr title
-  [ -n "$1" ] || return 0
-  show=$(tasks-axi show "$1" --full 2>/dev/null) \
-    || fail "cannot read $1 to check whether it is a [captain-ask] item; it stays in the backlog until the read succeeds"
-  title=$(printf '%s\n' "$show" | sed -n 's/^  title: //p' | head -1)
-  case "$title" in
-    '') fail "cannot read the title of $1 to check whether it is a [captain-ask] item; it stays in the backlog" ;;
-    *'[captain-ask]'*) ;;
-    *) return 0 ;;
-  esac
-  "$SCRIPT_DIR/fm-captain-hold.sh" answered "$1" && return 0
-  for pr in $(printf '%s\n' "$show" | sed -n 's/^  links: //p' | grep -o 'pr:[^" ,]*' | sed 's/^pr://'); do
-    [ "$(gh pr view "$pr" --json state -q .state 2>/dev/null)" = MERGED ] && return 0
-  done
-  fail "$1 is a [captain-ask] item with no recorded captain answer (bin/fm-captain-hold.sh answer) and no merged PR (tasks-axi update --pr); it cannot leave the backlog"
-}
+tasks_axi() { tasks-axi "$@"; }
+# shellcheck source=bin/fm-captain-ask-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-captain-ask-lib.sh"
 captain_guard() {  # <tasks-axi args>
-  local verb id='' value=0 title_next=0 has_title=0 new_title='' arg
+  local prune_state="done" no_prune=0 keep_arg='' keep_next=0 sub=''
+  local verb id='' value=0 title_next=0 state_next=0 has_title=0 new_title='' arg
   [ "${1:-}" = task ] && shift
   verb=${1:-}
   [ "$#" -gt 0 ] && shift
+  if [ "$verb" = public-followup ]; then sub=${1:-}; [ "$#" -gt 0 ] && shift; fi
   for arg in "$@"; do
     if [ "$arg" = --json ]; then continue; fi
     if [ "$value" = 1 ]; then value=0; continue; fi
     if [ "$title_next" = 1 ]; then title_next=0; new_title=$arg; continue; fi
+    if [ "$state_next" = 1 ]; then state_next=0; prune_state=$arg; continue; fi
+    if [ "$keep_next" = 1 ]; then keep_next=0; keep_arg=$arg; continue; fi
     case "$arg" in
+      --no-prune) no_prune=1 ;;
+      --keep) keep_next=1 ;;
+      --keep=*) keep_arg=${arg#--keep=} ;;
+      --state) state_next=1 ;;
+      --state=*) prune_state=${arg#--state=} ;;
       --title) title_next=1; has_title=1 ;;
       --title=*) has_title=1; new_title=${arg#--title=} ;;
-      --pr|--report|--note|--keep|--reason|--until|--kind|--repo|--priority|--body|--body-file) value=1 ;;
+      --pr|--report|--note|--reason|--until|--kind|--repo|--priority|--body|--body-file) value=1 ;;
       -*) ;;
       *) id=${id:-$arg} ;;
     esac
   done
   case "$verb" in
-    rm|delete|done|close) guard_captain_ask "$id" ;;
-    hold)
-      case " $* " in
-        *' --kind parked '*|*' --kind=parked '*) guard_captain_ask "$id" ;;
+    prune) guard_captain_ask_archive "$prune_state" "$keep_arg" "" ;;
+    done|close)
+      guard_captain_ask "$id"
+      [ "$no_prune" = 1 ] || guard_captain_ask_archive "done" "$keep_arg" "$id"
+      ;;
+    public-followup)
+      case "$sub" in
+        record-delivery|waive) guard_captain_ask_archive "done" "" "$id" ;;
       esac
       ;;
+    rm|delete) guard_captain_ask "$id" ;;
+    hold) guard_captain_ask_hold "$id" ;;
     update|edit)
       if [ "$has_title" = 1 ]; then
         case "$new_title" in

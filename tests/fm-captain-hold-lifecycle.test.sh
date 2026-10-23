@@ -1593,6 +1593,38 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+test_reconcile_retry_after_completed_close_of_a_merged_captain_ask() {
+  local parent mate evidence request out
+  parent=$(make_home reconcile-ask-parent)
+  mate=$(make_home reconcile-ask-mate)
+  printf 'reconcile-ask-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$mate/.fm-secondmate-parent"
+  evidence="$mate/reconcile-evidence.txt"
+  request="$mate/state/reconcile-requests/reconcile-ask.request"
+  tasks_in "$mate" add reconcile-ask "[captain-ask] Verify the merged ask" --kind ship --repo sample >/dev/null \
+    || fail "could not create the merged captain-ask call"
+  tasks_in "$mate" update reconcile-ask --pr https://github.com/o/r/pull/1 >/dev/null \
+    || fail "could not link the merged PR to the captain-ask call"
+  run_captain "$mate" hold reconcile-ask --reason "verify current release state" >/dev/null \
+    || fail "could not hold the merged captain-ask call"
+  request_reconciles "$mate" reconcile-board reconcile-ask || fail "could not request the captain-ask reconciliation"
+  printf 'The release has already landed.\n' > "$evidence"
+  printf '%s\n' '#!/bin/sh' 'echo MERGED' > "$mate/fakebin/gh"
+  chmod +x "$mate/fakebin/gh"
+
+  chmod 0500 "$mate/state/reconcile-requests"
+  out=$(run_captain "$mate" reconcile close reconcile-ask --evidence-file "$evidence" 2>&1) \
+    && fail "failed reconcile request retirement reported success: $out"
+  chmod 0700 "$mate/state/reconcile-requests"
+  assert_contains "$(tasks_in "$mate" show reconcile-ask --full)" "state: done" \
+    "request retirement failure reversed the merged captain-ask close"
+  [ -f "$request" ] || fail "the request retired despite its forced retirement failure"
+
+  run_captain "$mate" reconcile close reconcile-ask --evidence-file "$evidence" >/dev/null \
+    || fail "the completed reconcile close of a merged captain-ask could not be retried"
+  [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -4827,6 +4859,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
+test_reconcile_retry_after_completed_close_of_a_merged_captain_ask
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_keyed_answer_exit_status_separates_settled_from_retried
