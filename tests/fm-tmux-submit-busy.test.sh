@@ -412,6 +412,48 @@ test_typed_submit_on_open_exit_picker_types_nothing() {
 }
 
 test_typed_submit_on_open_exit_picker_types_nothing
+
+# The bottom of a pane on a Claude permission prompt for a hook "ask"
+# (Claude Code 2.1.306). Its selected "❯ 1. Yes" row reads as a composer
+# holding text, so without the dialog check the submit would type and press
+# Enter, which approves the prompted call.
+test_typed_submit_on_open_permission_prompt_types_nothing() {
+  local dir fakebin composer sent before rc=0 err
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  dir="$TMP_ROOT/typed-on-permission-prompt"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  err="$dir/err"
+  printf '%s\n' \
+    '────────────────────' \
+    ' Bash command' \
+    ' Echo the probe marker' \
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌' \
+    ' echo fm-probe-ask-marker' \
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌' \
+    ' │ Hook PreToolUse:Bash requires confirmation for this command:' \
+    ' │ probe marker needs confirmation [settings]' \
+    '' \
+    ' Do you want to proceed?' \
+    ' ❯ 1. Yes' \
+    '   2. No' \
+    '' \
+    ' Esc to cancel · Tab to amend' > "$composer"
+  before=$(cat "$composer")
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_backend_send_text_submit tmux win 'please continue' 3 0 0 >"$dir/out" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a typed submit onto an open permission prompt should refuse"
+  [ ! -s "$sent" ] || fail "a typed submit onto an open permission prompt sent input: $(cat "$sent")"
+  [ "$(cat "$composer")" = "$before" ] || fail "a typed submit onto an open permission prompt changed the pane"
+  grep -F 'blocked on a prompt: Claude permission prompt: echo fm-probe-ask-marker' "$err" >/dev/null \
+    || fail "the refusal should name the prompt, got '$(cat "$err")'"
+  pass "fm_backend_send_text_submit: a typed message to a permission prompt types nothing and sends no Enter"
+}
+
+test_typed_submit_on_open_permission_prompt_types_nothing
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try

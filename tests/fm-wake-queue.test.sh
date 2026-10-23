@@ -2963,6 +2963,8 @@ test_wake_queue_prune_task() {
   append_wake "$state" stale "test:window-b" "stale: test:window-b"
   append_wake "$state" signal "task-b.status" "signal: $state/task-b.status"
   append_wake "$state" check "$state/task-b.check.sh" "check: $state/task-b.check.sh: merged: https://example.test/pr/2"
+  append_wake "$state" check "permission-prompt-task-a-1792580000" "check: permission prompt pending: task=task-a window=test:window-a waiting=95s - Claude permission prompt"
+  append_wake "$state" check "permission-prompt-task-a-b-1792580000" "check: permission prompt pending: task=task-a-b window=test:window-c waiting=95s - Claude permission prompt"
 
   FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_queue_prune_task "$1" "$2" "$3"' "$ROOT" "$state" "task-a" "test:window-a" \
     || fail "fm_wake_queue_prune_task returned non-zero"
@@ -2974,6 +2976,8 @@ test_wake_queue_prune_task() {
   grep -F 'test:window-b' "$queue" >/dev/null || fail "prune removed stale wake for task-b"
   grep -F 'task-b.status' "$queue" >/dev/null || fail "prune removed status wake for task-b"
   grep -F 'task-b.check.sh' "$queue" >/dev/null || fail "prune removed check wake for task-b"
+  grep -F 'permission-prompt-task-a-1792580000' "$queue" >/dev/null && fail "prune left the permission-prompt wake for task-a"
+  grep -F 'permission-prompt-task-a-b-1792580000' "$queue" >/dev/null || fail "prune removed the permission-prompt wake for task-a-b"
 
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }

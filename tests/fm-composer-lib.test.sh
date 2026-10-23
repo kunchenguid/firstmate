@@ -1593,3 +1593,135 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+
+# The bottom of a pane on a Claude permission prompt for a PreToolUse hook's
+# "ask", as Claude Code 2.1.306 drew it (the rules are shortened). <command>
+# is the command block: one plain row, or "│ "-prefixed rows for a multi-line
+# command. The yes and no rows default to the selection on Yes.
+permission_prompt_screen() {  # <command-row>... (rows of the command block)
+  local rule dash
+  rule=$(printf '─%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
+  dash=$(printf '╌%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
+  printf '%s\n' \
+    '⏺ Bash(echo fm-probe-ask-marker)' \
+    '  ⎿  Waiting…' \
+    '' \
+    "$rule" \
+    ' Bash command' \
+    ' Echo the probe marker' \
+    "$dash"
+  printf '%s\n' "$@"
+  printf '%s\n' \
+    "$dash" \
+    ' │ Hook PreToolUse:Bash requires confirmation for this command:' \
+    ' │ probe marker needs confirmation [settings]' \
+    '' \
+    ' Do you want to proceed?' \
+    "${FM_TEST_YES_ROW:- ❯ 1. Yes}" \
+    "${FM_TEST_NO_ROW:-   2. No}" \
+    '' \
+    ' Esc to cancel · Tab to amend'
+}
+
+test_permission_prompt_names_the_command_first_line() {
+  local screen out rc esc
+  screen=$(permission_prompt_screen ' echo fm-probe-ask-marker && echo second-line')
+  out=$(fm_composer_permission_prompt "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded permission prompt should match"
+  [ "$out" = 'echo fm-probe-ask-marker && echo second-line' ] || fail "subject was '$out'"
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "a permission prompt is a blocking dialog"
+  [ "$out" = 'Claude permission prompt: echo fm-probe-ask-marker && echo second-line' ] \
+    || fail "dialog name was '$out'"
+  screen=$(permission_prompt_screen ' │ printf "%s\n" fm-probe-ask-marker' ' │ printf "%s\n" second-line')
+  out=$(fm_composer_permission_prompt "$screen")
+  [ "$out" = 'printf "%s\n" fm-probe-ask-marker' ] || fail "a multi-line command should name its first row, got '$out'"
+  esc=$(printf '\033')
+  screen=$(permission_prompt_screen " ${esc}[1mecho fm-probe-ask-marker${esc}[22m" | sed "s/Do you want/${esc}[1mDo you want/")
+  out=$(fm_composer_permission_prompt "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "a styled capture should match"
+  [ "$out" = 'echo fm-probe-ask-marker' ] || fail "a styled capture should name the plain command, got '$out'"
+  out=$(FM_TEST_YES_ROW='   1. Yes' FM_TEST_NO_ROW=' ❯ 2. No, and tell Claude what to do differently (esc)' \
+    permission_prompt_screen ' echo moved-selection' | { s=$(cat); fm_composer_permission_prompt "$s"; }); rc=$?
+  [ "$rc" -eq 0 ] || fail "the selection on No should still match"
+  [ "$out" = 'echo moved-selection' ] || fail "subject with the selection on No was '$out'"
+  out=$(fm_composer_permission_prompt "$(printf '%s\n' "$(permission_prompt_screen ' echo blank-tail')" '' '')"); rc=$?
+  [ "$rc" -eq 0 ] || fail "blank rows below the footer should still match"
+  # Claude Code 2.1.153 indents the command under the heading, with no rules.
+  screen=$(printf '%s\n' '────────────────────' ' Bash command' '' \
+    '   echo fm-probe-ask-marker && echo second-line' '   Run the specified command' '' \
+    ' Hook PreToolUse:Bash requires confirmation for this command:' ' live guard asks [settings]' '' \
+    ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No' '' ' Esc to cancel · Tab to amend · ctrl+e to explain')
+  out=$(fm_composer_permission_prompt "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the indented layout should match"
+  [ "$out" = 'echo fm-probe-ask-marker && echo second-line' ] || fail "the indented layout's subject was '$out'"
+  pass "a Claude permission prompt is a named blocking dialog carrying the prompted command's first line"
+}
+
+test_permission_prompt_subject_falls_back_and_is_bounded() {
+  local screen out rc long
+  screen=$(printf '%s\n' ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No' '' ' Esc to cancel · Tab to amend')
+  out=$(fm_composer_permission_prompt "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "a prompt whose heading scrolled away should still match"
+  [ -z "$out" ] || fail "a prompt with no visible heading should have no subject, got '$out'"
+  out=$(fm_composer_blocking_dialog "$screen")
+  [ "$out" = 'Claude permission prompt' ] || fail "a subjectless prompt name was '$out'"
+  screen=$(permission_prompt_screen | sed '/╌/d')
+  out=$(fm_composer_permission_prompt "$screen")
+  [ "$out" = 'Bash command' ] || fail "a prompt with no command block should name its heading, got '$out'"
+  long=$(printf 'x%.0s' $(seq 1 300))
+  out=$(fm_composer_permission_prompt "$(permission_prompt_screen " echo $long")")
+  [ "${#out}" -eq 160 ] || fail "a long subject should be cut to 160 characters, got ${#out}"
+  case "$out" in *...) ;; *) fail "a cut subject should end in an ellipsis, got '$out'" ;; esac
+  pass "a permission prompt subject falls back to the heading, then to nothing, and stays one bounded line"
+}
+
+test_permission_prompt_requires_the_bottom_structure() {
+  local screen out rc
+  # Quoted above a live composer, as a diff of this test would show it.
+  screen=$(printf '%s\n' "$(permission_prompt_screen ' echo quoted')" '' \
+    '────────────────────' '❯ next steer' '────────────────────' '  ⏵⏵ bypass permissions on (shift+tab to cycle)')
+  out=$(fm_composer_permission_prompt "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a prompt quoted above a live composer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a quoted prompt must not be a blocking dialog"
+  out=$(FM_TEST_NO_ROW='   2. Maybe' permission_prompt_screen ' echo no-no-row' | { s=$(cat); fm_composer_permission_prompt "$s"; }); rc=$?
+  [ "$rc" -eq 1 ] || fail "a prompt without a No option must not match"
+  out=$(FM_TEST_YES_ROW=' ❯ 1. Approve' permission_prompt_screen ' echo no-yes-row' | { s=$(cat); fm_composer_permission_prompt "$s"; }); rc=$?
+  [ "$rc" -eq 1 ] || fail "a prompt without a Yes option must not match"
+  out=$(fm_composer_permission_prompt "$(permission_prompt_screen ' echo no-question' | sed 's/Do you want to proceed?/Proceed now/')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "options without the question must not match"
+  out=$(fm_composer_permission_prompt "$(printf '%s\n' ' ❯ 1. Yes' '   2. No' ' Do you want to proceed?' ' Esc to cancel · Tab to amend')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "options above the question must not match"
+  pass "a permission prompt matches only as the dialog at the bottom of the screen"
+}
+
+test_permission_prompt_blocks_the_confirming_enter() {
+  local screen out sink enters
+  screen=$(permission_prompt_screen ' echo fm-probe-ask-marker')
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  fm_composer_classify_screen 'styled=1' "$screen" >/dev/null
+  [ "$(cat "$sink")" = 'Claude permission prompt: echo fm-probe-ask-marker' ] \
+    || fail "classify should note the permission prompt, got '$(cat "$sink")'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  FM_TEST_PICKER_SCREEN=$screen
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  fm_composer_dialog_sink_release
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = unknown ] || fail "a permission prompt must stop the retry as unknown, got '$out'"
+  [ "$enters" -eq 1 ] || fail "a permission prompt must receive no second Enter, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "a permission prompt stops the Enter retries, so no retry can approve it"
+}
+
+test_permission_prompt_names_the_command_first_line
+test_permission_prompt_subject_falls_back_and_is_bounded
+test_permission_prompt_requires_the_bottom_structure
+test_permission_prompt_blocks_the_confirming_enter

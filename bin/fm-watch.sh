@@ -105,6 +105,13 @@
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: permission prompt pending: task=<id> window=<window> waiting=<s>s - Claude permission prompt: <subject>
+#                          the same Claude permission prompt (bin/fm-composer-lib.sh's
+#                          fm_composer_permission_prompt; the subject is the prompted
+#                          command's first line when the pane shows it) has stayed on
+#                          an ordinary task's pane for FM_PERMISSION_PROMPT_SECS
+#                          (default 90), whatever its busy verdict; once per prompt,
+#                          and nothing answers it
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -364,6 +371,12 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A worker parked on a Claude permission prompt is still inside its turn, so it
+# reads busy and would otherwise wait out BUSY_TURN_MAX_SECS. Once the same
+# prompt has stayed on its pane this long, permission_prompt_check raises one
+# check wake for it.
+PERMISSION_PROMPT_SECS=${FM_PERMISSION_PROMPT_SECS:-}
+case "$PERMISSION_PROMPT_SECS" in ''|*[!0-9]*) PERMISSION_PROMPT_SECS=90 ;; esac
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -2360,6 +2373,44 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
+# Wake once when a pane has shown the same Claude permission prompt for
+# PERMISSION_PROMPT_SECS. The clock is keyed by the prompt's dialog name, not
+# the pane hash, so a ticking pane does not restart it and a different prompt
+# does. A poll without the prompt clears the record. Nothing here answers the
+# prompt: the delivery guards refuse to type into it for the same reason.
+permission_prompt_check() {  # <window> <task> <window-key> [dialog-name]
+  local win=$1 task=$2 key=$3 dialog=${4-} record since name now age reason notify_key queued
+  record="$STATE/.permission-prompt-$key"
+  case "$dialog" in
+    'Claude permission prompt'*) ;;
+    *)
+      [ ! -e "$record" ] || rm -f "$record" "$record.alerted"
+      return 0
+      ;;
+  esac
+  now=$(date +%s)
+  since=; name=
+  [ ! -f "$record" ] || IFS=$'\t' read -r since name < "$record" || true
+  case "$since" in ''|*[!0-9]*) since= ;; esac
+  if [ -z "$since" ] || [ "$name" != "$dialog" ]; then
+    printf '%s\t%s\n' "$now" "$dialog" > "$record"
+    rm -f "$record.alerted"
+    triage_log "permission prompt on screen, waking after ${PERMISSION_PROMPT_SECS}s: $win"
+    since=$now
+  fi
+  age=$((now - since))
+  [ "$age" -ge "$PERMISSION_PROMPT_SECS" ] || return 0
+  [ ! -e "$record.alerted" ] || return 0
+  reason="check: permission prompt pending: task=$task window=$win waiting=${age}s - $dialog"
+  notify_key="permission-prompt-$task-$since"
+  queued=$(fm_wake_queued_keys check)
+  if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
+    fm_wake_append check "$notify_key" "$reason" || exit 1
+  fi
+  : > "$record.alerted"
+  wake "$reason"
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
@@ -3798,6 +3849,11 @@ EOF
     # poll already takes, and a miss drops a name the away daemon saved.
     dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
     [ -n "$dialog" ] || clear_dialog_suffix "$task"
+    if [ "$kind" = secondmate ]; then
+      permission_prompt_check "$w" "$task" "$key"
+    else
+      permission_prompt_check "$w" "$task" "$key" "$dialog"
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

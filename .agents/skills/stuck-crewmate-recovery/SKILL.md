@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, a failed steer, or a `check: permission prompt pending` wake, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -63,6 +63,13 @@ Nothing reaches the captain in that case.
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
+
+## A worker on a permission prompt
+
+A `check: permission prompt pending` wake, or a stale reason ending in `blocked-on-prompt: Claude permission prompt`, names a worker parked on a Claude permission prompt; it cannot continue until the prompt is answered.
+Never approve it: approval is the captain's call, and a steer typed into that pane is refused because its Enter would approve the call.
+When the prompted command is not one the task needs, interrupt with `bin/fm-control.sh <task-id> interrupt`, which cancels the prompt without approving it, then steer the worker onto a path that avoids the prompt.
+Otherwise relay the task, the command's first line, and the consequence to the captain as an approve-or-redirect decision.
 
 ## Live-endpoint escalation
 

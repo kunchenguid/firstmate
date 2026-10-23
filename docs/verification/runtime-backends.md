@@ -1453,6 +1453,34 @@ That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-tr
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
+### Claude permission prompt
+
+Measured 2026-10-21 against Claude Code 2.1.306 and 2.1.153 in isolated tmux servers, with a PreToolUse hook that answers `ask` for one marker command.
+The Herdr lab was not running, so the Herdr path is covered by the existing fakes.
+The prompt ends with a `Do you want to proceed?` row, a `❯ 1. Yes` row, a `2. No` row, and a last non-blank row that starts `Esc to cancel`.
+2.1.306 draws the command in a dashed-rule block under the `Bash command` heading, with a left bar on each row of a multi-line command; 2.1.153 indents the command under the heading with no rules.
+The `❯ 1. Yes` row reads as a composer holding text, so before this matcher a typed submit there would have typed and pressed Enter, which approves the call.
+`fm_composer_permission_prompt` now names it as a blocking dialog, so delivery types nothing, and the watcher raises one `check: permission prompt pending` wake for a pane that keeps the same prompt for `FM_PERMISSION_PROMPT_SECS`.
+On both versions Claude ran the `PermissionRequest` hook before drawing the dialog, with `tool_name` and `tool_input.command` in the payload.
+On 2.1.306 it also ran the `Notification` hook with `notification_type: "permission_prompt"` about 6 seconds later.
+On 2.1.306 no hook ran when the prompt was cancelled with Esc or answered No; the session transcript gained the interruption at that moment, and approval wrote nothing to it until the approved command finished, when `PostToolUse` ran.
+That is why the main-session check in `bin/fm-main-prompt-alarm.sh` reads both the transcript and the main pane.
+Live main-session probe on 2.1.306, delay 20 seconds: a prompt left waiting alerted once, an approved `sleep 45` logged `resolved: the main pane no longer shows the Bash prompt`, and a cancelled prompt logged `resolved: the session moved on after the Bash prompt`.
+
+Refresh this record with the live guard, which submits one Haiku turn per run:
+
+```text
+$ FM_PERMISSION_PROMPT_LIVE_E2E=1 bash tests/fm-permission-prompt-live-e2e.test.sh
+ok - Claude Code 2.1.306 (Claude Code): the live hook-ask permission prompt matches and names the prompted command
+ok - Claude Code 2.1.306 (Claude Code): the PermissionRequest registration alerts on a waiting prompt and leaves it unanswered
+$ FM_PERMISSION_PROMPT_LIVE_E2E=1 FM_PERMISSION_PROMPT_LIVE_CLAUDE_BIN=/opt/homebrew/bin/claude bash tests/fm-permission-prompt-live-e2e.test.sh
+ok - Claude Code 2.1.153 (Claude Code): the live hook-ask permission prompt matches and names the prompted command
+ok - Claude Code 2.1.153 (Claude Code): the PermissionRequest registration alerts on a waiting prompt and leaves it unanswered
+```
+
+Other Claude dialogs, such as an edit approval or an MCP approval, share the question, option, and footer rows, but no screen of them was recorded here, so their subject line is not covered.
+No other primary harness has this main-session alarm.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

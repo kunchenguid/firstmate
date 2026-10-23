@@ -7507,3 +7507,164 @@ test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_stays_quiet
 test_closed_exit_picker_drops_saved_dialog_name
+
+# The bottom of a pane on a Claude permission prompt for a hook "ask", as
+# Claude Code 2.1.306 drew it (the rules are shortened). The worker's turn is
+# still open, so its semantic busy record stays busy the whole time.
+write_permission_prompt() {  # <file> <command>
+  printf '%s\n' \
+    '⏺ Bash(echo fm-probe-ask-marker)' \
+    '  ⎿  Waiting…' \
+    '' \
+    '────────────────────' \
+    ' Bash command' \
+    ' Echo the probe marker' \
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌' \
+    " $2" \
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌' \
+    ' │ Hook PreToolUse:Bash requires confirmation for this command:' \
+    ' │ probe marker needs confirmation [settings]' \
+    '' \
+    ' Do you want to proceed?' \
+    ' ❯ 1. Yes' \
+    '   2. No' \
+    '' \
+    ' Esc to cancel · Tab to amend' > "$1"
+}
+
+# A busy Claude ship whose last turn ended recently, so the busy-turn bound is
+# not what these cases exercise.
+prime_prompt_window() {  # <state> <id> <window> -> window key
+  local state=$1 id=$2 window=$3 gen
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/$id.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'working: setup complete\n' > "$state/$id.status"
+  printf '%s' "$(seen_sig "$state/$id.status")" > "$state/.seen-${id}_status"
+  touch "$state/$id.turn-ended"
+  prime_turnend_seen "$state/$id.turn-ended"
+  printf '%s' "$window" | tr ':/.' '___'
+}
+
+run_prompt_watcher() {  # <state> <fakebin> <out> <window> <capture> <threshold>
+  PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$4" FM_FAKE_TMUX_CAPTURE="$5" \
+    FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$2/fm-crew-state.sh" FM_PERMISSION_PROMPT_SECS="$6" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$3" &
+}
+
+test_permission_prompt_on_busy_pane_wakes_once_naming_the_command() {
+  local dir state fakebin out capture_file window key pid since verdict
+  dir=$(make_case permission-prompt-wake); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-prompted"
+  write_permission_prompt "$capture_file" 'echo fm-probe-ask-marker && echo second-line'
+  key=$(prime_prompt_window "$state" prompted "$window")
+  # The motivating case: the open turn keeps the worker's busy verdict busy.
+  verdict=$(bash -c '. "$1/bin/fm-backend.sh"; . "$1/bin/fm-busy-lib.sh"; fm_busy_classify_meta "$2/prompted.meta" prompted "$2" "$(cat "$3")"' \
+    _ "$ROOT" "$state" "$capture_file")
+  [ "${verdict%% *}" = busy ] || fail "the fixture is not a busy worker: $verdict"
+
+  # Below the threshold the busy pane is still absorbed, but the prompt's clock starts.
+  run_prompt_watcher "$state" "$fakebin" "$out" "$window" "$capture_file" 999
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a prompt below the threshold woke: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a prompt below the threshold printed a wake: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the below-threshold stop"
+  IFS=$'\t' read -r since _ < "$state/.permission-prompt-$key" || fail "the prompt's first sighting was not recorded"
+  case "$since" in ''|*[!0-9]*) fail "the prompt's first sighting is not an epoch: $since" ;; esac
+
+  # Past the threshold the same prompt wakes, naming the task and the command.
+  printf '%s\t%s\n' "$(( $(date +%s) - 120 ))" \
+    'Claude permission prompt: echo fm-probe-ask-marker && echo second-line' > "$state/.permission-prompt-$key"
+  : > "$out"
+  run_prompt_watcher "$state" "$fakebin" "$out" "$window" "$capture_file" 90
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a busy pane on a prompt past the threshold did not wake"
+  grep -E "^check: permission prompt pending: task=prompted window=$window waiting=1[2-9][0-9]s - Claude permission prompt: echo fm-probe-ask-marker && echo second-line$" \
+    "$out" >/dev/null || fail "the prompt wake did not name the task and the command: $(cat "$out")"
+  grep -F 'permission-prompt-prompted-' "$state/.wake-queue" >/dev/null \
+    || fail "the prompt wake was not queued as a durable check row: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ -e "$state/.permission-prompt-$key.alerted" ] || fail "the prompt wake was not recorded as alerted"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prompt wake"
+
+  # The same prompt does not wake again.
+  : > "$out"
+  run_prompt_watcher "$state" "$fakebin" "$out" "$window" "$capture_file" 90
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the same prompt woke a second time: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the same prompt printed a second wake: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the repeat-prompt stop"
+  pass "a busy worker on a permission prompt wakes once past the threshold, naming the task and the command"
+}
+
+test_permission_prompt_clock_follows_the_prompt() {
+  local dir state fakebin out capture_file window key pid since
+  dir=$(make_case permission-prompt-clock); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-prompt-clock"
+  key=$(prime_prompt_window "$state" clocked "$window")
+  # A different prompt restarts the clock and the alert.
+  write_permission_prompt "$capture_file" 'echo second-prompt'
+  printf '%s\t%s\n' "$(( $(date +%s) - 500 ))" 'Claude permission prompt: echo first-prompt' > "$state/.permission-prompt-$key"
+  : > "$state/.permission-prompt-$key.alerted"
+  run_prompt_watcher "$state" "$fakebin" "$out" "$window" "$capture_file" 90
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a new prompt woke before its own threshold: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a new prompt printed a wake before its own threshold: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the new-prompt stop"
+  IFS=$'\t' read -r since _ < "$state/.permission-prompt-$key" || fail "the new prompt was not recorded"
+  [ "$(( $(date +%s) - since ))" -lt 60 ] || fail "a new prompt kept the old prompt's clock"
+  [ ! -e "$state/.permission-prompt-$key.alerted" ] || fail "a new prompt kept the old prompt's alert"
+  grep -F 'Claude permission prompt: echo second-prompt' "$state/.permission-prompt-$key" >/dev/null \
+    || fail "the record does not name the new prompt"
+  # A pane without the prompt clears the record.
+  printf '%s\n' '⏺ Done.' '' '────────────────────' '❯ ' '────────────────────' > "$capture_file"
+  run_prompt_watcher "$state" "$fakebin" "$out" "$window" "$capture_file" 90
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a pane without a prompt woke: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  [ ! -e "$state/.permission-prompt-$key" ] || fail "a pane without the prompt kept the prompt record"
+  pass "the permission prompt clock restarts for a different prompt and clears when the prompt leaves the pane"
+}
+
+test_paused_secondmate_permission_prompt_is_not_checked() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case secondmate-permission-prompt); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/mate.status"
+  window="test:fm-prompted-mate"
+  write_permission_prompt "$capture_file" 'echo mate-prompt'
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/mate.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-mate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s\t%s\n' "$(( $(date +%s) - 500 ))" 'Claude permission prompt: echo mate-prompt' > "$state/.permission-prompt-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PERMISSION_PROMPT_SECS=90 \
+    FM_PAUSE_RESURFACE_SECS=99999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || true
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  grep -F 'permission prompt pending' "$out" >/dev/null \
+    && fail "a paused secondmate on a permission prompt raised a prompt wake: $(cat "$out")"
+  [ ! -e "$state/.permission-prompt-$key" ] || fail "a paused secondmate kept a permission prompt record"
+  pass "a paused secondmate's pane is not checked for a pending permission prompt"
+}
+
+test_permission_prompt_on_busy_pane_wakes_once_naming_the_command
+test_permission_prompt_clock_follows_the_prompt
+test_paused_secondmate_permission_prompt_is_not_checked

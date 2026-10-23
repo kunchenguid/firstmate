@@ -1939,8 +1939,10 @@ EOF
 # and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+# A Claude permission prompt (fm_composer_permission_prompt) is the other
+# recorded dialog; Enter there would approve the prompted tool call.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
-  local screen=${1-}
+  local screen=${1-} subject
   [ -n "$screen" ] || return 1
   if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
     /^[ \t]*Background work is running[ \t\r]*$/ { heading = 1 }
@@ -1951,7 +1953,73 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     printf '%s' 'Claude background-task exit picker'
     return 0
   fi
+  if subject=$(fm_composer_permission_prompt "$screen"); then
+    printf '%s%s' 'Claude permission prompt' "${subject:+: $subject}"
+    return 0
+  fi
   return 1
+}
+
+# fm_composer_permission_prompt: a Claude tool-permission dialog, including the
+# one a PreToolUse hook's "ask" decision opens. Returns 0 only when the screen
+# ends in the recorded structure: a "Do you want to ...?" question row, then a
+# "1. Yes" option row and a later "<n>. No" option row (either may carry the
+# selection glyph), with a row starting "Esc to cancel" as the last non-blank
+# row. The bottom anchor is what keeps a quoted copy above a live composer from
+# matching. On a match it prints the prompt's subject, possibly empty: the
+# prompted command's first line, else the dialog's heading (such as "Bash
+# command"). Two layouts carry the command under the heading: 2.1.306 puts it
+# in a dashed-rule block, with a left bar on each row of a multi-line command,
+# and 2.1.153 indents it deeper than the heading, with no rules.
+# Recorded 2026-10-21 on Claude Code 2.1.306 and 2.1.153 for a hook "ask" on a
+# Bash call; tests/fm-permission-prompt-live-e2e.test.sh is the live guard.
+fm_composer_permission_prompt() {  # <screen> -> subject
+  local screen=${1-} subject
+  # The watcher reads every pane on every poll; skip the forks below when the
+  # question is not on screen at all.
+  case "$screen" in *'Do you want to '*) ;; *) return 1 ;; esac
+  subject=$(printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+    { row[NR] = $0 }
+    /[^ \t\r]/ { last = NR }
+    /^[ \t]*Do you want to [^?]*\?[ \t\r]*$/ { question = NR }
+    END {
+      if (!question || last <= question) exit 1
+      if (row[last] !~ /^[ \t]*Esc to cancel/) exit 1
+      for (i = question + 1; i < last; i++) {
+        if (row[i] ~ /^[ \t]*(❯[ \t]*)?1\.[ \t]+Yes([ \t,].*)?[ \t\r]*$/) yes = i
+        if (yes && row[i] ~ /^[ \t]*(❯[ \t]*)?[2-9]\.[ \t]+No([ \t,].*)?[ \t\r]*$/) no = i
+      }
+      if (!yes || !no) exit 1
+      for (i = question - 1; i >= 1; i--) if (row[i] ~ /^[ \t]*(─)+[ \t\r]*$/) break
+      if (i < 1) exit 0
+      for (i++; i < question && trim(row[i]) == ""; i++) ;
+      if (i >= question) exit 0
+      heading = trim(row[i])
+      match(row[i], /^[ \t]*/)
+      indent = RLENGTH
+      start = i
+      for (; i < question; i++) if (row[i] ~ /^[ \t]*(╌)+[ \t\r]*$/) break
+      line = ""
+      if (i < question) {
+        for (i++; i < question && trim(row[i]) == ""; i++) ;
+        if (i < question) line = trim(row[i])
+        sub(/^│[ \t]*/, "", line)
+        if (line ~ /^(╌)+$/) line = ""
+      } else {
+        for (i = start + 1; i < question && trim(row[i]) == ""; i++) ;
+        if (i < question && match(row[i], /^[ \t]*/) && RLENGTH > indent) line = trim(row[i])
+      }
+      print (line != "" ? line : heading)
+    }
+  ') || return 1
+  subject=$(printf '%s' "$subject" | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C tr '\t\n' '  ')
+  subject=${subject#"${subject%%[! ]*}"}
+  subject=${subject%"${subject##*[! ]}"}
+  if [ "${#subject}" -gt 160 ]; then
+    subject="${subject:0:157}..."
+  fi
+  printf '%s' "$subject"
 }
 
 # A command substitution drops a shell variable, and every composer read runs
