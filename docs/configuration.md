@@ -1800,7 +1800,7 @@ The files are static, never executed, and local to each home rather than part of
 ## Repository-owner GitHub identity (config/github-owner-accounts)
 
 The optional local, gitignored `config/github-owner-accounts` names the `gh` account that observes each repository owner's published contributions, for a home whose contributions span several GitHub accounts, such as a personal account and a company organization whose private repositories only the company login can read.
-Without it, and for any owner it does not name, the contribution observer keeps `gh`'s ambient identity exactly as before.
+Without it, and for any owner it does not name, the contribution observer keeps `gh`'s ambient identity.
 It holds one line per repository owner, the owner first and the `gh` account second:
 
 ```text
