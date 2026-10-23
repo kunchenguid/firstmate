@@ -307,7 +307,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij has no verified recovery-grade agent process probe, while Orca, cmux, and tern do not support secondmate spawns, so those backends retain their existing generic ordinary-launch semantics without a new secondmate liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -315,7 +315,8 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for the then-supported backends.
+The portable suite now also carries a tern metadata fixture with full 64-bit session/tab/block ids (including values above 2^53) so validation cannot round them; re-run the commands below after integration for current output rather than treating the 2026-07-28 transcript as tern-era evidence.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -324,9 +325,10 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-tern.test.sh
 ```
 
-Bounded output from the incident regression:
+Bounded output from the 2026-07-28 incident regression (pre-tern):
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
@@ -338,7 +340,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch, and now covers tern as well once the parent records a green portable run; do not treat the pre-tern transcript above as proof of the tern fixture.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -371,6 +373,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
+| tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -2348,6 +2351,56 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 ```
 
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
+
+## tern
+
+The compatibility floor documented with this adapter is Tern 0.9.4.
+This host measured `tern 0.9.4 (b9ef74c)` on 2026-10-19 inside a remote Tern block (`TERM_PROGRAM=tern`, `TERN_PANE` set).
+
+### Host boundary measured here
+
+Read-only CLI probes on this host (no create/close against the captain's live Default session), including TernAdapter's own-block measurements:
+
+| Probe | Result |
+| --- | --- |
+| `tern --version` | `tern 0.9.4 (b9ef74c)` |
+| `tern ls --json` | Succeeded; listed the live Default session and its blocks (ids are integers; do not touch captain blocks). |
+| `tern process <block> --json` | Succeeded; returned `{pane,child,group,foreground}` with pid/name/argv/cwd. |
+| `tern whoami --json` | Succeeded; returned remote identity hops. |
+| `tern capture <block>` / `--ansi` on an omp TSP block | Empty (no transcript text). |
+| `tern capture <block> --surfaces` | Succeeded; JSON `{"block","text"}` main-region transcript without omp's composer; byte-identical with or without `--scrollback` on this host. |
+| `tern ctl state` and `tern ctl carly lua ...` | Failed immediately with `{"ok":false,"error":"no Tern window on this machine shows this pane"}` (exit 1). |
+
+Therefore:
+
+- Session-daemon scripting (`ls` / `process` / `capture --surfaces`) can work on a remote-host block without a local Tern window.
+- Native agent-state via `tern ctl` is unavailable on this host and must degrade to `unknown` rather than fail hard (`FM_BACKEND_TERN_CTL_TIMEOUT` bounds each call; default 5s).
+- Composer caps are deliberately conservative (`styled=0 cursor=0 identity=0`) with no native identity or styled-classifier proof; on omp TSP surfaces observed here, composer-only submit proof is `unknown` and native state is the submit path when `ctl` works.
+- Real-binary smoke (`tests/fm-backend-tern-smoke.test.sh`) requires `tern`, `jq`, a successful `tern ls --json`, **and** a successful `tern ctl state`; it capability-skips (exit 0) when the control endpoint is absent even if `ls` works, and only ever creates sessions named `fm-test-smoke-*` cleaned through `tests/tern-test-safety.sh`.
+- This record does **not** claim a live spawn/steer/teardown proof or a desktop-window native-agent proof on this host.
+- Not live-verified here: key chord names against a desktop window, `send text` with flag-looking text, `tern run` semantics, rename pinning, focus behaviour of new session/tab, and successful `ctl` agent entries.
+
+### Portable and smoke entry points
+
+```sh
+env -u TERM_PROGRAM -u TERN_PANE -u TERN_PANE_SOCKET -u TERN_WINDOW_KEY -u TERN_WINDOW_SOCKET -u TERN_IDENTITY \
+  bash bin/fm-test-run.sh --family tern
+```
+
+Recorded on 2026-10-19 against this worktree (ambient Tern markers unset so the suite does not inherit the captain block):
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=1 duration_ms=22983
+tests/fm-backend-tern.test.sh exit=0 duration_ms=22502
+tests/fm-backend-tern-smoke.test.sh exit=0 duration_ms=29 gate_skip=true
+skip: no Tern window control endpoint (tern ctl state failed) - native agent state cannot be exercised here
+```
+
+The fake-CLI unit suite reported 70 ok cases and exit 0, including full-spawn environment and metadata coverage through `fm-spawn.sh`.
+The real-binary smoke capability-skipped on the absent control endpoint exactly as designed; it did not create or close any session.
+This still does not claim a desktop-window native-agent or live spawn/steer/teardown proof.
+
+Safety: real tests may touch only sessions named `fm-test-*` through `tests/tern-test-safety.sh`, and must never close the captain's live remote Default blocks observed on this host.
 
 ## Codex App host tools
 

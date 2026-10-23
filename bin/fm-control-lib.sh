@@ -314,7 +314,7 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux|paseo|rex)
+    tmux|herdr|zellij|cmux|paseo|rex|tern)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -325,10 +325,11 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. Only tmux,
-# herdr, and rex implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# herdr, and rex implement fm_backend_agent_state; zellij, orca, cmux, and paseo
+# report `unverified`, and tern's `tern process` classifier answers for display
+# but is not promoted to this list, so no reading of theirs can prove an agent
+# stopped. The control plane refuses a stop-proving verb there instead of
+# reporting an unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr|rex) return 0 ;;

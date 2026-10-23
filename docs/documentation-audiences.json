@@ -33,6 +33,7 @@
     "docs/cmux-backend.md",
     "docs/paseo-backend.md",
     "docs/rex-backend.md",
+    "docs/tern-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -98,6 +99,10 @@
     },
     {
       "source": "docs/cmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/tern-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -324,6 +329,10 @@
     },
     {
       "path": "docs/cmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/tern-backend.md",
       "audience": "operator-current"
     },
     {

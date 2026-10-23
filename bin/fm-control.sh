@@ -122,8 +122,8 @@
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
 #     classifier (tmux, herdr, rex), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, cmux, and paseo are refused
-#     rather than reported as successful blind.
+#     postcondition cannot be proven. zellij, orca, cmux, paseo, and tern are
+#     refused rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts (a Rex `unreadable` first goes through the absence
 #     proof `exit` describes, and refuses unless that proof settles it).

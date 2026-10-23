@@ -98,10 +98,10 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux, rex. Others (zellij, orca, cmux, paseo) have
-# no verified non-visible-launch primitive here yet and refuse loudly. On rex the
-# daemon runs in a dedicated Rex session of its own, so the captain's session
-# gains no tab and keeps its focus.
+# Supported backends: herdr, tmux, rex. Others (zellij, orca, cmux, paseo, tern)
+# have no verified non-visible-launch primitive here yet and refuse loudly. On rex
+# the daemon runs in a dedicated Rex session of its own, so the captain's
+# session gains no tab and keeps its focus.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
