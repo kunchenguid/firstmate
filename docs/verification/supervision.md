@@ -687,6 +687,32 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Session-exit backstop
+
+Verified on 2026-10-10 on macOS with Bash 5.3.15 using real watcher, arm, owner, and blocked-check processes in isolated homes.
+The exit verdict uses kernel process lifetime and the home's session lock, with no installed-harness or endpoint dependency.
+The supported primary integration review covered Claude's Stop-owned arm, Cursor's awaited stop hook, Grok's background-notify arm, OpenCode's plugin-owned arm, Pi and omp's native shutdown handlers, and Codex's foreground checkpoint.
+No backend lifecycle command is needed for these process-scoped checks.
+The current guarantees and Codex Desktop limitation are owned by [watcher-continuity.md](../watcher-continuity.md#grace-beacon-and-stop-signals).
+
+Refresh the executable regression with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh
+```
+
+Observed output:
+
+```text
+ok - session exit promptly stops its real watcher and preserves another home
+ok - replacement ownership preserves supervision through old exit and stops at new exit
+ok - launcher exit stops its watcher even while a shared owner process remains alive
+ok - owner exit stops a real watcher blocked in a registered check and reaps that check
+```
+
+The shared-owner case first asserts that the server, launcher, and watcher remain live together, then kills only the launcher.
+That fixture proves launcher-exit handling; it does not provide a Codex chat-close event.
+
 ## Supervision host
 
 This pre-flip evidence supports [supervision-host.md](../supervision-host.md)'s Claude engine, away-wake path, and failure direction; its no-file baseline describes the earlier opt-in release, not the current Claude default.

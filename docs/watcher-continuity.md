@@ -410,6 +410,13 @@ Only the watcher process touches `state/.last-watcher-beat`.
 No helper process can make a wedged watcher appear healthy.
 An arm whose own script path sits under a disposable no-mistakes validation checkout (`.no-mistakes/worktrees/`) refuses with the typed failure line before touching any state, because a watcher started there outlives the validation step and keeps writing the real home's state from a checkout about to be deleted.
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
+`watch_session_owner` in `bin/fm-watch.sh` owns the session-exit backstop, including process identity, replacement adoption, launcher lifetime, and signal-target verification.
+It runs independently of the poll loop for a cycle started with a session lock, so owner exit stops even a blocked poll without signalling another home's watcher.
+For daemon-managed cycles, `bin/fm-supervise-daemon.sh` checks session ownership before restarting a stopped watcher, preserving a live replacement owner and shutting down after confirmed owner exit.
+Pi and omp's native shutdown handlers remain responsible for conversation changes inside a live process.
+Codex Desktop can share an app-server across chats.
+Closing a chat while both the server and its background arm remain alive has no verified session-exit signal in this integration and is unsupported by the auto-stop backstop.
+Codex's foreground checkpoint protocol continues to bound each wait.
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked check or a blocked `fm_backend_capture` pane read, so both run its EXIT cleanup and stop that read.
 `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
 The EXIT cleanup bounds its wait for `state/.watcher-down.lock` while persisting recovery state with `FM_WATCHER_CLEANUP_LOCK_BOUND` (default 2 seconds).
@@ -417,6 +424,9 @@ Only positive decimal integers are accepted, including leading-zero forms such a
 A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lock wait: on timeout the recovery transition fails without releasing the singleton, leaving dead-pid stale evidence for the next arm to republish and clear.
 
 ## Regression coverage
+
+`tests/fm-watch-checkpoint.test.sh` runs real arms and watchers in isolated homes to exercise owner exit, live replacement ownership before the monitor's first observation and after the old arm dies, cross-home isolation, unreadable owner identity, launcher exit before identity capture and with a live shared owner, and owner exit during a blocked registered check.
+`tests/fm-wake-daemon-lifecycle-e2e.test.sh` covers the daemon's restart boundary with a live owner, a live replacement, and session exit.
 
 ### Pi and OpenCode watch extension
 

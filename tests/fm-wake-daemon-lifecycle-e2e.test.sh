@@ -32,6 +32,81 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
 fi
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
+LIFECYCLE_PIDS=()
+cleanup_lifecycle() {
+  local pid
+  for pid in "${LIFECYCLE_PIDS[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+    wait_for_exit "$pid" 50 >/dev/null 2>&1 || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_lifecycle EXIT
+
+wait_daemon_watcher() { # <state> [previous-pid]
+  local state=$1 previous=${2:-} pid i=0
+  while [ "$i" -lt 100 ]; do
+    pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" != "$previous" ] && is_live_non_zombie "$pid" \
+      && [ -e "$state/.last-watcher-beat" ]; then
+      LIFECYCLE_WATCHER=$pid
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "daemon did not arm a new watcher: $(cat "$state/.supervise-daemon.log" 2>/dev/null)"
+}
+
+test_daemon_stops_after_session_exit() {
+  local dir state owner replacement daemon watcher
+  dir=$(make_supercase daemon-session-exit)
+  state="$dir/state"
+  sleep 120 & owner=$!
+  LIFECYCLE_PIDS+=("$owner")
+  printf '%s\n' "$owner" > "$state/.lock"
+  printf 'quiet\n' > "$state/.afk"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=sess:supervisor \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_POLL=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_HOUSEKEEPING_TICK=999999 \
+    "$DAEMON" > "$dir/daemon.out" 2> "$dir/daemon.err" & daemon=$!
+  LIFECYCLE_PIDS+=("$daemon")
+  wait_daemon_watcher "$state"
+  watcher=$LIFECYCLE_WATCHER
+  # A crash while the owner lives still needs the ordinary restart behavior.
+  kill -TERM "$watcher"
+  wait_daemon_watcher "$state" "$watcher"
+  watcher=$LIFECYCLE_WATCHER
+  sleep 120 & replacement=$!
+  LIFECYCLE_PIDS+=("$replacement")
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.lock.acquire" || exit 1
+    printf "%s\n" "$2" > "$STATE/.lock"
+    fm_lock_release "$STATE/.lock.acquire"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$replacement" || fail "replacement claim failed"
+  kill -TERM "$owner"
+  wait "$owner" 2>/dev/null || true
+  sleep 2
+  is_live_non_zombie "$daemon" || fail "old session exit stopped the replacement's daemon"
+  # Away-mode wake cycles can legitimately replace the child in the meantime.
+  wait_daemon_watcher "$state"
+  watcher=$LIFECYCLE_WATCHER
+  # Exercise the restart boundary with a replacement, not just the monitor.
+  kill -TERM "$watcher"
+  wait_daemon_watcher "$state" "$watcher"
+  watcher=$LIFECYCLE_WATCHER
+  kill -TERM "$replacement"
+  wait "$replacement" 2>/dev/null || true
+  wait_for_exit "$daemon" 100 || fail "session exit retained the restarting daemon"
+  is_live_non_zombie "$watcher" && fail "session exit retained the daemon's watcher"
+  assert_absent "$state/.supervise-daemon.pid" "session exit retained daemon ownership"
+  assert_absent "$state/.watch.lock/pid" "session exit left a relaunched watcher"
+  assert_contains "$(cat "$state/.supervise-daemon.log")" 'session owner exited; stopping' \
+    "daemon did not distinguish owner exit from a crash"
+  pass "lifecycle: daemon restarts for live replacement ownership and stops after session exit"
+}
 
 # Run the daemon-managed watcher once: under the supervise-daemon (away mode) the
 # watcher is one-shot - it exits with a single reason line on EVERY wake and the
@@ -167,5 +242,6 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+test_daemon_stops_after_session_exit
 test_routine_then_terminal_after_restart
 test_stale_pane_transient_persistent_resume

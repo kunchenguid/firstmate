@@ -161,8 +161,9 @@
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
-#          lock. A crashing fm-watch.sh is logged and restarted, never killing
-#          the daemon; a tight crash-restart spin is detected and backed off.
+#          lock. A crashing fm-watch.sh is logged and restarted while its session
+#          owner is live; confirmed owner exit stops the daemon instead.
+#          A tight crash-restart spin is detected and backed off.
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1825,6 +1826,12 @@ fm_super_main() {
   local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
   local CRASH_BACKOFF=${FM_CRASH_BACKOFF:-$CRASH_BACKOFF_DEFAULT}
   local CRASH_NORMAL_SLEEP=${FM_CRASH_NORMAL_SLEEP:-$CRASH_NORMAL_SLEEP_DEFAULT}
+  local session_bound=0 session_pid='' session_identity='' current_pid current_identity
+  if [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ]; then
+    session_bound=1
+    session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+    session_identity=$(fm_pid_identity "$session_pid" 2>/dev/null || true)
+  fi
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
@@ -1979,6 +1986,25 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    # A session-bound child's shutdown must not become a crash-restart loop.
+    # Read under the publisher's claim lock so a live replacement wins, even
+    # if the previous owner exited or the supervisor pane disappeared.
+    if [ "$session_bound" -eq 1 ] \
+      && { [ -z "$WATCHER_PID" ] || ! kill -0 "$WATCHER_PID" 2>/dev/null; }; then
+      if ! fm_lock_try_acquire "$STATE/.lock.acquire"; then sleep 1; continue; fi
+      current_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+      current_identity=$(fm_pid_identity "$current_pid" 2>/dev/null || true)
+      if ! fm_pid_alive "$current_pid" \
+        || { [ "$current_pid" = "$session_pid" ] && [ -n "$session_identity" ] \
+          && [ -n "$current_identity" ] && [ "$current_identity" != "$session_identity" ]; }; then
+        fm_lock_release "$STATE/.lock.acquire"
+        log "session owner exited; stopping instead of restarting watcher"
+        cleanup
+      fi
+      session_pid=$current_pid
+      session_identity=$current_identity
+      fm_lock_release "$STATE/.lock.acquire"
+    fi
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

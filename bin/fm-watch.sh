@@ -185,6 +185,13 @@
 # and exits 1, so a watcher whose temporary home or disposable checkout was
 # deleted stops itself instead of running on as an orphan. That check is scoped
 # to this process alone and never signals another watcher.
+# A session-bound cycle also has a one-second owner monitor independent of the
+# poll loop, so owner exit stops even a blocked poll. The monitor follows this
+# home's current session-lock pid under .lock.acquire, retaining a live
+# replacement's cycle. Process birth identity prevents PID reuse from keeping
+# an old owner alive. The original launcher's lifetime is a second bound, since
+# a shared Codex app-server pid alone does not identify a chat session. Native
+# adapter shutdown hooks still own same-process conversation replacement.
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -197,6 +204,13 @@ mkdir -p "$STATE"
 # disappeared, so the per-poll home-gone exit below applies only when it did.
 WATCH_HOME_EXISTED=0
 [ ! -d "$FM_HOME" ] || WATCH_HOME_EXISTED=1
+WATCH_LAUNCHER_PID=$PPID
+WATCH_SESSION_BOUND=0
+WATCH_SESSION_OWNER_PID=
+if [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ]; then
+  WATCH_SESSION_BOUND=1
+  WATCH_SESSION_OWNER_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+fi
 
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
@@ -3275,6 +3289,71 @@ reconcile_requests_detached() {
 
 PR_POLL_CONTROL_LOCK=
 PR_POLL_PUBLISH_LOCK=
+SESSION_MONITOR_PID=
+WATCH_LAUNCHER_IDENTITY=
+
+# Only session-bound watchers opt into this check: state-only executable
+# fixtures and operator probes without a session lock retain their contract.
+# The child resets the watcher's traps and never takes the watcher singleton.
+# Its only signal target is the exact home/path/birth-bound parent watcher.
+watch_session_owner() {
+  local owner_pid=$WATCH_SESSION_OWNER_PID owner_identity=$WATCH_SESSION_OWNER_IDENTITY
+  local current_pid current_identity launcher_pid=$WATCH_LAUNCHER_PID launcher_identity reason
+  trap - EXIT HUP INT TERM
+  trap 'fm_lock_release "$STATE/.lock.acquire"' EXIT
+  launcher_identity=$WATCH_LAUNCHER_IDENTITY
+  while fm_pid_alive "$WATCHER_PID"; do
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ] || return 0
+    fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME" || return 0
+    if fm_lock_try_acquire "$STATE/.lock.acquire"; then
+      reason=
+      current_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+      case "$current_pid" in
+        ''|*[!0-9]*) reason='session owner lock removed or invalid' ;;
+        *)
+          current_identity=$(fm_pid_identity "$current_pid" 2>/dev/null || true)
+          if ! fm_pid_alive "$current_pid"; then
+            reason="session owner exited: pid=$current_pid"
+          elif [ "$current_pid" != "$owner_pid" ]; then
+            # Adoption happens only after the publisher releases its claim.
+            # The previous launcher's exit cannot cancel replacement ownership.
+            launcher_pid=
+            owner_pid=$current_pid
+            owner_identity=$current_identity
+          elif [ -n "$current_identity" ] && [ -n "$owner_identity" ] \
+            && [ "$current_identity" != "$owner_identity" ]; then
+            reason="session owner process replaced: pid=$current_pid"
+          elif [ -n "$current_identity" ]; then
+            owner_identity=$current_identity
+          fi
+          ;;
+      esac
+      if [ -z "$reason" ] && [ -n "$launcher_pid" ]; then
+        current_identity=$(fm_pid_identity "$launcher_pid" 2>/dev/null || true)
+        if ! fm_pid_alive "$launcher_pid"; then
+          reason="session launcher exited: pid=$launcher_pid"
+        elif [ -n "$current_identity" ] && [ -n "$launcher_identity" ] \
+          && [ "$current_identity" != "$launcher_identity" ]; then
+          reason="session launcher exited: pid=$launcher_pid"
+        elif [ -n "$current_identity" ]; then
+          launcher_identity=$current_identity
+        fi
+      fi
+      if [ -n "$reason" ]; then
+        # Re-prove the signal target while session publication is excluded.
+        if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ] \
+          && fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
+          echo "watcher: exiting - $reason" >&2
+          kill -TERM "$WATCHER_PID" 2>/dev/null || true
+        fi
+        fm_lock_release "$STATE/.lock.acquire"
+        return 0
+      fi
+      fm_lock_release "$STATE/.lock.acquire"
+    fi
+    sleep 1
+  done
+}
 
 pr_poll_control_release() {
   [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
@@ -3288,6 +3367,11 @@ pr_poll_publish_release() {
 
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  if [ -n "$SESSION_MONITOR_PID" ]; then
+    kill -TERM "$SESSION_MONITOR_PID" 2>/dev/null || true
+    wait "$SESSION_MONITOR_PID" 2>/dev/null || true
+    SESSION_MONITOR_PID=
+  fi
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -3321,6 +3405,12 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+if [ "$WATCH_SESSION_BOUND" -eq 1 ]; then
+  WATCH_SESSION_OWNER_IDENTITY=$(fm_pid_identity "$WATCH_SESSION_OWNER_PID" 2>/dev/null || true)
+  WATCH_LAUNCHER_IDENTITY=$(fm_pid_identity "$WATCH_LAUNCHER_PID" 2>/dev/null || true)
+  watch_session_owner &
+  SESSION_MONITOR_PID=$!
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

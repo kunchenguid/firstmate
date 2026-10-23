@@ -255,6 +255,7 @@ ln -s "$ROOT/bin" "$MIRROR_ROOT/bin"
 # Run the host under the fake harness that holds the home's session lock.
 # Every hook payload in $home/mirror-seed.* is first written to the dialog
 # mirror by that same session, as its prompt and Stop hooks would.
+# Pass-through cases keep the session alive until session.stop or cleanup.
 start_host() {  # <home> [park options...]
   local home=$1
   shift
@@ -269,6 +270,9 @@ start_host() {  # <home> [park options...]
       done
       "$0" park "$@" > "$FM_HOME/host.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/host.rc"
+      if [ "${FM_TEST_KEEP_SESSION_ALIVE:-0}" = 1 ]; then
+        while [ ! -e "$FM_HOME/session.stop" ]; do sleep 0.1; done
+      fi
     ' "$HOST" "$@" 2>> "$home/claude.err" &
 }
 
@@ -1072,9 +1076,9 @@ test_off_written_while_parked_passes_the_next_attended_close_to_main() {
 # armed again. The close still reaches main unchanged, and the successor
 # cycle stays up for the session's next arm to attach to.
 test_main_only_pass_through_leaves_the_successor_watcher_running() {
-  local home pid
+  local home pid owner
   home=$(make_home main-only-successor attended)
-  start_host "$home"
+  FM_TEST_KEEP_SESSION_ALIVE=1 start_host "$home"
   wait_until 150 watcher_live "$home" || fail "successor: the host never started a watcher cycle"
   append_status "$home" 'which export format?' needs-decision
   wait_until 250 host_exited "$home" || fail "successor: the decision close did not reach main: $(cat "$home/state/.supervision-host.log")"
@@ -1086,10 +1090,15 @@ test_main_only_pass_through_leaves_the_successor_watcher_running() {
   [ "$(marker_kind "$home")" = downtime ] \
     || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
   pid=$(cat "$home/state/.watch.lock/pid")
+  owner=$(cat "$home/state/.lock")
   sleep 2
+  kill -0 "$owner" 2>/dev/null || fail "successor: the fixture session exited before main's next turn"
   kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] || fail "successor: the watcher lock moved after the pass-through"
-  pass "host: a main-only pass-through leaves the successor watcher running and the close undelivered for main"
+  touch "$home/session.stop"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$owner" "$pid" \
+    || fail "successor: the watcher survived its session owner exiting"
+  pass "host: a main-only pass-through leaves its successor running for main until the session owner exits"
 }
 
 # The session-lock holder's process identity cannot be read (its proc entry
@@ -1165,7 +1174,7 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   local home
   home=$(make_home attended-turns-main-only attended)
   turn_main_only_at_second_offer "$home" snapshot
-  start_host "$home"
+  FM_TEST_KEEP_SESSION_ALIVE=1 start_host "$home"
   wait_until 150 watcher_live "$home" || fail "turns-main-only: the host never started a watcher cycle"
   append_status "$home" 'step one'
   wait_until 250 host_exited "$home" || fail "turns-main-only: the close did not reach main: $(cat "$home/state/.supervision-host.log")"
@@ -1758,20 +1767,19 @@ host_owns_the_only_cycle() {  # <home>
 }
 
 # The live leak (2026-10-01): a main-only pass-through leaves its successor
-# cycle running through main's handling turn, and the next park - here a
-# restarted session's first turn end - attached to that cycle instead of
-# owning it. The successor arm, orphaned by its host's exit, kept owning the
-# watcher while the new park's arm polled it until the park boundary, hours
-# later. The next park now takes that cycle over: one arm, the host's own
+# cycle running through main's handling turn, and the next park attached to
+# that cycle instead of owning it. The successor arm, orphaned by its host's
+# exit, kept owning the watcher while the new park's arm polled it until the
+# park boundary, hours later. The next park now takes that cycle over: one arm, the host's own
 # child, owns the watcher, nothing reaches main for the takeover, no downtime
 # episode is opened, and the cycle it owns still delivers the next close.
 # A main-only pass-through in <home> leaves its successor cycle running, main
-# handles and acknowledges the close, and the session restarts. Sets
+# handles and acknowledges the close in the same session. Sets
 # LEFT_WATCHER and LEFT_ARM to the successor watcher and the arm that owns it.
 LEFT_WATCHER=
 LEFT_ARM=
-leave_a_cycle_for_main_and_restart() {  # <home>
-  local home=$1 first_session
+leave_a_cycle_for_main() {  # <home>
+  local home=$1
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "takeover: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
@@ -1786,19 +1794,13 @@ leave_a_cycle_for_main_and_restart() {  # <home>
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
   [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
     || fail "takeover: main's acknowledgement failed: $MAIN_ACK"
-  # The session restarts: the old one ends, and a new one holds the lock.
-  first_session=$(tail -n 1 "$home/claude-pids")
-  : > "$home/session.stop"
-  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$first_session" || fail "fixture: the first session did not end"
-  rm -f "$home/session.stop"
-  kill -0 "$LEFT_ARM" 2>/dev/null || fail "fixture: the successor arm did not outlive its session"
-  start_hook_session "$home"
+  kill -0 "$LEFT_ARM" 2>/dev/null || fail "fixture: the successor arm did not survive the main turn"
 }
 
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   local home left_watcher left_arm
   home=$(make_primary_home hook-takeover)
-  leave_a_cycle_for_main_and_restart "$home"
+  leave_a_cycle_for_main "$home"
   left_watcher=$LEFT_WATCHER
   left_arm=$LEFT_ARM
   turn_end "$home"
@@ -1825,7 +1827,7 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park() {
   local home holder host
   home=$(make_primary_home hook-takeover-interrupted)
-  leave_a_cycle_for_main_and_restart "$home"
+  leave_a_cycle_for_main "$home"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2" || exit 1
@@ -1904,7 +1906,7 @@ esac
 exec "$real_mktemp" "\$@"
 SH
   chmod +x "$home/fakebin/mktemp"
-  start_host "$home"
+  FM_TEST_KEEP_SESSION_ALIVE=1 start_host "$home"
   wait_until 150 watcher_live "$home" || fail "away-then-attended: the host never started a watcher cycle"
   append_status "$home" 'which export format?' needs-decision
   wait_until 250 host_exited "$home" || fail "away-then-attended: the decision close did not reach main: $(cat "$home/state/.supervision-host.log")"
@@ -2568,15 +2570,18 @@ test_engine_turn_is_bounded_and_its_descendants_reaped() {
 }
 
 test_restarted_host_stops_what_a_killed_predecessor_left() {
-  local home first_host arm watcher
+  local home first_host arm watcher owner
   home=$(make_home away-crash away)
-  start_host "$home"
+  # Crash only the host: session exit would correctly reap its watcher first.
+  FM_TEST_KEEP_SESSION_ALIVE=1 start_host "$home"
   wait_until 150 watcher_live "$home" || fail "crash: the host never started a watcher cycle"
   first_host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   arm=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
   watcher=$(cat "$home/state/.watch.lock/pid")
+  owner=$(cat "$home/state/.lock")
   kill -KILL "$first_host"
-  sleep 1
+  sleep 3
+  kill -0 "$owner" 2>/dev/null || fail "crash: fixture session exited before host recovery"
   kill -0 "$arm" 2>/dev/null || fail "crash: fixture error: the arm died with its host, so this case proves nothing"
   start_host "$home"
   wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$arm" "$watcher" \
@@ -2811,7 +2816,7 @@ test_park_limit_lets_a_turn_outlive_the_boundary() {
 test_first_cycle_status_streams_and_owner_options_reach_it() {
   local home stale fresh generation predecessor
   home=$(make_home stream attended pi)
-  start_host "$home"
+  FM_TEST_KEEP_SESSION_ALIVE=1 start_host "$home"
   wait_until 150 grep -qs '^watcher: started pid=' "$home/host.out" \
     || fail "stream: the first cycle's status did not reach the owner before a close: $(cat "$home/host.out")"
   host_exited "$home" && fail "stream: the host exited before any close: $(cat "$home/host.out")"
@@ -2824,17 +2829,16 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$home/drain.err" || fail "stream: main's drain failed"
   ack_drain_err "$home/state" "$home/drain.err" >/dev/null 2>&1 || fail "stream: main's acknowledgement failed: $(cat "$home/drain.err")"
   # Pass-through can leave a successor watcher running. Retire that cycle so
-  # the orphan-arm fixture below owns the watcher we later ask --restart to replace.
+  # the standalone arm below owns the watcher we later ask --restart to replace.
   FM_HOME="$home" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null || fail "stream: could not stop the prior cycle"
 
-  # A watcher a dead arm left behind, holding this home's watcher lock.
+  # A live cycle holding this home's watcher lock. Killing its arm here would
+  # let session-exit cleanup win before --restart can exercise replacement.
   FM_HOME="$home" PATH="$home/fakebin:$PATH" perl -e 'setpgrp(0, 0); exec @ARGV' "$ROOT/bin/fm-watch-arm.sh" \
     > "$home/stale-arm.out" 2>&1 &
   wait_until 150 grep -qs '^watcher: started pid=' "$home/stale-arm.out" \
     || fail "stream: the fixture arm never started its watcher: $(cat "$home/stale-arm.out")"
   wait_until 150 watcher_live "$home" || fail "stream: the fixture watcher never started"
-  kill -KILL "$!" 2>/dev/null || true
-  wait "$!" 2>/dev/null || true
   stale=$(cat "$home/state/.watch.lock/pid")
   rm -f "$home/host.out" "$home/host.rc"
   start_host "$home" --restart
