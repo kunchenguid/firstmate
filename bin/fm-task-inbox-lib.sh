@@ -336,12 +336,14 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
+# composer pre-check, then the backend's submit machinery, whose verdict is
+# confirmed rather than discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# failed or our doorbell is still unsubmitted after the Enter retries (the
+# watcher re-rings and that ring submits it rather than typing another copy),
+# 3 skipped because the endpoint is positively dead or missing (nothing typed;
+# recovery owns the record). No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
@@ -349,10 +351,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-# A pending composer holding exactly our own doorbell line is a previous ring
-# whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# A pending composer holding only copies of our own doorbell line is a previous
+# ring whose Enter never landed, so on an agent not reported busy it is
+# submitted (Enter only, never retyped) rather than skipped; skipping it would
+# block every later ring. After a fresh typing the backend's own verdict gets
+# the same treatment when it still reports our line pending.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -367,10 +370,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      fm_task_inbox_submit_held "$backend" "$target" "$line" "$label" || return 2
       return 0
       ;;
   esac
@@ -381,19 +381,46 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
+  # A verdict of pending means the Enter retries were spent with our line still
+  # in the composer (long wrapped lines lose Enters on codex); keep pressing
+  # Enter, never retyping, until it submits.
+  if [ "$verdict" = pending ] && fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label"; then
+    fm_task_inbox_submit_held "$backend" "$target" "$line" "$label" || return 2
+  fi
   return 0
 }
 
-# Whether the composer's content, ignoring line wrapping, is exactly <line>.
+# Press Enter until the composer no longer holds the doorbell line (or a busy
+# agent has queued it); fails when it is still unsubmitted after the budget.
+fm_task_inbox_submit_held() {  # <backend> <target> <line> [expected-label]
+  local i=0
+  while [ "$i" -lt 4 ]; do
+    fm_backend_send_key "$1" "$2" Enter "${4:-}" >/dev/null 2>&1 || return 1
+    sleep 0.4
+    fm_task_inbox_composer_holds "$1" "$2" "$3" "${4:-}" || return 0
+    [ "$(fm_backend_busy_state "$1" "$2" 2>/dev/null)" != busy ] || return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Whether the composer's content, ignoring line wrapping, is one or more
+# back-to-back copies of exactly <line> (a re-ring that typed again appends).
 fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held
+  local cap held want
   fm_backend_source "$1" || return 1
   cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
-  [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
+  held=$(printf '%s' "$held" | tr -d '[:space:]')
+  want=$(printf '%s' "$3" | tr -d '[:space:]')
+  [ -n "$held" ] && [ -n "$want" ] || return 1
+  while [ -n "$held" ]; do
+    case "$held" in
+      "$want"*) held=${held#"$want"} ;;
+      *) return 1 ;;
+    esac
+  done
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

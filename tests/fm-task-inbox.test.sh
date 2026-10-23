@@ -398,6 +398,49 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
+# The unsent-doorbell incident: a long wrapped doorbell into codex stayed typed
+# but unsubmitted, then re-rings appended more copies. The ring keeps pressing
+# Enter (never retyping) until the composer clears, submits a composer holding
+# only appended copies of the doorbell, and reports an Enter that never lands.
+test_ring_confirms_submit_and_drains_appended_copies() {
+  local dir state rec doorbell log composer drops rc
+  dir="$TMP_ROOT/ring-confirm"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+
+  : > "$log"; : > "$composer"; echo 3 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a doorbell whose first three Enters are lost should still be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the doorbell should be typed once and submitted by a later Enter:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "lost Enters left the doorbell unsubmitted"
+
+  : > "$log"; printf '%s%s%s' "$doorbell" "$doorbell" "$doorbell" > "$composer"; echo 0 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a composer holding appended doorbell copies should be submitted, got rc $rc"
+  [ "$(grep -c '^SUBMIT:' "$log")" = 1 ] || fail "appended copies should submit in one Enter:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "appended doorbell copies were left in the composer"
+
+  : > "$log"; : > "$composer"; echo 99 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 2 ] || fail "a doorbell that never submits must report failure, got rc $rc"
+  [ "$(cat "$composer")" = "$doorbell" ] || fail "the failed ring should leave exactly one doorbell copy: $(cat "$composer")"
+  echo 0 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "the re-ring after a failed ring should submit the stuck doorbell, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the re-ring should submit the one stuck copy, not append another:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring confirms the submit, drains appended copies, and re-rings submit instead of appending"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -1186,6 +1229,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_confirms_submit_and_drains_appended_copies
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
