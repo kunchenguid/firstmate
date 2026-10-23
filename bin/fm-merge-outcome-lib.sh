@@ -13,9 +13,9 @@
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
-# The main watcher may additionally invoke the guarded teardown for a finished
-# direct report after releasing its poll-control lock; this library owns that
-# eligibility check and the resulting notice text.
+# The merge entrypoint and the main watcher may each run the guarded teardown
+# for a finished direct report once the merge outcome is recorded; this library
+# owns that eligibility check, the teardown call, and the resulting notice text.
 # The merge outcome adds no new transport; a cleanup outcome rides the merge
 # notice this library emits.
 #
@@ -65,7 +65,7 @@ fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
 # on the ordinary merge-notice path.
 fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   local home=$1 state=$2 id=$3 url=$4 meta="$2/$3.meta" status="$2/$3.status"
-  local data kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
+  local kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
   # shellcheck disable=SC2034 # wake-library helpers use these under Bash dynamic scope.
   local FM_HOME=$1 STATE=$2 FM_STATE_OVERRIDE=$2
   FM_MERGE_OUTCOME_CLEANUP=skipped
@@ -84,25 +84,16 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   [ -f "$status" ] && [ ! -L "$status" ] || return 0
   kind=$(fm_meta_get "$meta" kind)
   [ -n "$kind" ] || kind=ship
-  case "$kind" in ship|scout) ;; *) return 0 ;; esac
+  [ "$kind" = ship ] || return 0
   line=$(status_current_line "$status" "$kind")
   [ "$(status_line_verb "$line")" = "done" ] || return 0
-  data=${FM_DATA_OVERRIDE:-$home/data}
-  case "$kind" in
-    ship)
-      recorded_pr=$(fm_meta_get "$meta" pr)
-      [ "$recorded_pr" = "$url" ] || return 0
-      note=$(status_line_note "$line")
-      case "$note" in PR\ *) ;; *) return 0 ;; esac
-      noted_pr=${note#PR }
-      noted_pr=${noted_pr%% *}
-      [ "$noted_pr" = "$url" ] || return 0
-      ;;
-    scout)
-      [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ] \
-        && [ -r "$data/$id/report.md" ] || return 0
-      ;;
-  esac
+  recorded_pr=$(fm_meta_get "$meta" pr)
+  [ "$recorded_pr" = "$url" ] || return 0
+  note=$(status_line_note "$line")
+  case "$note" in PR\ *) ;; *) return 0 ;; esac
+  noted_pr=${note#PR }
+  noted_pr=${noted_pr%% *}
+  [ "$noted_pr" = "$url" ] || return 0
   current=$(fm_merge_outcome_current_state "$home" "$state" "$id" 2>/dev/null) || return 0
   case "$current" in 'state: done ·'*) ;; *) return 0 ;; esac
 
@@ -147,6 +138,23 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
       ;;
     *) printf '%s' "$1" ;;
   esac
+}
+
+# The one boundary for a post-merge cleanup: run the guarded teardown, then
+# publish its outcome under the durable key the merge notice used, so the
+# payload presented for that key carries the cleanup result.
+fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
+  local home=$1 state=$2 id=$3 url=$4 status=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  fm_merge_outcome_auto_teardown "$home" "$state" "$id" "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" != skipped ] || return 0
+  fm_pr_url_parse "$url" || return 2
+  STATE=$state
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
+  fm_wake_append check "merged-$id-$FM_PR_URL" \
+    "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")" || status=1
+  return "$status"
 }
 
 # fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [authority]
