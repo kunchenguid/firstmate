@@ -734,6 +734,10 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Contribution poll opt-out (config/contributions-poll-disabled)
+
+For the durable contribution-poll opt-out, see the [`bin/fm-contributions.sh` header and `--help`](../bin/fm-contributions.sh), which own the enable and disable commands, presence-flag semantics, automatic arming behavior, unaffected operations, and per-home scope.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off further form of wait evidence in the watcher's wedge timer.

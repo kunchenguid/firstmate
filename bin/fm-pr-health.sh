@@ -39,8 +39,9 @@
 # only the newly failing checks. The two conditions have independent histories.
 # A merged or closed PR is final and never read again. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
-# fingerprint untouched and prints nothing; fm-contributions.sh reports forge
-# outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
+# fingerprint untouched and prints nothing; outage reporting belongs to
+# fm-contributions.sh under the observation policy in its header.
+# Forge reads stop FM_CHECK_TIMEOUT (default 30)
 # minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
 # Branch discovery and owned-PR reads each fan out in one concurrent wave;
 # there is no rotating PR backlog or serial network wait per PR.
@@ -51,7 +52,7 @@
 # file is reported once and replaced.
 #
 # arm writes state/pr-health.check.sh, binds it through fm-check-register.sh,
-# and arms the contribution observer that reads the PRs poll enrolls.
+# and invokes fm-contributions.sh arm (observer policy: that script's header).
 # The monitor never comments on, edits, or fixes a PR.
 # GraphQL, jq and bash -c programs below are literal, not shell expressions.
 # shellcheck disable=SC2016

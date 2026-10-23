@@ -11,6 +11,8 @@
 #   fm-contributions.sh arm [--if-owned]
 #   fm-contributions.sh owned
 #   fm-contributions.sh enroll <task> <pr-url>
+#   fm-contributions.sh disable
+#   fm-contributions.sh enable
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
@@ -146,6 +148,20 @@
 #
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
+#
+# config/contributions-poll-disabled is this home's optional local, gitignored
+# durable opt-out; only its presence is read, and this script is its single
+# writer and reader. disable writes that flag and retires
+# any registered check through fm-check-unregister.sh. While the flag exists,
+# poll and every arm path - startup's arm --if-owned and PR registration's
+# arm - succeed as silent no-ops, so no forge subprocess runs and neither can
+# restore the poll. enable removes the flag and arms --if-owned, so owned
+# contributions are observed again. Explicitly requested forge operations,
+# the exact merged-state PR poll, and every other check are untouched. The
+# flag is per home and is not inherited. Cached contribution records remain
+# readable without a forge read. Unregistering contributions alone is not a
+# durable opt-out because a later arm can restore the check.
+# Opt-out behavior is verified by tests/fm-contributions.test.sh.
 # jq_lib receives literal jq programs, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
@@ -154,6 +170,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DISABLED_FLAG="$CONFIG/contributions-poll-disabled"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -244,6 +262,10 @@ project() {
     | .captain |= .[:20]
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
 }
+
+# Any existing form of the opt-out flag disables, including a symlink, so the
+# posture fails toward "no forge subprocess".
+poll_disabled() { [ -e "$DISABLED_FLAG" ] || [ -L "$DISABLED_FLAG" ]; }
 
 acquire() {
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
@@ -561,7 +583,9 @@ clear_unsupported_errors() {
 poll() {
   local task url old kind error observed why
   local -a row
+  if poll_disabled; then return 0; fi
   acquire
+  if poll_disabled; then return 0; fi
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -645,10 +669,9 @@ poll() {
   done < "$TMP/known.tsv"
 }
 
-arm() {
+arm_locked() {
   local device staged
   local -a shim
-  acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
     if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" \
@@ -662,7 +685,8 @@ arm() {
   shim=('#!/usr/bin/env bash'
     "export FM_HOME=$(printf '%q' "$FM_HOME")"
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")"
-    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
+    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")"
+    "export FM_CONFIG_OVERRIDE=$(printf '%q' "$CONFIG")")
   if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
   fi
@@ -671,9 +695,55 @@ arm() {
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
+
   chmod 700 "$staged"
   mv -f -- "$staged" "$STATE/contributions.check.sh"
   "$SCRIPT_DIR/fm-check-register.sh" contributions
+}
+
+arm() {
+  if poll_disabled; then return 0; fi
+  acquire
+  if poll_disabled; then return 0; fi
+  arm_locked "${1:-}"
+}
+
+disable_poll() {
+  local staged
+  acquire
+  [ ! -L "$CONFIG" ] || fail 'config directory is a symlink'
+  [ ! -L "$DISABLED_FLAG" ] || fail 'opt-out flag is a symlink'
+  if [ ! -e "$DISABLED_FLAG" ]; then
+    mkdir -p -- "$CONFIG" || fail 'config directory unavailable'
+    staged=$(umask 077; mktemp "$CONFIG/.contributions-disabled.XXXXXX") || fail 'opt-out write unavailable'
+    printf 'contribution poll opted out; restore with fm-contributions.sh enable\n' > "$staged"
+    chmod 600 "$staged"
+    mv -f -- "$staged" "$DISABLED_FLAG"
+  fi
+  # Retire an existing registration through its owner. The flag stays even on
+  # failure, so polling stays disabled while the failure is reported.
+  "$SCRIPT_DIR/fm-check-unregister.sh" contributions \
+    || fail 'opt-out recorded but the registered check could not be retired'
+  printf 'disabled: config/contributions-poll-disabled\n'
+}
+
+enable_poll() {
+  local removed=0
+  acquire
+  if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+    [ ! -L "$CONFIG" ] || fail 'config directory is a symlink'
+    if [ -e "$DISABLED_FLAG" ] || [ -L "$DISABLED_FLAG" ]; then
+      [ -f "$DISABLED_FLAG" ] && [ ! -L "$DISABLED_FLAG" ] || fail 'opt-out flag is unsafe to remove'
+      rm -f -- "$DISABLED_FLAG" || fail 'opt-out flag could not be removed'
+      removed=1
+    fi
+  fi
+  arm_locked --if-owned
+  if [ "$removed" = 1 ]; then
+    printf 'enabled: config/contributions-poll-disabled removed\n'
+  else
+    printf 'enabled: no opt-out present\n'
+  fi
 }
 
 case "${1:-}" in
@@ -708,6 +778,8 @@ case "${1:-}" in
       write_record "$task" "$TMP/row.json"
     fi
     ;;
+  disable) disable_poll ;;
+  enable) enable_poll ;;
   pending)
     read_saved
     [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); pending signals are unverified"

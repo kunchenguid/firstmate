@@ -1501,6 +1501,115 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+install_acquire_pause() {
+  local home=$1 real_uname
+  real_uname=$(command -v uname)
+  cat > "$home/fakebin/uname" <<SH
+#!/usr/bin/env bash
+set -eu
+if [ -n "\${FM_TEST_ACQUIRE_PAUSE:-}" ]; then
+  : > "\$FM_TEST_ACQUIRE_PAUSE/waiting"
+  while [ ! -e "\$FM_TEST_ACQUIRE_PAUSE/continue" ]; do sleep 0.1; done
+fi
+exec "$real_uname" "\$@"
+SH
+  chmod +x "$home/fakebin/uname"
+}
+
+wait_for_pause() {
+  local marker=$1 attempts=0
+  while [ ! -e "$marker" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  [ -e "$marker" ]
+}
+
+run_disable_overtakes_waiter() { # arm|poll
+  local action=$1 home gate pid
+  home=$(new_home "optout-race-$action")
+  forge_home "$home"
+  wrap_forge "$home"
+  install_acquire_pause "$home"
+  gate="$home/pause"
+  mkdir -p "$gate"
+  : > "$home/forge/calls"
+  with_home "$home" env FM_TEST_ACQUIRE_PAUSE="$gate" \
+    "$ROOT/bin/fm-contributions.sh" "$action" > "$home/$action.out" 2> "$home/$action.err" &
+  pid=$!
+  if ! wait_for_pause "$gate/waiting"; then
+    : > "$gate/continue"
+    wait "$pid" || true
+    fail "$action did not reach the pre-lock pause"
+  fi
+  if ! with_home "$home" "$ROOT/bin/fm-contributions.sh" disable >/dev/null; then
+    : > "$gate/continue"
+    wait "$pid" || true
+    fail "disable failed while $action waited"
+  fi
+  : > "$gate/continue"
+  wait "$pid" || fail "$action failed after disable completed: $(cat "$home/$action.err")"
+  [ ! -e "$home/state/contributions.check.sh" ] || fail "waiting $action restored the disabled check"
+  [ ! -s "$home/forge/calls" ] || fail "waiting $action read the forge after disable: $(cat "$home/forge/calls")"
+}
+
+test_disable_serializes_stale_arm_and_poll() {
+  run_disable_overtakes_waiter arm
+  run_disable_overtakes_waiter poll
+  pass 'a completed disable stops pre-existing arm and poll waiters before registration or forge reads'
+}
+
+test_disable_retires_registration_and_blocks_rearm() {
+  local home out
+  home=$(new_home optout-block)
+  forge_home "$home"
+  wrap_forge "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery before opting out'
+  [ -f "$home/state/contributions.check.sh" ] || fail 'fixture did not register the contribution check'
+  : > "$home/forge/calls"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" disable >/dev/null || fail 'disable failed'
+  [ -f "$home/config/contributions-poll-disabled" ] || fail 'disable left no durable opt-out'
+  [ ! -e "$home/state/contributions.check.sh" ] || fail 'disable left the check registered'
+  [ ! -e "$home/state/contributions.check-trust" ] || fail 'disable left the trust binding'
+  # Startup arming and PR registration cannot restore disabled polling.
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm --if-owned >/dev/null \
+    || fail 'startup arming failed under opt-out'
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'PR registration failed under opt-out'
+  [ ! -e "$home/state/contributions.check.sh" ] || fail 'an arm path restored disabled polling'
+  # PR registration still performs its own explicit head read; only the
+  # contribution poll and its arm paths must stay forge-silent.
+  grep -vF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls" > "$home/forge/contribution-calls" || true
+  [ ! -s "$home/forge/contribution-calls" ] \
+    || fail "opted-out registration read a forge beyond the explicit head read: $(cat "$home/forge/contribution-calls")"
+  : > "$home/forge/calls"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'disabled poll failed'
+  [ -z "$out" ] || fail "disabled poll printed: $out"
+  [ ! -s "$home/forge/calls" ] || fail "disabled polling read a forge: $(cat "$home/forge/calls")"
+  pass 'disable retires the check and every arm path stays a no-op with zero forge reads'
+}
+
+test_enable_restores_registration() {
+  local home
+  home=$(new_home optout-restore)
+  forge_home "$home"
+  wrap_forge "$home"
+  rm -rf "$home/config"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" disable >/dev/null \
+    || fail 'disable failed with no prior registration'
+  [ -f "$home/config/contributions-poll-disabled" ] || fail 'disable without registration left no opt-out'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" enable >/dev/null || fail 'enable failed'
+  [ ! -e "$home/config/contributions-poll-disabled" ] || fail 'enable left the opt-out flag'
+  [ -f "$home/state/contributions.check.sh" ] || fail 'enable did not restore the contribution check'
+  [ -f "$home/state/contributions.check-trust" ] || fail 'enable did not rebind the check trust'
+  : > "$home/forge/calls"
+  registered_checks "$home" >/dev/null
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'restored registration did not observe the owned contribution'
+  pass 'enable removes the opt-out and restores observation of owned contributions'
+}
+
 test_retire_ends_observation_of_a_gone_contribution() {
   local home out url=https://github.com/o/r/pull/8
   local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
@@ -1849,7 +1958,7 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable test_disable_serializes_stale_arm_and_poll test_disable_retires_registration_and_blocks_rearm test_enable_restores_registration; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
