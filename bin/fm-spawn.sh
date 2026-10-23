@@ -3609,19 +3609,20 @@ if [ "$KIND" = secondmate ]; then
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" ||
       echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
-    SECOND_MATE_CHARTER="$PROJ_ABS/data/charter.md"
-  else
-    SECOND_MATE_CHARTER="$DATA/$ID/brief.md"
-  fi
-  # Deterministic role identity at the launch boundary. The home's AGENTS.md is
-  # the primary supervisor contract, so a secondmate session that reads only that
-  # and its charter has to guess its role; this overlay states the role, the
-  # absolute home, and the charter path before the charter text, and the launch
-  # environment carries the same facts as FM_SECONDMATE_ROLE/FM_SECONDMATE_CHARTER.
-  # The role variable is deliberately NOT FM_ROLE: bin/fm-role-lib.sh already owns
-  # FM_ROLE for this home's user|maintainer publication role, and overloading it
-  # would put a second meaning in that variable's environment.
+  # The identity owner is this home's OWN charter copy, checked here at the
+  # launch boundary: a secondmate must never resolve its role from the primary
+  # contract (AGENTS.md) or from a silent substitution to a charter living
+  # outside its home. The check's result is carried into the overlay instead of
+  # being assumed, so a home whose copy is missing is named as such rather than
+  # looking identical to a seeded one.
+  SECOND_MATE_CHARTER="$PROJ_ABS/data/charter.md"
+  # Deterministic role identity at the launch boundary. This overlay states the
+  # role, the absolute home, and the charter path before any charter text, and
+  # the launch environment carries the same facts as
+  # FM_SECONDMATE_ROLE/FM_SECONDMATE_CHARTER. The role variable is deliberately
+  # NOT FM_ROLE: bin/fm-role-lib.sh already owns FM_ROLE for this home's
+  # user|maintainer publication role, and overloading it would put a second
+  # meaning in that variable's environment.
   # It scopes the boundary to the PRIMARY home's startup, never to this home's
   # own startup: bin/fm-session-start.sh runs a reconcile-only posture for a
   # marked secondmate home, which is what takes this home's lock and arms its
@@ -3630,9 +3631,21 @@ if [ "$KIND" = secondmate ]; then
   mkdir -p "$DATA/$ID"
   {
     printf 'You are a secondmate, not the primary Firstmate. Your home is %s. Your charter is %s.\n' "$PROJ_ABS" "$SECOND_MATE_CHARTER"
+    if [ -f "$SECOND_MATE_CHARTER" ]; then
+      printf 'CHARTER: present at %s (this home own copy).\n' "$SECOND_MATE_CHARTER"
+    else
+      printf 'CHARTER: MISSING at %s. Do NOT infer any role from AGENTS.md and do NOT run startup as the primary home; report the missing charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
+    fi
     printf 'Run startup only for your own home: bin/fm-session-start.sh in your home takes your own home session lock and reconciles your own home durable records from disk, and your own watcher arms once that lock is held.\n'
     printf 'Never run startup against the primary home, never take the primary home helm, never run the primary home mutating fleet sweeps, and never address the captain; report only through your parent Firstmate.\n\n'
-    cat -- "$SECOND_MATE_CHARTER"
+    if [ -f "$SECOND_MATE_CHARTER" ]; then
+      cat -- "$SECOND_MATE_CHARTER"
+    elif [ -f "$DATA/$ID/brief.md" ]; then
+      # Recovery only, and never silent: the parent copy is labelled as such and
+      # does not turn an unseeded home into a primary-looking one.
+      printf 'CHARTER FALLBACK: this home has no local copy yet; the parent copy follows and belongs to this home only until it is seeded.\n\n'
+      cat -- "$DATA/$ID/brief.md"
+    fi
   } >"$SECOND_MATE_LAUNCH_BRIEF" || {
     echo "error: could not prepare secondmate launch instructions for $ID" >&2
     exit 1

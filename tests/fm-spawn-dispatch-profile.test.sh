@@ -254,6 +254,40 @@ test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
   pass "a secondmate claude launch publishes its identity, home, charter, and boundaries into its own home"
 }
 
+# The identity owner is the home's own charter copy, so its absence is named at
+# the launch boundary instead of being silently replaced by a path outside the
+# home. Recovery still launches, but the session is told not to infer a role
+# from AGENTS.md and to report the gap to its parent.
+test_secondmate_launch_names_a_missing_local_charter() {
+  local rec id sm out status overlay
+  id=charter-check-z3
+  rec=$(make_spawn_case charter-check claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  rm -f "$sm/data/charter.md"
+  printf 'parent copy of the charter\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate launch without a local charter should still launch for recovery"$'\n'"$out"
+  overlay="$HOME_DIR/data/$id/secondmate-launch-brief.md"
+  [ -f "$overlay" ] || fail "the secondmate overlay was not written: $overlay"
+  grep -q "CHARTER: MISSING at $sm/data/charter.md" "$overlay" \
+    || fail "the overlay did not name the missing local charter: $(cat "$overlay")"
+  grep -q 'Do NOT infer any role from AGENTS.md' "$overlay" \
+    || fail "the overlay did not forbid inferring a role from AGENTS.md"
+  grep -q 'CHARTER FALLBACK' "$overlay" \
+    || fail "the overlay did not label the parent copy as a fallback"
+  grep -q 'parent copy of the charter' "$overlay" \
+    || fail "the overlay dropped the parent copy the recovering session needs"
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_SECONDMATE_CHARTER='$sm/data/charter.md'" \
+    "the launch did not name the home's own charter path"
+  pass "a secondmate launch names a missing local charter instead of substituting a path outside the home"
+}
+
 # A claude worker given a typed envelope would see it with the marker stripped,
 # so a launch-brief record that cannot be published stops the spawn before any
 # launch is sent.
@@ -2740,6 +2774,7 @@ test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
+test_secondmate_launch_names_a_missing_local_charter
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
