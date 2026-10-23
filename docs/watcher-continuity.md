@@ -11,6 +11,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 | --- | --- |
 | Which component re-arms the watcher on each harness | [Ownership](#ownership) |
 | What happens between an actionable close and the wake reaching the model | [Actionable wake ordering](#actionable-wake-ordering) |
+| What happens when a Claude turn ends in an API error | [Claude API-error turn ends](#claude-api-error-turn-ends) |
 | How a watcher-downtime episode is announced and retired | [Recovery episode acknowledgement](#recovery-episode-acknowledgement) |
 | How each actor consumes the wake queue | [Per-actor acknowledgement](#per-actor-acknowledgement) |
 | What `bin/fm-watch-arm.sh` guarantees about each cycle | [Arm-layer cycle contract](#arm-layer-cycle-contract) |
@@ -28,7 +29,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
-| Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
+| Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`); an API-error turn end runs [`bin/fm-claude-stopfailure.sh`](#claude-api-error-turn-ends) instead |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
@@ -119,6 +120,30 @@ The beacon is `state/.last-watcher-beat`, which only the watcher process touches
 - After a successful notice, later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
+
+### Claude API-error turn ends
+
+Claude runs `StopFailure` instead of `Stop` when a turn ends in an API error (overloaded, rate limit, DNS failure, connection refused, the machine sleeping mid-response).
+The Stop hooks never run for that turn, so the StopFailure path must recover supervision or alert independently of them (issue #2940).
+`.claude/settings.json` therefore registers `bin/fm-claude-stopfailure.sh` as a `StopFailure` `asyncRewake` hook with the same `timeout: 28800` as the auto-arm.
+Claude delivers that hook's exit 2 to an idle session even though its hooks reference calls `StopFailure` output ignored; [`verification/supervision.md`](verification/supervision.md#stopfailure-asyncrewake-wakes-an-idle-session-2026-10-22) records the measurement.
+
+The hook spends no model tokens and acts only under the auto-arm's own gates: a genuine primary, the session-lock owner, no AFK record, supervision needed, and no live identity-matched watcher with a fresh beacon.
+It stands down on Cursor and pi-code payloads for the reason the auto-arm does.
+Its header owns the exact thresholds and tunables.
+
+- Recovery: it backs off, probes the API endpoint with one HTTP request (never a model request), and exits 2 once the endpoint answers.
+  The rewake handling turn drains the queue, and its ordinary `Stop` re-arms through the auto-arm, which stays the only arm owner.
+  A provider whose endpoint the hook cannot name, or a host without `curl`, counts as reachable, so the capped backoff paces recovery.
+- Backoff: `state/.claude-stopfailure-episode` counts the rewakes delivered since the last clean Stop, doubling the backoff each time.
+  Backoff grows up to its cap; failed handling turns do not exhaust a rewake count budget.
+  After a firing reaches its maximum wait without recovery, the alert has fired and the session waits for a human message.
+  A clean Stop by the owning session removes the record, which ends the episode and makes a still-waiting hook stand down, and a newer `StopFailure` supersedes an older waiting one.
+- Alert: an episode that has gone `FM_GUARD_GRACE` seconds without a clean Stop, or whose error needs a human (`authentication_failed`, `billing_error`), publishes the typed `downtime` recovery episode above and raises one active alert through the [`config/wedge-alarm`](wedge-alarm.md) channels, repeated at most once per `FM_STOPFAILURE_REALERT_SECS`.
+  The next drain then presents WATCHER DOWN.
+  So within `FM_GUARD_GRACE` of an eligible `StopFailure`, either a live identity-matched watcher with an independently viable owner exists or the captain receives the active alert.
+  One alert-only check starts with the episode and enforces its original deadline independently of probes and retry generations.
+  A clean Stop ends that episode; a healthy watcher or vanished need makes the check a no-op.
 
 ### Supervision host
 
@@ -517,6 +542,10 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 3. Completes two tokenless cycles.
 4. Checks the competing-live-owner negative control.
 
+`tests/fm-claude-stopfailure.test.sh` covers the StopFailure hook's gates, backoff and reachability wait, rewake banner, alert-once rate limit, immediate credential alert, continued recovery beyond repeated failures, clean-Stop stand-down, and newer-firing supersession.
+`tests/fm-claude-stopfailure-live-e2e.test.sh` drives the real tracked registration in an interactive session against a local stub endpoint, sends no message after the launch prompt, and covers both the recovery and the alert outcome.
+It spends no model tokens, so it runs by default wherever `claude`, `tmux`, and `python3` are installed.
+
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including:
 
 - Monotonic failed-epoch progression.
@@ -534,7 +563,7 @@ OpenCode support targets persistent TUI sessions rather than headless `opencode 
 
 The other harnesses rely on these mechanisms:
 
-- Claude depends on the Stop `asyncRewake` rewake.
+- Claude depends on the Stop `asyncRewake` rewake, and on the `StopFailure` `asyncRewake` rewake after an API-error turn end.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
 - Codex retains bounded foreground checkpoints.

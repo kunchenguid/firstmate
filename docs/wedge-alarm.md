@@ -3,6 +3,7 @@
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
+The channels live in `bin/fm-wedge-alarm-lib.sh`, which the Claude `StopFailure` hook also uses to alert when an API-error turn end leaves supervision off ([watcher continuity](watcher-continuity.md#claude-api-error-turn-ends)); that alert is rate-limited by its own episode, not by the max-defer window below.
 The durable marker and tmux flash remain as additional signals.
 
 ## Channels

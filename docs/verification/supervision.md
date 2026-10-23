@@ -532,6 +532,26 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### StopFailure asyncRewake wakes an idle session, 2026-10-22
+
+This supports the `bin/fm-claude-stopfailure.sh` header statement that Claude delivers a `StopFailure` hook's exit 2 to an idle session, although the hooks reference calls `StopFailure` output and exit status ignored.
+It was measured on Claude Code 2.1.308 on macOS arm64, in a scratch project on a private tmux socket against a local stub endpoint (`ANTHROPIC_BASE_URL`), so no model tokens were spent.
+The project registered one `Stop` and one `StopFailure` command hook through `.claude/settings.json`, each with `asyncRewake: true` and `timeout: 60`.
+The `Stop` hook exited 2 once, so its rewake created a handling turn; the stub answered that turn with a 400 error and every other request normally.
+The `StopFailure` hook slept 2 seconds, printed `ISOLATED_STOPFAILURE_REWAKE` to stderr, and exited 2.
+Nothing was typed after the launch prompt.
+
+| Event | Hook log or stub request (epoch seconds) |
+| --- | --- |
+| `Stop` hook fired for the launch turn, exited 2 | 1792670291 |
+| Handling turn failed, `StopFailure` hook fired with `"error":"unknown"` and `"last_assistant_message":"API Error: 400 ISOLATED_API_FAILURE"` | 1792670292 |
+| `StopFailure` hook exited 2 | 1792670294 |
+| Next model request, 0.1 seconds later, whose newest message was a `Stop hook feedback` notification reading `Stop hook blocking error from command "StopFailure:unknown": ISOLATED_STOPFAILURE_REWAKE` | 1792670294.38 |
+
+The pane showed `Stop hook feedback` followed by a normal reply, and a final `Stop` hook fired after it.
+The refreshing command is `tests/fm-claude-stopfailure-live-e2e.test.sh`, which runs by default wherever `claude`, `tmux`, and `python3` are installed.
+On Claude Code 2.1.308 it passed both outcomes: after the endpoint returned, the idle session was rewoken once and the Stop-owned auto-arm re-armed with no alert and no user message beyond the launch prompt; with the endpoint never returning, one alert reached a real `command:` channel inside the guard grace, a typed downtime episode was published, and nothing rewoke.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.

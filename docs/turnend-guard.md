@@ -266,6 +266,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 The registrations in detail:
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+  It also registers a `StopFailure` hook, `bin/fm-claude-stopfailure.sh`, because Claude runs that event instead of `Stop` when a turn ends in an API error; [Claude API-error turn ends](watcher-continuity.md#claude-api-error-turn-ends) owns its contract.
   In a Claude secondmate home, `bin/fm-spawn.sh` writes a `.fm-busy-stop` pointer and gives the mate no `Stop` busy hook, so `--claude` is the only Stop writer of the parent home's busy record for that generation.
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
@@ -291,11 +292,12 @@ The registrations in detail:
   A guard keyed on `GROK_AGENT` alone therefore stopped firing on grok 1.0.0, and the resulting Claude-only auto-arm ran synchronously under Grok.
   Grok has no `asyncRewake`, so it waited on the foregrounded watcher for the declared 28800-second timeout and the Grok turn never ended.
   Do NOT widen this guard to `GROK_SESSION_ID`: Grok injects that into every child process, so it can survive into a Claude session that Grok launched and would silently disable Claude's own continuity.
-  The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries.
+  The same marker guard carries both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries, whose events Grok covers through its own `.grok/hooks/` registration.
+  It also excludes the Claude-only `StopFailure` recovery hook, which requires `asyncRewake`.
   `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 - pi-code, Pi's Claude-hook compatibility extension, also loads `<project>/.claude/settings.json` and has no `asyncRewake`, so it awaits every Stop hook it delivers.
-  `bin/fm-claude-stop-autoarm.sh` therefore stands down on a pi-code-delivered payload.
+  `bin/fm-claude-stop-autoarm.sh` and `bin/fm-claude-stopfailure.sh` therefore stand down on a pi-code-delivered payload.
   Otherwise its foreground arm would run synchronously and hold Pi's turn open for the declared multi-hour timeout, exactly the wedge Cursor and grok 1.0.0 would produce (issue #3343).
   Pi's own native extensions own its supervision.
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.

@@ -34,3 +34,17 @@ fm_hook_payload_is_foreign_host() {  # <payload>
     type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
   ' >/dev/null 2>&1
 }
+
+# Return 0 when payload $1 was delivered by pi-code (Pi's Claude-hook
+# compatibility extension), which loads the tracked Claude settings, has no
+# asyncRewake, and awaits every hook, so a long-running hook would hold Pi's turn
+# end open (issue #3343). pi-code stamps every hook payload's transcript_path with
+# Pi's own session file under .pi/, which a Claude transcript path never
+# contains. Same fail direction as above: no payload, no jq, or no
+# transcript_path means the hook RUNS.
+fm_hook_payload_is_pi_code() {  # <payload>
+  local payload=${1-}
+  [ -n "$payload" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$payload" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1
+}

@@ -354,7 +354,7 @@ family_for_basename() {
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-bearings-board-lavish-live-e2e.test.sh|\
-    fm-claude-stop-autoarm-live-e2e.test.sh|\
+    fm-claude-stop-autoarm-live-e2e.test.sh|fm-claude-stopfailure-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
@@ -738,6 +738,8 @@ tests/fm-classify-corr-token.test.sh 23085
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
 tests/fm-claude-stop-autoarm.test.sh 61189
+tests/fm-claude-stopfailure-live-e2e.test.sh 80
+tests/fm-claude-stopfailure.test.sh 39000
 tests/fm-claude-trust.test.sh 12010
 tests/fm-cmux-claude-composer-live-e2e.test.sh 77
 tests/fm-codex-continuity-live-e2e.test.sh 108
@@ -1608,11 +1610,23 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
+    bin/fm-claude-stopfailure.sh)
+      printf '%s\n' __script__:fm-claude-stopfailure.test.sh
+      printf '%s\n' __script__:fm-claude-stop-autoarm.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-wedge-alarm-lib.sh)
+      # The shared alert channels: the away daemon's wedge alarm and the Claude
+      # StopFailure hook both raise their alerts through it.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' __script__:fm-claude-stopfailure.test.sh
+      ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
       # context-reset stdout injection) only show up against a real harness.
       printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
+      printf '%s\n' __script__:fm-claude-stopfailure-live-e2e.test.sh
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
       ;;
