@@ -5,6 +5,7 @@
 #   fm-inactive-reconcile.sh scan [--startup]
 #   fm-inactive-reconcile.sh report <task-id>
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
+#   fm-inactive-reconcile.sh presented <fingerprint>
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
@@ -65,6 +66,17 @@
 # path share the same receipt store.
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
 # only after its corresponding inactive-outcome wake is handled.
+# Before queueing that wake, a main home with a branch outcome store asks
+# bin/fm-branch-outcome.sh processed-covers, the owner of when a processed
+# branch outcome covers it; a covered record becomes presented with no wake,
+# and a query that times out is retried on the next scan.
+# `presented <fingerprint>` is the read-only receipt query bin/fm-wake-drain.sh
+# asks, under its wake-queue lock, before printing an inactive-outcome row: it
+# exits 0 when that outcome has a presented record and no pending one, or a
+# pending presentation-stage record that processed-covers (lock-free, so it
+# cannot deadlock with the drain) already covers, so a wake queued before main
+# processed the same branch outcome is never shown to main again, even before
+# the next scan records it as presented.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
@@ -83,8 +95,9 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# The scan reads only durable local state, fm-crew-state.sh, and the local
+# fm-branch-outcome.sh store; it never invokes gh, gh-axi, curl,
+# fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
 
@@ -95,6 +108,8 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+BRANCH_OUTCOME_BIN="$SCRIPT_DIR/fm-branch-outcome.sh"
+BRANCH_OUTCOME_STORE="$STATE/branch-outcomes.jsonl"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -234,6 +249,12 @@ mark_reported() { # <record>
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   reported=${record%.pending}.reported
   mv -f "$record" "$reported"
+}
+
+mark_presented() { # <record>
+  local record=$1
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  mv -f "$record" "${record%.pending}.presented"
 }
 
 queue_key_exists() { # <key>
@@ -496,7 +517,8 @@ report_child() { # <id>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind covered_seq remaining state_rc=0 started
+  started=$(date +%s)
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -547,6 +569,26 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     fi
     return 0
   fi
+  # An outcome main already processed through the branch outcome store was
+  # presented there; its receipt records that instead of waking main again.
+  # A home with no branch outcome store skips the query. Whole-second budgets
+  # round down, so the query always gets one second rather than deferring a
+  # child the scan could still finish.
+  covered_seq=
+  if [ -s "$BRANCH_OUTCOME_STORE" ]; then
+    remaining=$((timeout - ($(date +%s) - started)))
+    [ "$remaining" -ge 1 ] || remaining=1
+    covered_seq=$(fm_run_timed "$remaining" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$BRANCH_OUTCOME_BIN" processed-covers --task "$id" --state "$state" ${pr:+--pr "$pr"} 2>/dev/null) \
+      || { [ "$?" -ne 124 ] || return 3; covered_seq=; }
+  fi
+  case "$covered_seq" in
+    ''|*[!0-9]*) ;;
+    *)
+      mark_presented "$RECORD_PENDING" || return 1
+      return 0
+      ;;
+  esac
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
@@ -635,15 +677,30 @@ scan() {
 }
 
 acknowledge() { # <fingerprint>
-  local fingerprint=$1 pending presented phase
+  local fingerprint=$1 pending phase
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
   pending=$(record_path "$fingerprint" pending)
-  presented=$(record_path "$fingerprint" presented)
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
   phase=$(record_value "$pending" phase)
   [ "$phase" = presentation ] || return 0
-  mv -f "$pending" "$presented"
+  mark_presented "$pending"
+}
+
+presented() { # <fingerprint>
+  local fingerprint=$1 pending record pr
+  case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  pending=$(record_path "$fingerprint" pending)
+  if [ -f "$pending" ] && [ ! -L "$pending" ] && [ "$(record_value "$pending" phase)" = presentation ] \
+      && [ -s "$BRANCH_OUTCOME_STORE" ]; then
+    pr=$(record_value "$pending" pr)
+    env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$BRANCH_OUTCOME_BIN" processed-covers \
+      --task "$(record_value "$pending" task_id)" --state "$(record_value "$pending" state)" \
+      ${pr:+--pr "$pr"} >/dev/null 2>&1 && return 0
+  fi
+  record=$(record_path "$fingerprint" presented)
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ ! -e "$pending" ] && [ ! -L "$pending" ]
 }
 
 acknowledge_notice() { # <fingerprint>
@@ -692,6 +749,10 @@ case "$mode" in
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge "$2"
+    ;;
+  presented)
+    [ "$#" -eq 2 ] || { printf 'usage: fm-inactive-reconcile.sh presented <fingerprint>\n' >&2; exit 2; }
+    presented "$2"
     ;;
   acknowledge-notice)
     [ "$#" -eq 2 ] || exit 2

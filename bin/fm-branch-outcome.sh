@@ -108,6 +108,28 @@
 #     owner of that wording for both presenters, the drain's BRANCH OUTCOMES
 #     section and the Pi branch's processing request, because a row main never
 #     acknowledged can be presented again long after its situation settled.
+#   fm-branch-outcome.sh processed-covers --task <id> --state done|failed [--pr <url>]
+#     Read-only: print the seq of the newest processed captain row for <id>
+#     and exit 0 when its status provenance still covers the task's terminal
+#     outcome, so main already acted on it; exit 1 otherwise, including legacy
+#     rows without provenance and a store that cannot be read safely.
+#     Covering means the status log keeps the recorded file identity, and
+#     both its latest event and its latest event through the recorded
+#     statusEndpoint are <state> lines, so a changed terminal state is a new
+#     outcome. With --pr, that covered event must also name the PR as a whole
+#     word, so an outcome recorded before the PR existed (a pre-validation
+#     handoff) never covers the PR-ready line. A later line with the same
+#     state and PR is the same outcome, matching
+#     bin/fm-inactive-reconcile.sh's receipt identity, which asks this before
+#     waking main for an inactive terminal outcome and again, through its
+#     `presented` query, while bin/fm-wake-drain.sh holds the wake-queue lock.
+#     So this read takes no outcome lock and can never wait on, or deadlock
+#     with, a lock holder. That is safe because the processed marker and read
+#     cursor are only atomically replaced and only advance, and the store is
+#     append-only: it reads the processed marker, then the cursor, then the
+#     store, so every consistent moment passes its ordering checks, and a
+#     marker, cursor, or store that is unreadable, malformed, out of order, or
+#     caught mid-append (an unterminated line) reads as not covered.
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Validate the read cursor and the processed marker without changing them,
 #     then rebuild the bounded per-task outcome indexes. --held-lock is only
@@ -163,7 +185,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-covers --task <id> --state done|failed [--pr <url>] | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -272,6 +294,32 @@ record_seq() { # <jsonl-line>
 outcome_index_path() { # <task>
   case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   printf '%s/.%s.branch-outcome-index' "$STATE" "$1"
+}
+
+# 0 when <text> names <pr> as a whole word, so .../pull/1 never matches .../pull/10.
+names_pr() { # <text> <pr>
+  local words word IFS=$' \t()<>[]"\',;'
+  read -r -a words <<< "$1"
+  for word in "${words[@]}"; do
+    [ "${word%.}" = "$2" ] && return 0
+  done
+  return 1
+}
+
+# 0 when one outcome's status provenance covers the task's current terminal
+# outcome (see processed-covers in the header usage).
+status_provenance_covers() { # <task> <state> <pr> <endpoint> <identity>
+  local f="$STATE/$1.status" state=$2 pr=$3 endpoint=$4 ident=$5 latest events_through_endpoint covered_event
+  case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(_fm_open_decisions_file_ident "$f" 2>/dev/null)" = "$ident" ] || return 1
+  latest=$(last_status_line "$f")
+  [ -n "$latest" ] && [ "$(status_line_verb "$latest")" = "$state" ] || return 1
+  events_through_endpoint=$(head -c "$endpoint" "$f" | tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" | _fm_status_event_scan) || return 1
+  covered_event=${events_through_endpoint##*$'\n'}
+  [ "$(status_line_verb "$covered_event")" = "$state" ] || return 1
+  [ -n "$pr" ] || return 0
+  names_pr "$covered_event" "$pr"
 }
 
 capture_status_position() { # <task>
@@ -674,6 +722,39 @@ case "$CMD" in
     fi
     write_processed "$THROUGH"
     fm_lock_release "$LOCK"
+    ;;
+  processed-covers)
+    TASK=''
+    COVER_STATE=''
+    PR=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --task) TASK=${2:-}; shift 2 || usage ;;
+        --state) COVER_STATE=${2:-}; shift 2 || usage ;;
+        --pr) PR=${2:-}; shift 2 || usage ;;
+        *) usage ;;
+      esac
+    done
+    outcome_index_path "$TASK" >/dev/null || usage
+    case "$COVER_STATE" in done|failed) ;; *) usage ;; esac
+    if ! PROCESSED_SEQ=$(read_processed) || ! CURSOR_SEQ=$(read_cursor) || ! LAST_SEQ=$(last_seq) \
+        || [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ] || [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
+      echo "error: refusing coverage read because the outcome store, cursor, or processed marker is unsafe" >&2
+      exit 1
+    fi
+    ROW=
+    if [ -s "$STORE" ] && ! ROW=$(jq -rs --arg task "$TASK" --argjson processed "$PROCESSED_SEQ" '
+        map(select(.task == $task and .verdict == "captain" and .seq <= $processed)) | last // empty
+        | select((.statusEndpoint | type) == "number" and (.statusIdent | type) == "string")
+        | [(.seq | tostring), (.statusEndpoint | tostring), .statusIdent] | @tsv' "$STORE"); then
+      exit 1
+    fi
+    [ -n "$ROW" ] || exit 1
+    IFS=$(printf '\t') read -r SEQ ENDPOINT IDENT <<EOF
+$ROW
+EOF
+    status_provenance_covers "$TASK" "$COVER_STATE" "$PR" "$ENDPOINT" "$IDENT" || exit 1
+    printf '%s\n' "$SEQ"
     ;;
   processed-init)
     HELD_LOCK=0

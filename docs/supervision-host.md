@@ -206,6 +206,8 @@ A captain outcome the attended engine records while the captain remains attended
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
+An acknowledged captain outcome also lets the inactive-outcome scan treat the terminal outcome it covers as already presented instead of waking main for it again; `bin/fm-branch-outcome.sh processed-covers` owns when an outcome covers it.
+An inactive-outcome wake queued before that acknowledgement is withheld from the drain's printed rows once that acknowledgement covers its outcome, and the ordinary acknowledgement still consumes it.
 The drain's header owns the section's bounds; these rules keep it bounded and in order:
 
 - Captain outcomes come first and never wait behind routine ones.
