@@ -48,7 +48,9 @@ The Stop payload includes `cwd`, but the tracked hook does not use it to choose 
 Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is Firstmate-shaped and hook-bearing, and then invokes the guard with the original payload.
 
-Codex's primary watcher protocol is `../../../bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `../../../bin/fm-watch-arm.sh`.
-Codex cannot reason while a foreground tool call is running, so the checkpoint is deliberately foreground and bounded to return control regularly for user messages and queued notifications.
-In a home with `config/supervision-host` and no `config/supervision-host-off` the checkpoint runs the supervision host instead of the watcher, with Claude's print mode as its headless engine, and holds for at least an hour while away; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host and that bound.
+Codex CLI 0.163.0 supports the native asynchronous Stop park registered by `bin/fm-codex-stop-park.sh`, verified in an isolated real CLI lab on 2026-10-19.
+The hook waits outside the model and delivers actionable wakes with `codex queue --thread`, including in embedded mode without a shared app-server daemon.
+The script owns version and native-session selection; [`codex.md`](../../../../../docs/supervision-protocols/codex.md) owns the operating protocol and failure fallback.
+Unverified versions and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.
+The [supervision host](../../../../../docs/supervision-host.md) retains its existing posture decisions on both paths.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.

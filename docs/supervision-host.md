@@ -71,7 +71,7 @@ The host's header owns the output contract they read.
 | OpenCode | the TUI plugin, `.opencode/plugins/fm-primary-watch-arm.js`, which restarts its own successor after each close | a `watcher` prompt through `promptAsync` |
 | omp | the watch extension, `.omp/extensions/fm-primary-omp-watch.ts`, which restarts its own successor after each close | the extension's `watcher` follow-up |
 | Grok | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
-| Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, in the watcher's place | the checkpoint's own output |
+| Codex | the native Stop park when verified, otherwise `bin/fm-watch-checkpoint.sh` | the native thread queue, otherwise checkpoint output; see [the Codex protocol](supervision-protocols/codex.md) |
 
 Hook, plugin, extension, and checkpoint owners pass their harness as the primary pin.
 Grok's model-owned call relies on primary detection.
@@ -155,7 +155,7 @@ A captain message typed while an engine turn is already running reaches the engi
 A captain prompt whose hook write fails is not mirrored, so the engine may judge the next attended wake without it; Claude and Cursor have no later source for it.
 
 Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt, so only they run the attended posture.
-Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
+Codex has no verified dialog-mirror writer yet, including on its native Stop-park path, so attended host handling remains pass-through.
 Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
 omp has no verified writer, because no omp was available to prove one against.
 
@@ -274,7 +274,8 @@ So it never stops the owner's host or watcher or releases its leases.
 ### A host that dies without a close
 
 The host's owner retries it.
-Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
+Grok's model and Codex's foreground fallback see it as a failed cycle and start the next one.
+The native Codex park reports the failure through its queue delivery and bounded retry owner.
 Before it arms, the next host does two things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
@@ -311,9 +312,14 @@ It judges this when the close arrives and again just before the turn starts.
 When it declines such a turn, that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
 One short main turn per boundary is the cost of never losing the park silently.
 
-### Codex checkpoint bound
+### Codex native park and checkpoint bound
 
-Codex has no asynchronous wake, so its checkpoint's own bound is the park.
+On the verified native Codex Stop-hook path, `FM_CODEX_MODEL_FREE_PARK=1` keeps the same watcher alive across quiet boundaries.
+The host records `quiet-boundary` in its log and resets the boundary clock without creating a downtime generation or waking the model.
+Native thread-queue delivery wakes the model only for an actionable close; user input remains immediately available.
+Engine turns retain their own timeout, and the park's next-turn failure guard remains active.
+
+On the foreground fallback, the checkpoint's own bound is the park.
 The checkpoint passes it as the boundary and reports the boundary as its ordinary quiet line (`checkpoint: no actionable wake within <n>s`).
 
 | Posture | Checkpoint bound |

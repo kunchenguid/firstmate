@@ -224,7 +224,7 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
+#   autoarm     Claude, Cursor, and verified native Codex Stop-hook parks: the
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
 #               watcher process is healthy, and a stale beacon is still healthy
@@ -235,7 +235,7 @@ fm_watcher_healthy() {
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
+#   persistent  every other harness (Codex foreground fallback, opencode/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
@@ -249,6 +249,13 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
+    codex)
+      if [ -x "$FM_WAKE_LIB_DIR/fm-codex-stop-park.sh" ] && "$FM_WAKE_LIB_DIR/fm-codex-stop-park.sh" --capable; then
+        printf 'autoarm\n'
+      else
+        printf 'persistent\n'
+      fi
+      ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac

@@ -3395,6 +3395,15 @@ resurface_after_downtime() {
 }
 
 while :; do
+  # Native Codex may tear down the async hook and its watchdog together.
+  # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
+  # closes the normal recovery generation and lets the arm/host exit too.
+  if [ -n "${FM_CODEX_PARK_OWNER_PID:-}" ] \
+    && { ! fm_pid_alive "$FM_CODEX_PARK_OWNER_PID" \
+      || [ "$(fm_pid_identity "$FM_CODEX_PARK_OWNER_PID" 2>/dev/null)" != "${FM_CODEX_PARK_OWNER_IDENTITY:-}" ]; }; then
+    echo 'watcher: exiting - native Codex park owner is gone' >&2
+    exit 1
+  fi
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
   # disposable checkout). Exit with a logged reason rather than writing state
