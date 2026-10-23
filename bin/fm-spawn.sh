@@ -4200,14 +4200,6 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
-  # The row read above does not exercise the mutation wrapper, so prove that
-  # wrapper executes here, while a refusal still costs nothing to unwind. The
-  # bound is the one the commit point below applies to each tasks-axi call.
-  FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
-  if ! fm_backlog_write_path_probe; then
-    echo "error: task $ID's backlog cannot be updated, so dispatching it would strand a worker no record owns ($FM_BACKLOG_TRANSITION_ERROR); refusing before creating its endpoint or local copy" >&2
-    exit 1
-  fi
 else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then

@@ -1374,44 +1374,8 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
 }
 
-# A tasks-axi that answers every direct call (the compatibility gate and the row
-# reads) but fails when the bounded wrapper's watchdog launches it, standing in
-# for a mutation path that cannot execute on this host.
-break_mutation_path() {  # <case-dir>
-  local case_dir=$1 real
-  real=$(command -v tasks-axi)
-  cat > "$case_dir/fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = --version ] && ps -o command= -p "\$PPID" | grep -q perl; then
-  echo 'error: "mutation path unavailable"' >&2
-  exit 1
-fi
-exec "$real" "\$@"
-SH
-  chmod +x "$case_dir/fakebin/tasks-axi"
-}
-
 spawn_windows() {  # <case-dir>
   cat "$1/fakebin/.spawn-window" 2>/dev/null || true
-}
-
-test_dispatch_refuses_before_launch_when_the_mutation_path_is_broken() {
-  local case_dir id out rc=0
-  id=atomic-dispatch-write-probe
-  case_dir=$(make_home dispatch-write-probe "$id")
-  add_item "$case_dir" "$id"
-  break_mutation_path "$case_dir"
-
-  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "spawn reported success though the backlog could not be updated"
-  assert_contains "$out" "refusing before creating its endpoint or local copy"     "spawn did not refuse before launching"
-  [ -z "$(spawn_windows "$case_dir")" ] \
-    || fail "a refused dispatch still opened an endpoint: $(spawn_windows "$case_dir")"
-  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "a refused dispatch left a task record behind"
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "a refused dispatch moved the backlog item to $(row_state "$case_dir" "$id")"
-  pass "dispatch refuses before launching when the backlog mutation path cannot run"
 }
 
 test_dispatch_closes_the_endpoint_it_cannot_hand_to_the_backlog() {
@@ -1475,7 +1439,6 @@ test_backlog_mutation_runs_under_the_system_bash() {
       . "$1/bin/fm-timeout-lib.sh"
       . "$1/bin/fm-tasks-axi-lib.sh"
       . "$1/bin/fm-backlog-transition-lib.sh"
-      ( fm_backlog_write_path_probe || { echo "probe: $FM_BACKLOG_TRANSITION_ERROR"; exit 10; } )
       ( fm_backlog_start "$2" "$3" || { echo "start: $FM_BACKLOG_TRANSITION_ERROR"; exit 11; } )
     ' _ "$ROOT" "$case_dir/home/data" "$id" 2>&1
   ) || rc=$?
@@ -3208,7 +3171,6 @@ test_dispatch_reports_a_backlog_read_failure
 test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
-test_dispatch_refuses_before_launch_when_the_mutation_path_is_broken
 test_dispatch_closes_the_endpoint_it_cannot_hand_to_the_backlog
 test_dispatch_keeps_an_endpoint_whose_copy_holds_work
 test_backlog_mutation_runs_under_the_system_bash
