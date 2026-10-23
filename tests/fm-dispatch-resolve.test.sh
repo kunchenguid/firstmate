@@ -1175,7 +1175,11 @@ pass "until rejects invalid calendar dates and clock values before expiry filter
 PRIVATE_TMP="$TMP_ROOT/private-tmp"
 PRIVACY_BIN="$TMP_ROOT/privacy-bin"
 mkdir -p "$PRIVATE_TMP" "$PRIVACY_BIN"
-export REAL_JQ="$(command -v jq)" REAL_CHMOD="$(command -v chmod)" REAL_MV="$(command -v mv)" FILTER_LOG="$LOG/filter-mode"
+REAL_JQ="$(command -v jq)"
+REAL_CHMOD="$(command -v chmod)"
+REAL_MV="$(command -v mv)"
+FILTER_LOG="$LOG/filter-mode"
+export REAL_JQ REAL_CHMOD REAL_MV FILTER_LOG
 for command_name in curl quota-axi pi pi-signed; do
   ln -s "$FAKEBIN/$command_name" "$PRIVACY_BIN/$command_name"
 done
