@@ -15,6 +15,13 @@
 # archive-task is teardown's internal transaction boundary. It captures one
 # task's metadata, optional live status, and pending/handled inbox records under
 # <root>/archive/<task>/<spawn_gen>/, then commits manifest.v1.json last.
+# manifest.v1.json is the commit marker and carries schema
+# firstmate-record-export-archive.v1, schema_version 1, task, spawn_gen, one UTC
+# captured_at timestamp, complete=true, and an ordered files array. Each file
+# entry records its source-relative name, archive-relative name, byte count, and
+# lowercase SHA-256. A committed generation is immutable; a retry validates it.
+# Successful archival prunes only safe committed generations whose manifest is
+# older than 30 completed days. Pruning warnings do not undo a committed capture.
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -31,7 +38,7 @@ STATE_REAL=
 ARCHIVE_SOURCE_LIST=
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 path_component_safe() {  # <component>
   case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac

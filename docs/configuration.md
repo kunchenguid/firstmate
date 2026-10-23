@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -761,6 +761,38 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Record export (config/record-export-root)
+
+The optional local, gitignored `config/record-export-root` file contains exactly one absolute directory path and opts this home into a private copy of a fixed record allowlist.
+The setting is off by default and is not inherited by secondmate homes.
+When the file is absent, sync exits without export work, teardown follows its existing path, and spawn, watcher, presentation, classification, and snapshot readers remain unaware of exports.
+
+Run `bin/fm-record-export.sh sync` to atomically refresh the currently present allowlisted files under `<export-root>/live/`:
+
+```text
+data/{projects.md,backlog.md,done-archive.md}
+data/<task>/{brief.md,report.md,status*.log}
+state/fleet-ledger.jsonl
+state/<task>.{meta,status}
+state/<task>.inbox/{,handled/}NNN.msg
+```
+
+The command is one-shot and starts no network transfer, daemon, timer, or watcher.
+It does not recursively copy `data/` or `state/`, accept arbitrary sources, discover secrets, or redact content.
+Every source must be a regular non-symlink file, unsafe source or destination objects are refused, each file is staged and atomically replaced, directories use mode `0750`, and files use mode `0640`.
+
+Enabled teardown commits metadata, the live status when present, and pending and handled inbox messages under `<export-root>/archive/<task>/<spawn_gen>/` before those source records are retired.
+`manifest.v1.json` is committed last and carries the version, capture time, completeness, source-relative names, byte counts, and SHA-256 values.
+Retries validate the immutable committed generation, and a reused task ID writes its distinct `spawn_gen` rather than overwriting an earlier generation.
+Committed generations older than 30 completed days are pruned by manifest mtime, matching task status archive retention.
+If the archive cannot commit, teardown reports the reason and stops before deleting metadata, status, or inbox sources.
+Removing `config/record-export-root` is the explicit escape hatch back to ordinary teardown behavior.
+
+Briefs and handled inbox messages carry captain text, and every exported record can contain other sensitive operational data.
+Keep the export root private and never serve it directly.
+The schema is versioned for compatible readers, but it is not a Firstmate command API and no Firstmate reader consumes it.
+[`architecture.md`](architecture.md#read-only-record-exports) describes the mechanism boundary; [`bin/fm-record-export.sh`](../bin/fm-record-export.sh) owns the exact allowlist, schema, path checks, publication, and retention mechanics.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 

@@ -258,6 +258,19 @@ Ordinary child teardown uses its own home's configuration; retiring a whole home
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns publication, retirement, path safety, and retention mechanics.
 [`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh) and [`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) cover archival and isolation across local, nested, and remote retirement.
 
+### Read-only record exports
+
+[Record export](configuration.md#record-export-configrecord-export-root) is an opt-in publication boundary for a fixed versioned subset of Firstmate-owned files.
+`bin/fm-record-export.sh sync` copies the allowlist into an external `live/` tree without modifying sources, while teardown calls the same owner to commit one immutable archive generation before retiring metadata, status, or steering records.
+The task's `spawn_gen` is the archive generation key, so a reused ID cannot replace an earlier incarnation.
+The manifest is the commit marker, is published last, and gives a read-only consumer byte counts and SHA-256 values for completeness checks.
+
+The export root is cold output rather than operational state.
+No presentation, wake, classification, spawn, or fleet snapshot path reads it, and the versioned schema is not a command API.
+The exporter rejects unsafe objects and containment failures, never follows symlinks, and performs no network access or redaction.
+[`bin/fm-record-export.sh`](../bin/fm-record-export.sh) owns the exact schema and copy mechanics, while `bin/fm-teardown.sh` owns when the pre-retirement transaction runs.
+[`tests/fm-record-export.test.sh`](../tests/fm-record-export.test.sh), [`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh), and [`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) cover allowlist safety, cold-reader isolation, local and nested retirement, and the remote-home path.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
