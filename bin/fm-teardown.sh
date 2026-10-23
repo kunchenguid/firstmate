@@ -330,6 +330,9 @@
 # logs and orphaned staging files older than 30 completed days by mtime.
 # Pruning failures warn, never abort teardown, and leave other task data and
 # symlinks alone.
+# Opt-in config/record-export-root delegates the record archive transaction to
+# bin/fm-record-export.sh immediately before status, metadata, or inbox records
+# for the retiring task are removed. A failed commit retains those sources.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -490,6 +493,18 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
+}
+
+teardown_export_records() {  # <state> <task-id>
+  local state=$1 task=$2
+  if [ ! -e "$CONFIG/record-export-root" ] && [ ! -L "$CONFIG/record-export-root" ]; then
+    return 0
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-record-export.sh" archive-task "$task" || {
+      echo "error: record export archive failed for $task; retaining task records for retry" >&2
+      return 1
+    }
 }
 
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -1185,6 +1200,7 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+  teardown_export_records "$STATE" "$ID" || return 1
   teardown_retire_status "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
@@ -3512,6 +3528,7 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    teardown_export_records "$sub_state" "$child_id" || return 1
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
@@ -4035,6 +4052,7 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+teardown_export_records "$STATE" "$ID" || exit 1
 teardown_retire_status "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \

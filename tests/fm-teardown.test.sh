@@ -5326,6 +5326,99 @@ test_status_archive_opt_in() {
   pass "status archival is opt-in and preserves the complete log"
 }
 
+test_record_export_config_absent_never_reads_the_exporter() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'pending\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  run_copied_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "config-absent teardown without exporter: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "config-absent teardown retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "config-absent teardown retained status"
+  assert_absent "$case_dir/state/task-x1.inbox" "config-absent teardown retained inbox"
+  pass "config-absent teardown does not read or invoke record export"
+}
+
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
+  local case_dir export_root archive rc mode
+  for mode in success failure; do
+    case_dir=$(make_case "record-export-$mode")
+    write_meta "$case_dir" local-only ship
+    export_root="$case_dir/export"
+    printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+    mkdir -p "$case_dir/state/task-x1.inbox/handled" "$case_dir/outside"
+    printf 'working: export me\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    printf 'pending captain text\n' > "$case_dir/state/task-x1.inbox/001.msg"
+    printf 'handled captain text\n' > "$case_dir/state/task-x1.inbox/handled/002.msg"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/expected.meta"
+    cp "$case_dir/state/task-x1.status" "$case_dir/expected.status"
+    if [ "$mode" = failure ]; then
+      rm -rf "$export_root"
+      ln -s "$case_dir/outside" "$export_root"
+    fi
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$mode" = success ]; then
+      expect_code 0 "$rc" "record export teardown: $(cat "$case_dir/stderr")"
+      archive="$export_root/archive/task-x1/teardown-test-task-x1"
+      cmp -s "$case_dir/expected.meta" "$archive/meta" || fail "teardown archive lost metadata"
+      cmp -s "$case_dir/expected.status" "$archive/status" || fail "teardown archive lost status"
+      assert_grep 'pending captain text' "$archive/inbox/001.msg" "teardown archive lost a pending steer"
+      assert_grep 'handled captain text' "$archive/inbox/handled/002.msg" "teardown archive lost a handled steer"
+      assert_present "$archive/manifest.v1.json" "teardown archive did not commit its manifest"
+      assert_absent "$case_dir/state/task-x1.meta" "successful export retained metadata"
+      assert_absent "$case_dir/state/task-x1.status" "successful export retained status"
+      assert_absent "$case_dir/state/task-x1.inbox" "successful export retained inbox"
+    else
+      [ "$rc" -ne 0 ] || fail "teardown ignored a record export commit failure"
+      assert_grep 'record export root contains an unsafe component' "$case_dir/stderr" \
+        "teardown did not report the export failure reason"
+      assert_grep 'retaining task records for retry' "$case_dir/stderr" \
+        "teardown did not explain its record-preservation refusal"
+      assert_present "$case_dir/state/task-x1.meta" "failed export removed metadata"
+      assert_present "$case_dir/state/task-x1.status" "failed export removed status"
+      assert_present "$case_dir/state/task-x1.inbox/001.msg" "failed export removed a pending steer"
+      assert_present "$case_dir/state/task-x1.inbox/handled/002.msg" "failed export removed a handled steer"
+    fi
+  done
+  pass "teardown commits the record archive before deleting sources and fails closed when export cannot commit"
+}
+
+test_record_export_captures_forced_secondmate_sub_state() {
+  local case_dir home export_root archive rc=0
+  case_dir=$(make_case record-export-secondmate-child)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  export_root="$case_dir/export"
+  mkdir -p "$home/state/child.inbox/handled" "$home/data" "$home/config" "$home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child.meta" \
+    "window=firstmate:fm-child" \
+    "kind=scout" \
+    "mode=local-only" \
+    "project=$case_dir/project" \
+    "worktree=$case_dir/wt" \
+    "spawn_gen=child-generation"
+  printf 'done: child complete\n' > "$home/state/child.status"
+  printf 'pending child steer\n' > "$home/state/child.inbox/001.msg"
+  printf 'handled child steer\n' > "$home/state/child.inbox/handled/002.msg"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "forced secondmate record export: $(cat "$case_dir/stderr")"
+  archive="$export_root/archive/child/child-generation"
+  assert_present "$archive/meta" "secondmate child archive lost metadata"
+  assert_grep 'done: child complete' "$archive/status" "secondmate child archive lost status"
+  assert_grep 'pending child steer' "$archive/inbox/001.msg" "secondmate child archive lost pending inbox"
+  assert_grep 'handled child steer' "$archive/inbox/handled/002.msg" "secondmate child archive lost handled inbox"
+  assert_present "$archive/manifest.v1.json" "secondmate child archive did not commit"
+  assert_absent "$home" "forced secondmate teardown retained the child home"
+  pass "forced secondmate teardown exports task records from the child sub-state"
+}
+
 test_status_archive_reuse_and_retention() {
   local case_dir rc archive
   case_dir=$(make_case status-archive-reuse)
@@ -5604,6 +5697,9 @@ test_status_archive_nested_secondmate_children() {
 }
 
 test_status_archive_opt_in
+test_record_export_config_absent_never_reads_the_exporter
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure
+test_record_export_captures_forced_secondmate_sub_state
 test_status_archive_nested_secondmate_children
 test_status_archive_missing_status_noop
 test_status_archive_reuse_and_retention

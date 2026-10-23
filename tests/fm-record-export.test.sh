@@ -264,6 +264,26 @@ test_archive_retry_is_idempotent_and_generations_never_overwrite() {
   pass "teardown archive retries idempotently and reused task IDs stay separated by spawn_gen"
 }
 
+test_archive_retry_accepts_sources_already_retired_after_commit() {
+  local home export_root manifest before rc=0
+  home=$(make_home archive-retired-retry)
+  export_root="$TMP_ROOT/export-archive-retired-retry"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" retired-retry-generation
+  run_export "$home" archive-task task-a > "$home/first.out" 2> "$home/first.err" || rc=$?
+  expect_code 0 "$rc" "initial archive before partial teardown"
+  manifest="$export_root/archive/task-a/retired-retry-generation/manifest.v1.json"
+  before=$(shasum -a 256 "$manifest" | awk '{print $1}')
+  rm -f "$home/state/task-a.status"
+  rm -rf "$home/state/task-a.inbox"
+  rc=0
+  run_export "$home" archive-task task-a > "$home/retry.out" 2> "$home/retry.err" || rc=$?
+  expect_code 0 "$rc" "archive retry after status and inbox retirement: $(cat "$home/retry.err")"
+  [ "$before" = "$(shasum -a 256 "$manifest" | awk '{print $1}')" ] \
+    || fail "partial-teardown retry rewrote the committed manifest"
+  pass "teardown archive retry accepts sources already retired after a committed capture"
+}
+
 test_archive_refuses_a_corrupt_committed_manifest() {
   local home export_root manifest rc=0
   home=$(make_home archive-corrupt-manifest)
@@ -404,6 +424,35 @@ test_archive_retention_prunes_only_old_committed_generations() {
   pass "record export retention mirrors 30 completed days and prunes only owned committed generations"
 }
 
+test_export_root_stays_cold_to_firstmate_readers() {
+  local home export_root output rc=0
+  home=$(make_home cold-readers)
+  export_root="$home/export-must-remain-absent"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  : > "$home/data/projects.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash "$ROOT/bin/fm-wake-drain.sh" \
+    > "$home/drain.out" 2> "$home/drain.err" || rc=$?
+  expect_code 0 "$rc" "wake presentation with record export configured"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash -c '
+      . "$1/bin/fm-watch.sh"
+      scan_signals
+      status_presentation_snapshot "$STATE"
+    ' _ "$ROOT" > "$home/watch.out" 2> "$home/watch.err" \
+    || fail "watch classification or snapshot failed with record export configured"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash "$ROOT/bin/fm-fleet-snapshot.sh" --json \
+    > "$home/snapshot.out" 2> "$home/snapshot.err" \
+    || fail "fleet snapshot failed with record export configured"
+  assert_absent "$export_root" "a presentation, wake, classification, or snapshot reader materialized the export root"
+  output=$(cat "$home/drain.out" "$home/drain.err" "$home/watch.out" "$home/watch.err" \
+    "$home/snapshot.out" "$home/snapshot.err")
+  assert_not_contains "$output" "$export_root" "a Firstmate reader exposed the configured export root"
+  pass "presentation, wake, classification, and snapshot readers leave the export root cold"
+}
+
 test_sync_is_off_when_config_is_absent
 test_sync_copies_only_the_v1_allowlist
 test_sync_replaces_files_atomically
@@ -412,11 +461,13 @@ test_sync_refuses_malformed_config_and_unsafe_paths
 test_archive_commits_manifest_last_with_integrity_metadata
 test_archive_is_off_before_any_state_read_when_config_is_absent
 test_archive_retry_is_idempotent_and_generations_never_overwrite
+test_archive_retry_accepts_sources_already_retired_after_commit
 test_archive_refuses_a_corrupt_committed_manifest
 test_archive_detects_a_source_change_during_capture
 test_archive_repairs_only_an_uncommitted_same_generation
 test_archive_allows_missing_optional_records
 test_archive_refuses_unsafe_sources_and_destinations
 test_archive_retention_prunes_only_old_committed_generations
+test_export_root_stays_cold_to_firstmate_readers
 
 echo "ALL TESTS PASSED"

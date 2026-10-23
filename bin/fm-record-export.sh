@@ -333,17 +333,32 @@ archive_copy_file() {  # <source> <generation-directory> <archive-relative-name>
 }
 
 archive_committed_matches_sources() {  # <generation-directory> <task> <spawn-gen>
-  local generation=$1 task=$2 spawn_gen=$3 source source_relative archive_relative bytes digest
-  local manifest="$generation/manifest.v1.json" source_count manifest_count
+  local generation=$1 task=$2 spawn_gen=$3 source source_relative archive_relative bytes digest path relative
+  local manifest="$generation/manifest.v1.json" archive_count=0 manifest_count
   [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  grep -F '"schema": "firstmate-record-export-archive.v1"' "$manifest" >/dev/null || return 1
-  grep -F '"schema_version": 1' "$manifest" >/dev/null || return 1
-  grep -F "\"task\": \"$task\"" "$manifest" >/dev/null || return 1
-  grep -F "\"spawn_gen\": \"$spawn_gen\"" "$manifest" >/dev/null || return 1
-  grep -F '"complete": true' "$manifest" >/dev/null || return 1
-  source_count=$(wc -l < "$ARCHIVE_SOURCE_LIST" | tr -d ' ')
+  [ "$(grep -cF '"schema": "firstmate-record-export-archive.v1"' "$manifest" || true)" = 1 ] || return 1
+  [ "$(grep -cF '"schema_version": 1' "$manifest" || true)" = 1 ] || return 1
+  [ "$(grep -cF "\"task\": \"$task\"" "$manifest" || true)" = 1 ] || return 1
+  [ "$(grep -cF "\"spawn_gen\": \"$spawn_gen\"" "$manifest" || true)" = 1 ] || return 1
+  [ "$(grep -cF '"complete": true' "$manifest" || true)" = 1 ] || return 1
+  while IFS= read -r -d '' path; do
+    [ -f "$path" ] || continue
+    relative=${path#"$generation"/}
+    [ "$relative" != manifest.v1.json ] || continue
+    case "$relative" in
+      meta) source_relative="state/$task.meta" ;;
+      status) source_relative="state/$task.status" ;;
+      inbox/*.msg|inbox/handled/*.msg) source_relative="state/$task.$relative" ;;
+      *) return 1 ;;
+    esac
+    bytes=$(file_bytes "$path")
+    digest=$(sha256_file "$path")
+    grep -F "\"source\": \"$source_relative\", \"archive\": \"$relative\", \"bytes\": $bytes, \"sha256\": \"$digest\"" \
+      "$manifest" >/dev/null || return 1
+    archive_count=$((archive_count + 1))
+  done < <(find "$generation" -mindepth 1 -type f -print0)
   manifest_count=$(grep -cF '"source":' "$manifest" || true)
-  [ "$source_count" = "$manifest_count" ] || return 1
+  [ "$archive_count" = "$manifest_count" ] || return 1
   while IFS=$(printf '\t') read -r source source_relative archive_relative; do
     [ -f "$generation/$archive_relative" ] && [ ! -L "$generation/$archive_relative" ] || return 1
     cmp -s "$source" "$generation/$archive_relative" || return 1

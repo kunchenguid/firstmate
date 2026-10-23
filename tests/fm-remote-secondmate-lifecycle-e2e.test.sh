@@ -1592,9 +1592,14 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
-# Opt-in archival must cover the parent-side status on the real remote path.
+# Both opt-in archives must cover the parent-side records on the real remote path.
 touch "$PARENT/config/status-archive"
+record_export_root="$TMP_ROOT/record-export"
+printf '%s\n' "$record_export_root" > "$PARENT/config/record-export-root"
 printf 'working: remote task history\ndone: remote task complete\n' > "$PARENT/state/ios.status"
+mkdir -p "$PARENT/state/ios.inbox/handled"
+printf 'pending remote steer\n' > "$PARENT/state/ios.inbox/001.msg"
+printf 'handled remote steer\n' > "$PARENT/state/ios.inbox/handled/002.msg"
 cp "$PARENT/state/ios.status" "$TMP_ROOT/remote-status.expected"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/remote-meta.saved"
 grep '^- ios ' "$PARENT/data/secondmates.md" > "$TMP_ROOT/remote-route.saved"
@@ -1651,6 +1656,18 @@ cmp -s "$TMP_ROOT/remote-status.expected" "$PARENT/data/ios/status.log" \
   || fail "remote retirement lost the parent-side status history"
 assert_absent "$PARENT/state/ios.status" "remote retirement left the archived status live"
 pass "remote retirement archives the complete parent-side status log when enabled"
+remote_spawn_gen=$(awk -F= '$1 == "spawn_gen" { print substr($0, index($0, "=") + 1) }' "$TMP_ROOT/remote-meta.saved")
+remote_record_archive="$record_export_root/archive/ios/$remote_spawn_gen"
+cmp -s "$TMP_ROOT/remote-meta.saved" "$remote_record_archive/meta" \
+  || fail "remote retirement lost the parent-side metadata export"
+cmp -s "$TMP_ROOT/remote-status.expected" "$remote_record_archive/status" \
+  || fail "remote retirement lost the parent-side status export"
+assert_grep 'pending remote steer' "$remote_record_archive/inbox/001.msg" \
+  "remote retirement lost a pending inbox export"
+assert_grep 'handled remote steer' "$remote_record_archive/inbox/handled/002.msg" \
+  "remote retirement lost a handled inbox export"
+assert_present "$remote_record_archive/manifest.v1.json" "remote retirement did not commit the record export manifest"
+pass "remote retirement commits parent-side metadata, status, and inbox records before cleanup"
 
 # Reconcile an already-retired remote home with no parent-side status. Holding
 # an unrelated presentation lock proves the no-op without risking an unbounded
