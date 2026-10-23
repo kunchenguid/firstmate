@@ -117,7 +117,10 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
 # the worker's own background work, pipeline or long command; blocked when
-# firstmate must act. The first-sight alert remains; repeats use the long cadence.
+# firstmate must act, and only for a wait expected to outlast about 15 minutes,
+# declared once per wait with an `until` rather than per test or rerun. The
+# first-sight alert remains unless the declared `until` is still in the future
+# (bin/fm-watch.sh owns that rule); repeats use the long cadence.
 # Emission-time syntax and legacy unknown-time handling are owned by
 # bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
@@ -175,6 +178,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
    Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
    Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
+   Declare only a wait expected to last more than about 15 minutes, once per wait and with an \`until\`; never declare one per test, build, or rerun, because every declaration costs the supervisor a turn.
    Do not declare active implementation or reasoning as a wait.
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
    When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
@@ -482,7 +486,7 @@ Bound that command by what your harness lets one command run: in Pi pass the bas
 Give any `--wait` a duration a little under that bound.
 When the bound passes with nothing changed, run the same blocking command again, with no status check in between.
 The one exception is `respond`: it sent its answer before it began waiting, so reattach with `no-mistakes axi run --wait` instead, and never send the same `respond` again, because it would answer whichever gate parks next without you reading it.
-A wait your shell can watch this way needs no `paused:` line, except your own pipeline run, a long foreground command, or your own validation round, which you declare once just before its blocking hold: append `paused:` once just before its first blocking command, then stay in the command, and never append it again as you reissue that command.
+A wait your shell can watch this way needs no `paused:` line, except your own pipeline run, a long foreground command, or your own validation round, which you declare once just before its blocking hold: append `paused:` once just before its first blocking command, then stay in the command, and never append it again as you reissue that command. Skip the declaration when the hold is expected to end within about 15 minutes.
 EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
 WAIT_BLOCK=
