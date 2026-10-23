@@ -29,9 +29,12 @@ DEAD_PID=99999999
 # fresh server with no sessions), `ls-fail`, `close-noop` (a close that leaves
 # the block alive). Per-block canned reads live in fake/process/<uuid>.json,
 # fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
+# `do` stands in for the bounded event reader: it prints "@subscribed", then
+# replays fake/events (a `sleep N` line pauses), and exits 0; `do-fail` makes
+# it exit 3 before subscribing.
 make_rex_fake() {  # <dir>
   local dir=$1
-  mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/home/state"
+  mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/fake/cursor" "$dir/home/state"
   cat >"$dir/bin/rex" <<'SH'
 #!/usr/bin/env bash
 D="${FM_REX_FAKE_DIR:?}"
@@ -96,8 +99,9 @@ case "$cmd:$sub" in
       session.view)
         has_session "$sid" || notfound "session"
         jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
-          | {session_id, label, windows: [.windows[] | {window_id, label,
-              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]}' "$S" ;;
+          | if ((.windows // []) | length) == 0 then {session_id, label}
+            else {session_id, label, windows: [.windows[] | {window_id, label,
+              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]} end' "$S" ;;
       *) exit 2 ;;
     esac ;;
   new:)
@@ -140,6 +144,16 @@ case "$cmd:$sub" in
         fi ;;
       program_status)
         if [ -f "$D/status/$u.json" ]; then cat "$D/status/$u.json"; else printf '{"records":[]}\n'; fi ;;
+      format)
+        # The styled grid without the newline `capture` adds when the grid
+        # does not already end in one, then the cursor from fake/cursor/<uuid>
+        # ("<row>;<col>") when extra_cursor is asked for.
+        content=$(cat "$D/capture/$u.vt" 2>/dev/null && printf x); content=${content%x}
+        case "$content" in *$'\r\n') ;; *$'\n') content=${content%$'\n'} ;; esac
+        case "$p1" in
+          *extra_cursor*) [ ! -f "$D/cursor/$u" ] || content="$content"$'\033['"$(cat "$D/cursor/$u")H" ;;
+        esac
+        printf '%s' "$content" | jq -Rs '{content: .}' ;;
       *) exit 2 ;;
     esac ;;
   capture:)
@@ -154,6 +168,18 @@ case "$cmd:$sub" in
     has_block "$sid" "$bid" || notfound "block"
     case "$p0" in enter|escape|tab|ctrl+c|ctrl+u) ;; *) exit 2 ;; esac
     printf '%s\n' "$p0" >>"$D/keys" ;;
+  do:)
+    has_session "$sid" || notfound "session"
+    [ ! -f "$D/do-fail" ] || exit 3
+    echo "@subscribed"
+    if [ -f "$D/events" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          "sleep "*) sleep "${line#sleep }" ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done <"$D/events"
+    fi ;;
   kill:)
     has_session "$p0" || notfound "session"
     save --arg s "$p0" '.sessions |= map(select(.session_id != $s))' ;;
@@ -409,6 +435,40 @@ test_capture_and_derived_viewport() {
   pass "rex capture: CR stripped and tailed; viewport derived from the last size.rows styled rows, implicit empty bottom row restored"
 }
 
+# The real OpenCode 1.19.3 idle screen read through Rex's `format` method,
+# ending in the cursor position Rex appended (row 45 of 50, the composer's
+# input row); below the composer OpenCode draws its status line.
+REX_OPENCODE_FIXTURE="$ROOT/tests/fixtures/rex-opencode-1.19.3/opencode-1.19.3-idle-format.vt"
+
+test_composer_reads_the_cursor_row() {
+  local dir out sid bid t u
+  dir=$(new_case composer-cursor)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"; u=${bid#block:}
+  python3 - "$REX_OPENCODE_FIXTURE" "$dir/fake/capture/$u.vt" <<'PYFIX'
+import re, sys
+data = open(sys.argv[1], 'rb').read()
+open(sys.argv[2], 'wb').write(re.sub(rb'\x1b\[\d+;\d+H$', b'', data))
+PYFIX
+  printf '45;6' >"$dir/fake/cursor/$u"
+  assert_equals empty "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
+    "an idle OpenCode 1.19.3 composer under the cursor must read empty despite the status line below it"
+  assert_equals 44 "$(rex_env "$dir" "fm_backend_rex_screen_read '$t' && printf %s \"\$FM_BACKEND_REX_CURSOR_Y\"")" \
+    "the cursor row must be 0-based within the derived viewport"
+  rm -f "$dir/fake/cursor/$u"
+  out=$(rex_env "$dir" "fm_backend_composer_state rex '$t'")
+  [ "$out" != empty ] && [ "$out" != pending ] \
+    || fail "the same screen read cursorless must not claim a definite verdict, got $out"
+  printf '99;1' >"$dir/fake/cursor/$u"
+  assert_equals "$out" "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
+    "a cursor outside the viewport must be ignored, falling back to the cursorless read"
+  printf '1;1' >"$dir/fake/cursor/$u"
+  assert_equals "$out" "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
+    "a cursor parked outside any composer must fall back to the cursorless read"
+  pass "fm_backend_composer_state rex: the composer holding the cursor decides; a cursor outside any composer falls back to the cursorless read"
+}
+
 write_process() {  # <dir> <block-id> <json>
   printf '%s\n' "$3" >"$1/fake/process/${2#block:}.json"
 }
@@ -495,6 +555,127 @@ test_send_literal_and_keys() {
   pass "rex input: literal text after --, no call for empty input, verified key names only, line submit"
 }
 
+# --- push events -------------------------------------------------------------
+
+# rex_event: one reader line for a status edge on <block-id>.
+rex_event() {  # <block-id> <state> <kind> <app> <owner-pid> <msg>
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"
+}
+
+# push_case: a task tab whose foreground is a harness at pid 4242 under a shell
+# at 4000; sets PUSH_DIR, PUSH_SID (bare), PUSH_BID (prefixed), and PUSH_T.
+push_case() {  # <name>
+  local out sid
+  PUSH_DIR=$(new_case "$1")
+  out=$(rex_env "$PUSH_DIR" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ PUSH_BID <<<"$out"
+  PUSH_SID=${sid#session:}
+  PUSH_T="$PUSH_SID:${PUSH_BID#block:}"
+  write_process "$PUSH_DIR" "$PUSH_BID" '{"foreground":{"pid":4242,"name":"claude"},"ancestors":[{"pid":4000,"name":"zsh"}],"last_exit":null}'
+}
+
+# push_wait: run the dispatcher's wait with <timeout>; prints "<rc>|<record>".
+push_wait() {  # <timeout> [VAR=value...]
+  local timeout=$1
+  shift
+  rex_env "$PUSH_DIR" "$@" "out=\$(fm_backend_wait_transition rex '$PUSH_SID' $timeout \"\$STATE\" '$PUSH_T'); printf '%s|%s' \"\$?\" \"\$out\""
+}
+
+test_push_capability_gate() {
+  local dir
+  dir=$(new_case push-cap)
+  rex_env "$dir" 'fm_backend_has_push rex' || fail "rex must report a push stream"
+  rex_env "$dir" 'fm_backend_events_capable rex abc' || fail "API revision 5 must be events-capable"
+  rex_env "$dir" FM_REX_FAKE_SERVER_API=4 'fm_backend_events_capable rex abc' && fail "a server below revision 5 must not be events-capable"
+  touch "$dir/fake/down"
+  rex_env "$dir" 'fm_backend_events_capable rex abc' && fail "a stopped server must not be events-capable"
+  [ -f "$dir/fake/down" ] || fail "the capability probe must never start a server"
+  pass "fm_backend_events_capable rex: API revision 5 on both ends, read without starting a server"
+}
+
+test_push_blocked_edge_carries_kind_and_message() {
+  local res rec
+  push_case push-edge
+  rex_event "$PUSH_BID" working "" claude-code 4242 "" >"$PUSH_DIR/fake/events"
+  rex_event "$PUSH_BID" blocked permission claude-code 4242 "Allow Bash: rm -rf build" >>"$PUSH_DIR/fake/events"
+  res=$(push_wait 5)
+  [ "${res%%|*}" = 0 ] || fail "a trusted blocked edge must return 0, got $res"
+  rec=${res#*|}
+  assert_equals "${PUSH_BID#block:}" "$(rex_env "$PUSH_DIR" "fm_transition_pane_id '$rec'")" "pane_id must be the block uuid"
+  assert_equals blocked "$(rex_env "$PUSH_DIR" "fm_transition_to_status '$rec'")" "to_status must be blocked"
+  assert_equals claude-code "$(rex_env "$PUSH_DIR" "fm_transition_agent '$rec'")" "agent must be Rex's app"
+  assert_equals "permission: Allow Bash: rm -rf build" "$(rex_env "$PUSH_DIR" "fm_transition_detail '$rec'")" "detail must carry the kind and message"
+  grep -qE "^rex --autostart=false do -s session:$PUSH_SID .*rex-eventwait.lua --args \{\"blocks\":\[\"$PUSH_BID\"\]\}$" "$PUSH_DIR/fake/log" \
+    || fail "the reader must run scoped to the recorded session with the watched block, never starting a server:"$'\n'"$(grep ' do ' "$PUSH_DIR/fake/log")"
+  pass "fm_backend_wait_transition rex: a trusted blocked edge returns its record with Rex's app, kind, and message"
+}
+
+test_push_untrusted_owner_is_ignored() {
+  local res
+  push_case push-untrusted
+  rex_event "$PUSH_BID" blocked question claude-code 777 "stale" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a blocked edge whose owner is not in the foreground chain must be ignored"
+  rex_event "$PUSH_BID" blocked question claude-code 4000 "Continue?" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  [ "${res%%|*}" = 0 ] || fail "a blocked edge from an ancestor owner must count, got $res"
+  pass "fm_backend_wait_transition rex: a blocked edge counts only while its owner is the foreground process or an ancestor"
+}
+
+test_push_level_reconcile_and_dedupe() {
+  local res rec
+  push_case push-level
+  printf '{"records":[{"state":"blocked","kind":"auth","app":"grok-build","msg":"Sign in","owner":{"pid":4242}}]}\n' \
+    >"$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  res=$(push_wait 1)
+  [ "${res%%|*}" = 0 ] || fail "a block already blocked must be returned by the level reconcile, got $res"
+  rec=${res#*|}
+  assert_equals "auth: Sign in" "$(rex_env "$PUSH_DIR" "fm_transition_detail '$rec'")" "the reconciled record must carry the kind and message"
+  rex_env "$PUSH_DIR" "fm_backend_commit_transition rex \"\$STATE\" '$PUSH_SID' '$rec'" || fail "commit failed"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a committed blocked block must not be re-delivered"
+  rex_event "$PUSH_BID" working "" grok-build 4242 "" >"$PUSH_DIR/fake/events"
+  rex_event "$PUSH_BID" blocked question grok-build 4242 "Pick one" >>"$PUSH_DIR/fake/events"
+  res=$(push_wait 5)
+  [ "${res%%|*}" = 0 ] || fail "a working edge must clear the marker so the next blocked edge escalates, got $res"
+  rex_env "$PUSH_DIR" "fm_backend_commit_transition rex \"\$STATE\" '$PUSH_SID' '${res#*|}'"
+  rex_env "$PUSH_DIR" "fm_backend_clear_transition rex \"\$STATE\" '$PUSH_T'"
+  : >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  [ "${res%%|*}" = 0 ] || fail "cleanup's clear must let a still-blocked block escalate again, got $res"
+  pass "fm_backend_wait_transition rex: level reconcile returns a blocked block once; working and cleanup clear the marker"
+}
+
+test_push_gone_edge_ends_the_wait() {
+  local res start
+  push_case push-gone
+  { rex_event "$PUSH_BID" gone "" "" "" "block closed"; echo "sleep 4"; } >"$PUSH_DIR/fake/events"
+  start=$SECONDS
+  res=$(push_wait 6)
+  assert_equals "1|" "$res" "an endpoint-gone edge must end the wait with 1 and no record"
+  [ $((SECONDS - start)) -lt 4 ] || fail "an endpoint-gone edge must end the wait at once"
+  rex_event "block:00000000-0000-7000-8000-00000000ffff" gone "" "" "" "block closed" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a gone edge for an unwatched block is a plain clean wait"
+  pass "fm_backend_wait_transition rex: a watched block's exit or close ends the wait at once for an immediate poll"
+}
+
+test_push_reader_failures_fall_back() {
+  local res
+  push_case push-fail
+  touch "$PUSH_DIR/fake/do-fail"
+  res=$(push_wait 1)
+  assert_equals "2|" "$res" "a reader that cannot subscribe must return 2"
+  rm -f "$PUSH_DIR/fake/do-fail"
+  res=$(push_wait 5)
+  assert_equals "2|" "$res" "a reader that ends well before the deadline must return 2, not a clean wait"
+  res=$(rex_env "$PUSH_DIR" "fm_backend_wait_transition rex '$PUSH_SID' 1 \"\$STATE\" 'not-a-target'; echo \$?")
+  assert_equals 2 "$res" "no watchable window must return 2"
+  res=$(rex_env "$PUSH_DIR" "fm_backend_wait_transition rex '$PUSH_SID' 1 \"\$STATE\" '00000000-0000-7000-8000-00000000aaaa:${PUSH_BID#block:}'; echo \$?")
+  assert_equals 2 "$res" "a window in another session must not be watched by this reader"
+  pass "fm_backend_wait_transition rex: a reader that cannot start or ends early falls back to polling"
+}
+
 # --- cleanup and absence proof ----------------------------------------------
 
 test_kill_closes_and_retires_per_home_session() {
@@ -533,6 +714,54 @@ test_kill_refuses_without_proof() {
   rm -f "$dir/fake/close-noop"; touch "$dir/fake/unreachable"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" 2>/dev/null && fail "an unreachable server must fail the kill"
   pass "fm_backend_kill rex: refuses success unless the block is proven gone"
+}
+
+# rex_teardown_meta: record <id> of <kind> on the fake's block in <state-dir>.
+rex_teardown_meta() {  # <state-dir> <id> <kind> <home> <session-id> <window-id> <block-id>
+  local state=$1 id=$2 kind=$3 home=$4 sid=$5 wid=$6 bid=$7
+  {
+    echo "window=${sid#session:}:${bid#block:}"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$home"
+    echo "project=$home"
+    [ "$kind" != secondmate ] || { echo "home=$home"; echo "mode=secondmate"; echo "projects=alpha"; }
+    echo "harness=echo"
+    echo "yolo=off"
+    echo "kind=$kind"
+    echo "backend=rex"
+    echo "rex_server=unix:///fake/rex.sock"
+    echo "rex_session_id=$sid"
+    echo "rex_window_id=$wid"
+    echo "rex_block_id=$bid"
+  } >"$state/$id.meta"
+}
+
+test_teardown_retires_the_secondmate_session() {
+  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc
+  dir=$(new_case teardown-secondmate)
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/data" "$dir/home/config"
+  printf 'sm' >"$mate/.fm-secondmate-home"
+  out=$(rex_env "$dir" "FM_HOME=$mate" "FM_ROOT=$mate" "STATE=$mate/state" \
+    'fm_backend_rex_create_task fm-sm /tmp other-home') || fail "secondmate create_task failed"
+  read -r sid wid bid <<<"$out"
+  out=$(rex_env "$dir" "FM_HOME=$mate" "FM_ROOT=$mate" "STATE=$mate/state" \
+    'fm_backend_rex_create_task fm-crew /tmp') || fail "crew create_task failed"
+  read -r crew_sid crew_wid crew_bid <<<"$out"
+  assert_equals "$sid" "$crew_sid" "the secondmate's crew must share its per-home session"
+  rex_teardown_meta "$dir/home/state" sm secondmate "$mate" "$sid" "$wid" "$bid"
+  rex_teardown_meta "$mate/state" crew ship "$dir/nonexistent-crew" "$crew_sid" "$crew_wid" "$crew_bid"
+  fake_rex "$dir" new other --window keep --cwd /tmp --json >/dev/null
+
+  out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    "$ROOT/bin/fm-teardown.sh" sm --force 2>&1); rc=$?
+  expect_code 0 "$rc" "teardown of a rex secondmate must succeed: $out"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\")] | length")" \
+    "retiring the secondmate must retire its emptied per-home session"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "an unrelated session must survive the retirement"
+  pass "fm-teardown rex: retiring a secondmate closes its crew and its own tab and retires its per-home session"
 }
 
 test_absence_recheck() {
@@ -660,6 +889,7 @@ test_create_task_refusals
 test_reclaim_replaces_a_husk_and_refuses_a_live_one
 test_reclaim_fallback_placement_replaces_a_husk
 test_capture_and_derived_viewport
+test_composer_reads_the_cursor_row
 test_agent_state_from_process_view
 test_native_busy_trusts_live_owner_only
 test_current_path_follows_foreground
@@ -667,7 +897,14 @@ test_send_literal_and_keys
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
 test_kill_refuses_without_proof
+test_teardown_retires_the_secondmate_session
 test_absence_recheck
 test_control_absence_verdict_reads_rex_meta
 test_control_exit_after_a_server_stop
 test_list_live_scopes_to_this_home
+test_push_capability_gate
+test_push_blocked_edge_carries_kind_and_message
+test_push_untrusted_owner_is_ignored
+test_push_level_reconcile_and_dedupe
+test_push_gone_edge_ends_the_wait
+test_push_reader_failures_fall_back

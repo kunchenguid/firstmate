@@ -299,6 +299,21 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Resolve the PR number for a task copy's branch via gh-axi, run inside that
+# copy so gh-axi resolves the copy's own repository. Echoes the number on a
+# single match and returns 0; returns non-zero on no match or any lookup
+# failure, so callers treat it as "no PR found" (fail-safe). bin/fm-teardown.sh
+# reads any state for its landed check; bin/fm-pr-health.sh reads open PRs to
+# enroll a branch whose PR was never recorded.
+fm_pr_number_from_branch() {  # <worktree> <branch> [open|closed|all]
+  local wt=$1 branch=$2 state=${3:-all} out n
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  out=$( cd "$wt" && gh-axi pr list --state "$state" --head "$branch" --limit 1 2>/dev/null ) || return 1
+  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
 # The one reading of a GitHub pull request's draft state. Prints "true" or
 # "false" for a boolean isDraft and nothing for anything else, so a caller can
 # tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses

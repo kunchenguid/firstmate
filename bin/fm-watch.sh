@@ -1386,8 +1386,8 @@ _wedge_cap_terminal_append() {
   return "$_status"
 }
 
-# _wedge_cap_rollback: reset the per-window wedge state after a cap-marker
-# write failure so the next poll re-accumulates from escalation 1 instead of
+# _wedge_cap_rollback: reset the per-window wedge state after a failed
+# cap-state write so the next poll re-accumulates from escalation 1 instead of
 # inheriting the saturated counter and an expired stale timer that would
 # amplify a single write failure into a wake-queue flood. On rollback
 # failure a transient `.wedge-rollback-failed-<key>` sentinel is written so
@@ -1935,10 +1935,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
-  # from either route that has to defend cap state this state dir would not
-  # persist - the cap-marker write whose own rollback also failed, or the
-  # escalation-count write below, whose failed write left the ceiling that count
-  # bounds unenforceable. Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
+  # from any of the routes that have to defend cap state this state dir would not
+  # persist - the cap-marker write whose own rollback also failed, the
+  # escalation-count write whose failed write left the ceiling that count
+  # bounds unenforceable, or the cap-fire counter reset whose failed reset
+  # leaves the saturated counter standing. Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
   # no wake, no marker write - so the operator observes one failure per
   # wedge-event instead of a wake-queue flood under persistent fs failure.
   # Read only where the cap is configured: with FM_WEDGE_MAX_ESCALATIONS at its
@@ -2093,10 +2094,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # marker check whatever hash they render. The terminal wake carries the
         # same evidence the escalation it replaces would have carried, because
         # it is the only one this window publishes for the rest of the horizon.
-        # The marker-write failure rolls back cap state to avoid amplifying a
-        # single write failure into a queue flood; a rollback that itself fails
-        # writes a transient sentinel so the next polls stay silent for
-        # FM_ROLLBACK_SENTINEL_TTL_SECS.
+        # Every cap-state write on this route - the escalation count above, the
+        # cap marker, and the escalation-counter reset the fire ends its episode
+        # with - takes that one three-tier defence, so a state dir that refuses
+        # any of them is never walked past with cap state it did not take: roll
+        # the cap state back rather than amplify a single write failure into a
+        # queue flood, and where the rollback itself fails write a transient
+        # sentinel so the next polls stay silent for FM_ROLLBACK_SENTINEL_TTL_SECS.
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           _wrb_cap_reason="$reason, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wedge escalations for this WINDOW while its cap marker stands: until FM_CAP_HORIZON_SECS elapses, the crew resumes, or the operator manually removes STATE/.wedge-permanent-<key>"
           _wrb_cap_reason=$(stale_reason_naming_dialog "$_wrb_cap_reason" "$dialog")
@@ -2123,7 +2127,23 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           wedge_episode_end "$_wkey" 1
           clear_write_tracking "$_wkey"
-          : > "$escalation_file"
+          # The reset is cap state like the count write above it, and the one
+          # whose failure the horizon would otherwise hide: it is what lets the
+          # count climb a fresh 1..N once the cap marker expires, so a state dir
+          # that refuses it leaves the counter saturated at the bound and the
+          # first post-horizon threshold would re-fire this terminal silence
+          # instead of escalating. The cycle ends in every failure tier, so the
+          # capped wake never goes out inline off a reset that failed; the durable
+          # terminal row this fire already queued stands for the drain.
+          if ! { : > "$escalation_file"; } 2>/dev/null; then
+            _wrb_rm_status=0
+            _wedge_cap_rollback "$_wkey" "$escalation_file" "$since_file" || _wrb_rm_status=$?
+            case "$_wrb_rm_status" in
+              2) triage_log "wedge escalation-counter reset FAILED AND rollback AND sentinel write ALL FAILED on $win - the counter stays saturated once the marker's horizon elapses; operator MUST intervene"; exit 1 ;;
+              1) triage_log "wedge escalation-counter reset FAILED AND rollback ALSO FAILED on $win - sentinel set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification"; exit 1 ;;
+              *) triage_log "wedge escalation-counter reset FAILED on $win - escalation count rolled back; the cap marker stands, so this window stays silent until its horizon (FM_CAP_HORIZON_SECS) elapses or an episode-ending route releases it (an operator can delete the marker to re-engage at once)"; exit 1 ;;
+            esac
+          fi
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
           [ "$_wrb_cap_status" -eq 3 ] || wake "$_wrb_cap_reason"
           return 0
@@ -3001,7 +3021,7 @@ heartbeat_scan_finds_actionable() {
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
-# with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
+# with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
 # `blocked` wakes the supervisor sub-second instead of after the stale-pane
 # wedge timer. For every other home - no push-capable window, backend not
@@ -3025,7 +3045,7 @@ event_wait_or_sleep() {
     session=${w%%:*}
     if [ -z "$first_backend" ]; then first_backend=$b; first_session=$session; fi
     # One socket connection covers one backend+session; a home normally has a
-    # single herdr session. A window in a different backend/session stays on the
+    # single herdr or rex session. A window in a different backend/session stays on the
     # poll path this cycle.
     if [ "$b" != "$first_backend" ] || [ "$session" != "$first_session" ]; then
       continue
@@ -3152,6 +3172,13 @@ done
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
+handling_successor_has_queued_row() {
+  local queued=1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$queued"
+}
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -3200,6 +3227,23 @@ home_summary_refresh_detached() {
   FM_HOME_SUMMARY_IF_IDLE=1 \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!
+}
+
+# Opt-in lane capacity facts (docs/configuration.md "Lane capacity"): publish
+# state/lane-capacity.json detached for the same beacon-freshness reason as the
+# home summary above. bin/fm-capacity.sh's header owns the document.
+LANE_CAPACITY_PID=
+lane_capacity_publish_detached() {
+  if [ -n "$LANE_CAPACITY_PID" ]; then
+    if kill -0 "$LANE_CAPACITY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$LANE_CAPACITY_PID" 2>/dev/null || true
+    LANE_CAPACITY_PID=
+  fi
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-capacity.sh" --publish </dev/null >/dev/null 2>&1 &
+  LANE_CAPACITY_PID=$!
 }
 
 RECONCILE_REQUEST_PID=
@@ -3328,9 +3372,17 @@ rerecord_device_shifted_pr_poll() {  # <id>
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # unbounded recovery loop. A handled host turn explicitly settles its
+  # handoff after consuming the predecessor's rows, making any row left for
+  # main a recoverable downtime episode.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+      echo "watcher: recovery state could not be consumed safely" >&2
+      exit 1
+    fi
+    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+    handling_successor_has_queued_row || return 0
+    wake "check: rearm-resurface"
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -3389,6 +3441,10 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+  fi
+  # Opt-in lane capacity facts: off costs one file test.
+  if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
+    lane_capacity_publish_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
@@ -4000,7 +4056,7 @@ EOF
     fi
   fi
 
-  # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
+  # Terminal wait: a bounded native-event wait for push-capable homes (herdr, rex),
   # else the blind poll sleep. See event_wait_or_sleep.
   event_wait_or_sleep
 done

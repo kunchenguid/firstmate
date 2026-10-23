@@ -989,6 +989,118 @@ test_wedge_cap_sentinel_probe_keeps_its_cadence() {
   pass "a window silenced by the rollback-failure sentinel keeps the probe on its escalation cadence, not once per poll"
 }
 
+# 8d. The reset the cap fire gives the escalation counter after the marker is
+# written is cap state like the count write and the marker write before it, so
+# a state dir that takes both of those but refuses the reset must not be walked
+# past: the watcher would carry a counter left saturated at the bound out of
+# the fire, and the first post-horizon threshold would re-fire the terminal
+# silence off it instead of climbing a fresh escalation 1..N. The reset is
+# defended exactly like its siblings - roll the cap state back, silence the
+# wedge path through the sentinel when the rollback cannot clean it either, and
+# end the cycle before the capped wake is delivered inline; the row the fire
+# already queued stays durable for the drain.
+#
+# The fault is a mode, and a mode does not restrict root, so under root the shim's
+# chmod 444 would leave the reset writable, the guard would never fire and this case
+# would fail on its own exit-code assertion. Skip it there the way this repository's
+# other test files skip their mode-bit faults - tests/fm-control-relaunch.test.sh
+# chmods a state directory to 000 for that same reason - so this suite behaves the
+# same whether it runs as root or as the ordinary user.
+test_wedge_cap_unwritable_counter_reset_fails_safe() {
+  if [ "$(id -u)" = 0 ]; then
+    pass "a refused escalation-counter reset fails safe instead of carrying a saturated counter (skipped as root)"
+    return 0
+  fi
+  local dir state out capture_file window key pane_hash sig fakebin max pid round_status sentinel real_rm queue_before
+  dir=$(make_case wedge-cap-reset-fail); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; fakebin="$dir/fakebin"
+  window="test:fm-wedge-cap-reset-fail"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-reset-fail.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-reset-fail.status"
+  sig=$(seen_sig "$state/wedge-cap-reset-fail.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-reset-fail_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  max=1
+  prime_and_ack "$dir" "$max" || fail "prime-and-ack failed"
+  sentinel="$state/.wedge-rollback-failed-$key"
+
+  # The failure has to land between the count write (which must succeed, or the
+  # counter route above would take the round) and the post-fire reset, so a
+  # passthrough rm shim - the one external command the cap fire runs in
+  # between, episode end's removal of the idle timer - turns the counter file
+  # unwritable at exactly that point, and only once the marker it must not
+  # defeat already stands.
+  real_rm=$(command -v rm)
+  cat > "$fakebin/rm" <<SHIM
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "$state/.stale-since-$key" ] \
+    && [ -e "$state/.wedge-permanent-$key" ]; then
+    chmod 444 "$state/.wedge-escalations-$key"
+  fi
+done
+exec "$real_rm" "\$@"
+SHIM
+  chmod +x "$fakebin/rm"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+    FM_ROLLBACK_SENTINEL_TTL_SECS=3600 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  round_status=$?
+  [ "$round_status" -eq 1 ] || fail "cap-fire round expected exit 1 on the failed counter reset, got $round_status: $(cat "$out")"
+  [ -e "$sentinel" ] || fail "a counter reset this state dir refuses left the wedge path unsilenced: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = "1" ] \
+    || fail "the fixture did not reproduce the failure: the counter was not left saturated at the bound"
+  grep -F "wedge permanently capped" "$state/.watch-triage.log" >/dev/null \
+    && fail "the watcher proceeded past a counter reset the state dir refused: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "the capped wake was delivered inline off a reset the state dir refused: $(cat "$out")"
+  grep -F "reset FAILED AND rollback ALSO FAILED" "$state/.watch-triage.log" >/dev/null \
+    || fail "the failed reset did not report its sentinel: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ "$(queued_wakes_carrying "$state" "$window" "PERMANENTLY-WEDGED")" -eq 1 ] \
+    || fail "the terminal row queued before the failed reset was not left durable for the drain"
+  unset FM_FAKE_CREW_STATE
+  ack_stopped_cycle "$state" || fail "ack after the cap-fire round failed"
+
+  # One more poll on the standing sentinel: it must hold the wedge path - no
+  # new escalation, no new terminal row - exactly as it does on the write
+  # routes above, while the saturated counter the state dir refused to reset
+  # stays where it is.
+  queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_ROLLBACK_SENTINEL_TTL_SECS=3600 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" 200; then
+    reap "$pid"; fail "the poll after a failed counter reset did not settle on the sentinel: $(cat "$out")"
+  fi
+  reap "$pid"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the sentinel short-circuit published a wedge wake after a failed reset: $(cat "$out")"
+  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] \
+    || fail "the poll after a failed reset queued another wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
+    || fail "the silenced poll did not report the sentinel: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ -e "$sentinel" ] || fail "the sentinel was consumed by the poll after the failed reset; it must hold until TTL expiry or an operator rm"
+  pass "a counter reset the state dir refuses ends the cycle behind the sentinel instead of walking out with a saturated counter"
+}
+
 # 9. The cap is a ceiling on CONSECUTIVE escalations: a crew that genuinely
 # resumes after the cap fired takes the watcher's wedge-bookkeeping reset with
 # it, so the cap marker goes and a pane that wedges again escalates normally
@@ -1710,6 +1822,7 @@ test_wedge_cap_reads_an_unreadable_counter_as_a_fresh_one
 test_wedge_cap_rollback_writes_sentinel_on_marker_failure
 test_wedge_cap_unwritable_escalation_count_fails_safe
 test_wedge_cap_sentinel_probe_keeps_its_cadence
+test_wedge_cap_unwritable_counter_reset_fails_safe
 test_wedge_cap_releases_after_genuine_recovery
 test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure
 test_wedge_cap_releases_after_declared_wait

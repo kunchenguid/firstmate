@@ -17,6 +17,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 
 PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
@@ -42,7 +44,8 @@ EOF
 }
 
 # The remote-route cases drive the real remote job worker, which outlives the
-# command that staged its job. Stop it before the shared fixture cleanup runs,
+# command that staged its job. Stop its whole tree (including the restart
+# supervisor) before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
   local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid attempt worker_state
@@ -54,7 +57,7 @@ pf_test_cleanup() {
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
     if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null || true
+      fm_remote_job_stop_worker_tree "$pid" || true
       # This worker is detached, so wait(1) cannot reap it. TERM begins a
       # shutdown that still writes job state; deleting its fixture immediately
       # races those writes and can make rm fail with "Directory not empty".

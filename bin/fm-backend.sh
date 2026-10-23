@@ -1177,16 +1177,16 @@ fm_backend_agent_alive() {  # <backend> <target>
 # fm_backend_has_push whether a window's backend can push semantic state changes,
 # and for those backends replaces its blind `sleep POLL` with a bounded wait on
 # fm_backend_wait_transition. Every push-capable backend reuses the shared
-# normalized-transition shape and policy table (bin/fm-transition-lib.sh); today
-# only herdr implements the surface (docs/herdr-backend.md "Native
-# pane.agent_status_changed push escalation"). A backend with no native push
+# normalized-transition shape, policy table, and dedupe (bin/fm-transition-lib.sh);
+# herdr (docs/herdr-backend.md "Push events and polling fallback") and rex
+# (docs/rex-backend.md "Push events") implement the surface. A backend with no native push
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 
 # fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
 fm_backend_has_push() {  # <backend>
   case "$1" in
-    herdr) return 0 ;;
+    herdr|rex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1202,6 +1202,7 @@ fm_backend_events_capable() {  # <backend> <session>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_events_capable "$@" ;;
+    rex) fm_backend_rex_events_capable "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1219,6 +1220,7 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
+    rex) fm_backend_rex_wait_transition "$@" ;;
     *) return 2 ;;
   esac
 }
@@ -1230,6 +1232,7 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_commit_transition "$@" ;;
+    rex) fm_backend_rex_commit_transition "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1241,6 +1244,7 @@ fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_clear_transition "$@" ;;
+    rex) fm_backend_rex_clear_transition "$@" ;;
     *) return 0 ;;
   esac
 }

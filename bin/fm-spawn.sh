@@ -4551,14 +4551,16 @@ EOF
     # The session lock follows the shadowed home too, so the secondmate's own
     # cleanup serializes against this launch on the same lock file.
     REX_LABEL_HOME=$FM_HOME
+    REX_LABEL_ROOT=$FM_ROOT
     REX_LABEL_STATE=$STATE
     REX_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       REX_LABEL_HOME=$PROJ_ABS
+      REX_LABEL_ROOT=$PROJ_ABS
       REX_LABEL_STATE=$PROJ_ABS/state
       REX_LAUNCHER_RELATIONSHIP=other-home
     fi
-    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
+    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" FM_ROOT="$REX_LABEL_ROOT" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
     read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
 $REX_TASK_IDS
 EOF

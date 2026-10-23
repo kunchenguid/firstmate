@@ -9,13 +9,22 @@
 #   fm-contributions.sh ack <task> <url> <event-token>
 #   fm-contributions.sh retire <task> <url> captain <reason>
 #   fm-contributions.sh arm [--if-owned]
+#   fm-contributions.sh owned
+#   fm-contributions.sh enroll <task> <pr-url>
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
 # URLs accepted by canonical_url in fm-contributions.jq and explicitly linked
 # by a structured backlog row or a task's pr= are owned.
-# Previously observed URLs remain in data/<task>/contributions.json after
-# endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# Previously observed or enrolled URLs remain in data/<task>/contributions.json
+# after endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# enroll records one task's supported PR URL as an unobserved record, so a PR
+# the task opened is owned before any pr= exists; it changes nothing when the
+# task already has a record for that URL and fails when that record is
+# retired, so a retirement is never undone by rediscovery.
+# owned prints the supported PR URLs this home owns as a JSON array of
+# {url,tasks,final}, where final means a saved observation is merged or closed.
+# It is read-only and never contacts a forge.
 # Only canonical PR and issue URLs on the exact github.com host are supported;
 # other accepted URLs remain visibly unmeasured.
 # poll skips unsupported URLs without forge calls, unavailable output, wakes or
@@ -675,6 +684,30 @@ case "${1:-}" in
     ;;
   poll) poll ;;
   arm) arm "${2:-}" ;;
+  owned)
+    get_input; read_saved
+    [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); ownership is unverified"
+    jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+      [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
+      | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
+      | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique),final:(.[0].url | IN($final[]))})'
+    ;;
+  enroll)
+    [ "$#" -eq 3 ] || fail 'enroll needs a task and a PR URL'
+    task=$2; url=$3
+    fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
+    jq_lib -ne --arg url "$url" '$url | supported_url and contains("/pull/")' >/dev/null \
+      || fail 'enroll needs a canonical github.com PR URL'
+    acquire; read_saved
+    [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); enrollment is unverified"
+    if jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url and .retired != null)' "$TMP/saved.json" >/dev/null; then
+      fail 'contribution is retired for this task; enrollment refused'
+    fi
+    if ! jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url)' "$TMP/saved.json" >/dev/null; then
+      jq -n --arg url "$url" '{url:$url,kind:"pr",checked_at:null,error:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    fi
+    ;;
   pending)
     read_saved
     [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); pending signals are unverified"
