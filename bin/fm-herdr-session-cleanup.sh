@@ -222,6 +222,7 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
+  local journal_session journal_home journal_projection journal_task journal_workspace journal_tab journal_pane
   local tab pane empty_tab state close_kind close_status=0
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
@@ -233,6 +234,13 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   bound_workspace=$FM_HERDR_CLEANUP_BOUND_WORKSPACE
   bound_tab=$FM_HERDR_CLEANUP_BOUND_TAB
   bound_pane=$FM_HERDR_CLEANUP_BOUND_PANE
+  journal_session=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  journal_home=$FM_BACKEND_HERDR_JOURNAL_HOME
+  journal_projection=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  journal_task=$FM_BACKEND_HERDR_JOURNAL_TASK_ID
+  journal_workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+  journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$task_lock"; then
@@ -300,13 +308,23 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
-      && fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" \
-      && [ "$FM_HERDR_CLEANUP_JOURNAL" = "$journal" ] \
-      && [ "$FM_HERDR_CLEANUP_ID" = "$id" ] \
-      && [ "$FM_HERDR_CLEANUP_VERSION" = "$version" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_WORKSPACE" = "$bound_workspace" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ] \
+      && { [ "$empty_tab" = 1 ] \
+        && fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$journal_session" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$journal_home" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$journal_projection" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_ID" = "$journal_task" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$journal_workspace" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$journal_tab" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$journal_pane" ]; } \
+      || { [ "$empty_tab" = 0 ] \
+        && fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" \
+        && [ "$FM_HERDR_CLEANUP_JOURNAL" = "$journal" ] \
+        && [ "$FM_HERDR_CLEANUP_ID" = "$id" ] \
+        && [ "$FM_HERDR_CLEANUP_VERSION" = "$version" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_WORKSPACE" = "$bound_workspace" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ]; } \
       && [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
       rm -f -- "$journal" || fm_herdr_cleanup_warn "$id $close_kind closed but its journal could not be retired"
     else

@@ -82,6 +82,7 @@ fm_backend_herdr_projection_focus_snapshot() {
 
 fixture_workspace_json() {
   local title=$1 tabs=$2 panes=$3 focused=false active=$TAB
+  [ ! -e "$FIXTURE_DIR/empty-tab" ] || panes=0
   [ "$(cat "$FIXTURE_DIR/active-tab")" = "$TAB" ] && focused=true
   printf '{"workspace_id":"%s","label":"%s","focused":%s,"active_tab_id":"%s","tab_count":%s,"pane_count":%s}' \
     "$WS" "$title" "$focused" "$active" "$tabs" "$panes"
@@ -92,7 +93,6 @@ fixture_workspaces() {
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
-  [ ! -e "$FIXTURE_DIR/empty-tab" ] || panes=0
   printf '[{"workspace_id":"w1","label":"firstmate","focused":%s,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1},' \
     "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t1 ] && printf true || printf false )"
   fixture_workspace_json "$title" "$tabs" "$panes"
@@ -150,7 +150,6 @@ fm_backend_herdr_cli() {
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
-  [ ! -e "$FIXTURE_DIR/empty-tab" ] || panes=0
   case "$first $second" in
     "workspace list")
       printf '{"result":{"workspaces":'; fixture_workspaces; printf '}}\n'
