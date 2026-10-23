@@ -152,6 +152,20 @@ EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
 }
 
+# Return 0 when <mode> is one of the two publishing modes, whose Definition of
+# done below publishes the task for review: a pull request, or on a
+# forge=gerrit project a change. local-only publishes nothing, and a scout
+# records no mode. A home that opts in with config/spawn-base-primary-checkout
+# reads it in bin/fm-spawn.sh, bin/fm-review-diff.sh, and bin/fm-promote.sh:
+# published work must start from, and be reviewed against, origin's tip rather
+# than a local branch carrying commits origin has never received.
+fm_mode_publishes() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+  esac
+  return 1
+}
+
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing

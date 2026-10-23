@@ -794,6 +794,26 @@ With the flag absent the wedge timer spends no read for it and keeps the unchang
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and `bin/fm-classify-lib.sh`'s `status_worker_wait_verb` owns which lines count.
 
+## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
+
+The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.
+Without it, every fresh ship or scout worktree on a project with an origin remote resets to `origin/<default>`, or to `origin/<base>` for a named base branch, exactly as before.
+
+### Which tasks it changes
+
+With it present, a fresh local-only ship, or a scout spawned without `--base-branch`, starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
+A local-only project lands work there through `bin/fm-merge-local.sh` and never pushes, so `origin/<default>` stays at the last push, and a fresh task would otherwise start behind work already landed and load the project's instruction files from that stale tree.
+A no-mistakes or direct-PR ship and any task with a named base branch still start from origin's tip, because that work is delivered against origin.
+When the primary checkout's `<default>` and origin's have diverged, the spawn prints a note and starts from origin's tip.
+A project without an origin remote is unaffected, and a relaunch never changes the base a task already has.
+
+`bin/fm-review-diff.sh` reads the same flag, so a local-only ship or a scout is reviewed against the branch it delivers to and its diff shows only its own work, while a no-mistakes or direct-PR ship stays anchored on `origin/<default>`.
+`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes or direct-PR to return to origin's default branch rather than the primary checkout's.
+
+The flag is per home and is not inherited by secondmate homes, which keep their own project clones and opt in separately.
+Only its presence is read, at each fresh spawn, review, and promotion.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the [`fm-review-diff.sh` header](../bin/fm-review-diff.sh) owns the review anchor.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.

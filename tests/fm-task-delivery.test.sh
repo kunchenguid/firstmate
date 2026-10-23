@@ -274,6 +274,50 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# A home with config/spawn-base-primary-checkout can start a scout from the
+# primary checkout's default branch, which may carry commits origin has never
+# received, so a promotion to a publishing mode names origin's default branch as
+# the base to return to. Local-only, a home without the flag, and a named base
+# keep their wording.
+test_promote_names_origin_for_a_publishing_mode_in_an_opted_in_home() {
+  local flag mode home id instructions out status
+  for flag in on off; do
+    for mode in direct-PR no-mistakes local-only; do
+      home="$TMP_ROOT/promote-base-$flag-$mode/home"
+      id="promote-base-$flag-${mode%%-*}-c1"
+      mkdir -p "$home/state" "$home/config"
+      [ "$flag" = off ] || : > "$home/config/spawn-base-primary-checkout"
+      write_brief "$home" "$id"
+      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1)
+      status=$?
+      expect_code 0 "$status" "flag $flag, $mode: the promotion should succeed"$'\n'"$out"
+      instructions="$home/data/$id/ship-instructions.md"
+      if [ "$flag" = on ] && [ "$mode" != local-only ]; then
+        assert_grep "3. Return to a clean copy of origin's default branch rather than the primary checkout's, which can carry commits origin has never received, then create your branch" \
+          "$instructions" "flag $flag, $mode: a publishing promotion did not name origin's default branch as its base"
+      else
+        assert_grep '3. Return to a clean default-branch base, then create your branch' \
+          "$instructions" "flag $flag, $mode: the promotion changed the default-branch wording"
+      fi
+    done
+  done
+
+  home="$TMP_ROOT/promote-base-named/home"
+  id='promote-base-named-c1'
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/spawn-base-primary-checkout"
+  write_brief "$home" "$id"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "a named-base promotion in an opted-in home should succeed"$'\n'"$out"
+  assert_grep "3. Return to a clean copy of the base branch \`feature/hub\`, then create your branch" \
+    "$home/data/$id/ship-instructions.md" "the opt-in changed a named base branch's promotion wording"
+  pass "fm-promote: an opted-in home sends a publishing promotion back to origin's default branch"
+}
+
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
 test_promote_refuses_a_symlinked_task_record() {
@@ -1747,6 +1791,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_names_origin_for_a_publishing_mode_in_an_opted_in_home
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
