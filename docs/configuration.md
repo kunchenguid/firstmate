@@ -1478,7 +1478,8 @@ The resolver supplies the fixed neutral Choice option `No listed rule applies to
 - `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 
 `until` is an ISO 8601 UTC instant (`YYYY-MM-DDTHH:MM:SSZ`).
-The resolver drops a rule once that instant has passed, before the model sees the option list, so a date-gated rule expires on its own instead of depending on the model reading dates out of `when` text; a malformed `until` is an actionable configuration error.
+The resolver drops the rule at or after that instant, before building the model's option list.
+The resolver rejects malformed values, including invalid calendar dates and clock values, before filtering expired rules or making network requests.
 
 `min_confidence` is a number from 0 through 1.
 The rule's own probability in the answer must reach it, replacing the resolver's global 0.6 floor on the answer's confidence.
@@ -1563,7 +1564,9 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 
 **What the model receives**
 
-When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
+When on and at least one unexpired rule exists, the tool sends the project name and the brief's task-specific text as state.
+It asks one Choice question with each remaining rule's `when` and the fixed neutral option for no matching rule.
+The model never sees quota, catalogs, `why`, `use`, approvals, confidence floors, or `until`.
 OpenRouter's Decisions API accepts the same Choice request shape and returns the same typed answer, including confidence and a probability per option; both providers use the same response validation and post-model gates.
 The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 
@@ -1593,7 +1596,9 @@ That one diagnostic names the list line number at most and never prints the list
 
 **Missing or invalid rules**
 
-An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
+An absent rules file, a default-only file, or no unexpired rules returns `no rules to match` without a model, Pi refresh, or quota request.
+This leaves firstmate's existing routing in control.
+An existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 
 **Checks performed after the answer**
 
@@ -1601,8 +1606,14 @@ After the answer, code applies all remaining checks and ranking:
 
 - The confidence floor and the matched rule's `approval` and `floor`.
 - Each candidate's `provider` and `floor`.
-- Every applicable account-wide and model/product row from one `quota-axi --json` snapshot, read with bounded reuse (`--max-age 2m`) after a best-effort bounded refresh of each Pi provider session the live rules name, since Pi renews a token only on use.
+- Every applicable account-wide and model/product row from one quota snapshot with bounded reuse.
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
+
+Before reading quota, the resolver attempts a bounded session refresh for each distinct Pi executable/provider pair in unexpired rules and the top-level default.
+It uses the profile's `pi` or `pi-signed` executable and the [worker account pin](#worker-account-pin-configclaude-account-configpi-account) when configured.
+A refused pin skips refresh; an undeclared provider skips that provider's refresh, without retrying under an ambient account.
+A missing executable or failed refresh does not stop resolution.
+The [resolver header](../bin/fm-dispatch-resolve.sh) owns the refresh command, timeout, and quota reuse limit.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 
@@ -1612,7 +1623,7 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 **Confidence and fallback rules**
 
 - A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
-- A picked rule without `min_confidence`, and the neutral option, keep the global 0.6 floor on the answer's confidence exactly as before, so a file with no declared floors behaves as it did.
+- A picked rule without `min_confidence`, and the neutral option, use the global 0.6 answer-confidence threshold for the low-confidence path below.
 
 When the picked rule declares its own floor but its probability falls below it, the tool checks the other options:
 
@@ -1621,8 +1632,11 @@ When the picked rule declares its own floor but its probability falls below it, 
 
 No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
 
-An answer below the global 0.6 floor with no declared floor on the picked rule still resolves: the tool takes the most probable option that clears its own declared floor, resolves its profiles, and marks the result note low confidence.
-A top-probability tie stays `ambiguous`, and an approval-gated rule still escalates, so the hand pick remains only where the captain reserved it.
+Only picks without a declared floor use the low-confidence path when answer confidence falls below the global threshold.
+The resolver selects the most probable option whose declared floor, if any, is met.
+Options without a declared floor, including the neutral option, need no minimum probability on this path.
+A tie between the highest-probability qualifying options returns `ambiguous`.
+Otherwise, the resolver applies approval and quota checks to the selected option and marks its result note low confidence.
 
 **Candidate eligibility and evidence**
 
@@ -1641,16 +1655,16 @@ A top-probability tie stays `ambiguous`, and an approval-gated rule still escala
 
 Every result above exits 0.
 
+- The response's selected choice must be an offered option before any confidence fallback, Pi refresh, or quota read.
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 - Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, or an OpenRouter provider without a model, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
 
-The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
+[`AGENTS.md` section 4](../AGENTS.md#4-harness-and-runtime-dispatch) owns outcome handling and the permitted overrides of a clear profile.
+The captain-approval gate and `fm-spawn.sh` validation still apply.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-
-Firstmate passes its profile line unchanged, changing it only for a current captain instruction or a hard blocker such as a failed spawn or a login refusal and recording that reason in the task's dispatch note; every non-clear result returns to the full existing intake.
 
 **Key handling and provider settings**
 

@@ -12,17 +12,14 @@
 #   key lives in a non-exported shell variable and reaches curl through fd 3,
 #   never argv, logs, or child environments.
 #
-# What it does when on with at least one rule: one POST with the project name and the brief's
+# What it does when on with at least one unexpired rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
 #   scout brief (the whole brief when it has neither section), as state and
 #   ONE Choice question whose options are every unexpired rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. A rule can
-#   declare `until` (an ISO 8601 UTC instant, YYYY-MM-DDTHH:MM:SSZ); a rule
-#   whose instant has passed leaves the option list before the question is
-#   built, so a date-gated rule expires on its own instead of depending on the
-#   model reading dates out of `when` text. The provider
-#   returns the matched rule, a probability per option, and a confidence. Everything
-#   after that is jq: the confidence floor (0.6 on the answer confidence, or a
+#   config/crew-dispatch.json plus one fixed generic none option. The `until`
+#   contract is owned by docs/configuration.md "Crew dispatch profiles".
+#   The provider returns the matched rule, a probability per option, and a
+#   confidence. Code then applies the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
 #   most probable other option that clears its own floor), the rule's declared
 #   `approval` and `floor`, each profile's declared `provider` and `floor`, the
@@ -31,13 +28,13 @@
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
 #   candidate is unmeasured, never blocked), read with --max-age 2m of bounded
-#   reuse so a burst of intakes cannot rate-limit a vendor endpoint into an
-#   escalation, and the spendPriority argmax over
-#   the eligible candidates. Pi renews a provider session token only on use,
-#   so before the quota read each Pi provider the live rules name gets one
-#   bounded `pi auth check --provider <p>` (10 seconds, never fatal): it
-#   refreshes an expired session and decides nothing. The model never sees quota, catalogs, approvals,
-#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
+#   reuse to reduce repeated vendor reads, and the spendPriority argmax over
+#   the eligible candidates. Before the quota read, each distinct Pi
+#   executable/provider pair from live rules or the top-level default gets
+#   `<pi|pi-signed> auth check --provider <p>` (10 seconds, never fatal),
+#   subject to the account-pin rules in the operator contract below.
+#   The model never sees quota, catalogs, approvals,
+#   confidence floors, `why`, or `use`. With no unexpired rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
@@ -66,9 +63,8 @@
 #     today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
-#   An answer below the global confidence floor still resolves the most
-#   probable option that clears its own declared floor, with a low-confidence
-#   note on the result; only a top-probability tie stays ambiguous.
+#   Confidence and fallback policy: docs/configuration.md
+#   "Confidence and fallback rules".
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, missing jq, an unknown
@@ -79,9 +75,8 @@
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
 #
-# Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
-#   the captain-approval gate, or fm-spawn.sh validation; it publishes one
-#   inspectable answer plus every candidate's evidence, in code.
+# Authority: AGENTS.md section 4 owns dispatch intake and override limits.
+#   This tool does not replace captain approval or fm-spawn.sh validation.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -258,8 +253,7 @@ while IFS= read -r until; do
     || die "malformed rules file: $RULES_PATH - until must be a valid ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ)"
 done < <(jq -r '.rules[]? | select(has("until")) | .until' "$RULES")
 
-# A rule whose declared `until` instant has passed leaves the option list
-# before the question is built; same-format UTC strings compare in order.
+# Same-format UTC strings compare in chronological order.
 NOW_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || die "could not read the current time"
 FILTERED_RULES=$(mktemp) || die "mktemp failed"
 if ! jq --arg now "$NOW_UTC" '.rules = [(.rules // [])[] | select((.until // "") == "" or .until > $now)]' "$RULES" > "$FILTERED_RULES"; then
@@ -426,9 +420,8 @@ jq -e --slurpfile rules "$RULES" '
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
 # ---- quota evidence: one bounded-reuse quota-axi --json snapshot -------------
-# Pi renews a provider session token only on use, so refresh each Pi provider
-# the live rules name first; bounded per provider and never fatal, because a
-# failed or absent refresh only leaves that lane's quota where it was.
+# Pi renews tokens only on use; a failed refresh must not block dispatch or
+# bypass the configured account pin.
 if pi_account=$(fm_worker_account_resolve pi "$CONFIG" config/pi-account 2>/dev/null); then
   pi_root=${pi_account#*$'\t'}
   pi_providers=${pi_root#*$'\t'}
@@ -536,11 +529,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def confidence_floor($c): if declared_confidence($c) then rule_at($c).min_confidence else ($floor | tonumber) end;
   ($a.choice) as $picked |
   (confidence_floor($picked)) as $picked_floor |
-  # A declared floor is checked against the probability of that option whether
-  # it is the pick or a runner-up, so a runner-up never needs weaker support
-  # than it would as the pick. Only a rule that declares its own floor falls
-  # through to a runner-up, so a file with no declared floors keeps the single
-  # global floor on the answer confidence exactly.
+  # Declared floors require the same option probability for picks and runner-ups.
+  # Their fallback stays separate from the low-confidence path so a declared
+  # floor miss cannot bypass the required runner-up support.
   (if declared_confidence($picked) | not then
      (if $a.confidence >= $picked_floor then {below: false} else {below: true, global: true} end)
    elif $a.probabilities[$picked] >= $picked_floor then {below: false}
