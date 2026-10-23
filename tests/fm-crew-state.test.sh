@@ -5705,7 +5705,7 @@ branch_sync:
   state: pipeline_owned"
   printf -v "$old_var" '%s' "$(FM_FAKE_RUN_HEAD=$head run_failed fm/reused-branch | sed "s/01RUN/$old_id/")"
   printf -v "$new_var" '%s' "$FM_FAKE_AXI_STATUS"
-  export "$old_var" "$new_var"
+  export "${old_var?}" "${new_var?}"
   FM_FAKE_RUNS_LIST="  running fm/reused-branch ${head:0:7} 2026-09-28 12:00
   failed fm/reused-branch ${head:0:7} 2026-09-28 12:00"
   out=$(run_crew_state "$d" reused)
