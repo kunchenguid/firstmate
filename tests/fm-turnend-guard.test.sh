@@ -335,7 +335,7 @@ ready = state / '.namespace-ready'
 stop = state / '.namespace-stop'
 nonlinux_bin = home / '.test-nonlinux-bin'
 nonlinux_bin.mkdir()
-(nonlinux_bin / 'uname').write_text('#!/usr/bin/env bash\nprintf "Darwin\\n"\n')
+(nonlinux_bin / 'uname').write_text('#!/usr/bin/env bash\nprintf "FreeBSD\\n"\n')
 (nonlinux_bin / 'uname').chmod(0o755)
 inner = r'''set -eu
 home=$1 state=$2 lib=$3 ready=$4 stop=$5
@@ -441,9 +441,29 @@ try:
     expect_block('codex', 'stale namespace holder was accepted')
     os.utime(beat, None)
 
-    beat.unlink()
     expect_block('codex', 'non-Linux guard accepted the namespace holder', nonlinux_bin)
-    beat.touch()
+
+    for path, expected in ((None, 0), (nonlinux_bin, 1)):
+        env = base_env.copy()
+        if path:
+            env['PATH'] = str(path) + os.pathsep + env['PATH']
+        result = subprocess.run(
+            ['bash', '-c', '. "$1"; fm_watcher_cross_namespace_healthy "$2" "$3" 300 "$4"',
+             '_', str(home / 'bin/fm-wake-lib.sh'), str(state), str(home / 'bin/fm-watch.sh'), str(home)],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+        )
+        if result.returncode != expected:
+            raise SystemExit(f'observer platform restriction failed ({path}): rc={result.returncode}')
+
+    library = home / 'bin/fm-wake-lib.sh'
+    original_size = library.stat().st_size
+    try:
+        with library.open('a') as file:
+            file.write('\nfm_watcher_cross_namespace_healthy() { return 0; }\n')
+        expect_block('codex', 'non-Linux guard invoked the fallback', nonlinux_bin)
+    finally:
+        with library.open('r+') as file:
+            file.truncate(original_size)
 
     stop.touch()
     os.killpg(proc.pid, signal.SIGKILL)
