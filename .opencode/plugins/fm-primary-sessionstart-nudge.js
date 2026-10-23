@@ -42,7 +42,10 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
       if (!sessionID || handledSessions.has(sessionID) || !root) return;
       handledSessions.add(sessionID);
 
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
+      const script = `${root}/bin/fm-sessionstart-nudge.sh`;
+      const result = process.platform === "win32"
+        ? await runProcess("bash", [script])
+        : await runProcess(script, []);
       const nudge = result.code === 0 ? result.stdout.trim() : "";
       if (!nudge) return;
 
