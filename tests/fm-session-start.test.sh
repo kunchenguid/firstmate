@@ -881,6 +881,66 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+test_secondmate_home_takes_its_own_lock_and_reconciles() {
+  local rec root home fakebin mate out status
+  rec=$(new_world secondmate-own-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # A marked secondmate home resolves its own startup exactly as a real seeded
+  # home does: FM_HOME and the root are the same directory, the marker decides
+  # the posture, and bin/ is the tracked code root.
+  mate="$TMP_ROOT/secondmate-own-startup-home"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s\n' fmtest-own-startup > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  ln -s "$ROOT/bin" "$mate/bin"
+
+  # A live secondmate meta pointed at a directory that is not a checkout: if
+  # bootstrap's MUTATING secondmate sweep ran it would report SECONDMATE_SYNC or
+  # NUDGE_SECONDMATES for it. This is the same proof shape the lock-refusal test
+  # uses for FM_BOOTSTRAP_DETECT_ONLY.
+  mkdir -p "$mate/other-secondmate/state"
+  fm_write_secondmate_meta "$mate/state/sm-x.meta" "$mate/other-secondmate" "firstmate:fm-sm-x" alpha
+  # A queued wake in this home's own queue is the disk reconciliation a restart
+  # must still perform.
+  append_wake "$mate/state" signal sm-own "done: reconciled from the local queue" \
+    || fail "seed wake failed"
+
+  status=0
+  out=$(run_session_start "$mate" "$mate" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "session start must exit 0 in a marked secondmate home"
+  assert_contains "$out" "SECOND MATE STARTUP - $mate" \
+    "a marked secondmate home did not run its own startup"
+  assert_contains "$out" "this home's session lock" \
+    "the secondmate startup did not state its own lock ownership"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the secondmate startup did not take a session lock through fm-lock.sh"
+  assert_contains "$out" "$(printf 'signal\tsm-own\tdone: reconciled from the local queue')" \
+    "the secondmate startup did not drain its own wake queue"
+  assert_contains "$out" "FLEET STATE" "the secondmate startup skipped disk reconciliation"
+
+  [ -s "$mate/state/.lock" ] || fail "the secondmate startup did not take its own session lock"
+  case "$(cat "$mate/state/.lock" 2>/dev/null)" in
+    '' | *[!0-9]*) fail "the secondmate lock does not name a pid: $(cat "$mate/state/.lock" 2>/dev/null)" ;;
+  esac
+  [ -s "$mate/state/.session-start-complete" ] \
+    || fail "the secondmate startup did not record its completion"
+  [ "$(cat "$mate/state/.session-start-complete" 2>/dev/null)" = "$(cat "$mate/state/.lock" 2>/dev/null)" ] \
+    || fail "the secondmate completion record is not keyed to its own lock holder"
+
+  assert_not_contains "$out" "SECONDMATE_SYNC" \
+    "a primary home mutating sweep ran during a secondmate home's own startup"
+  assert_not_contains "$out" "NUDGE_SECONDMATES" \
+    "a primary home mutating sweep ran during a secondmate home's own startup"
+
+  pass "a marked secondmate home runs its own startup: it takes its own lock, reconciles its own durable records, and skips the primary home's mutating sweeps"
+}
+
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
   rec=$(new_world lock-write-failure)
@@ -3159,4 +3219,5 @@ test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
+test_secondmate_home_takes_its_own_lock_and_reconciles
 echo "# fm-session-start.test.sh: all assertions passed"

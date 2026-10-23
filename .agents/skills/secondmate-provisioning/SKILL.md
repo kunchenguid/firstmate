@@ -85,6 +85,10 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
 [`docs/configuration.md`](../../../docs/configuration.md#choose-the-secondmate-harness) owns the primary's secondmate runtime pins, per-mate overrides, launch precedence, compatibility, and malformed-file refusal.
 Select the registered mate's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
+Each launch also gets a generated role-and-home instruction overlay naming the absolute home and the original charter path; it does not rewrite the standing charter.
+The launch sets `FM_SECONDMATE_ROLE=secondmate` and `FM_SECONDMATE_CHARTER` for the agent, and delivers the overlay as an operational input in the secondmate home's state rather than the primary's.
+That overlay scopes the boundary to the PRIMARY home: it names this home's own startup as the thing that takes this home's lock and arms this home's watcher, and forbids only startup against the primary home.
+[`sessionstart-nudge.md`](../../../docs/sessionstart-nudge.md#shared-wrapper-and-safety) owns the reconcile-only secondmate posture `bin/fm-session-start.sh` runs in a marked secondmate home.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.

@@ -3610,10 +3610,34 @@ if [ "$KIND" = secondmate ]; then
       echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
-    BRIEF="$PROJ_ABS/data/charter.md"
+    SECOND_MATE_CHARTER="$PROJ_ABS/data/charter.md"
   else
-    BRIEF="$DATA/$ID/brief.md"
+    SECOND_MATE_CHARTER="$DATA/$ID/brief.md"
   fi
+  # Deterministic role identity at the launch boundary. The home's AGENTS.md is
+  # the primary supervisor contract, so a secondmate session that reads only that
+  # and its charter has to guess its role; this overlay states the role, the
+  # absolute home, and the charter path before the charter text, and the launch
+  # environment carries the same facts as FM_SECONDMATE_ROLE/FM_SECONDMATE_CHARTER.
+  # The role variable is deliberately NOT FM_ROLE: bin/fm-role-lib.sh already owns
+  # FM_ROLE for this home's user|maintainer publication role, and overloading it
+  # would put a second meaning in that variable's environment.
+  # It scopes the boundary to the PRIMARY home's startup, never to this home's
+  # own startup: bin/fm-session-start.sh runs a reconcile-only posture for a
+  # marked secondmate home, which is what takes this home's lock and arms its
+  # watcher, so forbidding it outright would leave a restarted secondmate inert.
+  SECOND_MATE_LAUNCH_BRIEF="$DATA/$ID/secondmate-launch-brief.md"
+  mkdir -p "$DATA/$ID"
+  {
+    printf 'You are a secondmate, not the primary Firstmate. Your home is %s. Your charter is %s.\n' "$PROJ_ABS" "$SECOND_MATE_CHARTER"
+    printf 'Run startup only for your own home: bin/fm-session-start.sh in your home takes your own home session lock and reconciles your own home durable records from disk, and your own watcher arms once that lock is held.\n'
+    printf 'Never run startup against the primary home, never take the primary home helm, never run the primary home mutating fleet sweeps, and never address the captain; report only through your parent Firstmate.\n\n'
+    cat -- "$SECOND_MATE_CHARTER"
+  } >"$SECOND_MATE_LAUNCH_BRIEF" || {
+    echo "error: could not prepare secondmate launch instructions for $ID" >&2
+    exit 1
+  }
+  BRIEF="$SECOND_MATE_LAUNCH_BRIEF"
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
@@ -6496,10 +6520,18 @@ case "$LAUNCH" in
     secondmate) brief_opstate="$PROJ_ABS/state" ;;
     *) brief_opstate=$STATE ;;
   esac
-  brief_doorbell=$(FM_STATE_OVERRIDE="$brief_opstate" "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
-    echo "error: could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched" >&2
-    exit 1
-  }
+  if [ "$KIND" = secondmate ]; then
+    brief_doorbell=$(FM_HOME="$PROJ_ABS" FM_STATE_OVERRIDE="$brief_opstate" \
+      "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
+      echo "error: could not publish secondmate launch instructions for $ID" >&2
+      exit 1
+    }
+  else
+    brief_doorbell=$(FM_STATE_OVERRIDE="$brief_opstate" "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
+      echo "error: could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched" >&2
+      exit 1
+    }
+  fi
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
@@ -6564,7 +6596,8 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  sq_charter=$(shell_quote "${SECOND_MATE_CHARTER:-$BRIEF}")
+  LAUNCH="FM_SECONDMATE_ROLE=secondmate FM_SECONDMATE_CHARTER=$sq_charter FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in

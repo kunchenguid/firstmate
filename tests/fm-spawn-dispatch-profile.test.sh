@@ -241,7 +241,17 @@ test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
     || fail "the secondmate launch record did not publish into its own home: $record"
   [ -z "$(find "$HOME_DIR/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
     || fail "the secondmate launch record leaked into the primary's operational inbox"
-  pass "a secondmate claude launch publishes its brief record into the secondmate's own home"
+  grep -q 'You are a secondmate, not the primary Firstmate' "$record" \
+    || fail "the launch record omitted the explicit secondmate role"
+  grep -Fq "Your home is $(cd "$sm" && pwd -P). Your charter is $sm/data/charter.md" "$record" \
+    || fail "the launch record omitted its absolute home and charter paths"
+  grep -q 'Run startup only for your own home' "$record" \
+    || fail "the launch record omitted the own-home startup instruction"
+  grep -q 'Never run startup against the primary home' "$record" \
+    || fail "the launch record omitted the primary-home boundary"
+  grep -q 'never address the captain' "$record" \
+    || fail "the launch record omitted the captain boundary"
+  pass "a secondmate claude launch publishes its identity, home, charter, and boundaries into its own home"
 }
 
 # A claude worker given a typed envelope would see it with the marker stripped,
@@ -1415,7 +1425,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
+  assert_contains "$launch" "FM_SECONDMATE_ROLE=secondmate" "secondmate launch omitted its explicit role identity"
+  assert_contains "$launch" "FM_SECONDMATE_CHARTER='$sm/data/charter.md'" \
+    "secondmate launch did not identify its original charter"
+  assert_contains "$launch" "< '$HOME_DIR/data/$id/secondmate-launch-brief.md'" \
+    "secondmate launch did not receive its role-and-home overlay"
+  grep -q 'You are a secondmate, not the primary Firstmate' \
+    "$HOME_DIR/data/$id/secondmate-launch-brief.md" \
+    || fail "the secondmate overlay omitted the explicit role"
+  grep -q 'Never run startup against the primary home' \
+    "$HOME_DIR/data/$id/secondmate-launch-brief.md" \
+    || fail "the secondmate overlay omitted the primary-home boundary"
+  tail -n 1 "$HOME_DIR/data/$id/secondmate-launch-brief.md" | grep -Fq 'charter for' \
+    || fail "the secondmate overlay did not carry the original charter last"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -1798,6 +1820,8 @@ test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates() {
   expect_code 0 "$status" "Pi secondmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "fm-primary-turnend-guard.ts" "secondmate launch was not the Pi secondmate shape"
+  assert_contains "$launch" "FM_SECONDMATE_ROLE=secondmate" "secondmate launch omitted its explicit role identity"
+  assert_contains "$launch" "FM_SECONDMATE_CHARTER=" "secondmate launch omitted the selected charter path"
   assert_not_contains "$launch" "--exclude-tools" "a secondmate's own agent must not receive the worker exclusions"
   pass "exclusions stay in the home that configured them and skip secondmate agents"
 }

@@ -182,6 +182,7 @@ So a truncated digest does neither of these:
 
 - They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 - They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
+- A marked secondmate home stays eligible in both wrappers, because `bin/fm-session-start.sh` owns a reconcile-only secondmate posture there: it takes that home's own session lock and reconciles that home's own durable records from disk, while the primary home's mutating fleet sweeps, primary Herdr projection cleanup, and the deferred locked network sweeps stay with the primary. A secondmate restart therefore never skips the one command that takes its lock or arms its own watcher, and it never runs the primary home's startup flow either. The launch overlay `bin/fm-spawn.sh` generates states the same boundary.
 
 A fresh clone has no gitignored state directory yet.
 When the root otherwise qualifies as primary, the run wrapper creates the state directory before the unchanged scope check, so the first session takes the helm without a manual `mkdir state`.

@@ -20,6 +20,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
+# A marked secondmate home is deliberately NOT excluded here. Its lock is taken by
+# bin/fm-session-start.sh's reconcile-only secondmate posture, so a secondmate
+# whose restart did not run startup is exactly the case this nudge must reach.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {

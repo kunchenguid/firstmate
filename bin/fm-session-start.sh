@@ -236,6 +236,20 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+# SECOND MATE POSTURE: this digest is the one startup every home must run for
+# itself, including a marked secondmate home. A secondmate home owns its own
+# state, its own session lock, and its own watcher, so skipping the digest after
+# a restart would leave it locked out of its own durable records and unable to
+# arm supervision - and no other command takes a session lock or reconciles from
+# disk. What distinguishes a secondmate is therefore SKIPPING the PRIMARY home's
+# startup work, not skipping startup: a home carrying a valid .fm-secondmate-home
+# marker (bin/fm-primary-scope-lib.sh) takes its own lock, drains its own wake
+# queue, and prints the same read-only reconciliation, while the mutating fleet
+# sweeps stay with the primary home - bootstrap runs detect-only/locked, the
+# deferred network stage runs probe-only, and the primary Herdr projection
+# cleanup is skipped. The launch overlay bin/fm-spawn.sh generates for a
+# secondmate names this posture so the two never read as contradictory.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -377,6 +391,15 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+
+# A marked secondmate home runs this digest for its own home only; see the
+# SECOND MATE POSTURE note in this file's header. The marker is the identity
+# owner, never FM_ROLE or any harness env, so a relaunch that loses env still
+# resolves the same posture.
+SECONDMATE_HOME=0
+fm_root_is_secondmate_home "$FM_HOME" && SECONDMATE_HOME=1
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -687,6 +710,13 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'secondmate convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
+elif [ "$SECONDMATE_HOME" -eq 1 ]; then
+  section "SECOND MATE STARTUP - $FM_HOME"
+  printf '%s\n' \
+    "This is this secondmate home's OWN startup, not the primary home's: it takes" \
+    "this home's session lock and reconciles this home's durable records from disk," \
+    "while the primary home's mutating fleet sweeps stay with the primary session." \
+    'The watcher for this home arms once this lock is held.'
 else
   section "SESSION START - $FM_HOME"
 fi
@@ -747,6 +777,10 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # steer, or merge anyway, so it has no action left for an auth verdict to gate.
   NETWORK_STAGE_LOCKED=1
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
+  # A secondmate home never runs the primary home's mutating network sweeps
+  # (dead-secondmate relaunch, secondmate convergence and liveness, pending
+  # handoff delivery, project clone refresh); probe-only is its read-only share.
+  [ "$SECONDMATE_HOME" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
@@ -761,7 +795,11 @@ if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
     FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
-elif [ "$REEMIT" -eq 1 ]; then
+elif [ "$REEMIT" -eq 1 ] || [ "$SECONDMATE_HOME" -eq 1 ]; then
+  # The re-emit path already reconciled its sweeps, and a secondmate home's
+  # mutating fleet sweeps belong to the primary: both ask bootstrap for its
+  # read-only diagnostics only, and never run the primary Herdr projection
+  # cleanup.
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
     FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)

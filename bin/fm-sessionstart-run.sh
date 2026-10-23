@@ -87,8 +87,10 @@ stand_down() {
 
 # The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home
-# they do not own. Pi's preflight-only status preserves that intentional silence
-# without mistaking it for a failed eligible attempt that needs the manual nudge.
+# they do not own. A marked secondmate home IS eligible on purpose: it owns its
+# own state, lock, and watcher, and bin/fm-session-start.sh runs the reconcile-only
+# secondmate posture there (see its header). Standing a secondmate down here would
+# skip the only command that takes its lock and reconciles it from disk.
 fm_is_gate_agent "$FM_ROOT" && stand_down
 if [ ! -d "$STATE" ] && fm_primary_root_matches "$FM_ROOT"; then
   if ! MKDIR_ERR=$(mkdir -p "$STATE" 2>&1); then
