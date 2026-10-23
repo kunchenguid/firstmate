@@ -3632,6 +3632,10 @@ if [ "$KIND" = secondmate ]; then
   elif [ -e "$SECOND_MATE_CHARTER" ]; then
     SECOND_MATE_CHARTER_STATE=unsafe
   fi
+  if [ "$SECOND_MATE_CHARTER_STATE" != present ] && [ ! -f "$DATA/$ID/brief.md" ]; then
+    echo "error: secondmate $ID has no usable charter: $SECOND_MATE_CHARTER is $SECOND_MATE_CHARTER_STATE and the parent copy $DATA/$ID/brief.md is absent; seed the home with bin/fm-home-seed.sh, or place the charter at $PROJ_ABS/data/charter.md" >&2
+    exit 1
+  fi
   # Deterministic role identity at the launch boundary. This overlay states the
   # role, the absolute home, and the charter path before any charter text. It
   # scopes the boundary to the PRIMARY home's startup, never to this home's own
@@ -6550,18 +6554,14 @@ case "$LAUNCH" in
     secondmate) brief_opstate="$PROJ_ABS/state" ;;
     *) brief_opstate=$STATE ;;
   esac
+  brief_publish_error="could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched"
   if [ "$KIND" = secondmate ]; then
-    brief_doorbell=$(FM_HOME="$PROJ_ABS" FM_STATE_OVERRIDE="$brief_opstate" \
-      "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
-      echo "error: could not publish secondmate launch instructions for $ID" >&2
-      exit 1
-    }
-  else
-    brief_doorbell=$(FM_STATE_OVERRIDE="$brief_opstate" "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
-      echo "error: could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched" >&2
-      exit 1
-    }
+    brief_publish_error="could not publish secondmate launch instructions for $ID"
   fi
+  brief_doorbell=$(FM_STATE_OVERRIDE="$brief_opstate" "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
+    echo "error: $brief_publish_error" >&2
+    exit 1
+  }
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac

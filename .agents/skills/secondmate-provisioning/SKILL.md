@@ -86,7 +86,7 @@ It also writes the gitignored `.fm-secondmate-parent` durable binding before the
 [`docs/configuration.md`](../../../docs/configuration.md#choose-the-secondmate-harness) owns the primary's secondmate runtime pins, per-mate overrides, launch precedence, compatibility, and malformed-file refusal.
 Select the registered mate's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
 Each launch also gets a generated role-and-home instruction overlay naming the absolute home and the original charter path; it does not rewrite the standing charter.
-That overlay is delivered as an operational input in the secondmate home's state rather than the primary's.
+The overlay is written to `$DATA/<id>/secondmate-launch-brief.md` under the PRIMARY home's data dir: a record-backed harness (claude) publishes it as an operational-inbox record in the secondmate home's own state, while every other harness (pi/pi-signed/codex/...) receives that primary-home file on stdin.
 It scopes the boundary to the PRIMARY home: it names this home's own startup as the thing that takes this home's lock and arms this home's watcher, and forbids only startup against the primary home.
 [`sessionstart-nudge.md`](../../../docs/sessionstart-nudge.md#shared-wrapper-and-safety) owns the home-scoped secondmate startup posture `bin/fm-session-start.sh` runs in a marked secondmate home.
 

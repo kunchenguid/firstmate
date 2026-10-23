@@ -317,6 +317,37 @@ test_secondmate_launch_refuses_a_charter_symlink_outside_the_home() {
   pass "a secondmate launch refuses a charter symlink outside the home and never reads it"
 }
 
+# A secondmate launch with neither the home's own charter nor the parent copy
+# must refuse before creating any endpoint, metadata, or launch record.
+test_secondmate_launch_refuses_when_no_charter_text_exists() {
+  local rec id sm out status
+  id=charter-refused-z3
+  rec=$(make_spawn_case charter-refused claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  rm -f "$sm/data/charter.md"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate launch with no charter text succeeded"$'\n'"$out"
+  assert_contains "$out" "no usable charter" "the refusal did not name the missing charter"
+  assert_contains "$out" "$sm/data/charter.md" "the refusal did not name the home's own charter path"
+  assert_contains "$out" "$HOME_DIR/data/$id/brief.md" "the refusal did not name the absent parent copy"
+  assert_contains "$out" "bin/fm-home-seed.sh" "the refusal did not name the seeding fix"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a launch was sent despite the missing charter text: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused secondmate launch created metadata"
+  assert_absent "$HOME_DIR/data/$id/secondmate-launch-brief.md" "the refused secondmate launch created an overlay"
+  if [ -e "$sm/state/operational-inbox" ]; then
+    [ -z "$(find "$sm/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
+      || fail "the refused secondmate launch created a launch record"
+  fi
+  pass "a secondmate launch with no home charter and no parent copy refuses before any endpoint, metadata, or record"
+}
+
 # A claude worker given a typed envelope would see it with the marker stripped,
 # so a launch-brief record that cannot be published stops the spawn before any
 # launch is sent.
@@ -2800,6 +2831,7 @@ test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_secondmate_launch_names_a_missing_local_charter
 test_secondmate_launch_refuses_a_charter_symlink_outside_the_home
+test_secondmate_launch_refuses_when_no_charter_text_exists
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
