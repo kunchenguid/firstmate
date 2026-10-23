@@ -189,8 +189,9 @@ test_dim_ghost_only_composer_is_not_pending() {
   dir="$TMP_ROOT/ghost-only"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  # The exact rendering claude emits: a normal prompt glyph + a DIM predicted prompt.
-  printf '\xe2\x9d\xaf \033[2mWhat is the largest country by area?\033[0m\n' > "$capture"
+  # Focused Claude 2.1.289: the first suggestion character is the inverse
+  # cursor cell; only the remaining predicted prompt is dim.
+  printf '\xe2\x9d\xaf \033[7mW\033[0m\033[2mhat is the largest country by area?\033[0m\n' > "$capture"
   if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
      fm_pane_input_pending "fakepane"; then
     fail "dim ghost-only composer falsely read as pending"
