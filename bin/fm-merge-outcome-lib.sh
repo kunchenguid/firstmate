@@ -16,8 +16,8 @@
 # The main watcher may additionally invoke the guarded teardown for a finished
 # direct report after releasing its poll-control lock; this library owns that
 # eligibility check and the resulting notice text.
-# The merge outcome adds no new transport; cleanup outcomes use the existing
-# task status stream.
+# The merge outcome adds no new transport; a cleanup outcome rides the merge
+# notice this library emits.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
 # the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
@@ -43,6 +43,8 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 FM_MERGE_OUTCOME_CLEANUP=skipped
 # shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
 FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+FM_MERGE_OUTCOME_NOTICE=
 
 fm_merge_outcome_current_state() {  # <home> <state> <task-id>
   FM_HOME=$1 FM_STATE_OVERRIDE=$2 "$_FM_MERGE_OUTCOME_LIB_DIR/fm-crew-state.sh" "$3"
@@ -56,30 +58,6 @@ fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
   FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
     FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
     "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id"
-}
-
-fm_merge_outcome_record_cleanup_status() {  # <home> <state> <task-id> <url>
-  local state=$2 id=$3 url=$4 lock
-  local FM_HOME=$1 STATE=$2 FM_STATE_OVERRIDE=$2
-  lock="$state/.control-$id.lock"
-  fm_lock_acquire_wait "$lock" || return 1
-  if [ -e "$state/$id.meta" ] || [ -L "$state/$id.meta" ]; then
-    fm_lock_release "$lock"
-    return 1
-  fi
-  [ -e "$state/$id.status" ] || : > "$state/$id.status" || {
-    fm_lock_release "$lock"
-    return 1
-  }
-  printf '%s\n' "$(status_stamp_line "note: automatically cleaned up after merged PR notice $url")" \
-    >> "$state/$id.status" || {
-      fm_lock_release "$lock"
-      return 1
-    }
-  local append_status=0
-  fm_wake_status_mark_current "$state" "$state/$id.status" || append_status=1
-  fm_lock_release "$lock"
-  return "$append_status"
 }
 
 # Check only an already-finished direct report, then delegate all destructive
@@ -138,13 +116,6 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
     if [ "$teardown_rc" -eq 4 ]; then
       FM_MERGE_OUTCOME_CLEANUP_DETAIL='cleanup completed, but the returned worktree pool slot needs repair'
     fi
-    if ! fm_merge_outcome_record_cleanup_status "$home" "$state" "$id" "$url"; then
-      if [ -n "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" ]; then
-        FM_MERGE_OUTCOME_CLEANUP_DETAIL="$FM_MERGE_OUTCOME_CLEANUP_DETAIL; routine outcome could not be recorded"
-      else
-        FM_MERGE_OUTCOME_CLEANUP_DETAIL='cleanup completed, but its routine status outcome could not be recorded'
-      fi
-    fi
     return 0
   fi
   summary=$(printf '%s\n' "$teardown_output" \
@@ -201,11 +172,12 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [authority]
   local home=$1 state=$2 id=$3 url=$4 origin=$5
   local authority=${6-} suffix=
-  local self_rc=0 destination='' line lock status=0
+  local self_rc=0 destination='' line lock status=0 notice
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  FM_MERGE_OUTCOME_NOTICE=
   case "$origin" in self|poll) ;; *) return 2 ;; esac
   case "$authority" in
     away|external|yolo|away-grant) suffix=" $authority" ;;
@@ -219,6 +191,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  notice="check: merge landed: $id $FM_PR_URL$suffix"
+  FM_MERGE_OUTCOME_NOTICE=$notice
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
@@ -245,8 +219,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
     fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
-    fm_wake_append check "merged-$id-$FM_PR_URL" \
-      "check: merge landed: $id $FM_PR_URL$suffix" || status=1
+    fm_wake_append check "merged-$id-$FM_PR_URL" "$notice" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \
