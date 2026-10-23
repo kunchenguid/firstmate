@@ -13,7 +13,11 @@
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
-# No new state file and no new transport are involved.
+# The main watcher may additionally invoke the guarded teardown for a finished
+# direct report after releasing its poll-control lock; this library owns that
+# eligibility check and the resulting notice text.
+# The merge outcome adds no new transport; cleanup outcomes use the existing
+# task status stream.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
 # the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
@@ -30,9 +34,149 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-backend.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+FM_MERGE_OUTCOME_CLEANUP=skipped
+# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+
+fm_merge_outcome_current_state() {  # <home> <state> <task-id>
+  FM_HOME=$1 FM_STATE_OVERRIDE=$2 "$_FM_MERGE_OUTCOME_LIB_DIR/fm-crew-state.sh" "$3"
+}
+
+fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
+  local home=$1 state=$2 id=$3 data config root
+  data=${FM_DATA_OVERRIDE:-$home/data}
+  config=${FM_CONFIG_OVERRIDE:-$home/config}
+  root=${FM_ROOT_OVERRIDE:-${FM_ROOT:-$_FM_MERGE_OUTCOME_LIB_DIR/..}}
+  FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+    FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id"
+}
+
+fm_merge_outcome_record_cleanup_status() {  # <home> <state> <task-id> <url>
+  local state=$2 id=$3 url=$4 lock
+  local FM_HOME=$1 STATE=$2 FM_STATE_OVERRIDE=$2
+  lock="$state/.control-$id.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$state/$id.meta" ] || [ -L "$state/$id.meta" ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  [ -e "$state/$id.status" ] || : > "$state/$id.status" || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  printf '%s\n' "$(status_stamp_line "note: automatically cleaned up after merged PR notice $url")" \
+    >> "$state/$id.status" || {
+      fm_lock_release "$lock"
+      return 1
+    }
+  local append_status=0
+  fm_wake_status_mark_current "$state" "$state/$id.status" || append_status=1
+  fm_lock_release "$lock"
+  return "$append_status"
+}
+
+# Check only an already-finished direct report, then delegate all destructive
+# decisions to teardown's existing guards. A missing or uncertain state remains
+# on the ordinary merge-notice path.
+fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
+  local home=$1 state=$2 id=$3 url=$4 meta="$2/$3.meta" status="$2/$3.status"
+  local data kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
+  # shellcheck disable=SC2034 # wake-library helpers use these under Bash dynamic scope.
+  local FM_HOME=$1 STATE=$2 FM_STATE_OVERRIDE=$2
+  FM_MERGE_OUTCOME_CLEANUP=skipped
+  FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+  if [ -e "$home/.fm-secondmate-home" ] || [ -L "$home/.fm-secondmate-home" ] \
+    || [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; then
+    return 0
+  fi
+  if fm_parent_channel_destination "$home" "$state" >/dev/null 2>&1; then
+    return 0
+  else
+    role_rc=$?
+    [ "$role_rc" -eq 1 ] || return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ -f "$status" ] && [ ! -L "$status" ] || return 0
+  kind=$(fm_meta_get "$meta" kind)
+  [ -n "$kind" ] || kind=ship
+  case "$kind" in ship|scout) ;; *) return 0 ;; esac
+  line=$(status_current_line "$status" "$kind")
+  [ "$(status_line_verb "$line")" = "done" ] || return 0
+  data=${FM_DATA_OVERRIDE:-$home/data}
+  case "$kind" in
+    ship)
+      recorded_pr=$(fm_meta_get "$meta" pr)
+      [ "$recorded_pr" = "$url" ] || return 0
+      note=$(status_line_note "$line")
+      case "$note" in PR\ *) ;; *) return 0 ;; esac
+      noted_pr=${note#PR }
+      noted_pr=${noted_pr%% *}
+      [ "$noted_pr" = "$url" ] || return 0
+      ;;
+    scout)
+      [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ] \
+        && [ -r "$data/$id/report.md" ] || return 0
+      ;;
+  esac
+  current=$(fm_merge_outcome_current_state "$home" "$state" "$id" 2>/dev/null) || return 0
+  case "$current" in 'state: done ·'*) ;; *) return 0 ;; esac
+
+  if teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" 2>&1); then
+    teardown_rc=0
+  else
+    teardown_rc=$?
+  fi
+  if [ "$teardown_rc" -eq 0 ] || [ "$teardown_rc" -eq 4 ]; then
+    FM_MERGE_OUTCOME_CLEANUP=cleaned
+    if [ "$teardown_rc" -eq 4 ]; then
+      FM_MERGE_OUTCOME_CLEANUP_DETAIL='cleanup completed, but the returned worktree pool slot needs repair'
+    fi
+    if ! fm_merge_outcome_record_cleanup_status "$home" "$state" "$id" "$url"; then
+      if [ -n "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" ]; then
+        FM_MERGE_OUTCOME_CLEANUP_DETAIL="$FM_MERGE_OUTCOME_CLEANUP_DETAIL; routine outcome could not be recorded"
+      else
+        FM_MERGE_OUTCOME_CLEANUP_DETAIL='cleanup completed, but its routine status outcome could not be recorded'
+      fi
+    fi
+    return 0
+  fi
+  summary=$(printf '%s\n' "$teardown_output" \
+    | awk '/^(REFUSED|error:)/ { last = $0 } END { print last }')
+  [ -n "$summary" ] || summary=$(printf '%s\n' "$teardown_output" \
+    | awk 'NF { last = $0 } END { print last }')
+  summary=$(printf '%s' "$summary" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200)
+  [ -n "$summary" ] || summary="teardown exited with status $teardown_rc"
+  case "$summary" in
+    REFUSED:*|*refused*|*refusal*) FM_MERGE_OUTCOME_CLEANUP=refused ;;
+    *) FM_MERGE_OUTCOME_CLEANUP=failed ;;
+  esac
+  FM_MERGE_OUTCOME_CLEANUP_DETAIL=$summary
+  return 0
+}
+
+fm_merge_outcome_cleanup_notice() {  # <original-notice>
+  case "$FM_MERGE_OUTCOME_CLEANUP" in
+    cleaned)
+      printf '%s; lane automatically cleaned up' "$1"
+      [ -z "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" ] \
+        || printf '; %s' "$FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+      ;;
+    refused)
+      printf '%s; automatic cleanup refused: %s' "$1" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+      ;;
+    failed)
+      printf '%s; automatic cleanup did not complete: %s' "$1" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 
 # fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [authority]
 #
