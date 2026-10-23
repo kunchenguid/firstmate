@@ -2137,6 +2137,11 @@ fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <w
     [ "$foreground_rc" -eq 1 ] || return 1
     skip_restore=1
   fi
+  fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab" || return 1
+  if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+    before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+    skip_restore=0
+  fi
   fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || return 1
   [ "$(fm_backend_herdr_tab_presence_state "$session" "$tab")" = dead ] || return 1
   if [ "$skip_restore" -eq 0 ]; then
