@@ -522,13 +522,18 @@
 # guard predates that pointer keeps the ordinary Stop idle hook instead.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
+# Kimi also gates a fresh worktree on an interactive folder-trust prompt, whose
+# wordings bin/fm-kimi-trust-lib.sh recognizes (2.0.0 and 2.3.0 recorded).
 # Its launch-readiness loop reads the visible viewport - so the spawn refuses at
 # preflight on a backend with no viewport-bounded capture - recognizes the
 # complete dialog, re-selects the already highlighted affirmative option on
 # every poll the complete dialog is still there, refuses any ready verdict while
 # dialog text is on that pane, and requires two consecutive captures that are
 # each ready and dialog-free before the ordinary readiness gates can pass. A
+# prompt that announces project MCP servers (Kimi 2.3.0 reads a root .mcp.json
+# as well as .kimi-code/mcp.json) or that pages its disclosure receives no key
+# and fails readiness with the reason: answering it starts those servers, and
+# Kimi's per-folder trust is not a consent decision that covers them. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -839,6 +844,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-kimi-trust-lib.sh
+. "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -4807,29 +4814,15 @@ kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
-# The navigation hint is matched as its two distinctive tokens rather than as
-# one row: a pane narrower than the row wraps it, and a wrapped hint is still
-# the complete dialog waiting for an answer.
-kimi_trust_dialog_is_visible() { # <plain-pane-capture>
-  local pane=$1
-  case "$pane" in *'Trust this folder?'*) ;; *) return 1 ;; esac
-  case "$pane" in *'↑↓ navigate'*) ;; *) return 1 ;; esac
-  case "$pane" in *'Enter select'*) ;; *) return 1 ;; esac
-  case "$pane" in *'❯ Trust this folder'*) ;; *) return 1 ;; esac
-  case "$pane" in *"Don't trust"*) ;; *) return 1 ;; esac
-}
-
-# The complete dialog above decides whether to press Enter. Any single marker
-# of it on the visible pane decides whether that pane is safe to call ready: a
-# capture caught mid-redraw and one that has painted only the dialog's box
-# title both fail the complete-dialog test while the dialog is still up and
-# waiting, with Kimi's startup banner sitting above it in that same capture.
-# Treating such a pane as ready would type the brief pointer into the dialog
-# and lose it.
-kimi_trust_marker_is_present() { # <plain-pane-capture>
-  case "$1" in *'Trust this folder'* | *"Don't trust"*) return 0 ;; esac
-  return 1
-}
+# The folder-prompt predicates (complete dialog, any dialog marker, paged
+# disclosure, project-server announcement) come from bin/fm-kimi-trust-lib.sh,
+# which the live guard shares. The complete dialog decides whether to press
+# Enter. Any single marker of it on the visible pane decides whether that pane
+# is safe to call ready: a capture caught mid-redraw and one that has painted
+# only the dialog's title both fail the complete-dialog test while the dialog
+# is still up and waiting, with Kimi's startup banner sitting above it in that
+# same capture. Treating such a pane as ready would type the brief pointer
+# into the dialog and lose it.
 
 # A successful key send is not evidence that Kimi accepted trust. Only the
 # ordinary readiness signals in a later capture prove advancement.
@@ -4841,7 +4834,7 @@ kimi_ready_signal_is_present() { # <plain-pane-capture>
 kimi_wait_for_ready() {
   local pane capture_rc i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   local trust_enters=0 trust_seen=0 trust_still_visible=0 trust_markers_pending=0
-  local ready_captures=0
+  local trust_affirmative='' trust_negative='' ready_captures=0
   KIMI_READY_FAILURE_DETAIL='kimi did not show a verified ready signal before brief delivery'
   while [ "$i" -lt "$max" ]; do
     capture_rc=0
@@ -4856,11 +4849,24 @@ kimi_wait_for_ready() {
       [ "$i" -ge "$max" ] || sleep "$interval"
       continue
     fi
+    # Both refusals come before the complete-dialog test on purpose: the
+    # announcing prompt and the paged prompt are complete dialogs, and the
+    # only thing that keeps Enter off them is deciding here first.
+    if kimi_pane_announces_project_mcp_servers "$pane"; then
+      KIMI_READY_FAILURE_DETAIL="kimi's folder prompt announces project MCP servers, so Firstmate did not answer it and did not send the brief; answering would start those servers without a consent decision that covers them. Remove the project MCP servers this directory declares (the prompt's Config line names the file), or wait for a later consent design."
+      return 1
+    fi
+    if kimi_trust_prompt_is_paged "$pane"; then
+      KIMI_READY_FAILURE_DETAIL="kimi's folder prompt pages what trusting would activate, so Firstmate could not read all of it and did not answer it; give the worker pane more rows and relaunch."
+      return 1
+    fi
     if kimi_trust_dialog_is_visible "$pane"; then
       trust_seen=1
       trust_still_visible=1
       trust_markers_pending=0
       ready_captures=0
+      trust_affirmative=$KIMI_TRUST_AFFIRMATIVE
+      trust_negative=$KIMI_TRUST_NEGATIVE
       # Kimi swallows keypresses during its startup window - the same hazard
       # FM_KIMI_SUBMIT_RETRIES covers for the brief pointer - so the
       # affirmative selection is re-sent on every poll the complete dialog is
@@ -4894,9 +4900,9 @@ kimi_wait_for_ready() {
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
   if [ "$trust_still_visible" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting 'Trust this folder' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting '$trust_affirmative' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected '$trust_affirmative', and the negative $trust_negative option"
   elif [ "$trust_seen" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected '$trust_affirmative', and the negative $trust_negative option"
   elif [ "$trust_markers_pending" -eq 1 ]; then
     KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready"
   fi
