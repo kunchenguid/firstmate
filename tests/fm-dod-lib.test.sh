@@ -517,7 +517,7 @@ test_rex_charter_copy_is_charter_plus_guard_and_leaves_charter_alone() {
   [ "$(cat "$dir/launch-charter.md")" = "$(cat "$dir/charter.before")"$'\n\n'"$guard" ] ||
     fail "the launch copy is not the charter plus one guard line"
   [ "$(grep -cxF "$guard" "$dir/launch-charter.md")" -eq 1 ] || fail "guard line is not exactly one line"
-  ls "$dir" | grep -q 'tmp' && fail "a temp file was left behind"
+  compgen -G "$dir/*tmp*" >/dev/null && fail "a temp file was left behind"
   fm_brief_rex_charter_copy "$dir/missing.md" "$dir/out.md" 2>/dev/null && fail "a missing charter was copied"
   [ ! -e "$dir/out.md" ] || fail "a failed copy published a launch charter"
   pass "the Rex second-mate launch copy is the charter plus one guard line"
