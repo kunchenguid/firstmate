@@ -66,8 +66,6 @@ fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
 fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   local home=$1 state=$2 id=$3 url=$4 meta="$2/$3.meta" status="$2/$3.status"
   local kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
-  # shellcheck disable=SC2034 # wake-library helpers use these under Bash dynamic scope.
-  local FM_HOME=$1 STATE=$2 FM_STATE_OVERRIDE=$2
   FM_MERGE_OUTCOME_CLEANUP=skipped
   FM_MERGE_OUTCOME_CLEANUP_DETAIL=
   if [ -e "$home/.fm-secondmate-home" ] || [ -L "$home/.fm-secondmate-home" ] \
@@ -115,9 +113,14 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
     | awk 'NF { last = $0 } END { print last }')
   summary=$(printf '%s' "$summary" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200)
   [ -n "$summary" ] || summary="teardown exited with status $teardown_rc"
-  case "$summary" in
-    REFUSED:*|*refused*|*refusal*) FM_MERGE_OUTCOME_CLEANUP=refused ;;
-    *) FM_MERGE_OUTCOME_CLEANUP=failed ;;
+  case "$teardown_rc" in
+    3|6) FM_MERGE_OUTCOME_CLEANUP=refused ;;
+    *)
+      case "$summary" in
+        REFUSED:*|*refused*|*refusal*|*refusing*) FM_MERGE_OUTCOME_CLEANUP=refused ;;
+        *) FM_MERGE_OUTCOME_CLEANUP=failed ;;
+      esac
+      ;;
   esac
   FM_MERGE_OUTCOME_CLEANUP_DETAIL=$summary
   return 0
@@ -146,6 +149,7 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
 fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
   local home=$1 state=$2 id=$3 url=$4 status=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" != true ] || return 0
   fm_merge_outcome_auto_teardown "$home" "$state" "$id" "$url"
   [ "$FM_MERGE_OUTCOME_CLEANUP" != skipped ] || return 0
   fm_pr_url_parse "$url" || return 2
