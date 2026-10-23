@@ -1750,6 +1750,11 @@ pr_is_closed_unmerged() {
   local target state
   [ -n "$PR_URL" ] || return 1
   target=$PR_URL
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_STATE" = closed ] && [ "$FM_PR_RECORD_MERGED" = false ]
+    return
+  fi
   state=$(cd "$WT" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
   case "$state" in
     CLOSED|closed) return 0 ;;
