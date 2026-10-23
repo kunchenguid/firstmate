@@ -6,10 +6,8 @@
 # asserts the watcher's handle_push_transition lands a stale wake carrying
 # Rex's blocked kind and message in a scratch wake queue. It also covers the
 # clean deadline, an endpoint-gone edge, and a reader that cannot start.
-# Isolation is tests/rex-test-safety.sh's: no server is ever started or
-# stopped, every state-changing call is confined to sessions this test
-# created, and every other session must be byte-identical afterwards. Only a
-# plain shell runs in the test's blocks.
+# Isolation is tests/rex-test-safety.sh's private server and state-changing
+# call guard. Only a plain shell runs in the test's blocks.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,8 +21,8 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 # shellcheck source=tests/rex-test-safety.sh
 . "$ROOT/tests/rex-test-safety.sh"
-rex_test_prepare || exit 0
 trap rex_test_cleanup EXIT
+rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 

@@ -77,8 +77,11 @@
 # releases the branch's leases and grant, and counts the wake handled only
 # when that turn exited cleanly, recorded a durable report
 # (bin/fm-branch-report.sh), and left none of its granted rows in the wake
-# queue. A handled wake with only routine outcomes never wakes
-# main, and neither does any handled wake while away: captain outcomes wait in
+# queue. Before parking after a handled turn, it settles the successor handoff;
+# docs/watcher-continuity.md "Durable queue and turn-end backstop" owns how
+# that transition makes rows still queued for main recoverable. A handled wake
+# with only routine outcomes never wakes main, and neither does any handled
+# wake while away: captain outcomes wait in
 # the outcome store for the return drain's BRANCH OUTCOMES section. A handled
 # attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
@@ -416,6 +419,11 @@ stop_engine_turn() {
 cleanup() {
   local rc=$? f
   trap - EXIT HUP TERM INT
+  # A signal can land inside the handled-turn settle, which holds the queue and
+  # marker locks; the grant release below needs the queue lock, so drop any of
+  # them this process still owns first (fm_lock_release ignores foreign owners).
+  fm_lock_release "$STATE/.watcher-down.lock" 2>/dev/null || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true
   if [ "$ENGINE_RUNNING" -eq 1 ]; then
     stop_engine_turn
   fi
@@ -1151,9 +1159,11 @@ while :; do
     detach_successor
     # Main handles this close after all, so hand back the downtime the handoff
     # above consumed: the re-arm owner delivers the close only while the
-    # recovery marker reads downtime (leave_successor_for_main).
+    # recovery marker reads downtime (leave_successor_for_main). It is handed
+    # back as already announced, so the successor left running does not
+    # resurface the episode this very close delivers.
     if [ -n "$SUCCESSOR_GENERATION" ] \
-      && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+      && ! fm_recovery_marker_handback "$STATE/.watcher-down" >/dev/null 2>&1; then
       log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
       exit 1
     fi
@@ -1193,6 +1203,9 @@ while :; do
   fi
 
   # Handled: park on the successor.
+  if ! fm_recovery_marker_handling_settled "$STATE/.watcher-down"; then
+    log_line "handling-settle-failed	turn=$LAST_TURN	successor=$SUCCESSOR_PID"
+  fi
   ARM_PID=$SUCCESSOR_PID
   ARM_OUT=$SUCCESSOR_OUT
   SUCCESSOR_PID=

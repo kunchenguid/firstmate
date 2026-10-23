@@ -193,8 +193,12 @@ The bounded turn-end guard enforces recovery at Stop when no watcher is live and
 So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 
 The recovery-episode contract below owns once-per-generation announcement.
-A handling successor does not re-announce.
+A handling successor does not re-announce the predecessor-delivered wake while its handling handoff remains open.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+After the supervision host finishes a handled turn, it settles the successor handoff under the durable-queue and recovery-marker locks.
+Any row left for main then becomes a recoverable downtime episode, including one appended after the predecessor closed but before the successor initialized or the host confirmed its handoff.
+The successor closes once with the recovery wake only while that row is still queued; this is how a captain inbox note reaches main during handling-successor startup or while the host is parked on the handled wake's successor.
+When the host instead hands the accepted close back to main and leaves that successor running, it republishes the episode as announced downtime, because the close it hands back is that episode's delivery; the successor therefore does not announce it again, while a later durable append still opens a pending episode it recovers.
 
 ### Manual recovery and other harnesses
 
@@ -230,7 +234,7 @@ Its ordinary arm check still announces a never-announced generation, including o
 ### Generation reuse
 
 An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
-A handling successor closing to resurface recovery preserves the existing marker instead.
+A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
@@ -468,6 +472,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- A handling successor that resurfaces a row appended between its predecessor's close and its own startup handoff.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

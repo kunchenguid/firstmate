@@ -118,7 +118,7 @@ A Rex-hosted Firstmate can run away and quiet supervision: the supervisor target
 - The viewport is derived, not read directly, as described above.
 - Only harnesses that report OSC 7501 contribute native busy evidence; the others are classified from their own lifecycle and rendered footer.
 - Command Code is refused on Rex until it is live-verified there, and Cursor Agent is not yet live-verified on Rex.
-- There is no Rex CI lane; the real-server tests run where a Rex server is already up.
+- There is no Rex CI lane; see "Regression entry points" below for real-Rex validation.
 
 ## Deferred upstream asks
 
@@ -141,5 +141,6 @@ tests/fm-backend-rex-eventwait-smoke.test.sh
 FM_REX_COMPOSER_LIVE=1 tests/fm-backend-rex-composer-live-e2e.test.sh
 ```
 
-The real-server isolation contract is owned by [`tests/rex-test-safety.sh`](../tests/rex-test-safety.sh): an already-running server, mutations confined to the tests' own `fm-test-` sessions, and unchanged ids and labels in every other session's structural snapshot.
+[`tests/rex-test-safety.sh`](../tests/rex-test-safety.sh) owns private-server isolation, cleanup, capability skips, and startup-failure handling for the real-Rex suites.
+The smoke test also stops and restarts its private server to verify passive reads and session-loss reclaim behavior.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#rex) records the live evidence.

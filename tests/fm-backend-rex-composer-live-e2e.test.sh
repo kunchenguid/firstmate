@@ -18,9 +18,8 @@
 # Run explicitly with FM_REX_COMPOSER_LIVE=1. No prompt is ever submitted, so
 # no model tokens are spent, and no key is ever sent to a harness. Each tab
 # runs its harness with the vendors' own auto-update switches off where they
-# exist, so the guard installs nothing. Isolation is tests/rex-test-safety.sh's:
-# it skips unless a Rex server is already reachable, works only in the session
-# it creates, and requires every other session to be byte-identical afterwards.
+# exist, so the guard installs nothing. Isolation is tests/rex-test-safety.sh's
+# private server and state-changing call guard.
 # An absent harness is reported and skipped; a run that verified nothing fails.
 # Harnesses start with the repository root as cwd, which the operator's
 # machine has normally trusted; a trust dialog is an unreadable composer and
@@ -43,8 +42,8 @@ note() { printf '# %s\n' "$1"; }
 
 # shellcheck source=tests/rex-test-safety.sh
 . "$ROOT/tests/rex-test-safety.sh"
-rex_test_prepare || exit 0
 trap rex_test_cleanup EXIT
+rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && exit 0; exit "$rc"; }
 
 # The vendors' own auto-update switches: Claude Code, OpenCode, and the Muse
 # launcher read these from the environment, and Cursor Agent takes a flag.

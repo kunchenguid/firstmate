@@ -1935,7 +1935,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
-  # from either route that has to defend cap state this state dir would not
+  # from any of the routes that have to defend cap state this state dir would not
   # persist - the cap-marker write whose own rollback also failed, the
   # escalation-count write whose failed write left the ceiling that count
   # bounds unenforceable, or the cap-fire counter reset whose failed reset
@@ -2141,7 +2141,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             case "$_wrb_rm_status" in
               2) triage_log "wedge escalation-counter reset FAILED AND rollback AND sentinel write ALL FAILED on $win - the counter stays saturated once the marker's horizon elapses; operator MUST intervene"; exit 1 ;;
               1) triage_log "wedge escalation-counter reset FAILED AND rollback ALSO FAILED on $win - sentinel set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification"; exit 1 ;;
-              *) triage_log "wedge escalation-counter reset FAILED on $win - cap state rolled back"; exit 1 ;;
+              *) triage_log "wedge escalation-counter reset FAILED on $win - escalation count rolled back; the cap marker stands, so this window stays silent until its horizon (FM_CAP_HORIZON_SECS) elapses or an episode-ending route releases it (an operator can delete the marker to re-engage at once)"; exit 1 ;;
             esac
           fi
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
@@ -3172,6 +3172,13 @@ done
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
+handling_successor_has_queued_row() {
+  local queued=1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$queued"
+}
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -3220,6 +3227,23 @@ home_summary_refresh_detached() {
   FM_HOME_SUMMARY_IF_IDLE=1 \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!
+}
+
+# Opt-in lane capacity facts (docs/configuration.md "Lane capacity"): publish
+# state/lane-capacity.json detached for the same beacon-freshness reason as the
+# home summary above. bin/fm-capacity.sh's header owns the document.
+LANE_CAPACITY_PID=
+lane_capacity_publish_detached() {
+  if [ -n "$LANE_CAPACITY_PID" ]; then
+    if kill -0 "$LANE_CAPACITY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$LANE_CAPACITY_PID" 2>/dev/null || true
+    LANE_CAPACITY_PID=
+  fi
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-capacity.sh" --publish </dev/null >/dev/null 2>&1 &
+  LANE_CAPACITY_PID=$!
 }
 
 RECONCILE_REQUEST_PID=
@@ -3348,9 +3372,17 @@ rerecord_device_shifted_pr_poll() {  # <id>
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # unbounded recovery loop. A handled host turn explicitly settles its
+  # handoff after consuming the predecessor's rows, making any row left for
+  # main a recoverable downtime episode.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+      echo "watcher: recovery state could not be consumed safely" >&2
+      exit 1
+    fi
+    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+    handling_successor_has_queued_row || return 0
+    wake "check: rearm-resurface"
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -3409,6 +3441,10 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+  fi
+  # Opt-in lane capacity facts: off costs one file test.
+  if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
+    lane_capacity_publish_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
