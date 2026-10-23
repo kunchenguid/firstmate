@@ -453,6 +453,29 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+# Every Stop that owns a needed home keeps the independent wake backstop
+# running before it arms, and an idle or away home does not start one.
+test_every_owned_stop_ensures_the_wake_backstop() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/backstop")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  cat > "$dir/bin/fm-wake-backstop.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/state/backstop-ran"
+SH
+  chmod +x "$dir/bin/fm-wake-backstop.sh"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the fixture close must still rewake"
+  [ "$(cat "$dir/state/backstop-ran" 2>/dev/null)" = ensure ] \
+    || fail "the Stop hook must ensure the wake backstop once: $(cat "$dir/state/backstop-ran" 2>/dev/null)"
+  rm -f "$dir/state/backstop-ran" "$dir/state/task.meta"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an idle home stays inert"
+  [ ! -e "$dir/state/backstop-ran" ] || fail "an idle home must not start the wake backstop"
+  pass "auto-arm: every owned, needed Stop ensures the wake backstop"
+}
+
 # pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
 # Stop payload but awaits the hook with no asyncRewake support, so the hook
 # must stand down or it wedges Pi's turn for the declared timeout (issue
@@ -1995,6 +2018,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_every_owned_stop_ensures_the_wake_backstop
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes

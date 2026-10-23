@@ -231,6 +231,12 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
 
+# --- wake backstop ---------------------------------------------------------------
+# Keep this session's independent wake backstop running (bin/fm-wake-backstop.sh),
+# so a rewake that this or any later Stop chain drops is still recovered while
+# the session sits idle.
+"$SCRIPT_DIR/fm-wake-backstop.sh" ensure >/dev/null 2>&1 || true
+
 # --- single-flight generation claim --------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
 # generation owner arms and translates per event epoch: every firing defers to

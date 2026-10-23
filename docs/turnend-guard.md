@@ -51,6 +51,7 @@ A live identity-matched daemon with a fresh beacon then satisfies that boundary 
 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
+The guard runs only at a turn boundary, so it cannot help a Claude session that is already idle when its rewake is lost; the [wake backstop](watcher-continuity.md#wake-backstop) covers that case without a Stop.
 
 ## Guard predicates
 
