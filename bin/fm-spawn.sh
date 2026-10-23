@@ -6839,7 +6839,7 @@ if [ "$HARNESS" = opencode ] && [ "$OPENCODE_MAJOR" -ge 2 ]; then
   if ! opencode2_wait_for_delivery; then
     printf '%s\n' "$(status_stamp_line "failed: opencode $OPENCODE_VERSION did not start the brief turn in window $T")" >>"$STATE/$ID.status"
     echo "error: opencode $OPENCODE_VERSION did not start the brief turn; inspect window $T" >&2
-    rovo_endpoint_cleanup
+    spawn_close_launched_endpoint
     exit 1
   fi
 fi
