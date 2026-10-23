@@ -3040,7 +3040,7 @@ wait
 # 🌳 Entered worktree at .../base/.firstmate-worktrees/home-a-c4139d9ae160/.treehouse/clone-3ecf41/1/clone. Type 'exit' to return.
 ```
 
-A return resolves its pool from the worktree path it is given and ignores the configured root, which is what leaves every worktree leased under a previously shared root returnable after its home moves to its own root:
+A return resolves its pool from the worktree path it is given, which is what leaves every worktree leased under a previously shared root returnable after its home moves to its own root:
 
 ```sh
 (cd home-a/projects/proj && treehouse --root "$ROOT_A" return --force "$LEGACY_SHARED_ROOT_WORKTREE")

@@ -1601,62 +1601,24 @@ fm_local_firstmate_state_dirs() {  # <first-state>
 # that knows the home derives the identical root however that home was spelled on
 # the way in. It is deliberately NOT derived from a marker inside the home, such
 # as .fm-secondmate-home: a marker can be rewritten or restored, and a root that
-# moves orphans the pool it already allocated. The base is the operator's own
-# TREEHOUSE_ROOT when they set one, so a deliberately relocated pool stays where
-# it was put, and $HOME otherwise, which is Treehouse's own default base. A
-# project-level treehouse.toml root is not consulted, because this has to resolve
-# without running treehouse; an operator who needs a different base sets
-# TREEHOUSE_ROOT.
+# moves orphans the pool it already allocated. The base is the parent of the
+# local root Firstmate home, so every local home derives its pool outside the
+# homes while retaining one stable machine-local base.
 #
 # Only `get` takes this. `treehouse return <path>` resolves the pool from the
-# path it is handed and ignores the configured root, so every worktree leased
-# under a previously shared root stays returnable and nothing has to be migrated;
+# path it is handed, so every worktree leased under a previously shared root
+# stays returnable and nothing has to be migrated;
 # tests/fm-treehouse-pool-isolation-live-e2e.test.sh pins both halves against the
 # real provider.
 #
-# When FM_HOME is set, the derived root is also refused if it lands inside the
-# active home or its root home: a Claude Code worker would then see that home's
-# own top-level CLAUDE.md as an external import target from inside its worktree
-# and re-trigger the import-approval prompt the default $HOME-based root avoids.
-# Set TREEHOUSE_ROOT outside those homes to clear the refusal.
 fm_treehouse_home_root() {  # <home>
-  local home=$1 abs base pool_root slug hash derived active_home root_home suffix parent
+  local home=$1 abs base pool_root slug hash derived root_home
   abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  base=${TREEHOUSE_ROOT:-${HOME:-}}
-  case "$base" in
-    /*) ;;
-    *) return 1 ;;
+  root_home=$(fm_firstmate_root_home "$abs") || return 1
+  case "$root_home" in
+    /) base=/ ;;
+    *) base=${root_home%/*}; [ -n "$base" ] || base=/ ;;
   esac
-  # Normalize an existing base so two spellings of one directory cannot produce
-  # two roots. A base Treehouse has yet to create still has its existing
-  # ancestor resolved through pwd -P: an ancestor symlinked into a Firstmate
-  # home must be caught by the prefix check below exactly as if the base
-  # already existed, or a not-yet-created root could lexically dodge the
-  # refusal while `treehouse --root` still creates the pool inside that home
-  # once the OS resolves the symlink.
-  if [ -d "$base" ]; then
-    base=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || return 1
-  else
-    case "/$base/" in
-      */./*|*/../*)
-        printf 'error: TREEHOUSE_ROOT %s has a . or .. segment and does not exist yet; set TREEHOUSE_ROOT to a path without dot segments\n' "$base" >&2
-        return 1
-        ;;
-    esac
-    suffix=
-    parent=$base
-    while [ "$parent" != / ] && [ ! -d "$parent" ]; do
-      suffix="/${parent##*/}$suffix"
-      parent=${parent%/*}
-      [ -n "$parent" ] || parent=/
-    done
-    if [ -d "$parent" ]; then
-      parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-    fi
-    base="${parent%/}$suffix"
-    while [ "${base%/}" != "$base" ] && [ "$base" != / ]; do base=${base%/}; done
-  fi
-  [ -n "$base" ] || return 1
   # The slug is readability only; the hash carries the identity. Reduce it to a
   # conservative character set so an unusual home name cannot produce a path that
   # needs quoting wherever this root is printed or sent to a shell.
@@ -1668,23 +1630,7 @@ fm_treehouse_home_root() {  # <home>
   hash=$(printf '%s' "$abs" | git hash-object --stdin 2>/dev/null) || return 1
   [ -n "$hash" ] || return 1
   pool_root="$base/.firstmate-worktrees"
-  if [ -d "$pool_root" ]; then
-    pool_root=$(CDPATH='' cd -- "$pool_root" 2>/dev/null && pwd -P) || return 1
-  fi
   derived="$pool_root/$slug-${hash:0:12}"
-  if [ -d "$derived" ]; then
-    derived=$(CDPATH='' cd -- "$derived" 2>/dev/null && pwd -P) || return 1
-  fi
-  if [ -n "${FM_HOME:-}" ]; then
-    active_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
-    root_home=$(fm_firstmate_root_home "$active_home") || return 1
-    case "$derived" in
-      "$active_home"|"$active_home"/*|"$root_home"|"$root_home"/*)
-        printf 'error: derived Treehouse root %s is inside the active Firstmate home or its root home; set TREEHOUSE_ROOT outside those homes\n' "$derived" >&2
-        return 1
-        ;;
-    esac
-  fi
   printf '%s\n' "$derived"
 }
 
