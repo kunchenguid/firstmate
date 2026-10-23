@@ -434,7 +434,7 @@ load_owner_accounts() { # validate config/github-owner-accounts once per poll
   if [ ! -f "$OWNER_ACCOUNTS" ] || [ ! -r "$OWNER_ACCOUNTS" ] \
     || ! bad=$(awk -v out="$TMP/owner-accounts.tsv" '
       /^[[:space:]]*(#|$)/ { next }
-      NF != 2 || $1 !~ /^[A-Za-z0-9][A-Za-z0-9-]*$/ || $2 !~ /^[A-Za-z0-9][A-Za-z0-9-]*$/ || (tolower($1) in seen) { print NR; exit }
+      NF != 2 || $1 !~ /^[A-Za-z0-9][A-Za-z0-9-]*$/ || $2 !~ /^[A-Za-z0-9][A-Za-z0-9_-]*$/ || (tolower($1) in seen) { print NR; exit }
       { seen[tolower($1)] = 1; print tolower($1) "\t" $2 > out }' "$OWNER_ACCOUNTS"); then
     OWNER_ACCOUNTS_WHY='owner identity configuration github-owner-accounts is unreadable'
   elif [ -n "$bad" ]; then

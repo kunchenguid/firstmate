@@ -982,7 +982,7 @@ test_http_404_is_not_retried() {
 OWNER_TOKEN='fixture-owner-token'
 PERSONAL_TOKEN='fixture-personal-token'
 
-owner_identity_forge() { # home: o/r is private, so only owner-account's stored login reads it
+owner_identity_forge() { # home: o/r is private, so only owner_acme's stored login reads it
   local home=$1
   mv "$home/fakebin/gh" "$home/fakebin/gh-fixture"
   cat > "$home/fakebin/gh" <<'SH'
@@ -1000,7 +1000,7 @@ if ps -o args= -p "$PPID" 2>/dev/null | grep -qF "$OWNER_TOKEN"; then
   printf 'token in the launching command line\n' >> "$FORGE/calls"
 fi
 case "$*" in
-  'auth token --hostname github.com --user owner-account') printf '%s\n' "$OWNER_TOKEN"; exit 0 ;;
+  'auth token --hostname github.com --user owner_acme') printf '%s\n' "$OWNER_TOKEN"; exit 0 ;;
   'auth token '*) printf 'no oauth token found for github.com account %s\n' "${!#}" >&2; exit 1 ;;
 esac
 [ "$identity" = owner ] || { printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1; }
@@ -1023,7 +1023,7 @@ test_configured_owner_identity_reads_a_private_contribution() {
   local home out
   home=$(new_home owner-identity)
   forge_home "$home"
-  printf '# repository owner, gh account\n\nO owner-account\nother-owner other-account\n' > "$home/config/github-owner-accounts"
+  printf '# repository owner, gh account\n\nO owner_acme\nother-owner other-account\n' > "$home/config/github-owner-accounts"
   owner_identity_forge "$home"
   out=$(owner_poll "$home") || fail 'the owner-identity check failed'
   [ -z "$out" ] || fail "a private contribution its configured owner identity can read was reported: $out"
@@ -1032,7 +1032,7 @@ test_configured_owner_identity_reads_a_private_contribution() {
     || fail 'the configured owner identity did not observe the private contribution'
   jq -e '.records[0].observation.can_merge == false' "$home/data/delivery/contributions.json" >/dev/null \
     || fail "an observation read as the owner account claimed firstmate can merge: $(jq -c '.records[0].observation.can_merge' "$home/data/delivery/contributions.json")"
-  [ "$(grep -c '^personal auth token --hostname github.com --user owner-account$' "$home/forge/calls")" = 1 ] \
+  [ "$(grep -c '^personal auth token --hostname github.com --user owner_acme$' "$home/forge/calls")" = 1 ] \
     || fail "the owner account's stored token was not read exactly once: $(cat "$home/forge/calls")"
   if grep -qx 'token in the launching command line' "$home/forge/calls"; then
     fail "the owner token reached the command line of a bounded read: $(cat "$home/forge/calls")"

@@ -1809,7 +1809,7 @@ example-org example-org-bot
 ```
 
 Owners match case-insensitively, a line whose first non-blank character is `#` is a comment, and blank lines are ignored.
-Both fields are GitHub names of letters, digits, and hyphens that do not start with a hyphen.
+Both fields are GitHub names of letters, digits, and hyphens that do not start with a hyphen, and the account name may also contain underscores, as Enterprise Managed User logins such as `jdoe_acme` do.
 Any other line, an owner named twice, or an unreadable file makes every observation unavailable until it is fixed, rather than reading any contribution with the ambient identity.
 Each named account needs a stored `gh auth login` for `github.com`; a missing login makes that owner's contributions unavailable with the failed identity read named, and the observer never retires a contribution on its own.
 The observer never switches the active `gh` account, never points `GH_CONFIG_DIR` anywhere, and never stores the token.
