@@ -506,6 +506,17 @@ jobs:
             exit 1
           }
 
+          # The backlog mutation wrapper spawn uses for its In flight move must
+          # run under stock Bash 3.2 with nounset, where BASHPID is unset.
+          mutation_output=$(FM_TEST_ONLY=test_backlog_mutation_runs_under_the_system_bash \
+            /bin/bash tests/fm-backlog-atomicity.test.sh)
+          printf '%s\n' "$mutation_output"
+          mutation_count=$(printf '%s\n' "$mutation_output" | grep -c '^ok - ')
+          [ "$mutation_count" -eq 1 ] || {
+            echo "::error::expected 1 backlog mutation bash 3.2 regression, got $mutation_count"
+            exit 1
+          }
+
           backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
             FM_TEST_BASH=/bin/bash \
             /bin/bash tests/fm-backend.test.sh)

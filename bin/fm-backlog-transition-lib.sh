@@ -512,6 +512,21 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   return "$command_status"
 }
 
+# Prove the mutation path itself runs before a caller commits to a launch: the
+# same fm_tasks_axi wrapper and bound a transition uses, applied to a verb that
+# reads no row. fm_backlog_row_probe reads through fm_run_timed, a different
+# code path, so it cannot show that a later mutation will be able to execute.
+# Captures the first output line in FM_BACKLOG_TRANSITION_ERROR on failure.
+fm_backlog_write_path_probe() {
+  local out command_status=0
+  FM_BACKLOG_TRANSITION_ERROR=
+  out=$(fm_tasks_axi --version 2>&1) || command_status=$?
+  [ "$command_status" -ne 0 ] || return 0
+  FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+  [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] || FM_BACKLOG_TRANSITION_ERROR="tasks-axi did not run (status $command_status)"
+  return "$command_status"
+}
+
 fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }

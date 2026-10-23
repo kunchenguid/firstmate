@@ -1464,6 +1464,26 @@ spawn_fresh_commit_rollback() {
   return 1
 }
 
+# A fresh dispatch whose backlog transition failed has already launched a worker
+# that no record or backlog item owns. Close its endpoint, which returns the
+# slot to the pool, but only while the local copy holds nothing a close could
+# discard: no uncommitted change and no commit that is on no remote. Anything
+# else stays for the operator, exactly as before. Returns 0 only when the
+# endpoint was closed.
+spawn_close_unowned_endpoint() {
+  local dirty unpushed
+  [ -n "${WT:-}" ] && [ -n "${T:-}" ] && [ -d "$WT" ] || return 1
+  dirty=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$dirty" ] || return 1
+  unpushed=$(git -C "$WT" rev-list --count HEAD --not --remotes 2>/dev/null) || return 1
+  [ "$unpushed" = 0 ] || return 1
+  spawn_close_launched_endpoint
+  [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] || return 1
+  clear_relaunch_harness_wiring "$HARNESS" "$WT" "${STATE_REAL:-$STATE}" "$ID" "$KIND" ||
+    echo "warning: could not remove $HARNESS wiring after the failed dispatch of $ID" >&2
+  return 0
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -1656,7 +1676,8 @@ spawn_abort_cleanup() {
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
-    elif [ "${HARNESS:-}" = polytoken ] && [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] &&
+    elif { [ "${HARNESS:-}" = polytoken ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+      [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] &&
       fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
       fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
@@ -4179,6 +4200,14 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
+  # The row read above does not exercise the mutation wrapper, so prove that
+  # wrapper executes here, while a refusal still costs nothing to unwind. The
+  # bound is the one the commit point below applies to each tasks-axi call.
+  FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+  if ! fm_backlog_write_path_probe; then
+    echo "error: task $ID's backlog cannot be updated, so dispatching it would strand a worker no record owns ($FM_BACKLOG_TRANSITION_ERROR); refusing before creating its endpoint or local copy" >&2
+    exit 1
+  fi
 else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
@@ -4929,17 +4958,18 @@ rovo_wait_for_delivery() {
 rovo_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_close_launched_endpoint
 }
 
-# The launch-then-confirm gates run after the task record is published, when
-# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
-# teardown owns this endpoint yet, so a gate failure must close the launched
-# process here or it keeps running as an orphaned autonomous agent outside
-# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
-# the exact terminal is closed: that stops the CLI while its worktree stays
-# for the record's own teardown, which owns worktree deletion.
-rovo_endpoint_cleanup() {
+# Close the launched worker endpoint. The launch-then-confirm gates run after
+# the task record is published, when ORCA_ABORT_CLEANUP is already cleared and
+# neither the abort trap nor a teardown owns this endpoint yet, so a gate
+# failure must close the launched process here or it keeps running as an
+# orphaned autonomous agent outside task control. Mirrors fm-teardown.sh's own
+# generic kill call. On orca only the exact terminal is closed: that stops the
+# CLI while its worktree stays for the record's own teardown, which owns
+# worktree deletion.
+spawn_close_launched_endpoint() {
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     return 0
@@ -5046,7 +5076,7 @@ agy_wait_for_working() {
 agy_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_close_launched_endpoint
 }
 
 # polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
@@ -5141,7 +5171,7 @@ polytoken_spawn_fail() {  # <detail>
       --sessions-dir "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" >/dev/null 2>&1 || true
   fi
   clear_relaunch_harness_wiring polytoken "$WT" "$STATE_REAL" "$ID" || true
-  rovo_endpoint_cleanup
+  spawn_close_launched_endpoint
 }
 
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
@@ -6717,7 +6747,7 @@ sleep 0.3
 spawn_orca_launch_send_fail() {
   rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
   kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
-  rovo_endpoint_cleanup
+  spawn_close_launched_endpoint
   exit 1
 }
 # Orca source mode: the pane unlinks the credential-bearing file as it starts
@@ -6894,7 +6924,11 @@ fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      if spawn_close_unowned_endpoint; then
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed and its endpoint $T was closed with no work left in local copy $WT - fix the backlog, then re-run the spawn" >&2
+      else
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - the local copy holds work or could not be verified clean, so close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      fi
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
     fi
