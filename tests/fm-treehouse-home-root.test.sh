@@ -172,6 +172,30 @@ test_root_rejects_existing_pool_symlink_into_home() {
   pass "an existing pool symlink into a home is rejected"
 }
 
+test_root_rejects_existing_derived_symlink_into_home() {
+  local base root_home active_home derived err
+  base="$TMP_ROOT/reject-existing-derived-symlink"
+  root_home="$base/root-home"
+  active_home="$root_home/secondmate"
+  mkdir -p "$active_home" "$base/treehouse-base"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
+  derived=$(FM_HOME= TREEHOUSE_ROOT="$base/treehouse-base" fm_treehouse_home_root "$active_home")
+  mkdir -p "$(dirname "$derived")"
+  ln -s "$active_home" "$derived"
+
+  err="$base/symlink.err"
+  if FM_HOME="$active_home" TREEHOUSE_ROOT="$base/treehouse-base" \
+    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
+    fail "an existing derived root symlink into the active Firstmate home was accepted"
+  fi
+  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
+    "the existing derived-root symlink rejection did not explain the unsafe root"
+  pass "an existing derived root symlink into a home is rejected"
+}
+
 test_root_refuses_dot_segments_in_absent_base() {
   local base root_home active_home out err
   base="$TMP_ROOT/reject-dots"
@@ -324,6 +348,7 @@ test_root_falls_back_to_home_and_fails_closed
 test_root_rejects_bases_inside_active_or_root_home
 test_root_rejects_base_via_symlinked_ancestor_into_home
 test_root_rejects_existing_pool_symlink_into_home
+test_root_rejects_existing_derived_symlink_into_home
 test_root_refuses_dot_segments_in_absent_base
 test_spawn_allocates_from_its_own_home_root
 test_home_seed_leases_from_the_seeding_home_root
