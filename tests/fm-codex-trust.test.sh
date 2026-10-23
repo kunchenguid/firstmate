@@ -98,6 +98,28 @@ EOF
   pass "fm-codex-trust: preserves and updates an existing project entry"
 }
 
+test_inserts_before_following_table() {
+  local rec
+  rec=$(make_case missing)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[projects.'$WORKTREE']
+note = "preserve"
+
+[profiles.review]
+trust_level = "unrelated"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "missing trust value registration failed"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "missing trust value was not inserted"
+  [ "$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)" = preserve ] \
+    || fail "project fields were not preserved when trust was missing"
+  [ "$(config_value "$CODEX_HOME_DIR" "profiles.review.trust_level")" = unrelated ] \
+    || fail "following table was modified when trust was missing"
+  pass "fm-codex-trust: inserts trust before a following table"
+}
+
 test_rejects_primary_checkout() {
   local rec status=0
   rec=$(make_case primary)
@@ -109,6 +131,7 @@ test_rejects_primary_checkout() {
 
 test_registers_exact_worktree
 test_preserves_existing_config_and_updates_entry
+test_inserts_before_following_table
 test_rejects_primary_checkout
 
 echo "all fm-codex-trust tests passed"
