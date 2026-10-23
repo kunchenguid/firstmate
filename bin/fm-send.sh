@@ -223,10 +223,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # a crewmate (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 
-if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
-  echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
-  exit 1
-fi
+# shellcheck source=bin/fm-home-default-lib.sh
+. "$SCRIPT_DIR/fm-home-default-lib.sh"
+fm_home_default_from_root "$FM_ROOT"
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 if [ ! -d "$FM_HOME" ]; then

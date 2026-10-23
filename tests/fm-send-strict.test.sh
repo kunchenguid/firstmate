@@ -110,17 +110,30 @@ test_exact_lane_id_send_still_works() {
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
 
-test_unset_fm_home_fails() {
+test_unset_fm_home_uses_script_root() {
   local dir fb err log rc
-  dir="$TMP_ROOT/nohome"; mkdir -p "$dir"
+  dir="$TMP_ROOT/rootonly"; mkdir -p "$dir/state"
   fb=$(make_stubs "$dir"); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
 
   env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" sess:win "hello" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "unset FM_HOME should fail"
-  assert_contains "$(cat "$err")" "FM_HOME is not set" "unset FM_HOME diagnostic should be explicit"
-  [ ! -s "$log" ] || fail "unset FM_HOME still attempted a send"$'\n'"$(cat "$log")"
-  pass "fm-send strict: unset FM_HOME fails before target resolution"
+  [ "$rc" -ne 0 ] || fail "unresolvable target should still fail"
+  assert_contains "$(cat "$err")" "$dir/state/" "unset FM_HOME should resolve against the script root's state"
+  [ ! -s "$log" ] || fail "unresolvable target still attempted a send"$'\n'"$(cat "$log")"
+  pass "fm-send strict: unset FM_HOME resolves against the script root"
+}
+
+test_set_fm_home_differing_from_root_is_honored() {
+  local dir fb err log rc
+  dir="$TMP_ROOT/otherhome"; mkdir -p "$dir/root/state" "$dir/home/state"
+  fb=$(make_stubs "$dir"); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+
+  env PATH="$fb:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sess:win "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "unresolvable target should still fail"
+  assert_contains "$(cat "$err")" "$dir/home/state/" "a set FM_HOME should win over the script root"
+  assert_not_contains "$(cat "$err")" "$dir/root/state" "a set FM_HOME must not be replaced by the script root"
+  pass "fm-send strict: a set FM_HOME that differs from the script root is honored"
 }
 
 test_unresolvable_target_does_not_tmux_fallback() {
@@ -234,7 +247,8 @@ test_key_send_exit_status_follows_delivery() {
 
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
-test_unset_fm_home_fails
+test_unset_fm_home_uses_script_root
+test_set_fm_home_differing_from_root_is_honored
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
