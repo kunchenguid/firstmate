@@ -6,6 +6,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$FM_ROOT/bin"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$BIN/fm-quota-axi-lib.sh"
+export FM_QUOTA_AXI_MIN
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-quota-choose.XXXXXX")
 FIXTURE="$LAB/quota.json"
@@ -152,7 +155,7 @@ cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 printf 'called\n' >> "${QUOTA_AXI_CALLS:?}"
 if [ "${1:-}" = "--version" ]; then
-  echo "quota-axi 0.1.51"
+  printf 'quota-axi %s\n' "$FM_QUOTA_AXI_MIN"
   exit 0
 fi
 cat "${QUOTA_AXI_FIXTURE:?}"
