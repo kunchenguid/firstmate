@@ -3612,38 +3612,55 @@ if [ "$KIND" = secondmate ]; then
   # The identity owner is this home's OWN charter copy, checked here at the
   # launch boundary: a secondmate must never resolve its role from the primary
   # contract (AGENTS.md) or from a silent substitution to a charter living
-  # outside its home. The check's result is carried into the overlay instead of
-  # being assumed, so a home whose copy is missing is named as such rather than
-  # looking identical to a seeded one.
+  # outside its home. A symlinked charter or one whose resolved path leaves the
+  # home is refused before any present/MISSING verdict and never read. The
+  # check's result is carried into the overlay instead of being assumed, so a
+  # home whose copy is missing is named as such rather than looking identical to
+  # a seeded one.
   SECOND_MATE_CHARTER="$PROJ_ABS/data/charter.md"
+  SECOND_MATE_CHARTER_STATE=missing
+  if [ -L "$SECOND_MATE_CHARTER" ]; then
+    SECOND_MATE_CHARTER_STATE=unsafe
+  elif [ -f "$SECOND_MATE_CHARTER" ]; then
+    second_mate_charter_dir=$(cd "$PROJ_ABS/data" 2>/dev/null && pwd -P) || second_mate_charter_dir=
+    if [ -n "$second_mate_charter_dir" ] \
+      && path_is_ancestor_of "$PROJ_ABS" "$second_mate_charter_dir/charter.md"; then
+      SECOND_MATE_CHARTER_STATE=present
+    else
+      SECOND_MATE_CHARTER_STATE=unsafe
+    fi
+  elif [ -e "$SECOND_MATE_CHARTER" ]; then
+    SECOND_MATE_CHARTER_STATE=unsafe
+  fi
   # Deterministic role identity at the launch boundary. This overlay states the
-  # role, the absolute home, and the charter path before any charter text, and
-  # the launch environment carries the same facts as
-  # FM_SECONDMATE_ROLE/FM_SECONDMATE_CHARTER. The role variable is deliberately
-  # NOT FM_ROLE: bin/fm-role-lib.sh already owns FM_ROLE for this home's
-  # user|maintainer publication role, and overloading it would put a second
-  # meaning in that variable's environment.
-  # It scopes the boundary to the PRIMARY home's startup, never to this home's
-  # own startup: bin/fm-session-start.sh runs a reconcile-only posture for a
-  # marked secondmate home, which is what takes this home's lock and arms its
-  # watcher, so forbidding it outright would leave a restarted secondmate inert.
+  # role, the absolute home, and the charter path before any charter text. It
+  # scopes the boundary to the PRIMARY home's startup, never to this home's own
+  # startup: bin/fm-session-start.sh runs the home-scoped startup for a marked
+  # secondmate home, which is what takes this home's lock and arms its watcher,
+  # so forbidding it outright would leave a restarted secondmate inert.
   SECOND_MATE_LAUNCH_BRIEF="$DATA/$ID/secondmate-launch-brief.md"
   mkdir -p "$DATA/$ID"
   {
     printf 'You are a secondmate, not the primary Firstmate. Your home is %s. Your charter is %s.\n' "$PROJ_ABS" "$SECOND_MATE_CHARTER"
-    if [ -f "$SECOND_MATE_CHARTER" ]; then
-      printf 'CHARTER: present at %s (this home own copy).\n' "$SECOND_MATE_CHARTER"
-    else
-      printf 'CHARTER: MISSING at %s. Do NOT infer any role from AGENTS.md and do NOT run startup as the primary home; report the missing charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
-    fi
+    case "$SECOND_MATE_CHARTER_STATE" in
+      present)
+        printf 'CHARTER: present at %s (this home own copy).\n' "$SECOND_MATE_CHARTER"
+        ;;
+      unsafe)
+        printf 'CHARTER: UNSAFE at %s: it is a symlink or does not resolve inside this home. Do NOT read it, do NOT infer any role from AGENTS.md, and do NOT run startup as the primary home; report the unsafe charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
+        ;;
+      *)
+        printf 'CHARTER: MISSING at %s. Do NOT infer any role from AGENTS.md and do NOT run startup as the primary home; report the missing charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
+        ;;
+    esac
     printf 'Run startup only for your own home: bin/fm-session-start.sh in your home takes your own home session lock and reconciles your own home durable records from disk, and your own watcher arms once that lock is held.\n'
     printf 'Never run startup against the primary home, never take the primary home helm, never run the primary home mutating fleet sweeps, and never address the captain; report only through your parent Firstmate.\n\n'
-    if [ -f "$SECOND_MATE_CHARTER" ]; then
+    if [ "$SECOND_MATE_CHARTER_STATE" = present ]; then
       cat -- "$SECOND_MATE_CHARTER"
     elif [ -f "$DATA/$ID/brief.md" ]; then
       # Recovery only, and never silent: the parent copy is labelled as such and
       # does not turn an unseeded home into a primary-looking one.
-      printf 'CHARTER FALLBACK: this home has no local copy yet; the parent copy follows and belongs to this home only until it is seeded.\n\n'
+      printf 'CHARTER FALLBACK: this home has no usable local copy; the parent copy follows and belongs to this home only until it is seeded.\n\n'
       cat -- "$DATA/$ID/brief.md"
     fi
   } >"$SECOND_MATE_LAUNCH_BRIEF" || {
@@ -6609,8 +6626,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  sq_charter=$(shell_quote "${SECOND_MATE_CHARTER:-$BRIEF}")
-  LAUNCH="FM_SECONDMATE_ROLE=secondmate FM_SECONDMATE_CHARTER=$sq_charter FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in

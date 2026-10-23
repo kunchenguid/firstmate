@@ -242,13 +242,12 @@
 # state, its own session lock, and its own watcher, so skipping the digest after
 # a restart would leave it locked out of its own durable records and unable to
 # arm supervision - and no other command takes a session lock or reconciles from
-# disk. What distinguishes a secondmate is therefore SKIPPING the PRIMARY home's
-# startup work, not skipping startup: a home carrying a valid .fm-secondmate-home
-# marker (bin/fm-primary-scope-lib.sh) takes its own lock, drains its own wake
-# queue, and prints the same read-only reconciliation, while the mutating fleet
-# sweeps stay with the primary home - bootstrap runs detect-only/locked, the
-# deferred network stage runs probe-only, and the primary Herdr projection
-# cleanup is skipped. The launch overlay bin/fm-spawn.sh generates for a
+# disk. Every sweep the digest runs is scoped to the effective FM_HOME (the
+# backlog replay, its own project clones, its own secondmate records, and its own
+# Herdr projection journals), so a marked secondmate home runs the same startup
+# as any other home and never reads or mutates the primary home. What
+# distinguishes a secondmate is therefore the marker-derived heading below, not
+# a reduced startup. The launch overlay bin/fm-spawn.sh generates for a
 # secondmate names this posture so the two never read as contradictory.
 set -u
 
@@ -715,7 +714,7 @@ elif [ "$SECONDMATE_HOME" -eq 1 ]; then
   printf '%s\n' \
     "This is this secondmate home's OWN startup, not the primary home's: it takes" \
     "this home's session lock and reconciles this home's durable records from disk," \
-    "while the primary home's mutating fleet sweeps stay with the primary session." \
+    "and every sweep it runs is scoped to this home, never to the primary home." \
     'The watcher for this home arms once this lock is held.'
 else
   section "SESSION START - $FM_HOME"
@@ -777,10 +776,6 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # steer, or merge anyway, so it has no action left for an auth verdict to gate.
   NETWORK_STAGE_LOCKED=1
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
-  # A secondmate home never runs the primary home's mutating network sweeps
-  # (dead-secondmate relaunch, secondmate convergence and liveness, pending
-  # handoff delivery, project clone refresh); probe-only is its read-only share.
-  [ "$SECONDMATE_HOME" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
@@ -795,10 +790,9 @@ if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
     FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
-elif [ "$REEMIT" -eq 1 ] || [ "$SECONDMATE_HOME" -eq 1 ]; then
-  # The re-emit path already reconciled its sweeps, and a secondmate home's
-  # mutating fleet sweeps belong to the primary: both ask bootstrap for its
-  # read-only diagnostics only, and never run the primary Herdr projection
+elif [ "$REEMIT" -eq 1 ]; then
+  # The re-emit path already reconciled its sweeps, so it asks bootstrap for its
+  # read-only diagnostics only and never repeats the primary Herdr projection
   # cleanup.
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \

@@ -283,9 +283,38 @@ test_secondmate_launch_names_a_missing_local_charter() {
     || fail "the overlay did not label the parent copy as a fallback"
   grep -q 'parent copy of the charter' "$overlay" \
     || fail "the overlay dropped the parent copy the recovering session needs"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_SECONDMATE_CHARTER='$sm/data/charter.md'" \
-    "the launch did not name the home's own charter path"
   pass "a secondmate launch names a missing local charter instead of substituting a path outside the home"
+}
+
+# A symlinked charter that points outside the home is refused before any
+# present/MISSING verdict, and its contents never reach the overlay.
+test_secondmate_launch_refuses_a_charter_symlink_outside_the_home() {
+  local rec id sm out status overlay outside
+  id=charter-escape-z3
+  rec=$(make_spawn_case charter-escape claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  outside="$CASE_DIR/outside-charter.md"
+  printf 'OUTSIDE-CHARTER-CONTENT\n' > "$outside"
+  rm -f "$sm/data/charter.md"
+  ln -s "$outside" "$sm/data/charter.md"
+  printf 'parent copy of the charter\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate launch with an escaping charter symlink should still launch for recovery"$'\n'"$out"
+  overlay="$HOME_DIR/data/$id/secondmate-launch-brief.md"
+  [ -f "$overlay" ] || fail "the secondmate overlay was not written: $overlay"
+  grep -q "CHARTER: UNSAFE at $sm/data/charter.md" "$overlay" \
+    || fail "the overlay did not name the unsafe local charter: $(cat "$overlay")"
+  assert_not_contains "$(cat "$overlay")" "OUTSIDE-CHARTER-CONTENT" \
+    "the overlay read a charter that resolves outside the home"
+  grep -q 'CHARTER FALLBACK' "$overlay" \
+    || fail "the overlay did not label the parent copy as a fallback"
+  pass "a secondmate launch refuses a charter symlink outside the home and never reads it"
 }
 
 # A claude worker given a typed envelope would see it with the marker stripped,
@@ -1459,9 +1488,6 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_SECONDMATE_ROLE=secondmate" "secondmate launch omitted its explicit role identity"
-  assert_contains "$launch" "FM_SECONDMATE_CHARTER='$sm/data/charter.md'" \
-    "secondmate launch did not identify its original charter"
   assert_contains "$launch" "< '$HOME_DIR/data/$id/secondmate-launch-brief.md'" \
     "secondmate launch did not receive its role-and-home overlay"
   grep -q 'You are a secondmate, not the primary Firstmate' \
@@ -1854,8 +1880,6 @@ test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates() {
   expect_code 0 "$status" "Pi secondmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "fm-primary-turnend-guard.ts" "secondmate launch was not the Pi secondmate shape"
-  assert_contains "$launch" "FM_SECONDMATE_ROLE=secondmate" "secondmate launch omitted its explicit role identity"
-  assert_contains "$launch" "FM_SECONDMATE_CHARTER=" "secondmate launch omitted the selected charter path"
   assert_not_contains "$launch" "--exclude-tools" "a secondmate's own agent must not receive the worker exclusions"
   pass "exclusions stay in the home that configured them and skip secondmate agents"
 }
@@ -2775,6 +2799,7 @@ test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_secondmate_launch_names_a_missing_local_charter
+test_secondmate_launch_refuses_a_charter_symlink_outside_the_home
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
