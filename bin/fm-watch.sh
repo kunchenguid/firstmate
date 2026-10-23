@@ -3664,13 +3664,9 @@ EOF
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          fm_merge_outcome_auto_teardown "$FM_HOME" "$STATE" "$id" "$url"
+          fm_merge_outcome_cleanup_and_publish "$FM_HOME" "$STATE" "$id" "$url" \
+            || triage_log "could not retain the cleanup outcome for merged PR notice $id"
           reason=$(fm_merge_outcome_cleanup_notice "$reason")
-          if [ "$FM_MERGE_OUTCOME_CLEANUP" != skipped ]; then
-            fm_wake_append check "merged-$id-$url" \
-              "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")" \
-              || triage_log "could not retain the cleanup outcome for merged PR notice $id"
-          fi
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
