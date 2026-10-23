@@ -33,7 +33,7 @@ test_sync_is_off_when_config_is_absent() {
   expect_code 0 "$rc" "record export without config"
   [ ! -s "$home/stdout" ] || fail "config-absent sync wrote stdout"
   [ ! -s "$home/stderr" ] || fail "config-absent sync wrote stderr"
-  [ "$(LC_ALL=C ls -1A "$home" | tr '\n' ' ')" = "config data state stderr stdout " ] \
+  [ "$(find "$home" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')" = "config data state stderr stdout " ] \
     || fail "config-absent sync created an export artifact"
   pass "record export sync is inert when config is absent"
 }

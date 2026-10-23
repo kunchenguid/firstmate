@@ -248,7 +248,8 @@ archive_source_add() {  # <source> <source-relative-name> <archive-relative-name
 }
 
 archive_inbox_sources() {  # <task>
-  local task=$1 inbox="$STATE/$task.inbox" subdir file base sequence
+  local task=$1
+  local inbox="$STATE/$task.inbox" subdir file base sequence
   if [ ! -e "$inbox" ] && [ ! -L "$inbox" ]; then
     return 0
   fi
@@ -273,7 +274,8 @@ archive_inbox_sources() {  # <task>
 }
 
 archive_sources_collect() {  # <task>
-  local task=$1 meta="$STATE/$task.meta" status="$STATE/$task.status"
+  local task=$1
+  local meta="$STATE/$task.meta" status="$STATE/$task.status"
   [ -e "$meta" ] || [ -L "$meta" ] || die "task metadata is unavailable for record export: $meta"
   archive_source_add "$meta" "state/$task.meta" meta
   if [ -e "$status" ] || [ -L "$status" ]; then
@@ -312,7 +314,7 @@ archive_generation_validate_contents() {  # <generation-directory> [allow-manife
         [ "$allow_manifest" = no ] || die "committed record export archive contains staging files"
         rm -f -- "$path" || die "cannot remove stale record export staging file: $path"
         ;;
-      inbox/*.msg|inbox/handled/*.msg)
+      inbox/*.msg)
         base=${relative##*/}
         sequence=${base%.msg}
         case "$sequence" in ''|*[!0-9]*) die "unknown record export archive artifact: $path" ;; esac
@@ -355,7 +357,7 @@ archive_committed_matches_sources() {  # <generation-directory> <task> <spawn-ge
     case "$relative" in
       meta) source_relative="state/$task.meta" ;;
       status) source_relative="state/$task.status" ;;
-      inbox/*.msg|inbox/handled/*.msg) source_relative="state/$task.$relative" ;;
+      inbox/*.msg) source_relative="state/$task.$relative" ;;
       *) return 1 ;;
     esac
     bytes=$(file_bytes "$path")
@@ -433,7 +435,7 @@ archive_generation_safe_for_prune() {  # <generation-directory>
     [ -f "$path" ] || return 1
     case "$relative" in
       meta|status|manifest.v1.json) ;;
-      inbox/*.msg|inbox/handled/*.msg)
+      inbox/*.msg)
         base=${relative##*/}
         sequence=${base%.msg}
         case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
