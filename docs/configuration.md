@@ -1374,6 +1374,36 @@ A malformed or unreadable file refuses every fresh ship or scout spawn until it 
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
 
+## Host headroom (config/host-headroom)
+
+Every Firstmate home and worker on a machine shares its memory, so a fan-out that exhausts it takes all of them down at once, whichever projects the workers belong to.
+Firstmate therefore treats the machine's memory as one budget shared by every project rather than as a per-project cap.
+Before a fresh ship or scout launch, `bin/fm-spawn.sh` checks this machine's available memory, swap in use, load per core, and, on macOS, the kernel memory-pressure level, and defers the launch when the new worker's expected footprint would take available memory below the floor or any other threshold is already past.
+Every running ship or scout first reserves what it still needs to reach its own expected footprint, so a worker launched seconds ago counts at its expected size rather than at the little memory it holds yet, and a rapid fan-out stops at the budget instead of passing every check and exhausting memory once its workers grow.
+Spawns hold one machine-wide lock from this check until the new task record is published, so concurrent spawns from any home are judged one at a time, each counting the workers admitted before it.
+The expected footprint comes from what earlier workers of the same kind and harness actually used while they worked, falling back to the same kind, then every worker, then a conservative default while fewer than three such workers have a mid-work sample, one taken at least ten minutes after the worker launched, so a mix of workers from different projects is admitted together until the machine budget is spent.
+Every check samples the running workers' memory first. A reading taken at cleanup, after the work has finished, or while a worker is still starting up can raise a worker's recorded footprint but never lowers the expected footprint below the default on its own.
+When a registered local Firstmate home is missing or its registry entry cannot be read, the check warns, skips only that home, and still counts the workers of every other local home, including those registered after it.
+A deferral works exactly like a project-capacity deferral: nothing is launched or recorded, the backlog item stays queued, the spawn prints one `deferred:` line naming every measured value, the expected footprint, and each breached threshold, and it exits 75 so Firstmate dispatches the item again once running work frees headroom.
+A relaunch of existing work and a secondmate launch are not gated.
+The optional local, gitignored `config/host-headroom` in the machine's root Firstmate home overrides the defaults, one `key=value` per line, with `off` disabling any threshold except the default footprint:
+
+```text
+min_avail_pct=20
+max_swap_used_mb=16384
+max_load_per_core=1.5
+defer_pressure=critical
+default_worker_mb=1536
+```
+
+These defaults suit a 48 GB Mac running a large fleet, where macOS routinely sits at the warn pressure level with several GB of swap in use, so only the critical level, a worker that would leave less than a fifth of memory available, or swap well past that defers.
+A value the machine cannot measure is reported and not judged, so a missing tool never blocks a spawn, while a malformed or unreadable file refuses every fresh spawn until it is fixed.
+`FM_SPAWN_IGNORE_HEADROOM=1` in the spawn's environment skips the check for that one spawn.
+Each fresh launch, each cleanup, each check, and each report appends every worker's project, kind, harness, model, and resident memory, with the machine's headroom, to the root home's `state/host-footprint.log`.
+`bin/fm-host-headroom.sh report` summarizes typical and 90th-percentile memory by kind and harness and by project, the machine budget after the running workers' reservation, how many more workers of each kind fit, the largest concurrent worker count the thresholds imply, and which project worktree pools would bind before that machine budget does.
+`bin/fm-host-headroom.sh check` prints the current verdict on its own.
+[`bin/fm-host-headroom.sh`](../bin/fm-host-headroom.sh) owns the measurements, the file format, the expected-footprint rule, the verdict, and the log.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -2692,6 +2722,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_SPAWN_IGNORE_HEADROOM=0   # 1 skips the host headroom check for one fresh spawn; see "Host headroom"
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set

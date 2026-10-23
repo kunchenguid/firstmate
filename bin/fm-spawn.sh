@@ -217,6 +217,15 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
+#   Host headroom: at that same point a fresh ship or scout spawn also runs
+#   bin/fm-host-headroom.sh check with the worker's kind and harness, which
+#   owns the measurements, the config/host-headroom thresholds, the worker's
+#   expected footprint, and the machine-wide verdict; a worker that does not fit
+#   gets the same `deferred:` line and exit 75, and unreadable thresholds refuse
+#   with exit 1. The spawn holds the machine-wide headroom lock from that check
+#   until its task record is published, so the next spawn's check counts it. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
+#   fresh spawn appends its footprint record through that helper's `record`.
+#   A relaunch and a --secondmate spawn are never gated or recorded.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1433,6 +1442,8 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_HEADROOM_LOCK=
+SPAWN_HEADROOM_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_OPENED=0
 SPAWN_FRESH_WIRING_PENDING=0
@@ -1663,6 +1674,10 @@ spawn_abort_cleanup() {
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
   fi
+  if [ "$SPAWN_HEADROOM_LOCK_HELD" = 1 ]; then
+    SPAWN_HEADROOM_LOCK_HELD=0
+    fm_lock_release "$SPAWN_HEADROOM_LOCK" || true
+  fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
@@ -1837,7 +1852,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
+      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity or this machine is short of headroom, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then
       echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
@@ -3555,6 +3570,39 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   fi
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
+  # Host headroom admission (bin/fm-host-headroom.sh owns what is measured, the
+  # thresholds, the expected footprint, and the verdict): one machine-wide
+  # memory budget shared by every project. A worker whose expected footprint
+  # does not fit the machine's current headroom is deferred here, at the same
+  # point and with the same exit status as a capacity deferral, so the task
+  # stays exactly as queued as it was. The machine-wide headroom lock is held
+  # from the check until this task's record is published, so a concurrent
+  # spawn from any home is judged after this worker counts as running.
+  if [ "${FM_SPAWN_IGNORE_HEADROOM:-0}" = 1 ]; then
+    echo "notice: FM_SPAWN_IGNORE_HEADROOM=1 - launching $ID without checking this machine's headroom" >&2
+  else
+    SPAWN_HEADROOM_LOCK="$STATE/.host-headroom.lock"
+    if SPAWN_HEADROOM_ROOT=$(fm_firstmate_root_home "$FM_HOME" 2>/dev/null) &&
+      [ "$SPAWN_HEADROOM_ROOT" != "$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P)" ]; then
+      SPAWN_HEADROOM_LOCK="$SPAWN_HEADROOM_ROOT/state/.host-headroom.lock"
+    fi
+    if ! fm_lock_acquire_wait "$SPAWN_HEADROOM_LOCK"; then
+      echo "error: could not acquire this machine's host headroom lock $SPAWN_HEADROOM_LOCK" >&2
+      exit 1
+    fi
+    SPAWN_HEADROOM_LOCK_HELD=1
+    SPAWN_HEADROOM_RC=0
+    SPAWN_HEADROOM=$(FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
+      "$SCRIPT_DIR/fm-host-headroom.sh" check --kind "$KIND" --harness "$HARNESS") \
+      || SPAWN_HEADROOM_RC=$?
+    if [ "$SPAWN_HEADROOM_RC" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
+      echo "deferred: this machine is short of headroom for another worker (${SPAWN_HEADROOM#defer: }); task $ID was not launched and its backlog item stays queued - dispatch it again once running work frees memory or load, or set FM_SPAWN_IGNORE_HEADROOM=1 for this one spawn (docs/configuration.md \"Host headroom\")" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+    elif [ "$SPAWN_HEADROOM_RC" -ne 0 ]; then
+      echo "error: spawn refused: this machine's headroom could not be judged; fix config/host-headroom so its limits are known (docs/configuration.md \"Host headroom\")" >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
@@ -6080,6 +6128,10 @@ if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
 fi
+if [ "$SPAWN_HEADROOM_LOCK_HELD" = 1 ]; then
+  SPAWN_HEADROOM_LOCK_HELD=0
+  fm_lock_release "$SPAWN_HEADROOM_LOCK"
+fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
@@ -6688,4 +6740,10 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+# Footprint record (bin/fm-host-headroom.sh): the machine's headroom as this
+# worker starts. Best effort - it never fails a launched spawn.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
+    "$SCRIPT_DIR/fm-host-headroom.sh" record spawn "$ID" >/dev/null 2>&1 || true
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

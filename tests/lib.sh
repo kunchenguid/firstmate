@@ -75,6 +75,12 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # can find the CLI; a case that verifies detection sets these itself.
 unset REX_SESSION REX_BLOCK
 
+# Pin the host headroom bin/fm-spawn.sh checks before every fresh launch to a
+# healthy machine (bin/fm-host-headroom.sh's FM_TEST_SEAM sample), so a busy CI
+# runner or developer machine never defers an unrelated spawn case. A case that
+# exercises the verdict or the deferral sets its own sample or unsets this one.
+export FM_HOST_HEADROOM_SAMPLE='total_mb=49152 avail_mb=40000 swap_used_mb=0 load1=1 cores=18 pressure=normal'
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the
