@@ -1620,7 +1620,7 @@ fm_local_firstmate_state_dirs() {  # <first-state>
 # and re-trigger the import-approval prompt the default $HOME-based root avoids.
 # Set TREEHOUSE_ROOT outside those homes to clear the refusal.
 fm_treehouse_home_root() {  # <home>
-  local home=$1 abs base slug hash derived active_home root_home suffix parent
+  local home=$1 abs base pool_root slug hash derived active_home root_home suffix parent
   abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   base=${TREEHOUSE_ROOT:-${HOME:-}}
   case "$base" in
@@ -1667,7 +1667,11 @@ fm_treehouse_home_root() {  # <home>
   esac
   hash=$(printf '%s' "$abs" | git hash-object --stdin 2>/dev/null) || return 1
   [ -n "$hash" ] || return 1
-  derived="$base/.firstmate-worktrees/$slug-${hash:0:12}"
+  pool_root="$base/.firstmate-worktrees"
+  if [ -d "$pool_root" ]; then
+    pool_root=$(CDPATH='' cd -- "$pool_root" 2>/dev/null && pwd -P) || return 1
+  fi
+  derived="$pool_root/$slug-${hash:0:12}"
   if [ -n "${FM_HOME:-}" ]; then
     active_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
     root_home=$(fm_firstmate_root_home "$active_home") || return 1
