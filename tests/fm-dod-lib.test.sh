@@ -488,6 +488,24 @@ test_worker_role_names_skill_and_fallback_file() {
   pass "worker role names the skill and its fallback skill file"
 }
 
+# Rex's agent hook tells every harness to rename its session, which on Rex is
+# the captain's session or the home's labeled task session. Only a task on the
+# Rex backend is told to ignore it; every other backend's role text is the
+# same bytes it was without a backend.
+test_worker_role_guards_rex_session_rename_only_on_rex() {
+  local guard plain rex_role tmux_role
+  guard='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
+  plain=$(fm_brief_worker_role "$TMP_ROOT/state" rex-rename-1 "$ROOT")
+  rex_role=$(fm_brief_worker_role "$TMP_ROOT/state" rex-rename-1 "$ROOT" rex)
+  tmux_role=$(fm_brief_worker_role "$TMP_ROOT/state" rex-rename-1 "$ROOT" tmux)
+  assert_contains "$rex_role" "$guard" "a Rex task was not told to ignore the session-rename prompt"
+  [ "$(printf '%s\n' "$rex_role" | grep -cxF "$guard")" -eq 1 ] || fail "the Rex rename guard is not exactly one line"
+  [ "$tmux_role" = "$plain" ] || fail "a tmux task's role text changed"
+  case "$plain" in *Rex*) fail "a task with no backend was told about Rex" ;; esac
+  [ "$rex_role" = "$plain"$'\n'"$guard" ] || fail "the Rex role is not the unchanged role plus the guard line"
+  pass "only a Rex task's role tells it to ignore the session-rename prompt"
+}
+
 # forge=external: a review tool uploads its own snapshot, so nothing is pushed.
 # The fixtures name an invented tool and an RFC 6761 reserved host only.
 EXT_CFG="$TMP_ROOT/external-config"
@@ -598,5 +616,6 @@ test_external_review_done_without_backup_is_accepted_on_the_url
 test_external_review_done_with_backup_needs_the_copy
 
 test_worker_role_names_skill_and_fallback_file
+test_worker_role_guards_rex_session_rename_only_on_rex
 
 echo "all fm-dod-lib tests passed"
