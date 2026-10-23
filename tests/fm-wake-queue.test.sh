@@ -2587,6 +2587,57 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# A waiter behind a live holder keeps waiting while the lock's directory
+# exists, but once a teardown removes that directory the lock can never be
+# created, so the wait must return within its stated 0.2s bound instead of
+# polling at 0.1s forever - the shape that kept orphaned watchers and
+# reconcile scans of removed test homes spinning under init.
+test_lock_wait_returns_when_its_directory_is_removed() {
+  local dir state holder waiter rc i
+  dir=$(make_case lock-dir-removed)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2/.fixture.lock" || exit 10
+    : > "$2/holder.ready"
+    exec sleep "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$FM_TEST_STUB_MAX_BLOCK_SECONDS" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/holder.ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/holder.ready" ] || fail "the fixture holder never took the lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2/.fixture.lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" &
+  waiter=$!
+  sleep 1
+  if ! kill -0 "$waiter" 2>/dev/null; then
+    kill -TERM "$holder" 2>/dev/null || true
+    fail "the waiter stopped waiting on a live hold while its directory still existed"
+  fi
+  rm -rf "$state"
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "$waiter" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  if kill -0 "$waiter" 2>/dev/null; then
+    kill -TERM "$waiter" 2>/dev/null || true
+    wait "$waiter" 2>/dev/null || true
+    fail "the lock wait kept polling after its directory was removed"
+  fi
+  rc=0
+  wait "$waiter" || rc=$?
+  [ "$rc" -eq 1 ] || fail "the lock wait over a removed directory returned $rc, not 1"
+  pass "a lock wait returns within its bound once its directory is removed"
+}
+
 test_subshell_lock_ownership_without_bashpid() {
   local dir state rc
   dir=$(make_case subshell-lock-ownership)
@@ -3515,6 +3566,7 @@ SH
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_lock_wait_returns_when_its_directory_is_removed
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
