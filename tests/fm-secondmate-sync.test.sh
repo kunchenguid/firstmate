@@ -35,6 +35,8 @@ set -u
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$ROOT/bin/fm-secondmate-nudge-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -1336,7 +1338,7 @@ remote_marker() {  # <w> <owed:0|1|legacy>
   mkdir -p "${marker%/*}"
   {
     printf 'id=sm\nselector=fm-sm\nhome=%s\ncommit=\ninstructions=remote\n' "$1/sm"
-    printf 'message=%s\nremote=1\n' 'Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.'
+    printf 'message=%s\nremote=1\n' "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE"
     [ "$2" = legacy ] || printf 'owed=%s\n' "$2"
   } > "$marker"
 }
