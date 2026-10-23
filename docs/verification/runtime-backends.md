@@ -310,7 +310,7 @@ Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
-Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
+Kimi pointer delivery and OpenCode busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
 ### Cleanup endpoint identity
@@ -742,9 +742,10 @@ hooks                                    stable             false
 Error: Unknown feature flag: no_such_feature
 ```
 
-The last arm is what makes the control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag fails the launch loudly instead of silently restoring the modal.
+The last arm is what makes the requested control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag stops the launch rather than silently restoring the modal.
+A managed policy can still override the requested disablement, so the effective hook state is not a portable guarantee.
 
-The same launch with the hook layer disabled reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
+The same launch with the hook disablement requested reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
 
 ```sh
 codex --dangerously-bypass-approvals-and-sandbox --disable hooks \
@@ -758,10 +759,27 @@ $ ls "$TURNEND"
 <turn-end file present>
 ```
 
-`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
-It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
-It spends no model tokens, so it runs by default wherever Codex is installed.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+`tests/fm-codex-hook-layer-live-e2e.test.sh` checks current flag acceptance; it does not repeat the composer and notification probe above.
+It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the installed Codex accepts the requested hook-disablement flag.
+It does not claim that a managed policy cannot re-enable hooks after launch.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
+
+## Codex automatic approval review
+
+Verified 2026-10-06 with codex-cli 0.160.1.
+`codex --help` describes `--approve-for-me` as `Route approval requests through automatic review using the workspace-write sandbox`.
+A managed-settings reproduction showed that `--dangerously-bypass-approvals-and-sandbox --disable hooks` could leave user-reviewed approvals active even while the sandbox bypass applied.
+Replacing that flag with `--approve-for-me --disable hooks` selected automatic approval review and the workspace-write sandbox.
+
+A real worker in that posture appended its authorized Firstmate status channel, inspected its steering channel, queried the no-mistakes service, completed `git push --dry-run`, and completed a GitHub read.
+The networked operations initially required automatic review because the workspace-write sandbox begins with network access disabled, then completed after that review.
+This confirms unattended progress through the reviewer, not unrestricted network or external-write access.
+
+`tests/fm-spawn-dispatch-profile.test.sh` pins unchanged bypass defaults and explicit `approve-for-me` launches for ships and scouts, plus hook and secondmate launch wiring.
+`tests/fm-approval-failover.test.sh` exercises the firstmate-invoked command through real filesystem publication and the existing lease owner, substituting lifecycle control to avoid touching real workers.
+It covers writing once, preserving explicit and concurrent settings, invoking guarded relaunch, retaining the remedy on recovery failure, and local/remote inheritance precedence.
+These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
+There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
 ## Composer classification matrix
 
@@ -898,6 +916,37 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
+
+### 2026-09-29 claude 2.1.284 named session through Herdr
+
+Verified on 2026-09-29 on Linux x86_64 against Claude Code 2.1.284 in Herdr 0.9.1 panes of an isolated lab session, read through `fm_backend_composer_state herdr <session>:<pane>` with the adapter's real capture and identity probe.
+A session started as `claude -n <name>` right-aligns that name in the rule above the composer (`───…─── <name> ─`), while the rule below stays solid.
+Herdr supplies no cursor, and the cursorless scan accepted only solid rules, so it recorded the lower rule alone; a lone rule below the `❯` row made cursorless selection refuse, and the idle composer read `unknown`.
+`inject_msg` in `bin/fm-supervise-daemon.sh` defers on anything but `empty`, so every away-mode escalation to a named Claude primary on Herdr deferred until the captain returned, without typing anything or writing its operational record.
+The same named pane read `empty` on tmux, where the cursor row anchors the bare `❯` composer directly.
+
+Before the fix, one variable at a time on idle panes:
+
+```text
+claude                                                      herdr: empty
+claude -n <name>                                            herdr: unknown
+CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n <name> herdr: unknown
+claude -n <name>                                            tmux:  empty (typed text: pending)
+```
+
+The classifier now accepts a bare agent-glyph row sandwiched between a width-proven titled top rule and its solid closing rule (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
+After the fix the named Herdr pane read `empty`, and the daemon's real injection path wrote the operational record, typed the doorbell, sent Enter, and confirmed the submit on that pane.
+`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, and extraction cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression.
+The composer-matrix guard's `claude-named` arm requires the cursorless read of a real named Claude pane to be exactly `empty`:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
+ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+```
 
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
@@ -2223,6 +2272,7 @@ $ rex --autostart=false api call server.status | jq .api_revision
 
 The evidence below used scratch sessions labeled `fm-test-*` on the personal Rex server, before private-server isolation; its transcripts are not the current test procedure.
 [`tests/rex-test-safety.sh`](../../tests/rex-test-safety.sh) owns the current isolation contract.
+Whether `session.create` changes the attached app remains unverified; follow the private-server isolation contract above rather than probing the live server.
 
 Current active CLI findings:
 
@@ -2442,6 +2492,32 @@ That supplies the genuine composer-empty proof required for away-mode escalation
 A live injection through `bin/fm-supervise-daemon.sh`'s own `inject_msg` into a real Cursor pane returned 0 and the pane processed the typed `FIRSTMATE_OP: v1 away-supervisor:` escalation.
 
 `tests/fm-tmux-agent-liveness.test.sh` pins this with real processes and no Cursor installed: it asserts the cursor-anchored source is blind, that the composite still reads `empty` idle and `pending` with typed text, that an identical screen stays `unknown` when the pane is not Cursor, and that a stale Cursor screen over a dead shell never reads `empty`.
+
+#### tmux composer verdict, fully dim placeholder 2026-10-21
+
+On 2026-10-21 the same idle shape was captured again from cursor-agent 2026.10.19-6bbf2c4 on tmux.
+`#{cursor_y}` was still below the footer with `#{cursor_flag}` 0, and `fm_tmux_pane_is_cursor` still matched `~/.local/bin/cursor-agent`.
+The placeholder row had changed: `→ Add a follow-up` was one SGR 2 run on background `48;2;42;44;57`, with half-block rules above and below and no reverse-video cell.
+Ghost stripping emptied that row, and the empty-content guard treated any plain row longer than a lone glyph as `unknown`, so the composite stayed `unknown` and relaunch and exit refused.
+The plain row is still the anchored placeholder, so that guard now reads it `empty`.
+Bright text, including text typed as exactly `Add a follow-up`, is not stripped and stays `pending`.
+
+```text
+composer row : ESC[48;2;42;44;57m ESC[2m→ Add a follow-upESC[0m
+before       : idle composite unknown    fm_backend_composer_state unknown
+after        : idle composite empty      fm_backend_composer_state empty
+typed        : bright `Add a follow-up`  pending
+```
+
+`test_matrix_cursor_fully_dim_placeholder` in `tests/fm-composer-lib.test.sh` pins this shape and asserts the row ghost-strips to empty, so the older reverse-video remnant path cannot satisfy it.
+`tests/fm-tmux-agent-liveness.test.sh` repeats the idle `empty` and typed `pending` verdicts through a real pane whose foreground binary is `cursor-agent`.
+Refresh the Cursor liveness evidence with:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+On 2026-10-22 that command classified cursor-agent 2026.10.22-27dcf5f alive at `comm cursor` strength.
 
 ### Busy state
 
@@ -2862,3 +2938,81 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+
+## OpenCode 2 launch and brief delivery
+
+Verified on 2026-10-15 on Linux x86_64 against OpenCode 2.0.11 and 2.0.22, each installed into a scratch npm prefix with scratch `HOME`, XDG directories, and `OPENCODE_DB`, while the host's global OpenCode 1.18 stayed in place.
+
+The token-free native plugin fixture passed on both releases:
+
+```
+$ FM_OPENCODE_LIVE_BINS="<2.0.11>/bin/opencode <2.0.22>/bin/opencode" tests/fm-opencode-primary-live-e2e.test.sh
+ok - OpenCode 2.0.11 loaded all five V2 Firstmate plugins
+ok - native shell execute.before rejects persistent-cd before execution
+ok - native terminal event admits a turn-end guard follow-up
+ok - native interrupted turn retains watcher supervision
+ok - native failed turn retains supervision and startup remains exactly once
+ok - OpenCode 2.0.22 loaded all five V2 Firstmate plugins
+(every other fixture case also passed on both releases)
+```
+
+The native fixture was re-run on 2026-10-15 after the seatbelt was narrowed to the shell tool's `{tool, input.command}` `execute.before` payload, and it passed on both 2.0.11 and 2.0.22.
+Its loopback provider issues a real `shell` tool call, and the persistent-cd and watcher-redirection cases assert the tool fails with the plugin's own reason and writes no escape file, which proves that payload shape live.
+
+A standalone TUI on both 2.0.11 and 2.0.22 showed the composer exit behavior `bin/fm-control.sh` relies on.
+With leftover composer text, the first Ctrl-C only clears the text and a second Ctrl-C exits.
+Ctrl-U clears the composer, and one Ctrl-C then exits.
+
+A tmux pane launching `opencode --standalone --prompt '<brief>'` against a loopback provider showed the brief-delivery difference the post-launch gate handles:
+
+```
+2.0.11 after 20s: provider_requests=0 composer=pending
+2.0.11 after one Enter: provider_requests=2
+2.0.22 after 20s: provider_requests=2 composer=pending
+```
+
+On 2.0.11 the brief stays unsent and the shared composer classifier reads it as pending, so the gate's single Enter is sent and starts the turn.
+On 2.0.22 the brief is submitted on its own, yet the composer still reads pending, which is why the gate treats the worker's busy-state plugin record as proof of delivery and the composer only as a veto on the Enter.
+`opencode debug config` on 2.0.11 normalized the launch's legacy `{"permission":{"*":"allow"}}` into an allow-all `permissions` rule; the same command printed no configuration on 2.0.22, so on 2.0.22 the legacy shape rests on the earlier 2.0.21 verification recorded in the OpenCode harness reference.
+`tests/fm-spawn-dispatch-profile.test.sh` pins the gate's outcomes portably: an auto-submitted brief gets no extra Enter, a prefilled brief gets exactly one, a composer that reads unknown before it draws gets its one Enter only once it reads pending, a composer that only reads unknown gets its one Enter at the submit deadline, and a turn that never starts fails the spawn.
+
+## OpenCode 1 compatibility of the dual-export plugins
+
+Verified on 2026-10-15 on Linux x86_64 against OpenCode 1.15.7, 1.18.20, and 1.18.31, each installed into a scratch npm prefix and run against a scratch `FM_HOME`.
+1.15.7 and 1.18.20 predate the V1 object entrypoint (`{ id, server }`) that OpenCode accepts from 1.18.29, so they exercise the named-export path of the five primary plugins; 1.18.31 exercises the object path.
+
+A copy of this checkout whose five `fm-primary-*.js` factories each append one line to a log when invoked ran one `opencode run` turn per release, and every plugin factory ran exactly once on all three:
+
+```
+opencode 1.15.7 plugin factory invocations:
+      1 fm-primary-cd-check
+      1 fm-primary-pretool-check
+      1 fm-primary-sessionstart-nudge
+      1 fm-primary-turnend-guard
+      1 fm-primary-watch-arm
+(1.18.20 and 1.18.31 printed the same five counts of 1)
+```
+
+A persistent TUI per release, with the watch-arm plugin removed from that copy so no watcher could arm and one task in flight in its home, answered one prompt; the turn-end guard queued exactly one follow-up and did not fire again after the model answered it:
+
+```
+user|Respond exactly OK. ...
+assistant|OK
+user|⁣FIRSTMATE_OP: v1 turn-end-guard: TURN WOULD END BLIND - supervision is off. ...
+assistant|NOTED
+(identical on 1.15.7, 1.18.20, and 1.18.31)
+```
+
+The credentialed watcher-continuity half of the live e2e passed on 1.18.20 and 1.18.31: the plugin started the first watcher after idle, started and ledger-linked a successor after the actionable close, the model drained and settled, no turn-end guard fired, and the model never ran the arm itself.
+
+```
+$ PATH=<release>/bin:$PATH FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh   # Ahoy sections skipped
+ok - OpenCode 1.18.20 live E2E covered native Ahoy first/later messages, near misses, and watcher continuity
+ok - OpenCode 1.18.31 live E2E covered native Ahoy first/later messages, near misses, and watcher continuity
+```
+
+The run is pinned to the named release because the test now launches its TUI panes through the resolved `opencode` path; it previously ran whatever `opencode` the panes' login shell found.
+The full run's native Ahoy cases depend on the model's own choices and failed with the `opencode-go/deepseek-v4.1-flash` model used here (1.18.20 took Bearings on a later `/ahoy`; 1.18.31 never ran session start in the later-message setup); the unchanged test on the default branch failed at the same 1.18.31 step with that model, so those failures are not from this change.
+
+A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-v4.1-flash` in a private tmux server recorded `opencode_version=1.18.20` (and `1.18.31` on the second release), launched the worker as `opencode --model opencode-go/deepseek-v4.1-flash --prompt <brief>` with no `--standalone`, and the worker answered its brief.
+`bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.

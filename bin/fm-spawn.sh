@@ -102,10 +102,11 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
+#   OpenCode 2 has no interactive model or effort flag, so its selected model
+#   and effort are written as the build agent's model and variant inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   re-verified on opencode 2.0.21); without a model the effort axis is recorded
+#   but omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -408,15 +409,22 @@
 #   settings still own access to personal credential files.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
-#   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
-#   `--dangerously-skip-permissions`; `auto` launches with `--permission-mode
-#   auto` instead, Claude Code's classifier-reviewed mode, for a captain who
-#   refuses to run workers in bypass mode. Every other part of the claude launch
+#   secondmate, and relaunch) carries. Absent or `bypass` selects
+#   `--dangerously-skip-permissions`; `auto` selects `--permission-mode auto`,
+#   the model-reviewed remedy for managed machines. Every other part of the claude launch
 #   is unchanged. The token is the file's whitespace-trimmed content; any other
 #   value, or an unreadable file, refuses the spawn before any endpoint,
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Codex approval mode (config/codex-approval-mode):
+#   One whitespace-trimmed token: absent or `bypass` selects
+#   --dangerously-bypass-approvals-and-sandbox; `approve-for-me` selects
+#   --approve-for-me, with model-reviewed approvals in workspace-write.
+#   Any other value or unreadable file refuses before mutation, like the Claude
+#   file. Both files apply to ships, scouts, secondmates, and relaunches.
+#   bin/fm-approval-failover.sh owns captain-approved durable failover after
+#   firstmate observes a bypass approval prompt or policy refusal; no polling.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
@@ -485,6 +493,10 @@
 #     __COMMANDCODEBIN__ resolved Command Code executable
 #     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __OPENCODEBIN__ quoted concrete opencode executable path resolved from PATH -
+#                  the same binary the version-gate probe reads, so the recorded
+#                  major can never describe a different executable than the pane
+#                  runs (empty resolution falls back to a bare `opencode`)
 #     __POLYTOKENBIN__ resolved, polytoken-verified executable for a polytoken launch
 #     __POLYTOKENCONFIG__ firstmate-owned per-task polytoken config dir (mirrored
 #                  operator config with the unattended permission posture enforced)
@@ -726,6 +738,31 @@ fi
 case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
+esac
+if ! CODEX_APPROVAL_PRESENT=$(fm_config_source_present "$CONFIG/codex-approval-mode"); then
+  exit 1
+fi
+CODEX_APPROVAL_MODE=bypass
+if [ "$CODEX_APPROVAL_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/codex-approval-mode" ] || [ ! -r "$CONFIG/codex-approval-mode" ]; then
+    echo "error: config/codex-approval-mode must be a readable regular file holding one of: bypass, approve-for-me" >&2
+    exit 1
+  fi
+  if ! CODEX_APPROVAL_MODE=$(perl -0777 -pe 's/\A\s+|\s+\z//g' <"$CONFIG/codex-approval-mode"); then
+    echo 'error: could not read config/codex-approval-mode' >&2
+    exit 1
+  fi
+  case "$CODEX_APPROVAL_MODE" in
+    bypass | approve-for-me) ;;
+    *)
+      echo "error: config/codex-approval-mode holds '$CODEX_APPROVAL_MODE'; accepted values are: bypass (the default), approve-for-me" >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$CODEX_APPROVAL_MODE" in
+  approve-for-me) CODEX_APPROVAL_FLAG='--approve-for-me' ;;
+  *) CODEX_APPROVAL_FLAG='--dangerously-bypass-approvals-and-sandbox' ;;
 esac
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
@@ -2402,7 +2439,7 @@ launch_template() {
   # stay in force.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
   # selects (header above): --dangerously-skip-permissions by default, or
-  # --permission-mode auto for a captain who refuses bypass mode.
+  # --permission-mode auto when configured.
   # __CLAUDEADDDIRS__ is the task-channel directory grant
   # claude_add_dirs_flag below builds: Claude path-checks Read/Glob/Grep (and
   # an Edit's mandatory prior Read) against cwd plus --add-dir, and since
@@ -2428,8 +2465,8 @@ launch_template() {
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
-  # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
-  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
+  # --disable hooks (equivalent to -c features.hooks=false) requests that codex
+  # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
@@ -2442,22 +2479,29 @@ launch_template() {
   # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
   # PRIMARY-session infrastructure that already stands down in a child worktree.
   # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
-  # hooks; disabling the feature runs none of them and leaves the operator's
-  # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
-  # release that drops this flag fails the launch loudly instead of silently
-  # restoring the modal.
+  # hooks; when honored, disabling the feature runs none of them and leaves the
+  # operator's ~/.codex untouched. An unknown feature name is a hard codex error, so a future
+  # release that drops this flag stops the launch rather than silently restoring
+  # the modal. A managed policy can override the requested disablement, so its
+  # effective hook state is not guaranteed.
+  # --approve-for-me uses Codex's automatic approval review with its workspace-write
+  # sandbox. When selected, it replaces complete bypass because managed settings
+  # can override its approval component while accepting the sandbox bypass. The
+  # workspace-write sandbox starts with network access disabled and reviews writes
+  # outside the worktree, so networked operations and external task channels may
+  # need automatic review before they proceed.
   # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
-  # secondmate launch deliberately keeps hooks on.
+  # secondmate launch deliberately keeps hooks on but shares this approval posture.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -3008,7 +3052,8 @@ muse_worker_meta_api_key_present() {
   fi
   [ "$BACKEND" = tmux ] || return 1
   if [ -n "${TMUX:-}" ]; then
-    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
+    fm_backend_source tmux >/dev/null 2>&1 || return 1
+    session=$(fm_backend_tmux_own_session 2>/dev/null) || return 1
   else
     tmux has-session -t firstmate 2>/dev/null || return 1
     session=firstmate
@@ -3069,10 +3114,18 @@ relaunch_resume_args() {  # <harness> <backend> <target>
 }
 
 model_flag_for_harness() {
-  local harness=$1 model=$2
+  local harness=$1 model=$2 oc_major=${3:-}
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  opencode)
+    # OpenCode 1.x takes the model as an interactive --model flag; 2.x removed
+    # it, so there the model rides OPENCODE_CONFIG_CONTENT via
+    # effort_flag_for_harness instead. The caller normalizes an undetected
+    # (empty/unparseable) major to 1, so only a parsed major >= 2 omits --model.
+    [ "$oc_major" = 1 ] || return 0
+    printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   # polytoken encodes reasoning effort inside the model reference, so the
@@ -3086,8 +3139,10 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2 model=${3:-}
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  local harness=$1 effort=$2 model=${3:-} oc_major=${4:-}
+  if [ "$harness" != opencode ]; then
+    [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  fi
   case "$harness" in
   claude)
     case "$effort" in
@@ -3153,32 +3208,38 @@ effort_flag_for_harness() {
     ;;
   opencode)
     # opencode's interactive `opencode --prompt` launch has no effort flag
-    # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # (`opencode run --variant` is a different, non-interactive mode), so the
+    # reasoning axis rides the OPENCODE_CONFIG_CONTENT JSON the launch already
+    # writes, keyed per-model as a variant. The variant is emitted only when the
+    # resolved model's provider is known to expose that effort (`anthropic/*`:
+    # high|max, `openai/*`: low|medium|high|xhigh); other providers, absent
+    # effort, or out-of-family efforts omit it (record-and-omit, as codex and
+    # grok do). Without a resolved model there is nothing to key to. The
+    # fragment lands inside the launch's single-quoted assignment, so a literal
+    # quote in the model id must close and reopen that quoting. The config SHAPE
+    # is version-sensitive: 1.x carries the effort as agent.build.variant only
+    # (the model still arrives via --model, config schema verified on 1.18.32);
+    # 2.x dropped --model, so there the model is pinned both globally and on the
+    # build agent alongside the variant (re-verified on 2.0.21). The caller
+    # normalizes an undetected (empty/unparseable) major to 1, so only a parsed
+    # major >= 2 takes the 2.x shape.
     [ -n "$model" ] && [ "$model" != default ] || return 0
-    case "${model%%/*}:$effort" in
-    anthropic:high | anthropic:max) ;;
-    openai:low | openai:medium | openai:high | openai:xhigh) ;;
-    *) return 0 ;;
-    esac
-    local model_json
+    local model_json variant_fragment=
     model_json=$(json_escape "$model")
     model_json=${model_json//\'/\'\\\'\'}
-    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
+    case "${model%%/*}:$effort" in
+    anthropic:high | anthropic:max | openai:low | openai:medium | openai:high | openai:xhigh)
+      variant_fragment=",\"variant\":\"$effort\""
+      ;;
+    esac
+    if [ "$oc_major" = 1 ]; then
+      # 1.x: the build agent carries model + variant only for a recognized
+      # effort; with no variant the launch keeps its permission-only config.
+      [ -n "$variant_fragment" ] || return 0
+      printf ',"agent":{"build":{"model":"%s"%s}}' "$model_json" "$variant_fragment"
+    else
+      printf ',"model":"%s","agent":{"build":{"model":"%s"%s}}' "$model_json" "$model_json" "$variant_fragment"
+    fi
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
@@ -4551,14 +4612,16 @@ EOF
     # The session lock follows the shadowed home too, so the secondmate's own
     # cleanup serializes against this launch on the same lock file.
     REX_LABEL_HOME=$FM_HOME
+    REX_LABEL_ROOT=$FM_ROOT
     REX_LABEL_STATE=$STATE
     REX_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       REX_LABEL_HOME=$PROJ_ABS
+      REX_LABEL_ROOT=$PROJ_ABS
       REX_LABEL_STATE=$PROJ_ABS/state
       REX_LAUNCHER_RELATIONSHIP=other-home
     fi
-    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
+    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" FM_ROOT="$REX_LABEL_ROOT" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
     read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
 $REX_TASK_IDS
 EOF
@@ -4924,6 +4987,50 @@ rovo_endpoint_cleanup() {
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+}
+
+# OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
+# releases (2.0.11) only prefill the composer and never submit it, while later
+# ones (2.0.22) submit it on their own. This post-launch gate makes both work:
+# the turn has started once the worker's own busy-state plugin has written a
+# record (source opencode-plugin; the arm-time record is source fm-spawn), so
+# the gate waits for that. If none arrives within the settle window it sends
+# one Enter once the shared composer classifier reads the brief as pending -
+# skipped when it proves the composer empty, since the brief has then already
+# left it - and keeps waiting. An unknown read (a TUI that has not drawn yet)
+# keeps polling and only spends the Enter at the later submit deadline, so a
+# backend whose classifier can only answer unknown still gets its one Enter.
+# The composer is only a veto, never proof of delivery: OpenCode 2's sidebar
+# can make an already-submitted composer read pending.
+opencode2_turn_started() {
+  local rec
+  rec=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || return 1
+  set -f
+  # shellcheck disable=SC2086 # the record is four space-separated tokens
+  set -- $rec
+  set +f
+  [ "${2:-}" = opencode-plugin ]
+}
+
+opencode2_wait_for_delivery() {
+  local i=0 max=${FM_OPENCODE_DELIVERY_POLLS:-120} interval=${FM_OPENCODE_POLL_INTERVAL:-0.5}
+  local settle=${FM_OPENCODE_SUBMIT_SETTLE_POLLS:-20} deadline=${FM_OPENCODE_SUBMIT_DEADLINE_POLLS:-80}
+  local sent=0 composer
+  while [ "$i" -lt "$max" ]; do
+    opencode2_turn_started && return 0
+    if [ "$sent" -eq 0 ] && [ "$i" -ge "$settle" ]; then
+      composer=$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)
+      if [ "$composer" != unknown ] || [ "$i" -ge "$deadline" ]; then
+        sent=1
+        if [ "$composer" != empty ]; then
+          spawn_send_key "$T" Enter || return 1
+        fi
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  opencode2_turn_started
 }
 
 # agy carries its brief on the launch command, so it needs no delivery gate,
@@ -5323,6 +5430,46 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+# OpenCode changed its interactive launch surface, its composer exit key, and
+# its plugin surface between the 1.x and 2.x lines: 2.x dropped the top-level
+# --model flag (the model rides OPENCODE_CONFIG_CONTENT instead), exits on a raw
+# Ctrl-C, and reports activity through session.execution.* events from a plugin
+# that exports a default definition; 1.x takes --model, exits on /exit, and
+# reports through session.status/session.idle. Detect the installed major once,
+# here, before the busy-state plugin is provisioned below, so the plugin shape,
+# the launch shape, and fm-control's recorded exit mechanics all key off the one
+# resolved version. Only a parsed major >= 2 selects the 2.x shape: an
+# undetectable probe (opencode unresolvable, or --version without a parseable
+# x.y.z) falls back to the 1.x shape everywhere - --model, the 1.x config and
+# busy-state plugin, and the version-agnostic /exit - matching the pre-gate
+# behavior.
+# Resolve the opencode executable exactly once, to the absolute path the worker
+# pane's launch will run (baked into the launch command as __OPENCODEBIN__
+# below). The probe reads that same binary, so the recorded major can never
+# describe a different executable than the pane starts: a PATH that resolves one
+# opencode here and another in the pane can no longer make the launch drop
+# --model or fm-control pick the wrong exit key. An unresolvable executable
+# leaves the version empty - the probe records no version (1.x launch/exit
+# defaults) and the launch falls back to a bare `opencode` the pane resolves
+# itself, exactly as before this gate existed.
+OPENCODE_BIN=
+OPENCODE_VERSION=
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_BIN=$(resolve_pi_executable opencode) || OPENCODE_BIN=
+  if [ -n "$OPENCODE_BIN" ]; then
+    OPENCODE_VERSION=$("$OPENCODE_BIN" --version 2>/dev/null \
+      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  fi
+fi
+# The effective major the launch, plugin, and exit shapes branch on. A resolved
+# x.y.z yields its numeric major (the grep above guarantees digits); an empty or
+# unparseable probe falls back to 1, so only a genuine major >= 2 ever takes the
+# 2.x path.
+case "$OPENCODE_VERSION" in
+'') OPENCODE_MAJOR=1 ;;
+*) OPENCODE_MAJOR=${OPENCODE_VERSION%%.*} ;;
+esac
+
 # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
 # adapter with a verified semantic source, including a --secondmate launch.
 # The parent watcher reads this home's record; skipping the arm left a
@@ -5371,6 +5518,10 @@ BUSY_GEN=
   esac
   case "$WIRING_HARNESS" in
   claude* | opencode* | pi | pi-signed | omp)
+    # opencode arms on every detected major: OpenCode 2 and the OpenCode 1 /
+    # undetected->1.x path both provision a busy-state plugin below that needs
+    # this gen, so gating the arm on major >= 2 would leave OpenCode 1 without
+    # the busy-state wiring it had before the OpenCode 2 port.
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
       exit 1
@@ -5505,8 +5656,115 @@ EOF
     fi
     ;;
   opencode*)
+    # The worker's generated busy-state plugin is version-keyed off the major
+    # resolved above. A detected OpenCode 2 (major >= 2) gets the
+    # session.execution.* plugin that exports a default definition with setup();
+    # OpenCode 1.x and an undetected install that falls back to 1.x get the
+    # pre-port session.status / session.idle plugin, so OpenCode 1 keeps the
+    # busy-state wiring it had before the OpenCode 2 port. OpenCode 1 genuinely
+    # needs a busy plugin, so gating it off entirely would regress OpenCode 1
+    # from its pre-port behavior; only the plugin SHAPE is version-gated.
     mkdir -p "$WT/.opencode/plugins"
-    cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+    if [ "$OPENCODE_MAJOR" -ge 2 ]; then
+      cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state comes from OpenCode 2's session.execution.started and terminal
+// session.execution.* events, with the OpenCode 1 session.status/session.idle
+// names retained as legacy inputs. Scoping latches the first session that
+// reports activity and ignores other sessions until the latched session settles,
+// so a child's terminal event can never clear the worker's busy state. The
+// turn-ended touch stays the watcher's wake NOTIFICATION, never current-state
+// truth.
+import { execFile } from "node:child_process";
+const notifyTurnEnd = $busy_notify_turnend;
+const busyEvent = (state, event) =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
+    ], () => resolve());
+  });
+const touchTurnEnded = () =>
+  new Promise((resolve) => {
+    execFile("touch", ["$TURNEND"], () => resolve());
+  });
+const eventType = (event) => event && (event.type || event.name) || "";
+const eventProperties = (event) => event && (event.properties || event.data) || {};
+const sessionID = (event) => {
+  const properties = eventProperties(event);
+  return properties.sessionID || properties.sessionId || (properties.session && properties.session.id) || properties.id || "";
+};
+const setupEventSubscription = (ctx, handler) => {
+  if (!ctx || !ctx.event || !ctx.event.subscribe) return false;
+  const controller = new AbortController();
+  void (async () => {
+    try {
+      const stream = await ctx.event.subscribe({ signal: controller.signal, onActivity() {} });
+      for await (const event of stream) await handler(event);
+    } catch {
+    }
+  })();
+  return true;
+};
+const makeHandler = () => {
+  let activeSession = null;
+  return async (event) => {
+    const type = eventType(event);
+    const id = sessionID(event);
+    if (type === "session.execution.started") {
+      if (activeSession === null) activeSession = id;
+      if (id === activeSession) await busyEvent("busy", "session-execution-started");
+      return;
+    }
+    if (type === "session.execution.succeeded" || type === "session.execution.interrupted" || type === "session.execution.failed") {
+      if (id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", type.replace(/\./g, "-"));
+      }
+      if (notifyTurnEnd) await touchTurnEnded();
+      return;
+    }
+    if (type === "session.status") {
+      const properties = eventProperties(event);
+      const statusType = properties.status && properties.status.type;
+      if (statusType === "busy" || statusType === "retry") {
+        if (activeSession === null) activeSession = id;
+        if (id === activeSession) await busyEvent("busy", "session-" + statusType);
+        return;
+      }
+      if (statusType === "idle" && id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-status-idle");
+      }
+      return;
+    }
+    if (type === "session.idle") {
+      if (id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-idle");
+      }
+      if (notifyTurnEnd) await touchTurnEnded();
+    }
+  };
+};
+export const FmBusyState = async () => {
+  const handleEvent = makeHandler();
+  return {
+    event: async ({ event }) => handleEvent(event),
+  };
+};
+
+export default {
+  id: "fm.busy-state",
+  server: FmBusyState,
+  setup(ctx) {
+    setupEventSubscription(ctx, makeHandler());
+  },
+};
+EOF
+    else
+      cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's session.status events: busy and retry
@@ -5558,6 +5816,7 @@ export const FmBusyState = async () => {
   };
 };
 EOF
+    fi
     exclude_path '.opencode/plugins/fm-busy-state.js'
     ;;
   pi | pi-signed)
@@ -5925,7 +6184,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5937,6 +6196,12 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  if [ "$RAW_LAUNCH" = 0 ]; then
+    case "$HARNESS" in
+      claude) echo "approval_mode=$CLAUDE_PERMISSION_MODE" ;;
+      codex) echo "approval_mode=$CODEX_APPROVAL_MODE" ;;
+    esac
+  fi
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -5950,6 +6215,10 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # The detected OpenCode major, recorded so fm-control sends the exit key this
+  # agent's TUI understands. Written only when a version was resolved, so a
+  # non-opencode or undetectable task record stays byte-identical.
+  [ -z "$OPENCODE_VERSION" ] || echo "opencode_version=$OPENCODE_VERSION"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -6099,10 +6368,10 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
@@ -6124,6 +6393,7 @@ case "$LAUNCH" in
   fi
   ;;
 esac
+LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else
@@ -6166,6 +6436,22 @@ commandcode)
   LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+opencode)
+  # The resolved absolute path probed for the version gate above, so the pane
+  # runs exactly the binary whose major was recorded. An unresolved executable
+  # keeps the bare `opencode` the pane resolves itself (pre-gate fallback).
+  # A detected OpenCode 2 also gets --standalone: its default launch attaches to
+  # the shared background service, which hosts plugins with the service's own
+  # environment and ignores this pane's OPENCODE_CONFIG_CONTENT, so per-worker
+  # model, permissions, FM_HOME, and lock ancestry would be wrong.
+  if [ -n "$OPENCODE_BIN" ]; then
+    oc_launch_bin=$(shell_quote "$OPENCODE_BIN")
+  else
+    oc_launch_bin=opencode
+  fi
+  [ "$OPENCODE_MAJOR" -lt 2 ] || oc_launch_bin="$oc_launch_bin --standalone"
+  LAUNCH=${LAUNCH//__OPENCODEBIN__/"$oc_launch_bin"}
+  ;;
 polytoken)
   LAUNCH=${LAUNCH//__POLYTOKENBIN__/"$(shell_quote "$POLYTOKEN_BIN")"}
   LAUNCH=${LAUNCH//__POLYTOKENCONFIG__/"$(shell_quote "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")")"}
@@ -6571,6 +6857,14 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = opencode ] && [ "$OPENCODE_MAJOR" -ge 2 ]; then
+  if ! opencode2_wait_for_delivery; then
+    printf '%s\n' "$(status_stamp_line "failed: opencode $OPENCODE_VERSION did not start the brief turn in window $T")" >>"$STATE/$ID.status"
+    echo "error: opencode $OPENCODE_VERSION did not start the brief turn; inspect window $T" >&2
+    rovo_endpoint_cleanup
     exit 1
   fi
 fi

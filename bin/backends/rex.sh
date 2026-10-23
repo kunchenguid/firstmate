@@ -332,7 +332,8 @@ fm_backend_rex_home_sessions() {  # <label>
 # "<session-id> <window-id> <block-id>". <relationship> is launcher-home for a
 # crewmate or scout of THIS home (the launcher's own Rex session when there is
 # one) and other-home for a --secondmate launch, which always uses that other
-# home's own per-home session (the caller shadows FM_HOME). The window label
+# home's own per-home session (the caller shadows FM_HOME, FM_ROOT, and STATE).
+# The window label
 # is the task label the captain reads in the tab bar; the block label is the
 # home-scoped name. <mode> is spawn or reclaim and decides what a block
 # already carrying that name in the chosen session means
@@ -373,6 +374,10 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
         sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
         wid=$(printf '%s' "$out" | jq -r '.initial_windows[0].window_id // empty' 2>/dev/null)
         bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0] // empty' 2>/dev/null)
+        if [ "$relationship" = other-home ] && [ -n "${REX_SESSION:-}" ]; then
+          fm_backend_rex_cli session move "$sid" --after "$REX_SESSION" >/dev/null 2>&1 \
+            || echo "warning: could not place Rex secondmate session $sid after its launcher session" >&2
+        fi
         ;;
       1) sid=$sessions ;;
       *)
@@ -390,6 +395,10 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
     }
     wid=$FM_BACKEND_REX_NEW_WINDOW
     bid=$FM_BACKEND_REX_NEW_BLOCK
+    if [ "$relationship" = other-home ] && [ "$count" -ne 0 ]; then
+      fm_backend_rex_cli window move -s "$sid" "$wid" --index 1 >/dev/null 2>&1 \
+        || echo "warning: could not move the respawned Rex secondmate tab $wid to the first position" >&2
+    fi
   fi
   fm_backend_rex_session_unlock
   fm_backend_rex_finish_tab "$sid" "$wid" "$bid" "$label"
@@ -440,7 +449,7 @@ fm_backend_rex_open_tab_locked() {  # <session-id> <label> <cwd> <spawn|reclaim>
     return 1
   fi
   rm -f "$err"
-  printf '%s' "$view" | jq -e '.windows | type == "array"' >/dev/null 2>&1 || {
+  printf '%s' "$view" | jq -e '.session_id != null and .label != null' >/dev/null 2>&1 || {
     echo "error: could not read rex session $sid" >&2
     return 1
   }
@@ -465,7 +474,7 @@ fm_backend_rex_open_tab_locked() {  # <session-id> <label> <cwd> <spawn|reclaim>
       return 1
     fi
   done <<EOF
-$(printf '%s' "$view" | jq -r --arg n "$name" '.windows[]?.layers[]?.blocks[]? | select(.label == $n) | .block_id' 2>/dev/null)
+$(printf '%s' "$view" | jq -r --arg n "$name" '(.windows // [])[]?.layers[]?.blocks[]? | select(.label == $n) | .block_id' 2>/dev/null)
 EOF
   out=$(fm_backend_rex_cli window new -s "$sid" "$label" --focus=false --cwd "$cwd" --json) || {
     echo "error: rex could not open a tab for '$label' in session $sid" >&2
@@ -949,7 +958,7 @@ fm_backend_rex_retire_session() {  # <session-id>
   fm_backend_rex_session_lock || return 0
   if view=$(fm_backend_rex_session_view "$sid") \
     && printf '%s' "$view" | jq -e --arg want "$(fm_backend_rex_home_label)" \
-      '.label == $want and (.windows | type == "array" and length == 0)' >/dev/null 2>&1; then
+      '.label == $want and ((.windows // []) | type == "array" and length == 0)' >/dev/null 2>&1; then
     fm_backend_rex_cli kill "$sid" >/dev/null 2>&1 || true
   fi
   fm_backend_rex_session_unlock

@@ -99,8 +99,9 @@ case "$cmd:$sub" in
       session.view)
         has_session "$sid" || notfound "session"
         jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
-          | {session_id, label, windows: [.windows[] | {window_id, label,
-              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]}' "$S" ;;
+          | if ((.windows // []) | length) == 0 then {session_id, label}
+            else {session_id, label, windows: [.windows[] | {window_id, label,
+              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]} end' "$S" ;;
       *) exit 2 ;;
     esac ;;
   new:)
@@ -715,6 +716,54 @@ test_kill_refuses_without_proof() {
   pass "fm_backend_kill rex: refuses success unless the block is proven gone"
 }
 
+# rex_teardown_meta: record <id> of <kind> on the fake's block in <state-dir>.
+rex_teardown_meta() {  # <state-dir> <id> <kind> <home> <session-id> <window-id> <block-id>
+  local state=$1 id=$2 kind=$3 home=$4 sid=$5 wid=$6 bid=$7
+  {
+    echo "window=${sid#session:}:${bid#block:}"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$home"
+    echo "project=$home"
+    [ "$kind" != secondmate ] || { echo "home=$home"; echo "mode=secondmate"; echo "projects=alpha"; }
+    echo "harness=echo"
+    echo "yolo=off"
+    echo "kind=$kind"
+    echo "backend=rex"
+    echo "rex_server=unix:///fake/rex.sock"
+    echo "rex_session_id=$sid"
+    echo "rex_window_id=$wid"
+    echo "rex_block_id=$bid"
+  } >"$state/$id.meta"
+}
+
+test_teardown_retires_the_secondmate_session() {
+  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc
+  dir=$(new_case teardown-secondmate)
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/data" "$dir/home/config"
+  printf 'sm' >"$mate/.fm-secondmate-home"
+  out=$(rex_env "$dir" "FM_HOME=$mate" "FM_ROOT=$mate" "STATE=$mate/state" \
+    'fm_backend_rex_create_task fm-sm /tmp other-home') || fail "secondmate create_task failed"
+  read -r sid wid bid <<<"$out"
+  out=$(rex_env "$dir" "FM_HOME=$mate" "FM_ROOT=$mate" "STATE=$mate/state" \
+    'fm_backend_rex_create_task fm-crew /tmp') || fail "crew create_task failed"
+  read -r crew_sid crew_wid crew_bid <<<"$out"
+  assert_equals "$sid" "$crew_sid" "the secondmate's crew must share its per-home session"
+  rex_teardown_meta "$dir/home/state" sm secondmate "$mate" "$sid" "$wid" "$bid"
+  rex_teardown_meta "$mate/state" crew ship "$dir/nonexistent-crew" "$crew_sid" "$crew_wid" "$crew_bid"
+  fake_rex "$dir" new other --window keep --cwd /tmp --json >/dev/null
+
+  out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    "$ROOT/bin/fm-teardown.sh" sm --force 2>&1); rc=$?
+  expect_code 0 "$rc" "teardown of a rex secondmate must succeed: $out"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\")] | length")" \
+    "retiring the secondmate must retire its emptied per-home session"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "an unrelated session must survive the retirement"
+  pass "fm-teardown rex: retiring a secondmate closes its crew and its own tab and retires its per-home session"
+}
+
 test_absence_recheck() {
   local dir out sid bid t ep=unix:///fake/rex.sock
   dir=$(new_case absence)
@@ -848,6 +897,7 @@ test_send_literal_and_keys
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
 test_kill_refuses_without_proof
+test_teardown_retires_the_secondmate_session
 test_absence_recheck
 test_control_absence_verdict_reads_rex_meta
 test_control_exit_after_a_server_stop
