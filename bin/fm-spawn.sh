@@ -3008,7 +3008,8 @@ muse_worker_meta_api_key_present() {
   fi
   [ "$BACKEND" = tmux ] || return 1
   if [ -n "${TMUX:-}" ]; then
-    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
+    fm_backend_source tmux >/dev/null 2>&1 || return 1
+    session=$(fm_backend_tmux_own_session 2>/dev/null) || return 1
   else
     tmux has-session -t firstmate 2>/dev/null || return 1
     session=firstmate
