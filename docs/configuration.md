@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [per-project captain preferences](#per-project-captain-preferences-datacaptain-projects), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -814,6 +814,24 @@ Before changing it, inspect the current file and curate the matching bullet in p
 
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
+
+## Per-project captain preferences (data/captain-projects/)
+
+A preference that applies to one project only lives in that project's own `data/captain-projects/<project>.md`, not in `data/captain.md`, so sessions that never touch the project stop paying for it.
+`<project>` is the registry name, the same as its `projects/<name>` clone directory, and must be one plain path component.
+Keep `data/captain.md` for cross-project preferences and working style.
+
+The file is local, gitignored with the rest of `data/`, and never printed by session start or counted by the [startup memory budget](#startup-memory-budget-configstartup-memory-budget), which cover only `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
+Because nothing loads it at startup, every path that acts on the project reads it through `bin/fm-project-prefs.sh`, whose header owns the name rule and the exit codes:
+
+- `bin/fm-brief.sh` prints it after the scaffold line for a ship or scout brief, so firstmate writes its rules into the brief's Firstmate spec, and stops before writing anything when the file exists but is unreadable.
+- `bin/fm-spawn.sh` names it at dispatch for a ship, so a hand-written brief cannot skip it.
+- `bin/fm-review-diff.sh` prints it before the diff, so a review is judged against the project's own rules.
+- Landing and merge are covered by the [`ship-landing` skill](../.agents/skills/ship-landing/SKILL.md), which has firstmate run `bin/fm-project-prefs.sh show <project>` before it decides a merge.
+
+The file follows the same inspect-then-update curation as `data/captain.md`, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) routes a project-only preference there.
+It is per-home and is not propagated to secondmate homes, so a secondmate that works the project needs its own copy of the file.
+A preference that must apply to every project, or one that declares a `Memory layering` tier, stays in `data/captain.md` or `data/captain-shared.md`.
 
 ## Operational learnings (data/learnings.md)
 

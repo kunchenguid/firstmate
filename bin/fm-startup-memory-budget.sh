@@ -10,6 +10,8 @@
 # Bootstrap owns default materialization; this command never creates or repairs
 # configuration, so an absent, malformed, symlinked, hardlinked, or otherwise
 # unsafe value is a concrete error rather than an inferred default.
+# Per-project captain preferences (data/captain-projects/<project>.md, read
+# through bin/fm-project-prefs.sh) are not startup memory and are never counted.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
