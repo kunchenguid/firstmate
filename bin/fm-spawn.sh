@@ -47,6 +47,9 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   A ship whose project has per-project captain preferences
+#   (data/captain-projects/<project>.md, bin/fm-project-prefs.sh) also gets a
+#   one-line notice naming the file, so a hand-written brief cannot skip it.
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
@@ -3984,6 +3987,12 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
+  # Per-project captain preferences (bin/fm-project-prefs.sh) are printed when
+  # the brief is scaffolded; this names the file again at dispatch so a brief
+  # written by hand cannot skip it.
+  if PROJECT_PREFS_FILE=$("$FM_ROOT/bin/fm-project-prefs.sh" path "$PROJ_NAME" 2>/dev/null); then
+    echo "notice: $PROJ_NAME has per-project captain preferences in $PROJECT_PREFS_FILE; confirm the brief carries them (bin/fm-project-prefs.sh show $PROJ_NAME)" >&2
+  fi
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
   # local-only) resolves to no posture at all, and launching on the silent

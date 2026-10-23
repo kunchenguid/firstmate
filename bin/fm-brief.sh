@@ -145,6 +145,10 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# A ship or scout scaffold for a project that has per-project captain preferences
+# (data/captain-projects/<project>.md, owned by bin/fm-project-prefs.sh) also
+# prints that file after the scaffold line, so its rules reach the brief's
+# Firstmate spec; an unreadable file stops the scaffold before anything is written.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -591,6 +595,20 @@ fi
 
 REPO=${POS[1]}
 
+# A project's own captain preferences live outside data/captain.md so only work
+# on that project reads them (bin/fm-project-prefs.sh owns the file and its name
+# rule). They are read before anything is written, so an unreadable file stops
+# the scaffold instead of letting the brief go out without the project's rules,
+# and they are printed after the scaffold line so firstmate writes them into the
+# brief's Firstmate spec.
+PROJECT_PREFS=$("$SCRIPT_DIR/fm-project-prefs.sh" show "$(basename "$REPO")") || {
+  echo "error: could not read the per-project captain preferences for $REPO" >&2
+  exit 1
+}
+print_project_prefs() {
+  [ -z "$PROJECT_PREFS" ] || printf '%s\n' "$PROJECT_PREFS"
+}
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -740,6 +758,7 @@ If your findings reveal work that should ship (e.g. you reproduced a bug and the
 EOF
 append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+print_project_prefs
 exit 0
 fi
 
@@ -825,3 +844,4 @@ elif [ "$FORGE" = gerrit ]; then
 else
   echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi
+print_project_prefs
