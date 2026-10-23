@@ -2713,6 +2713,43 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   pass "merged notices auto-clean only finished direct reports with recorded deliverables, leave no retired task state, and surface guarded refusals without force"
 }
 
+test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
+  local dir state url rc last
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case self-merge-auto-teardown)
+  state="$dir/home/state"
+  git -C "$dir/wt" checkout -q -b fm/task
+  write_poll_meta "$state" task-a "$url" \
+    'kind=ship' 'mode=no-mistakes' 'branch=fm/task' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' "project=$dir/wt"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  seed_canonical_poll "$dir" task-a "$url"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED FM_TEST_NM_WORKTREE="$dir/wt" \
+    run_merge_entry "$dir" task-a "$url" >"$dir/merge.out" 2>"$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "self-merge: the merge entrypoint failed: $(cat "$dir/merge.err")"
+  assert_grep "check: merge landed: task-a $url" "$state/.wake-queue" \
+    "self-merge: the durable merge notice lost the canonical merge identity"
+  last=$(grep -F "merged-task-a-$url" "$state/.wake-queue" | tail -n 1)
+  case "$last" in
+    *'lane automatically cleaned up'*)
+      [ ! -e "$state/task-a.meta" ] \
+        || fail "self-merge: the cleanup reported success but the task record survived"
+      ;;
+    *'automatic cleanup refused: '*)
+      [ -f "$state/task-a.meta" ] \
+        || fail "self-merge: a refused cleanup removed the task record"
+      ;;
+    *) fail "self-merge: the entrypoint skipped the guarded cleanup of a finished direct report: $last" ;;
+  esac
+  pass "a merge this home performs itself runs the guarded cleanup of a finished direct report and publishes its outcome durably"
+}
+
 test_different_merged_pr_for_same_task_is_not_absorbed() {
   local dir state rc
   dir=$(make_case different-merged-pr-not-absorbed)
@@ -3777,6 +3814,7 @@ test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_watcher_surfaces_guarded_auto_teardown_refusal
 test_merged_notice_auto_teardown_is_done_only_and_guarded
+test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
