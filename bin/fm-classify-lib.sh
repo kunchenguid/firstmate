@@ -1522,8 +1522,26 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# Print <task-id>'s presentation-cursor row as "<ident>\t<presented>\t<backstop>",
+# or nothing when the manifest has no row for it. A malformed or duplicated row
+# fails only its own task's lookup; other tasks' rows are not validated here.
+_fm_status_presentation_cursor_row() {  # <manifest-data> <task-id>
+  local row_task ident presented backstop extra found=
+  while IFS=$(printf '\t') read -r row_task ident presented backstop extra; do
+    [ "$row_task" = "$2" ] || continue
+    [ -z "$found" ] || return 1
+    [ -z "$extra" ] || return 1
+    case "$presented:$backstop" in *[!0-9:]*) return 1 ;; esac
+    [ -n "$presented" ] && [ -n "$ident" ] || return 1
+    found=$ident$'\t'$presented$'\t'${backstop:-0}
+  done <<EOF
+$1
+EOF
+  printf '%s' "$found"
+}
+
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
+  local f=$1 state task manifest data row offset ident cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1531,25 +1549,13 @@ status_presentation_cursor_offset() {  # <status-file>
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
-    offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
-      [ -n "$row_task" ] || continue
-      [ -z "$extra" ] || return 1
-      case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
-      [ -n "$legacy" ] && [ -n "$ident" ] || return 1
-      if [ "$row_task" = "$task" ]; then
-        [ -z "$offset" ] || return 1
-        offset=$legacy
-        cur_ident=$ident
-      fi
-    done <<EOF
-$data
-EOF
-    if [ -z "$offset" ]; then
+    row=$(_fm_status_presentation_cursor_row "$data" "$task") || return 1
+    if [ -z "$row" ]; then
       printf '0'
       return 0
     fi
-    ident=$cur_ident
+    ident=${row%%$'\t'*}
+    offset=${row#*$'\t'}; offset=${offset%%$'\t'*}
   else
     legacy=$(_fm_open_decisions_cursor_path "$f")
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
@@ -1568,7 +1574,7 @@ EOF
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  local f=$1 state task manifest data row ident backstop current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1576,27 +1582,17 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   [ -e "$manifest" ] || { printf '0'; return 0; }
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
-  backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
-    [ -n "$row_task" ] || continue
-    [ -z "$extra" ] || return 1
-    case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
-    [ -n "$presented" ] && [ -n "$ident" ] || return 1
-    if [ "$row_task" = "$task" ]; then
-      current=$(_fm_open_decisions_file_ident "$f") || return 1
-      size=$(_fm_status_file_size "$f") || return 1
-      size=${size//[[:space:]]/}
-      case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
-      backstop=${row_backstop:-0}
-      [ "$backstop" -le "$size" ] || backstop=0
-      printf '%s' "$backstop"
-      return 0
-    fi
-  done <<EOF
-$data
-EOF
-  printf '0'
+  row=$(_fm_status_presentation_cursor_row "$data" "$task") || return 1
+  [ -n "$row" ] || { printf '0'; return 0; }
+  ident=${row%%$'\t'*}
+  backstop=${row##*$'\t'}
+  current=$(_fm_open_decisions_file_ident "$f") || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  [ "$backstop" -le "$size" ] || backstop=0
+  printf '%s' "$backstop"
 }
 
 status_signal_seen_marker_path() {  # <state> <task-id>
