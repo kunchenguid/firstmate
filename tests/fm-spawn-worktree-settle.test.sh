@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the `seq 1 "$worktree_wait_secs"` loop after `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -232,6 +232,48 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# The window is a count of 1-second polls read from FM_SPAWN_WORKTREE_WAIT_SECS,
+# defaulting to 60. A pane that never settles reads its path once per poll, so
+# the fake tmux's read count measures the window without sleeping.
+test_worktree_wait_defaults_to_60_and_honors_override() {
+  local rec id out status reads
+  id=settle-wait-default-z6
+  rec=$(make_primary_case settle-wait-default "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(unset FM_SPAWN_WORKTREE_WAIT_SECS; run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 60s" "the default window was not 60s"
+  assert_contains "$out" "FM_SPAWN_WORKTREE_WAIT_SECS" "the refusal did not name the variable that widens the window"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -ge 60 ] && [ "$reads" -le 63 ] || fail "default window took $reads reads instead of about 60"
+
+  id=settle-wait-short-z7
+  rec=$(make_primary_case settle-wait-short "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(FM_SPAWN_WORKTREE_WAIT_SECS=7 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 7s" "the overridden window was not reported"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -ge 7 ] && [ "$reads" -le 10 ] || fail "overridden window took $reads reads instead of about 7"
+
+  id=settle-wait-invalid-z8
+  rec=$(make_primary_case settle-wait-invalid "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(FM_SPAWN_WORKTREE_WAIT_SECS=soon run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 60s" "a non-numeric window did not fall back to 60s"
+  pass "the worktree window defaults to 60s and FM_SPAWN_WORKTREE_WAIT_SECS overrides it"
+}
+
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
   id=settle-unborn-head-z5
@@ -257,6 +299,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_worktree_wait_defaults_to_60_and_honors_override
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
