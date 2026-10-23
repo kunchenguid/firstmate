@@ -56,8 +56,11 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
+  def backlog_artifact($r):
+    if $r.links_ambiguous == true then "links ambiguous: \($r.links_raw | gsub("\\|"; "\\|"))"
+    else dash($r.pr_url // $r.report_path // $r.local_note) end;
   def backlog_row($r):
-    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(backlog_artifact($r)) |";
 
   "# Fleet View",
   "",
@@ -74,7 +77,9 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Queued",
-  (if ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
+  (if (.backlog.error // null) != null then
+    "Backlog unavailable: \(.backlog.error)"
+   elif ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
     "No queued backlog records found."
    else
     "| ID | Title | Repo | Kind | Blocked By | Artifact |",
@@ -83,7 +88,9 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Done",
-  (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
+  (if (.backlog.error // null) != null then
+    "Backlog unavailable: \(.backlog.error)"
+   elif ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
     "No done backlog records found."
    else
     "| ID | Title | Repo | Kind | Blocked By | Artifact |",

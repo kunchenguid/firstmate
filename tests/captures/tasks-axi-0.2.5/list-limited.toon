@@ -1,0 +1,8 @@
+count: 3 of 7 total
+tasks[3]{id,state,kind,repo,title,blocked,blocked_by,closed,created,deps,held,hold_kind,hold_reason,hold_until,links,priority}:
+  odd-links,queued,ship,fixture,"Odd links https://github.com/o/a,b/pull/7 data/a,report:b/report.md",no,none,"-",2026-10-02,none,no,"-","-","-","pr:https://github.com/o/a,b/pull/7,report:data/a,report:b/report.md","-"
+  two-prs,queued,ship,fixture,"Two PRs https://github.com/o/r/pull/1 https://github.com/o/r/pull/2",no,none,"-",2026-10-02,none,no,"-","-","-","pr:https://github.com/o/r/pull/1,pr:https://github.com/o/r/pull/2","-"
+  long-title,queued,ship,fixture,"Long title xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n... (truncated, 211 chars total - use show long-title --full to see complete text)",no,none,"-",2026-10-02,none,no,"-","-","-",none,"-"
+help[2]:
+  - Run `tasks-axi show <id>` for full notes on a task
+  - Run `tasks-axi ready` to see unblocked queued work

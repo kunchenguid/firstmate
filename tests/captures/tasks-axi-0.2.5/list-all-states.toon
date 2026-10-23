@@ -1,0 +1,12 @@
+count: 7
+tasks[7]{id,state,kind,repo,title,blocked,blocked_by,closed,created,deps,held,hold_kind,hold_reason,hold_until,links,priority}:
+  odd-links,queued,ship,fixture,"Odd links https://github.com/o/a,b/pull/7 data/a,report:b/report.md",no,none,"-",2026-10-02,none,no,"-","-","-","pr:https://github.com/o/a,b/pull/7,report:data/a,report:b/report.md","-"
+  two-prs,queued,ship,fixture,"Two PRs https://github.com/o/r/pull/1 https://github.com/o/r/pull/2",no,none,"-",2026-10-02,none,no,"-","-","-","pr:https://github.com/o/r/pull/1,pr:https://github.com/o/r/pull/2","-"
+  long-title,queued,ship,fixture,"Long title xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n... (truncated, 211 chars total - use show long-title --full to see complete text)",no,none,"-",2026-10-02,none,no,"-","-","-",none,"-"
+  done-work,done,ship,fixture,"Fixture landed https://github.com/o/r/pull/338",no,none,2026-10-02,2026-10-02,none,no,"-","-","-","pr:https://github.com/o/r/pull/338","-"
+  held-choice,queued,captain,fixture,Fixture captain decision,no,none,"-",2026-10-02,none,yes,captain,"Fixture decision pending, with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason with a long reason","-",none,"-"
+  queued-work,queued,ship,fixture,"Fixture queued, with comma and \"quote\" and unicode äö https://github.com/o/r/pul\n... (truncated, 85 chars total - use show queued-work --full to see complete text)",yes,in-flight-work,"-",2026-10-02,"blocked-by:in-flight-work",no,"-","-","-","pr:https://github.com/o/r/pull/339","-"
+  in-flight-work,in_flight,ship,fixture,Fixture underway,no,none,"-",2026-10-02,none,no,"-","-","-",none,"-"
+help[2]:
+  - Run `tasks-axi show <id>` for full notes on a task
+  - Run `tasks-axi ready` to see unblocked queued work
