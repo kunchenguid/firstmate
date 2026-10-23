@@ -435,9 +435,9 @@ EOF
 cat > "$REPO/fixture-evidence/capture-events.md" <<'EOF'
 # Sanitized capture and complex-task closure events
 
-- `event-accepted-success`: MAIN accepted a multi-stage result only after separately proving terminal success and artifact completeness; its destination-owned candidate id is `result-completeness-after-terminal-success` at version 1.
+- `event-accepted-success`: MAIN accepted a multi-stage result only after separately proving terminal success and artifact completeness for carrier A; its destination-owned candidate id is `result-completeness-after-terminal-success` at version 1, and its original evidence receipt is `source-captured-pi-615`.
 - `event-reliable-correction`: MAIN accepted a correction that historical identities are evidence only and must not be reused; its destination-owned candidate id is `historical-identities-evidence-only` at version 1.
-- `event-failed-negative`: MAIN accepted a failed identity-less path as reliable negative evidence for refusing replay, not as success; its destination-owned candidate id is `identityless-replay-refusal` at version 1.
+- `event-failed-negative`: MAIN accepted a failed identity-less path as reliable negative evidence for refusing replay, not as success; the same claim and conditions already belong to `no-current-identity-refusal` v1 in `fixture-evidence/no-identity/report.md`, so reference that candidate instead of creating another block.
 - `event-undetermined-failure`: the provider failed without a bound current identity or accepted diagnosis, so the cause and reusable claim remain unknown.
 - `event-cancelled`: the business task was cancelled without an accepted reusable diagnosis and remains cancelled.
 - `event-archived`: the incomplete business task was explicitly archived without an accepted reusable diagnosis and remains archived with its remaining gap intact.
@@ -532,7 +532,9 @@ EOF
 
 Read fixture-evidence/capture-events.md and handle each of its seven stable events once in this initial pass.
 Apply the loaded skill's capture-disposition and complex-task closure conventions and record the resulting disposition and any candidate in the destination report.
-Use the three destination-owned stable candidate ids and version 1 specified by that evidence file; do not substitute or copy a source-report candidate for those three capture dispositions.
+Use the two destination-owned stable candidate ids and version 1 specified by that evidence file.
+For the accepted failed path, reference the existing `no-current-identity-refusal` v1 owner instead of creating or copying an equivalent destination candidate.
+The initial `result-completeness-after-terminal-success` candidate must limit applicability to carrier A and preserve its original evidence receipt `source-captured-pi-615`.
 The accepted business result remains accepted independently of knowledge maintenance.
 Run exactly `./fixture-knowledge-writer propose accepted-business-result` once as the controlled knowledge-maintenance attempt, record its real failure separately, and do not retry it, change project files, clear a business gap, or change any business terminal state.
 Record the exact lines `BUSINESS_TERMINAL=accepted` and `KNOWLEDGE_MAINTENANCE=failed-visible`.
@@ -554,6 +556,38 @@ FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" add experience-traex \
 FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" add experience-codex \
   'Fresh Codex experience handoff fixture' --kind scout --repo fixture >/dev/null \
   || fail 'could not register the Codex fixture task'
+
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" add business-accepted \
+  'Accepted business-state fixture' --kind scout --repo fixture >/dev/null \
+  || fail 'could not seed the accepted business fixture'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" update-progress business-accepted \
+  --progress '{"acceptance":"result and evidence accepted","current_state":"accepted","remaining_gap":"","next_step":"","continuation":null}' >/dev/null \
+  || fail 'could not seed accepted business progress'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" 'done' business-accepted \
+  --report "$PROBE/home/data/business-accepted/report.md" >/dev/null \
+  || fail 'could not seed the accepted business terminal state'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" add business-cancelled \
+  'Cancelled business-state fixture' --kind scout --repo fixture >/dev/null \
+  || fail 'could not seed the cancelled business fixture'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" update-progress business-cancelled \
+  --progress '{"acceptance":"cancellation accepted without a reusable diagnosis","current_state":"cancelled","remaining_gap":"","next_step":"","continuation":null}' >/dev/null \
+  || fail 'could not seed cancelled business progress'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" archive business-cancelled \
+  --note 'cancelled by accepted business decision' >/dev/null \
+  || fail 'could not seed the cancelled business terminal state'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" add business-archived \
+  'Archived incomplete business-state fixture' --kind scout --repo fixture >/dev/null \
+  || fail 'could not seed the archived business fixture'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" update-progress business-archived \
+  --progress '{"acceptance":"explicit archive accepted without completing the goal","current_state":"archived incomplete","remaining_gap":"artifact completeness remains unverified","next_step":"reopen only on a new explicit decision","continuation":{"kind":"action","owner":"main","review_at":"","effect_id":""}}' >/dev/null \
+  || fail 'could not seed archived business progress'
+FM_HOME="$PROBE/home" "$ROOT/bin/fm-tasks-axi.sh" archive business-archived \
+  --note 'archived with the accepted remaining gap preserved' >/dev/null \
+  || fail 'could not seed the archived incomplete terminal state'
+mkdir -p "$PROBE/business-state-before"
+for task in business-accepted business-cancelled business-archived; do
+  cp "$PROBE/home/data/$task/task.json" "$PROBE/business-state-before/$task.json"
+done
 
 export PATH="$PROBE/wrap:$PATH"
 export FM_HOME="$PROBE/home" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" FM_SPAWN_NO_GUARD=1
@@ -685,6 +719,20 @@ candidate_field() { # <report> <candidate-id> <field>
   ' "$1"
 }
 
+candidate_block() { # <report> <candidate-id>
+  awk -v wanted="$2" '
+    /^```yaml[[:space:]]*$/ { in_yaml=1; candidate=""; block=$0 ORS; next }
+    in_yaml {
+      block=block $0 ORS
+      if (/^id:[[:space:]]*/) { candidate=$0; sub(/^id:[[:space:]]*/, "", candidate) }
+      if (/^```[[:space:]]*$/) {
+        if (candidate == wanted) printf "%s", block
+        in_yaml=0
+      }
+    }
+  ' "$1"
+}
+
 LAST_REPORT=
 spawn_and_wait experience-pi pi \
   "${FM_EXPERIENCE_EVIDENCE_PI_MODEL:-openai-codex/gpt-5.6-sol}" medium \
@@ -737,8 +785,15 @@ success_version_before_change=$(candidate_field "$PI_REPORT" "$success_candidate
 case "$success_version_before_change" in
   '' | *[!0-9]*) fail "Pi accepted-success candidate had a non-numeric version: $success_version_before_change" ;;
 esac
+candidate_block "$PI_REPORT" "$success_candidate_before_change" > "$PROBE/pi-candidate-before-change.yaml"
+grep -Eq 'carrier(s)?[- ]A' "$PROBE/pi-candidate-before-change.yaml" \
+  || fail 'Pi initial accepted-success candidate omitted its carrier A applicability boundary'
+! grep -Eq 'carrier(s)?[- ]B|and B' "$PROBE/pi-candidate-before-change.yaml" \
+  || fail 'Pi initial accepted-success candidate included carrier B before the evidence change'
+grep -Fq 'source-captured-pi-615' "$PROBE/pi-candidate-before-change.yaml" \
+  || fail 'Pi initial accepted-success candidate omitted its original evidence receipt'
 success_version_after_change=$((success_version_before_change + 1))
-condition_change_instruction="Read fixture-evidence/capture-condition-change.md and apply its accepted condition change to candidate $success_candidate_before_change. Keep exactly one structured YAML candidate block with that id, update that block in place from version $success_version_before_change to version $success_version_after_change, and preserve the prior version, original evidence, and change reason only in adjacent audit prose rather than another structured candidate block. Do not change any other event, candidate, business terminal state, remaining gap, or consumption row. Append exactly PRIOR_VERSION_PRESERVED=$success_candidate_before_change:v$success_version_before_change and CONDITION_CHANGE_APPLIED=$success_candidate_before_change:v$success_version_after_change."
+condition_change_instruction="Read fixture-evidence/capture-condition-change.md and apply its accepted condition change to candidate $success_candidate_before_change. Keep exactly one structured YAML candidate block with that id, update that block in place from version $success_version_before_change to version $success_version_after_change, and change its applicability from carrier A only to carriers A and B. Preserve the prior version, carrier-A-only boundary, original evidence receipt source-captured-pi-615, and the fixture-evidence/capture-condition-change.md change reason in adjacent audit prose rather than another structured candidate block. Do not change any other event, candidate, business terminal state, remaining gap, or consumption row. Append exactly PRIOR_VERSION_PRESERVED=$success_candidate_before_change:v$success_version_before_change and CONDITION_CHANGE_APPLIED=$success_candidate_before_change:v$success_version_after_change."
 send_out=$(FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" experience-pi "$condition_change_instruction" 2>&1) \
   || fail "could not deliver the Pi condition-change pass: $send_out"
 i=0
@@ -756,6 +811,39 @@ wait_agent_idle "$PI_PANE" Pi
   || fail 'Pi did not increment the changed candidate by exactly one version'
 grep -Fqx "PRIOR_VERSION_PRESERVED=$success_candidate_before_change:v$success_version_before_change" "$PI_REPORT" \
   || fail 'Pi did not preserve the prior candidate version in its audit explanation'
+candidate_block "$PI_REPORT" "$success_candidate_before_change" > "$PROBE/pi-candidate-after-change.yaml"
+grep -Eq 'carrier(s)?[- ]A' "$PROBE/pi-candidate-after-change.yaml" \
+  || fail 'Pi changed candidate dropped carrier A applicability'
+grep -Eq 'carrier(s)?[- ]B|and B' "$PROBE/pi-candidate-after-change.yaml" \
+  || fail 'Pi changed candidate did not add carrier B applicability'
+awk '
+  /^```yaml[[:space:]]*$/ { in_yaml=1; next }
+  in_yaml && /^```[[:space:]]*$/ { in_yaml=0; next }
+  !in_yaml && !/^(PRIOR_VERSION_PRESERVED|CONDITION_CHANGE_APPLIED)=/ { print }
+' "$PI_REPORT" > "$PROBE/pi-report-prose.txt"
+grep -Eq "version[[:space:]]+$success_version_before_change|v$success_version_before_change([^0-9]|$)" \
+  "$PROBE/pi-report-prose.txt" \
+  || fail 'Pi version audit prose did not preserve the prior version'
+grep -Eq 'carrier(s)?[- ]A' "$PROBE/pi-report-prose.txt" \
+  || fail 'Pi version audit prose did not preserve the prior carrier A boundary'
+for preserved in source-captured-pi-615 fixture-evidence/capture-condition-change.md; do
+  grep -Fq "$preserved" "$PROBE/pi-report-prose.txt" \
+    || fail "Pi version audit prose did not preserve $preserved"
+done
+captured_claim=$(candidate_field "$PI_REPORT" "$success_candidate_before_change" claim)
+[ -n "$captured_claim" ] || fail 'Pi changed candidate omitted its reusable claim'
+for task in experience-codex experience-traex; do
+  cat >> "$PROBE/home/data/$task/brief.md" <<EOF
+
+## Later captured experience pointer
+
+MAIN selected a third originally verified pointer from the actual earlier task report: $success_candidate_before_change v$success_version_after_change at data/experience-pi/report.md, locator Reusable experience candidates; claim: $captured_claim
+Read the original source at \$FM_HOME/data/experience-pi/report.md before action and copy its source-only receipt into the Original evidence receipts section; this brief intentionally does not supply the receipt value.
+Apply the captured candidate to the same positive provider result only if its carrier A/B, SG, permission, current-identity, terminal-success, and artifact-readiness conditions match.
+Add a distinct Experience consumption row for this pointer with its actual source, version, receipt, disposition, observable action, goal acceptance, and side effects.
+Record the exact lines CAPTURED_CANDIDATE_CONSUMPTION=adopted and CAPTURED_CANDIDATE_ACTION=terminal-success-and-artifact-ready-observed only if the original candidate was read and those observations occurred.
+EOF
+done
 spawn_and_wait experience-codex codex \
   "${FM_EXPERIENCE_EVIDENCE_CODEX_MODEL:-gpt-5.6-sol}" medium \
   || fail 'fresh Codex worker did not complete the fixture'
@@ -781,9 +869,9 @@ for event in event-accepted-success event-reliable-correction event-failed-negat
   [ "$(grep -Ec '^[|][[:space:]]*`?'"$event"'`?[[:space:]]*[|]' "$PI_REPORT")" -eq 1 ] \
     || fail "Pi capture handling did not converge for $event"
 done
-[ "$(grep -c '^schema: firstmate-experience-candidate.v1$' "$PI_REPORT")" -eq 3 ] \
-  || fail 'Pi did not leave exactly three truthful proposed candidate blocks'
-[ "$(grep -c '^status: proposed$' "$PI_REPORT")" -eq 3 ] \
+[ "$(grep -c '^schema: firstmate-experience-candidate.v1$' "$PI_REPORT")" -eq 2 ] \
+  || fail 'Pi did not leave exactly two destination-owned candidate blocks after cross-task deduplication'
+[ "$(grep -c '^status: proposed$' "$PI_REPORT")" -eq 2 ] \
   || fail 'capture promoted or mis-stated a candidate'
 grep -Fq 'reason-not-reusable' "$PI_REPORT" \
   || fail 'Pi omitted the no-reusable-knowledge disposition'
@@ -798,8 +886,10 @@ negative_disposition=$(event_disposition "$PI_REPORT" event-failed-negative)
 [ "$(event_disposition "$PI_REPORT" event-undetermined-failure)" = evidence-pending ] \
   || fail 'Pi did not map the unverified event to evidence-pending'
 for event in event-cancelled event-archived; do
-  [ "$(event_disposition "$PI_REPORT" "$event")" = reason-not-reusable ] \
-    || fail "Pi did not preserve the non-success disposition for $event"
+  case "$(event_disposition "$PI_REPORT" "$event")" in
+    reason-not-reusable|evidence-pending) ;;
+    *) fail "Pi did not preserve the non-success disposition for $event" ;;
+  esac
 done
 for mapping in "success:$success_disposition" "correction:$correction_disposition"; do
   label=${mapping%%:*}
@@ -813,13 +903,17 @@ for mapping in "success:$success_disposition" "correction:$correction_dispositio
   [ "$(candidate_field "$PI_REPORT" "$candidate_id" lesson_validity)" = validated ] \
     || fail "Pi $label candidate did not preserve validated lesson evidence"
 done
-case "$negative_disposition" in candidate:*) ;; *) fail 'Pi failed-path event did not map to a candidate' ;; esac
+case "$negative_disposition" in candidate:*) ;; *) fail 'Pi failed-path event did not reference a candidate' ;; esac
 negative_candidate=${negative_disposition#candidate:}
-case "$(candidate_field "$PI_REPORT" "$negative_candidate" execution_outcome)" in
+[ "$negative_candidate" = no-current-identity-refusal ] \
+  || fail "Pi duplicated the existing failed-path candidate as $negative_candidate"
+[ "$(grep -c '^id: no-current-identity-refusal$' "$PI_REPORT")" -eq 0 ] \
+  || fail 'Pi copied the existing failed-path candidate into the destination report'
+case "$(candidate_field "$REPO/fixture-evidence/no-identity/report.md" "$negative_candidate" execution_outcome)" in
   failed|blocked) ;;
   *) fail 'Pi failed-path candidate was mislabeled as success or uncertainty' ;;
 esac
-[ "$(candidate_field "$PI_REPORT" "$negative_candidate" lesson_validity)" = validated ] \
+[ "$(candidate_field "$REPO/fixture-evidence/no-identity/report.md" "$negative_candidate" lesson_validity)" = validated ] \
   || fail 'Pi failed-path candidate did not preserve the validated negative lesson'
 
 for marker in BUSINESS_TERMINAL=accepted KNOWLEDGE_MAINTENANCE=failed-visible \
@@ -830,6 +924,32 @@ done
 printf 'propose\taccepted-business-result\n' > "$PROBE/expected-knowledge.log"
 cmp -s "$PROBE/expected-knowledge.log" "$PROBE/knowledge.log" \
   || fail "knowledge-maintenance failure was not attempted exactly once: $(cat "$PROBE/knowledge.log")"
+for task in business-accepted business-cancelled business-archived; do
+  cmp -s "$PROBE/business-state-before/$task.json" "$PROBE/home/data/$task/task.json" \
+    || fail "knowledge maintenance or reconciliation changed persisted business state for $task"
+done
+jq -e '.state == "done" and .progress.current_state == "accepted" and .progress.remaining_gap == ""' \
+  "$PROBE/home/data/business-accepted/task.json" >/dev/null \
+  || fail 'the accepted business fixture no longer has its actual accepted terminal state'
+jq -e '.state == "archived" and .progress.current_state == "cancelled" and .progress.remaining_gap == ""' \
+  "$PROBE/home/data/business-cancelled/task.json" >/dev/null \
+  || fail 'the cancelled business fixture no longer has its actual cancelled terminal state'
+jq -e '.state == "archived" and .progress.current_state == "archived incomplete" and .progress.remaining_gap == "artifact completeness remains unverified"' \
+  "$PROBE/home/data/business-archived/task.json" >/dev/null \
+  || fail 'the archived business fixture lost its actual terminal state or remaining gap'
+
+for report in "$CODEX_REPORT" "$TRAE_REPORT"; do
+  grep -Fq "$success_candidate_before_change" "$report" \
+    || fail "$report did not consume the candidate captured by the earlier task"
+  grep -Fq "v$success_version_after_change" "$report" \
+    || fail "$report did not consume the captured candidate's current version"
+  grep -Fq 'source-captured-pi-615' "$report" \
+    || fail "$report did not read the captured candidate's original source receipt"
+  grep -Fqx 'CAPTURED_CANDIDATE_CONSUMPTION=adopted' "$report" \
+    || fail "$report did not record adoption of the captured candidate"
+  grep -Fqx 'CAPTURED_CANDIDATE_ACTION=terminal-success-and-artifact-ready-observed' "$report" \
+    || fail "$report did not connect the captured candidate to observable use"
+done
 
 for report in "$PI_REPORT" "$CODEX_REPORT" "$TRAE_REPORT"; do
   for receipt in source-z-valid-741 source-no-identity-852 source-same-entity-963 \
