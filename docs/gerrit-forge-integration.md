@@ -138,52 +138,31 @@ A worker cannot be told "push your branch and open a pull request, and we will w
 That is the whole of what a `forge=` annotation buys: **a pre-publication signal, where GitLab only ever needed a post-publication one.**
 Everything downstream of publication - watching, reading state, reporting - continues to work off the provider tag derived from the URL, exactly as it does for GitLab, because by then the URL exists.
 
-### How the forge is known: detected, then proposed for confirmation
+### How the forge is known: explicit delivery binding and bootstrap provider classification
 
-The binding is **detected from the project's origin and proposed at intake for confirmation**, rather than declared cold in the registry or inferred silently at use time.
-Detection is what every other forge already gets for free, because the URL tells Firstmate what it is dealing with.
-Confirmation is what stops a wrong guess from becoming a silent second source of truth, since a mis-detected forge produces a brief that is internally consistent and wrong.
-Proposing it at intake also puts the signal where a pre-publication signal has to be, in the brief at scaffold time with no clone read and no network call, while keeping a human at the one point where the evidence can be misread.
-The delivery-mode design takes that shape, treating a protocol fact such as an SSH remote on port 29418 or a `refs/for/<branch>` push target as good evidence to propose the binding while refusing to infer it later.
+The `forge=` binding is a confirmed project fact proposed at project-add intake for Gerrit and confirmed directly for Forgejo or external review paths; it is never inferred at use time.
+For projects without an explicit supported binding, bootstrap's provider boundary classifies origin hosts against the configured GitHub and GitLab lists to select required CLIs and authentication checks, and to fail closed on unknown hosts.
+This classification is operational bootstrap policy, not a new registry binding: it does not alter the delivery-mode decision or write `data/projects.md`.
 
-The tool with the broadest forge coverage in this stack corroborates detection, though more narrowly than it first appears to.
-no-mistakes binds its provider by calling `DetectProvider(remoteURL)` across the six forges its `Provider` type names - GitHub, GitLab, Bitbucket, Azure DevOps, Forgejo and Gitea - and no project declares its forge anywhere in that scheme.
-Only well-known hosts are recognised from the URL alone.
-For a host it does not recognise, which is how Gerrit is nearly always deployed, it falls back to machine-local configuration keyed by host: SSH config, then whether the local `glab`, `gh` or `tea` CLI is logged in to that host, then a `FORGEJO_BASE_URL` environment variable, while its per-repository execution context resolves machine-local forge profiles.
-What survives as corroboration is exactly one fact: no per-project declaration anywhere in the scheme, across six forges.
-
-The same evidence also bears against detection.
-Because it reads per-machine login state, one remote can resolve to different forges on two machines, or to none on a machine where the CLI is not logged in, and that is a genuine argument for declaring the forge rather than detecting it.
-It does not overturn the decision, since confirmation at intake is where a misread is meant to be caught, but anyone relying on detection should know it is not purely structural.
-
+The binding remains the pre-publication signal needed by Gerrit, while GitHub and GitLab can derive their provider after a pull request or merge request URL exists.
+The registry fact therefore remains the authority for delivery semantics, and the bootstrap classifier supplies only the provider prerequisites needed before dispatch.
 #### Could the tool declare its own semantics instead?
 
-That settles where the binding comes from without settling whether a project-level binding is needed at all.
+The explicit binding settles the delivery semantics without asking the provider tool to declare them.
 Suppose the forge tool answered the question itself: a `forge-type` subcommand on `gerrit-axi` returning `change`, where a GitHub or GitLab tool would return `branch`.
 The appeal is real, and the reasoning behind it is sound as far as it goes.
-The origin URL already selects which tool to call, the tool then declares its own semantics, and no project ever carries an annotation that can drift from its remote.
+The origin URL can select which provider-specific tool to call for bootstrap, but it does not replace the registry fact that controls delivery before publication.
 
 Be precise about what that removes and what it does not.
-It removes the per-project declaration, which is the part capable of disagreeing with reality.
-It does not remove the mapping, because something must still get from a remote URL to the right tool before any tool can be asked anything, and that something is Firstmate.
-The question is therefore not whether Firstmate holds forge knowledge, since it does either way, but whether it holds one thin host-pattern mapping for the whole fleet or one annotation per project.
+It could remove the explicit delivery binding only if the tool's answer were trusted as delivery authority.
+It would not remove the mapping, because something must still get from a remote URL to the right tool before any tool can be asked anything, and that something is Firstmate.
+The runtime boundary therefore uses a host-pattern mapping for bootstrap prerequisites and an explicit project annotation for delivery semantics.
+A host pattern is written once and is then either wrong for every project on that host or right for every project on it, which makes a bad provider boundary visible on first use.
+An explicit project binding can be wrong on one project, so intake confirmation and the agreement checks at spawn and promotion keep that decision visible and durable.
+Keeping those roles separate prevents a bootstrap classification from silently becoming a delivery decision, and the forge tool is never asked to redefine either one.
 
-Framed that way the mapping has a real advantage, for a reason that has nothing to do with Gerrit.
-A host pattern is written once and is then either wrong for every project on that host or right for every project on it, which is a failure mode that announces itself on first use.
-A per-project annotation can be wrong on exactly one project, which left alone is the failure mode that does not announce itself; intake confirmation is what closes it, because that one project's binding is put in front of a human at the moment it is recorded.
-Asking the tool has a cost on the other side: a round trip, because asking the tool means running it, so the answer stops being available at scaffold time without a call, which is the property the pre-publication signal needed to begin with.
-Caching the answer recovers that and reintroduces, in smaller form, the staleness the annotation had.
-
-The answer is to keep a per-project binding and not to ask the tool.
-
-That does not reverse the detected-and-confirmed binding above, and the two compose exactly.
-Detection proposes, the per-project record is the durable answer that confirmation produces, and the forge tool is never asked what it is.
-The earlier decision says where the proposal comes from; this one says where the confirmed answer lives.
-
-It also disposes of the ambient-configuration objection raised just above.
-A detector that reads per-machine login state is only ever proposing something a human confirms once, and what is recorded afterwards is a project fact rather than one machine's opinion.
-The objection bounds how much weight detection can carry alone, which is the weight the confirmation step already removes.
-
+The detector's machine-local evidence is therefore only an intake proposal; the recorded project binding remains the durable answer after confirmation.
+This split preserves the pre-publication certainty Gerrit needs without making runtime provider prerequisites depend on an unrecorded machine opinion.
 ### Applying "mode is where the worker stops"
 
 Read the modes as stopping points rather than as artifacts and they line up cleanly:
