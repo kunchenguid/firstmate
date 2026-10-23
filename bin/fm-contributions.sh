@@ -106,10 +106,12 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
-# contribution author), issue transitions to ready-for-pr, and pull-request
-# movement since the previous observation - a replaced head, leaving draft, or
-# a newly requested reviewer or team - persist as pending before any wake. A
-# first observation is the movement baseline, never movement itself. On a PR, comments, reviews and inline review comments whose
+# contribution author), issue transitions to ready-for-pr, and open
+# pull-request movement since the previous observation - a replaced head,
+# leaving draft, or a newly requested reviewer or team - persist as pending
+# before any wake. A first observation is the movement baseline, never movement
+# itself, and a merged or closed observation reports no movement. On a PR,
+# comments, reviews and inline review comments whose
 # author login is listed in the effective config/contribution-review-bots (one
 # exact login per line; blank and # lines ignored) are admitted too, marked
 # review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
