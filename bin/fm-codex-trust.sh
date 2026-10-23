@@ -130,8 +130,14 @@ if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
 text = original.decode() if original else ""
 escaped = target.replace("\\", "\\\\").replace('"', '\\"')
 header = f'[projects."{escaped}"]'
-header_re = re.compile(r'^\[projects\.(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')\][ \t]*$', re.MULTILINE)
-match = re.search(r'^\[projects\."' + re.escape(escaped) + r'"\][ \t]*$', text, re.MULTILINE)
+header_re = re.compile(r'^(?P<header>\[projects\.(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')\])[ \t]*$', re.MULTILINE)
+match = None
+for candidate in header_re.finditer(text):
+    candidate_config = tomllib.loads(candidate.group("header") + "\n__fm_marker = 1\n")
+    candidate_projects = candidate_config.get("projects", {})
+    if isinstance(candidate_projects, dict) and target in candidate_projects:
+        match = candidate
+        break
 if match is None:
     if text and not text.endswith("\n"):
         text += "\n"

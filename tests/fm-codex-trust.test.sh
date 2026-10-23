@@ -37,6 +37,27 @@ with open(sys.argv[1], "rb") as handle:
 PY
 }
 
+project_field() {
+  python3 - "$1/config.toml" "$2" "$3" <<'PY'
+import sys
+import tomllib
+with open(sys.argv[1], "rb") as handle:
+    print(tomllib.load(handle)["projects"][sys.argv[2]][sys.argv[3]])
+PY
+}
+
+config_value() {
+  python3 - "$1/config.toml" "$2" <<'PY'
+import sys
+import tomllib
+with open(sys.argv[1], "rb") as handle:
+    value = tomllib.load(handle)
+for key in sys.argv[2].split('.'):
+    value = value[key]
+print(value)
+PY
+}
+
 test_registers_exact_worktree() {
   local rec
   rec=$(make_case fresh)
@@ -57,18 +78,23 @@ test_preserves_existing_config_and_updates_entry() {
   cat > "$CODEX_HOME_DIR/config.toml" <<EOF
 model = "gpt-5"
 
-[projects."$WORKTREE"]
+[projects.'$WORKTREE']
 trust_level = "untrusted"
 note = "preserve"
+
+[profiles.review]
+trust_level = "unrelated"
 EOF
   CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
     || fail "existing Codex config trust update failed"
   [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
     || fail "existing worktree entry was not updated to trusted"
-  grep -Fqx 'note = "preserve"' "$CODEX_HOME_DIR/config.toml" \
+  [ "$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)" = preserve ] \
     || fail "existing project fields were not preserved"
-  grep -Fqx 'model = "gpt-5"' "$CODEX_HOME_DIR/config.toml" \
+  [ "$(config_value "$CODEX_HOME_DIR" model)" = "gpt-5" ] \
     || fail "unrelated Codex configuration was not preserved"
+  [ "$(config_value "$CODEX_HOME_DIR" "profiles.review.trust_level")" = unrelated ] \
+    || fail "unrelated table fields were not preserved"
   pass "fm-codex-trust: preserves and updates an existing project entry"
 }
 
