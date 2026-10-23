@@ -1233,7 +1233,7 @@ On the cancelled turn the same payload carried `prompt_response = '[no response 
 
 ### Autonomous end-to-end worker
 
-One throwaway worker was launched exactly as the spawn launches one - positional brief, `-y`, workspace trust - and observed from start to idle:
+At the time of this verification, one throwaway worker was launched with the then-current spawn shape - positional brief, `-y`, and workspace trust - and observed from start to idle:
 
 ```text
 t=5s   (esc to cancel, 2s)
