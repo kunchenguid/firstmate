@@ -174,6 +174,10 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
+# The project's own captain preferences (bin/fm-project-prefs.sh) are printed to
+# stderr before the merge, since no startup digest carries them; a failed read
+# only warns and never refuses or alters the merge.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -491,6 +495,7 @@ if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
   echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
   exit 1
 fi
+fm_pr_print_project_prefs "$ID" "$FM_HOME" "$STATE"
 
 # Reading the merge request state needs both tools. Report them together and
 # before anything is recorded, so a missing tool is a named prerequisite rather

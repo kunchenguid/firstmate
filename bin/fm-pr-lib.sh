@@ -110,6 +110,16 @@ fm_pr_task_id_valid() {
   fm_task_id_path_safe "$id"
 }
 
+# Prints the task project's per-project captain preferences to stderr ahead of a
+# merge, so the rules reach firstmate at the merge choke points. It never
+# changes a merge's outcome: a failed read only warns.
+fm_pr_print_project_prefs() { # <task-id> <fm-home> <state-dir>
+  local id=${1-} home=${2-} state=${3-} lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$lib_dir/fm-project-prefs.sh" show --task "$id" >&2 ||
+    echo "warning: could not read the per-project captain preferences for task $id; run bin/fm-project-prefs.sh show --task $id before deciding this merge" >&2
+}
+
 fm_task_id_creation_valid() {
   local id=${1-}
   fm_pr_task_id_valid "$id" || return 1

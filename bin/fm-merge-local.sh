@@ -15,6 +15,8 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
+# The project's own captain preferences (bin/fm-project-prefs.sh) are printed to
+# stderr first, since no startup digest carries them; a failed read only warns.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -77,6 +79,7 @@ fi
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+fm_pr_print_project_prefs "$ID" "$FM_HOME" "$STATE"
 
 default_branch() {
   local ref branch

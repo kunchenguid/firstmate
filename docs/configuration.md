@@ -825,9 +825,9 @@ The file is local, gitignored with the rest of `data/`, and never printed by ses
 Because nothing loads it at startup, every path that acts on the project reads it through `bin/fm-project-prefs.sh`, whose header owns the name rule and the exit codes:
 
 - `bin/fm-brief.sh` prints it after the scaffold line for a ship or scout brief, so firstmate writes its rules into the brief's Firstmate spec, and stops before writing anything when the file exists but is unreadable.
-- `bin/fm-spawn.sh` names it at dispatch for a ship, so a hand-written brief cannot skip it.
+- `bin/fm-spawn.sh` names it at dispatch for a ship or scout, so a hand-written brief cannot skip it, and warns when the file exists but cannot be read.
 - `bin/fm-review-diff.sh` prints it before the diff, so a review is judged against the project's own rules.
-- Landing and merge are covered by the [`ship-landing` skill](../.agents/skills/ship-landing/SKILL.md), which has firstmate run `bin/fm-project-prefs.sh show <project>` before it decides a merge.
+- `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` print it to stderr (resolved from the task's `project=` record) before they merge, so the rules reach firstmate at the merge itself. A failed read only prints a warning: it never blocks, refuses, or changes the exit of a merge, and stdout is untouched. The [`ship-landing` skill](../.agents/skills/ship-landing/SKILL.md) also has firstmate run `bin/fm-project-prefs.sh show <project>` before it decides a merge.
 
 The file follows the same inspect-then-update curation as `data/captain.md`, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) routes a project-only preference there.
 It is per-home and is not propagated to secondmate homes, so a secondmate that works the project needs its own copy of the file.
