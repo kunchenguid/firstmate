@@ -112,6 +112,7 @@ tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
+tests/fm-kimi-trust-prompt-live-e2e.test.sh
 tests/fm-cursor-harness.test.sh
 tests/fm-muse-harness.test.sh
 tests/fm-omp-harness.test.sh

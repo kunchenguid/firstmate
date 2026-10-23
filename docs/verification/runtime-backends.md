@@ -403,6 +403,39 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+## Kimi folder prompt
+
+Verified on 2026-10-23 on Linux with tmux 3.6 against Kimi Code CLI 2.3.0 and 2.3.1, each installed into an isolated prefix and launched with a disposable home and its updater off.
+Kimi 2.3.0 reworded its folder prompt: the options read `Trust and continue` and `Exit`, a directory with no project MCP servers reads `No project integrations or instructions to activate.`, and a directory that declares project MCP servers announces them as `Start N MCP server(s) automatically` over `Config: <file>`.
+It also reads a root `.mcp.json` at the git worktree root as a project declaration, which its documentation does not name; the prompt's `Config:` line names whichever file declared the servers.
+Pressing Enter on an announcing prompt started the declared stdio command before any login, so `bin/fm-spawn.sh` never answers one.
+In a pane too short for the prompt Kimi shows only the title and `Enlarge terminal to review sources. Esc exit.`, and in a pane a few rows taller it keeps the complete dialog and pages the lines between the directory and the options, marked `←→ page · N / M`, which can hide the announcement.
+`bin/fm-kimi-trust-lib.sh` owns the predicates and `tests/captures/kimi-code-2.3.0/README.md` the recorded panes.
+The default-on live guard launches the installed Kimi bare in a private tmux server, spends no tokens, needs no login, and refreshes this evidence:
+
+```sh
+FM_KIMI_TRUST_PROMPT_LIVE=1 bin/fm-test-run.sh tests/fm-kimi-trust-prompt-live-e2e.test.sh
+```
+
+Observed output against 2.3.0; 2.3.1 printed the same lines with its own version:
+
+```text
+# kimi 2.3.0: plain prompt options read 'Trust and continue' / 'Exit'
+ok - kimi 2.3.0: a plain directory's folder prompt is the complete dialog, and Enter clears it into a ready pane
+# kimi 2.3.0: root-mcp-json prompt announces: Start 1 MCP server automatically;Config: .mcp.json;
+ok - kimi 2.3.0: a root-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.3.0: kimi-code-mcp-json prompt announces: Start 1 MCP server automatically;Config: .kimi-code/mcp.json;
+ok - kimi 2.3.0: a kimi-code-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.3.0: 100x7 pane shows: Trust this folder?;Enlarge terminal to review sources. Esc exit.;
+# kimi 2.3.0: 100x12 pane: the announcement is on a hidden page, so only the page marker refuses this prompt
+ok - kimi 2.3.0: a short pane collapses the prompt below the complete dialog, and a slightly taller one pages it with the page marker on screen
+ok - kimi 2.3.0: folder-prompt predicates agree with the installed Kimi on every recorded wording
+```
+
+The portable regression `tests/fm-kimi-harness.test.sh` replays the recorded panes through its fake pane: the plain prompt is answered once and the brief delivered, each announcing wording and the paged prompt receive no key and report why, and the collapsed prompt reports that it is not ready.
+Each case is non-vacuous: dropping the 2.3.0 option pair from the complete-dialog test fails the plain case, making the announcement test never fire fails the root `.mcp.json` case, and making the page test never fire fails the paged case.
+The 2.0.0 wording keeps its existing cases in the same suite.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
