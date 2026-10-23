@@ -86,6 +86,17 @@
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
 #
+# An arm whose ground is removed under it exits instead of polling on: when its
+# own script file, the state directory, or an FM_HOME that existed at start no
+# longer exists, it prints
+# "watcher: FAILED - arm ground removed: <path> no longer exists" and exits 1.
+# The check runs on every confirmation, successor, and attached poll, so the
+# bound is one poll interval plus a 0.2s recheck that keeps a transient rename
+# (a self-update rewriting this file) from counting as a removal. Sourcing
+# bin/fm-wake-lib.sh creates a not-yet-existing state directory first, so only a
+# deletion after start can trip it. The watcher's own home-gone exit
+# (bin/fm-watch.sh) covers the cycle this arm waits on.
+#
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
 # outside a marked lab with
@@ -132,6 +143,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+ARM_SCRIPT="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
+ARM_HOME_EXISTED=0
+[ ! -d "$FM_HOME" ] || ARM_HOME_EXISTED=1
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
@@ -326,6 +340,33 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# Header, "arm ground removed". Sets ARM_GROUND_MISSING to the first missing
+# path and succeeds only when it is still missing after the 0.2s recheck.
+ARM_GROUND_MISSING=
+arm_ground_missing_now() {
+  ARM_GROUND_MISSING=
+  if [ ! -e "$ARM_SCRIPT" ]; then
+    ARM_GROUND_MISSING=$ARM_SCRIPT
+  elif [ ! -d "$STATE" ]; then
+    ARM_GROUND_MISSING=$STATE
+  elif [ "$ARM_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
+    ARM_GROUND_MISSING=$FM_HOME
+  fi
+  [ -n "$ARM_GROUND_MISSING" ]
+}
+
+arm_ground_gone() {
+  arm_ground_missing_now || return 1
+  sleep 0.2
+  arm_ground_missing_now
+}
+
+fail_arm_ground_gone() {
+  cycle_log_append unknown unknown arm-ground-removed none
+  echo "watcher: FAILED - arm ground removed: $ARM_GROUND_MISSING no longer exists"
+  return 1
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -336,6 +377,7 @@ wait_for_healthy_successor() {
   deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
   while :; do
     healthy_watcher && return 0
+    arm_ground_gone && return 1
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 0.2
   done
@@ -404,6 +446,10 @@ attached_holder_live() {
 attach_and_wait() {
   local attached_pid=$1 age
   while :; do
+    if arm_ground_gone; then
+      fail_arm_ground_gone
+      return 1
+    fi
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
@@ -430,6 +476,10 @@ attach_and_wait() {
       cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
       report_attached
       continue
+    fi
+    if [ -n "$ARM_GROUND_MISSING" ]; then
+      fail_arm_ground_gone
+      return 1
     fi
     if close_unobserved_cycle; then
       cycle_log_append unknown unknown attached-delivered-wake none
@@ -720,6 +770,10 @@ owned_child_finished() {
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
+    if [ -n "$ARM_GROUND_MISSING" ]; then
+      fail_arm_ground_gone
+      return 1
+    fi
     if close_unobserved_cycle; then
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
       return 0
@@ -789,6 +843,12 @@ while :; do
     child_done=1
     owned_child_finished "$rc"
     exit $?
+  fi
+  if arm_ground_gone; then
+    cleanup_child
+    wait "$child" 2>/dev/null || true
+    fail_arm_ground_gone
+    exit 1
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 0.2

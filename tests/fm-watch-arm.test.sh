@@ -1450,6 +1450,44 @@ test_watcher_exits_when_its_home_is_removed() {
   pass "watch-arm: a watcher exits when its home is removed"
 }
 
+# An arm whose repository root is deleted mid-flight - the temporary root of a
+# torn-down test fixture - must exit within its stated bound with the typed
+# ground-removed line instead of polling for a successor that cannot come. The
+# owning arm first proves a state directory that does not exist yet is created,
+# not mistaken for a removed one. The root's bin is a symlink to this checkout's
+# bin, so removing the root removes the arm's script path too.
+test_attached_arm_exits_when_its_root_is_removed() {
+  local dir repo state fakebin ownerout armout owner attached status
+  dir=$(make_case root-removed)
+  repo="$dir/repo"
+  state="$repo/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner.out"
+  armout="$dir/arm.out"
+  mkdir -p "$repo/data"
+  ln -s "$ROOT/bin" "$repo/bin"
+  fm_test_track_watcher_state "$state"
+  WATCH_ARM="$repo/bin/fm-watch-arm.sh" start_owned_watcher "$repo" "$state" "$fakebin" "$ownerout"
+  owner=$ARM_PID
+  [ -d "$state" ] || fail "the owning arm did not create the not-yet-existing state directory"
+  PATH="$fakebin:$PATH" FM_HOME="$repo" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=60 "$repo/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  attached=$!
+  wait_for_file_text "$armout" "watcher: attached pid=$WATCH_PID" \
+    || fail "second arm did not attach to the live watcher: $(cat "$armout")"
+
+  rm -rf "$repo"
+  # One 0.1s attach poll plus the 0.2s recheck, with headroom for a busy host;
+  # far short of the 60s successor window the arm used to poll through.
+  wait_for_exit "$attached" 50
+  status=$?
+  wait_for_exit "$owner" 400 >/dev/null 2>&1 || true
+  expect_code 1 "$status" "an arm whose root was removed must exit 1: $(cat "$armout")"
+  grep -qF "watcher: FAILED - arm ground removed: $repo/bin/fm-watch-arm.sh no longer exists" "$armout" \
+    || fail "arm did not report its removed ground: $(cat "$armout")"
+  pass "watch-arm: an attached arm exits within its bound when its root is removed"
+}
+
 # tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
 # temporary home, through the home-scoped stop, so no test leaves one behind.
 # The reaper is driven with a private registry so this suite's own registry
@@ -1719,6 +1757,7 @@ test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
+test_attached_arm_exits_when_its_root_is_removed
 test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
