@@ -2351,6 +2351,21 @@ Real harness edges on that build, each captured by `fm_backend_wait_transition r
 - Grok 1.0.67's workspace-trust dialog reported `blocked` with kind `permission`, and the wait returned `...|blocked|grok-build|permission: Trust this folder?`.
 - Codex 0.163.0's workspace-trust dialog reported no program status, so it reached no push edge.
 
+### Command palette
+
+Checked on 2026-10-23 on `rex 0.0.1792607779-g171246`, macOS, and jq, on `tests/rex-test-safety.sh`'s private server.
+
+```text
+$ bash tests/fm-rex-palette-smoke.test.sh
+ok - real rex: palette install loads every Firstmate action beside the captain's own, with no key bound
+ok - real rex: This Worker opens a popup over the worker that closes on Enter
+ok - real rex: an answer typed into the popup lands in the captain inbox
+ok - real rex: goto selects the waiting worker's tab
+ok - real rex: a broken module becomes a palette error and the captain's config still loads
+ok - real rex: uninstall restores the config byte for byte and unloads the actions
+ok - real rex: all state-changing calls stayed within this run's private server
+```
+
 ### Worker tools on Rex
 
 Rechecked on 2026-10-22 on the same Rex build.

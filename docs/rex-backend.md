@@ -112,6 +112,38 @@ Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-
 `bin/fm-control.sh` `exit` and `relaunch` work on Rex; [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recorded-server absence proof, stopped-server recovery, reclaim placement, and reclaim-only shell-husk cleanup.
 An ordinary spawn refuses any block carrying the task's scoped label.
 
+## Command palette
+
+Opt-in: Firstmate can add its own commands to the Rex command palette, grouped under **Firstmate**; nothing changes until the installer runs.
+Installing them edits the captain's Rex `init.lua` and reloads every connected client's keymap, so Firstmate installs them only on the captain's word:
+
+```sh
+bin/fm-rex-palette.sh install    # also: uninstall
+```
+
+- The installer owns only one marked block at the top of that file, so the captain's own later lines always win, and `uninstall` leaves the rest of the file byte for byte as it was.
+- It works only on this machine's own Rex server, because Rex reloads its config only over the local socket; its header owns the backup, check, and symlink mechanics.
+- No key is bound: the captain assigns a shortcut to any command in the Rex app.
+- When Firstmate's module fails to load, the captain's config still loads and the palette shows **Firstmate: Palette Failed to Load** with the reason.
+
+| Command | What it does |
+| --- | --- |
+| Show Fleet | A popup with the fleet view. |
+| This Worker | A popup with the focused worker's task, latest status, open decisions, and pull request. |
+| Peek Worker | A popup that follows the focused worker's screen. |
+| Go to Waiting Worker | Shows the tab of the worker waiting on the captain: a decision first, then a blocker, a failure, and a ready pull request. |
+| Answer Decision | A popup listing open decisions and captain holds; the typed answer is filed as `Answer for <task> [key=<key>]: <text>`. |
+| Tell Firstmate | A popup for a free note, filed with `About <task>:` in front when a worker is focused. |
+| Request Merge | A popup listing recorded pull requests; a confirmed pick is filed as `Merge request: <PR URL> (task <task>)`. |
+
+The three acting commands only file a note in Firstmate's captain inbox through `bin/fm-inbox.sh`, which wakes Firstmate.
+Firstmate then answers the worker or merges through its usual paths and checks; the palette itself never steers a worker or merges.
+A popup closes itself when its command ends.
+
+Rex gives a command 30 seconds and runs it in the Rex server's own environment, so each command only asks `bin/fm-rex-popup.sh plan` what to do and leaves slow work to the popup, and the installer records the operator's `PATH`, `FM_HOME`, and the Rex server.
+A command run from the CLI never moves the captain's view; only a key or palette use does.
+`bin/fm-rex-popup.sh`'s header owns the plan and popup contracts.
+
 ## Away mode
 
 A Rex-hosted Firstmate can run away and quiet supervision: the supervisor target is discovered from `REX_SESSION` and `REX_BLOCK`, and the away daemon runs in its own dedicated Rex session, never as a tab or split in yours, which `/afk` exit kills by its exact recorded id.
@@ -143,6 +175,8 @@ These asks to Superlogical are deliberately unfiled, pending a later decision; e
 tests/fm-backend-rex.test.sh
 tests/fm-backend-rex-smoke.test.sh
 tests/fm-backend-rex-eventwait-smoke.test.sh
+tests/fm-rex-palette.test.sh
+tests/fm-rex-palette-smoke.test.sh
 FM_REX_COMPOSER_LIVE=1 tests/fm-backend-rex-composer-live-e2e.test.sh
 ```
 
