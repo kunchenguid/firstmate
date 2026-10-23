@@ -154,12 +154,34 @@ async function sessionOwnsLock(paths) {
   }
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
   let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < 16; i += 1) {
     if (pid === lockPid) return true;
     const result = await runProcess("ps", ["-o", "ppid=", "-p", pid]);
-    if (result.code !== 0) return false;
+    if (result.code !== 0) break;
     pid = result.stdout.trim();
-    if (!pid || pid === "1") return false;
+    if (!pid || pid === "1") break;
+  }
+  try {
+    process.kill(Number(lockPid), 0);
+  } catch {
+    const acquire = await runProcess("bash", [`${paths.root}/bin/fm-lock.sh`], {
+      env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state, FM_ROOT_OVERRIDE: paths.root },
+    });
+    if (acquire.code === 0) {
+      try {
+        const newLockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+        let cur = String(process.pid);
+        for (let i = 0; i < 16; i += 1) {
+          if (cur === newLockPid) return true;
+          const res = await runProcess("ps", ["-o", "ppid=", "-p", cur]);
+          if (res.code !== 0) break;
+          cur = res.stdout.trim();
+          if (!cur || cur === "1") break;
+        }
+      } catch {
+        return false;
+      }
+    }
   }
   return false;
 }
@@ -477,10 +499,15 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
-      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const prevRestoration = restorationInFlight;
+      const restoration = (async () => {
+        if (prevRestoration) {
+          await prevRestoration.catch(() => {});
+        }
+        return restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      })();
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
         try {

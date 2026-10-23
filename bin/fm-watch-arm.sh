@@ -121,6 +121,9 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -690,12 +693,74 @@ child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
+# Start a detached handling successor for this home's ended cycle before exiting,
+# maintaining continuous watcher supervision when FM_WATCH_AUTO_SUCCESSOR=1 is requested.
+start_handling_successor() {  # <predecessor-arm-pid>
+  local predecessor=$1 out pid deadline budget line monitor_was_on=0 arm_lock
+  arm_lock="$STATE/.watch-arm-successor.lock"
+  if ! fm_lock_try_acquire "$arm_lock"; then
+    return 0
+  fi
+  if [ "${FM_TEST_SUCCESSOR_FAIL:-0}" = 1 ]; then
+    fm_lock_release "$arm_lock"
+    return 1
+  fi
+  budget=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
+  case "$budget" in ''|*[!0-9]*) budget=$ARM_CONFIRM_DEFAULT ;; esac
+  if ! out=$(mktemp "$STATE/.watch-arm-successor.XXXXXX" 2>/dev/null); then
+    fm_lock_release "$arm_lock"
+    return 1
+  fi
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+  FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" \
+  FM_WATCH_AUTO_SUCCESSOR=1 \
+    nohup "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 </dev/null &
+  pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  deadline=$(( $(date +%s) + budget + 2 ))
+  while :; do
+    if grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$out" 2>/dev/null; then
+      rm -f "$out" 2>/dev/null || true
+      fm_lock_release "$arm_lock"
+      return 0
+    fi
+    grep -q '^watcher: FAILED' "$out" 2>/dev/null && break
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 0.1
+  done
+  line=$(grep '^watcher: FAILED' "$out" 2>/dev/null | head -n 1 || true)
+  rm -f "$out" 2>/dev/null || true
+  fm_lock_release "$arm_lock"
+  return 1
+}
+
+reconcile_cycle_successor() {  # <predecessor-arm-pid>
+  local predecessor=$1
+  [ "${FM_WATCH_AUTO_SUCCESSOR:-0}" = 1 ] || return 0
+  fm_supervision_needed "$STATE" || return 0
+  if healthy_watcher; then
+    cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+    return 0
+  fi
+  if ! start_handling_successor "$predecessor"; then
+    fm_wake_append check watcher-successor-drop \
+      "check: watcher successor dropped: cycle $predecessor ended without a live successor" || true
+    echo "watcher: FAILED - cycle ended and successor watcher could not be confirmed" >&2
+    return 1
+  fi
+  return 0
+}
+
 owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
+    reconcile_cycle_successor "$ARM_PID"
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
@@ -722,6 +787,7 @@ owned_child_finished() {
     child_out=
     if close_unobserved_cycle; then
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
+      reconcile_cycle_successor "$ARM_PID"
       return 0
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none

@@ -42,6 +42,9 @@ Each adapter:
 - Preserves one child or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
+OpenCode first checks whether its session owns the numeric lock pid through its process ancestry.
+If that pid is no longer live, it attempts lock acquisition through `bin/fm-lock.sh` and accepts ownership only when the resulting lock belongs to the current process ancestry.
+
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
@@ -369,6 +372,11 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
+Adapters (OpenCode, Claude, Pi, omp) own their own successor launches by default; standalone arms exit cleanly upon delivering a wake without spawning an unrequested successor.
+When `FM_WATCH_AUTO_SUCCESSOR=1` is opted in and supervision is needed, an arm confirms a live watcher successor before it exits and links the successor in the cycle log.
+If an opted-in successor cannot be confirmed, it queues a `watcher-successor-drop` check and reports failure with the cycle's missing successor.
+A single-flight launch guard protects the arm so concurrent or consecutive wakes cannot multiply arm processes.
+An arm started without an actionable wake follows its existing close-resolution contract below.
 
 ### How an arm resolves a close
 
@@ -467,6 +475,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
+- Opt-in successor confirmation and cycle-log linking after an actionable close, surfaced failure when an opted-in successor cannot be confirmed, repair of a dropped chain, and single-arm invariance across consecutive wakes.
 
 `tests/fm-watch-recovery-loop.test.sh` covers:
 
