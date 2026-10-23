@@ -7,8 +7,10 @@
 # start and never counts toward the startup memory budget. Every path that acts
 # on the project reads it through this script instead, which keeps one reader and
 # one name rule: bin/fm-brief.sh prints it while scaffolding a ship or scout
-# brief, bin/fm-spawn.sh names it at dispatch, and bin/fm-review-diff.sh prints it
-# before a review. The ship-landing skill covers the merge path. docs/configuration.md
+# brief, bin/fm-spawn.sh names it at dispatch, bin/fm-review-diff.sh prints it
+# before a review, and bin/fm-pr-merge.sh and bin/fm-merge-local.sh print it to
+# stderr before they merge (a failed read there only warns and never changes the
+# merge). The ship-landing skill covers the merge decision. docs/configuration.md
 # owns the file's layout and the knowledge-routing rule.
 #
 # <project> is the registry name, the same value as the projects/<name> clone
@@ -29,8 +31,9 @@
 #   silently when it does not.
 #   list prints the name of every project that has a file, one per line, sorted.
 # A file that exists but is not a readable regular file, or whose directory is a
-# symlink, exits 1 naming the path, so a project's rules are never silently
-# skipped. Exit 2 is a usage error.
+# symlink, exits 3 naming the path, so a project's rules are never silently
+# skipped. Exit 2 is a usage error or an invalid name, and show --task exits 1
+# when the task record is missing or has no project=.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

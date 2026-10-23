@@ -2,7 +2,8 @@
 # Tests for per-project captain preferences (data/captain-projects/<project>.md):
 # bin/fm-project-prefs.sh's show/path/list contract and name rule, the readers
 # that surface it (bin/fm-brief.sh for ship and scout scaffolds and
-# bin/fm-review-diff.sh, and a ship spawn's dispatch notice), and the guarantee that the startup memory budget never
+# bin/fm-review-diff.sh, a ship or scout spawn's dispatch notice, and
+# bin/fm-merge-local.sh), and the guarantee that the startup memory budget never
 # counts it.
 set -u
 
@@ -99,7 +100,7 @@ test_show_task_resolves_project_from_meta() {
 }
 
 test_brief_prints_project_prefs() {
-  local out rc brief
+  local out rc
   out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-alpha-s1 alpha --mode no-mistakes 2>&1); rc=$?
   expect_code 0 "$rc" "a ship scaffold for a project with preferences should exit 0"
   assert_contains "$out" "scaffolded: $HOME_DIR/data/brief-alpha-s1/brief.md" "the scaffold line must still print"
@@ -167,15 +168,22 @@ test_review_diff_prints_project_prefs() {
 }
 
 test_memory_budget_ignores_project_prefs() {
-  local before after
+  local before after bytes tokens status
   printf '%s\n' '- A captain preference.' > "$HOME_DIR/data/captain.md"
-  printf '30\n' > "$HOME_DIR/config/startup-memory-budget" 2>/dev/null || true
-  before=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-startup-memory-budget.sh" report 2>&1) || true
+  printf '30\n' > "$HOME_DIR/config/startup-memory-budget"
+  bytes=$(wc -c < "$HOME_DIR/data/captain.md" | tr -d ' ')
+  tokens=$(( (bytes + 2) / 3 ))
+  before=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-startup-memory-budget.sh" report 2>&1); status=$?
+  expect_code 0 "$status" "the budget report should succeed on the fixture"$'\n'"$before"
+  assert_contains "$before" "file=data/captain.md bytes=$bytes estimated_tokens=$tokens status=present" \
+    "the report must size captain.md from its own bytes"
+  assert_contains "$before" "total_estimated_tokens=$tokens" "the report total must be captain.md's estimate alone"
   head -c 20000 /dev/zero | tr '\0' 'x' > "$PREFS_DIR/huge.md"
-  after=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-startup-memory-budget.sh" report 2>&1) || true
+  after=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-startup-memory-budget.sh" report 2>&1); status=$?
   rm -f "$PREFS_DIR/huge.md"
+  expect_code 0 "$status" "the budget report should still succeed with a per-project file present"$'\n'"$after"
   assert_equals "$before" "$after" "a per-project file must not change the startup memory budget report"
-  assert_not_contains "$after" "captain-projects" "the startup memory budget report must not mention per-project files"
+  assert_contains "$after" "budget_status=within-budget" "a 20000-byte per-project file must not push startup memory over budget"
   pass "fm-startup-memory-budget.sh: per-project files are never counted"
 }
 
@@ -217,6 +225,111 @@ test_spawn_names_project_prefs_at_dispatch() {
   assert_contains "$out" "prefproj has per-project captain preferences in $home/data/captain-projects/prefproj.md" \
     "a ship dispatch must name the project's preferences file"
   pass "fm-spawn.sh: a ship dispatch names the project's preferences file, and only when one exists"
+
+  id=prefs-spawn-a3
+  rm -f "$home/data/captain-projects/prefproj.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" prefproj --mode direct-PR >/dev/null 2>&1 \
+    || fail "could not scaffold the unreadable-preferences spawn fixture brief"
+  sed -i.bak -e 's/{TASK}/Fixture ask./' -e 's/{FIRSTMATE_SPEC}/Fixture spec./' "$home/data/$id/brief.md"
+  printf 'x\n' > "$case_dir/target.md"
+  ln -s "$case_dir/target.md" "$home/data/captain-projects/prefproj.md"
+  git -C "$project" worktree remove --force "$pool" >/dev/null 2>&1 || true
+  git -C "$project" worktree add --quiet --detach "$pool" "$(git -C "$project" rev-parse HEAD)"
+  out=$(fm_test_run_spawn "$home" "$pool" "$fakebin" "$id" "$project" --mode direct-PR --yolo off 2>&1); status=$?
+  expect_code 0 "$status" "an unreadable preferences file must warn without blocking the dispatch"$'\n'"$out"
+  assert_contains "$out" "could not read the per-project captain preferences for prefproj" \
+    "an unreadable preferences file must be reported at dispatch, not treated as none"
+  assert_not_contains "$out" "has per-project captain preferences" "an unreadable file must not read as a clean notice"
+  rm -f "$home/data/captain-projects/prefproj.md"
+  pass "fm-spawn.sh: an unreadable preferences file warns at dispatch instead of passing silently"
+}
+
+test_spawn_names_project_prefs_for_scout() {
+  local case_dir home project pool fakebin id out status
+  case_dir="$TMP_ROOT/spawn-scout"
+  home="$case_dir/home"
+  project="$case_dir/scoutproj"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/captain-projects" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf -- '- scoutproj [direct-PR] - fixture (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '%s\n' '- Scout fixture rule.' > "$home/data/captain-projects/scoutproj.md"
+  touch "$home/state/.last-watcher-beat"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -qm initial
+  git -C "$project" worktree add --quiet --detach "$pool" "$(git -C "$project" rev-parse HEAD)"
+
+  id=prefs-scout-b1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" scoutproj --scout >/dev/null 2>&1 \
+    || fail "could not scaffold the scout spawn fixture brief"
+  sed -i.bak -e 's/{TASK}/Fixture ask./' -e 's/{FIRSTMATE_SPEC}/Fixture spec./' "$home/data/$id/brief.md"
+  out=$(fm_test_run_spawn "$home" "$pool" "$fakebin" "$id" "$project" --scout 2>&1); status=$?
+  expect_code 0 "$status" "a scout spawn with project preferences should launch"$'\n'"$out"
+  assert_contains "$out" "scoutproj has per-project captain preferences in $home/data/captain-projects/scoutproj.md" \
+    "a scout dispatch must name the project's preferences file"
+  pass "fm-spawn.sh: a scout dispatch names the project's preferences file"
+}
+
+make_local_merge_fixture() { # <case-dir> <id> -> prints the project path
+  local case_dir=$1 id=$2 proj="$1/proj" main
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data"
+  git init -q "$proj"
+  git -C "$proj" config user.email test@example.com
+  git -C "$proj" config user.name test
+  printf 'base\n' > "$proj/base"
+  git -C "$proj" add base
+  git -C "$proj" commit -qm base
+  main=$(git -C "$proj" branch --show-current)
+  git -C "$proj" checkout -qb "fm/$id"
+  printf 'change\n' > "$proj/change"
+  git -C "$proj" add change
+  git -C "$proj" commit -qm change
+  git -C "$proj" checkout -q "$main"
+  printf 'project=%s\nmode=local-only\nbranch=fm/%s\n' "$proj" "$id" > "$case_dir/home/state/$id.meta"
+  printf '%s\n' "$proj"
+}
+
+test_merge_local_prints_project_prefs() {
+  local case_dir id proj stdout stderr rc
+  case_dir="$TMP_ROOT/merge-local-prefs"
+  id=prefs-merge-m1
+  proj=$(make_local_merge_fixture "$case_dir" "$id")
+  mkdir -p "$case_dir/home/data/captain-projects"
+  printf '%s\n' '- Merge-time rule: confirm the release note.' > "$case_dir/home/data/captain-projects/proj.md"
+  FM_HOME="$case_dir/home" "$ROOT/bin/fm-merge-local.sh" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  stdout=$(cat "$case_dir/stdout"); stderr=$(cat "$case_dir/stderr")
+  expect_code 0 "$rc" "a local merge for a project with preferences should succeed"$'\n'"$stderr"
+  assert_contains "$stderr" "Merge-time rule: confirm the release note." "a local merge must print the project's preferences to stderr"
+  assert_not_contains "$stdout" "Merge-time rule" "the preferences must stay off stdout"
+  assert_contains "$stdout" "merged fm/$id into local" "the merge report on stdout must be unchanged"
+  assert_equals "$(git -C "$proj" rev-parse "fm/$id")" "$(git -C "$proj" rev-parse HEAD)" "the default branch must fast-forward to the ship branch"
+
+  id=prefs-merge-m2
+  case_dir="$TMP_ROOT/merge-local-noprefs"
+  make_local_merge_fixture "$case_dir" "$id" >/dev/null
+  FM_HOME="$case_dir/home" "$ROOT/bin/fm-merge-local.sh" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  expect_code 0 "$rc" "a local merge for a project without preferences should succeed"
+  assert_not_contains "$(cat "$case_dir/stderr")" "Per-project captain preferences" "a project without a file must print no preference block at merge"
+  pass "fm-merge-local.sh: a merge prints the project's preferences to stderr and leaves stdout alone"
+}
+
+test_merge_local_warns_but_still_merges_when_prefs_unreadable() {
+  local case_dir id proj stderr rc
+  case_dir="$TMP_ROOT/merge-local-unreadable"
+  id=prefs-merge-m3
+  proj=$(make_local_merge_fixture "$case_dir" "$id")
+  mkdir -p "$case_dir/home/data/captain-projects"
+  printf 'x\n' > "$case_dir/target.md"
+  ln -s "$case_dir/target.md" "$case_dir/home/data/captain-projects/proj.md"
+  FM_HOME="$case_dir/home" "$ROOT/bin/fm-merge-local.sh" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 0 "$rc" "an unreadable preferences file must never block a merge"$'\n'"$stderr"
+  assert_contains "$stderr" "could not read the per-project captain preferences for task $id" "an unreadable file must warn at merge time"
+  assert_equals "$(git -C "$proj" rev-parse "fm/$id")" "$(git -C "$proj" rev-parse HEAD)" "the merge must still land despite the unreadable file"
+  pass "fm-merge-local.sh: an unreadable preferences file only warns and the merge still lands"
 }
 
 
@@ -230,5 +343,8 @@ test_brief_refuses_unreadable_prefs_before_writing
 test_review_diff_prints_project_prefs
 test_memory_budget_ignores_project_prefs
 test_spawn_names_project_prefs_at_dispatch
+test_spawn_names_project_prefs_for_scout
+test_merge_local_prints_project_prefs
+test_merge_local_warns_but_still_merges_when_prefs_unreadable
 
 echo "# fm-project-prefs.test.sh: all assertions passed"
