@@ -7,6 +7,7 @@
 #   fm-rex-lab.sh provision <lab>
 #   fm-rex-lab.sh server <lab>
 #   fm-rex-lab.sh run <lab> <rex arguments...>
+#   fm-rex-lab.sh restart <lab>
 #   fm-rex-lab.sh teardown <lab>
 #
 # Lab names must begin with "fm-rexlab-"; the name command sanitizes the
@@ -18,6 +19,9 @@
 # FM_REX_LAB_STATE_DIR (default /tmp/fm-rex-lab-<uid>), because macOS caps
 # Unix socket paths near 104 bytes.
 # Server prints the lab's `unix://` address, for FM_REX_SERVER.
+# Restart stops the lab server through its own socket and starts it again on
+# the same socket and state directory, so tests can prove recovery after a
+# server restart, which ends every session the server held.
 # Every Rex call made here carries `-S <lab address> --autostart=false` with
 # REX_SESSION, REX_BLOCK, REX_CLIENT, and REX_SERVER removed from its
 # environment, so it can neither reach another server nor autostart one.
@@ -109,30 +113,62 @@ fm_rex_lab_name() { # <label>
   printf 'fm-rexlab-%s-%s%s\n' "$label" "$$" "$RANDOM"
 }
 
-fm_rex_lab_provision() { # <lab>
-  local name=$1 dir address i env_args=(-u REX_SERVER) var
-  fm_rex_lab_validate_name "$name" || return 1
-  command -v jq >/dev/null 2>&1 || { fm_rex_lab_error "jq is required"; return 1; }
-  fm_rex_lab_bin >/dev/null || { fm_rex_lab_error "rex is required"; return 1; }
-  fm_rex_lab_refuse_live "$name" || return 1
+# fm_rex_lab_start: start <lab>'s headless server from a scrubbed environment
+# and wait until it answers on its own socket.
+fm_rex_lab_start() { # <lab>
+  local name=$1 dir address env_args=(-u REX_SERVER) var
   dir=$(fm_rex_lab_dir "$name")
   address=$(fm_rex_lab_address "$name")
-  [ ! -e "$dir" ] || { fm_rex_lab_error "lab '$name' already exists at $dir; refusing to adopt it"; return 1; }
-  mkdir -p "$(fm_rex_lab_root)" && chmod 700 "$(fm_rex_lab_root)" && mkdir -m 700 "$dir" "$dir/state" || return 1
-  : > "$dir/empty.lua"
-  fm_rex_lab_fleet_state > "$dir/fleet-state.json" || return 1
   for var in $(env | awk -F= '/^(REX|TMUX|HERDR|FM|CLAUDE|TERM_PROGRAM)[A-Za-z0-9_]*=/ {print $1}'); do
     env_args+=(-u "$var")
   done
   env "${env_args[@]}" "$(fm_rex_lab_bin)" server run --listen "$address" \
-    --state-dir "$dir/state" --config "$dir/empty.lua" > "$dir/server.log" 2>&1 &
+    --state-dir "$dir/state" --config "$dir/empty.lua" >> "$dir/server.log" 2>&1 &
   printf '%s\n' "$!" > "$dir/server.pid"
-  for i in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     fm_rex_lab_lab "$name" server status --json >/dev/null 2>&1 && return 0
     sleep 0.1
   done
   fm_rex_lab_error "lab server '$name' did not become reachable at $address (log: $dir/server.log)"
   return 1
+}
+
+# fm_rex_lab_stop: stop <lab>'s server through its own socket and wait for its
+# process to exit.
+fm_rex_lab_stop() { # <lab>
+  local name=$1 dir pid
+  dir=$(fm_rex_lab_dir "$name")
+  fm_rex_lab_lab "$name" server stop >/dev/null 2>&1 || true
+  pid=$(cat "$dir/server.pid" 2>/dev/null || true)
+  for _ in $(seq 1 50); do
+    { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || return 0
+    sleep 0.1
+  done
+  fm_rex_lab_error "lab server '$name' (pid $pid) did not stop through its own socket"
+  return 1
+}
+
+fm_rex_lab_provision() { # <lab>
+  local name=$1 dir
+  fm_rex_lab_validate_name "$name" || return 1
+  command -v jq >/dev/null 2>&1 || { fm_rex_lab_error "jq is required"; return 1; }
+  fm_rex_lab_bin >/dev/null || { fm_rex_lab_error "rex is required"; return 1; }
+  fm_rex_lab_refuse_live "$name" || return 1
+  dir=$(fm_rex_lab_dir "$name")
+  [ ! -e "$dir" ] || { fm_rex_lab_error "lab '$name' already exists at $dir; refusing to adopt it"; return 1; }
+  mkdir -p "$(fm_rex_lab_root)" && chmod 700 "$(fm_rex_lab_root)" && mkdir -m 700 "$dir" "$dir/state" || return 1
+  : > "$dir/empty.lua"
+  fm_rex_lab_fleet_state > "$dir/fleet-state.json" || return 1
+  fm_rex_lab_start "$name"
+}
+
+fm_rex_lab_restart() { # <lab>
+  local name=$1
+  fm_rex_lab_validate_name "$name" || return 1
+  [ -d "$(fm_rex_lab_dir "$name")" ] || { fm_rex_lab_error "lab '$name' is not provisioned"; return 1; }
+  fm_rex_lab_refuse_live "$name" || return 1
+  fm_rex_lab_stop "$name" || return 1
+  fm_rex_lab_start "$name"
 }
 
 fm_rex_lab_run() { # <lab> <rex arguments...>
@@ -156,21 +192,12 @@ fm_rex_lab_run() { # <lab> <rex arguments...>
 }
 
 fm_rex_lab_teardown() { # <lab>
-  local name=$1 dir pid i before after
+  local name=$1 dir before after
   fm_rex_lab_validate_name "$name" || return 1
   dir=$(fm_rex_lab_dir "$name")
   [ -d "$dir" ] || return 0
   fm_rex_lab_refuse_live "$name" || return 1
-  fm_rex_lab_lab "$name" server stop >/dev/null 2>&1 || true
-  pid=$(cat "$dir/server.pid" 2>/dev/null || true)
-  for i in $(seq 1 50); do
-    { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || break
-    sleep 0.1
-  done
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    fm_rex_lab_error "lab server '$name' (pid $pid) did not stop through its own socket"
-    return 1
-  fi
+  fm_rex_lab_stop "$name" || return 1
   before=$(cat "$dir/fleet-state.json" 2>/dev/null || printf '{}')
   after=$(fm_rex_lab_fleet_state) || return 1
   if [ "$before" != '{}' ]; then
@@ -191,9 +218,10 @@ main() {
     provision) [ "$#" -eq 1 ] || { fm_rex_lab_error "usage: provision <lab>"; return 2; }; fm_rex_lab_provision "$1" ;;
     server) [ "$#" -eq 1 ] || { fm_rex_lab_error "usage: server <lab>"; return 2; }; fm_rex_lab_validate_name "$1" && fm_rex_lab_address "$1" && echo ;;
     run) [ "$#" -ge 1 ] || { fm_rex_lab_error "usage: run <lab> <rex arguments...>"; return 2; }; fm_rex_lab_run "$@" ;;
+    restart) [ "$#" -eq 1 ] || { fm_rex_lab_error "usage: restart <lab>"; return 2; }; fm_rex_lab_restart "$1" ;;
     teardown) [ "$#" -eq 1 ] || { fm_rex_lab_error "usage: teardown <lab>"; return 2; }; fm_rex_lab_teardown "$1" ;;
-    -h | --help | help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) fm_rex_lab_error "unknown command '${cmd:-<none>}' (name, provision, server, run, teardown)"; return 2 ;;
+    -h | --help | help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) fm_rex_lab_error "unknown command '${cmd:-<none>}' (name, provision, server, run, restart, teardown)"; return 2 ;;
   esac
 }
 

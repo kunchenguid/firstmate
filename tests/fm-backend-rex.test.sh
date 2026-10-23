@@ -35,14 +35,14 @@ SERVER=unix:///tmp/fm-rex-fake.sock
 #   new.json             `new ... --json`
 #   window-new.json      `window new ... --json` (also answers `window move`)
 #   window-ls.json       `window ls -s S --json`; `window rename` only logs
-#   events.jsonl         `events ...` prints these lines, then holds the
-#                        stream open; events.exit makes it exit at once
+#   version-api          the CLI's `rex version` API revision (default 5)
 #   split.json           `split ... --json`; absent -> exit 1
 #   wait.exit            exit code for `wait` (default 0)
 #   api-call.json        `api call ...` (e.g. session.new_block); absent -> exit 1
 #   inspect/<id>.json    `block inspect <id> --json`; absent -> exit 3
 #   blocks/<sid>.json    `block ls -s <sid> --json`
 #   call/<bid>.<m>.json  `block call -s S -b <bid> <m>`; absent -> exit 3
+#                        (screen_json writes the size and format reads)
 #   capture/<bid>.txt    `capture -b <bid>` (capture/<bid>.vt for --format vt)
 #   session/<sid>.json   `session inspect <sid> --json`
 #   <cmd>.exit           exit code for rename|close|send|send-key|kill
@@ -74,13 +74,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 cmd=${1:-}; shift || true
-if [ "$cmd" = version ]; then echo "rex 0.0.1-fake"; echo "api: revision 4 (supports 0 to 4)"; exit 0; fi
+if [ "$cmd" = version ]; then
+  v=$(cat "$F/version-api" 2>/dev/null || echo 5)
+  echo "rex 0.0.1-fake"; echo "api: revision $v (supports 0 to $v)"; exit 0
+fi
 [ -f "$F/exit" ] && { echo "Error: rex server is not running" >&2; exit "$(cat "$F/exit")"; }
 opt() { local want=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && { printf '%s' "${2:-}"; return; }; shift; done; }
 case "$cmd" in
   server)
     [ "${1:-}" = status ] || exit 0
-    [ -f "$F/status.json" ] || printf '{"endpoint":"unix:///tmp/fm-rex-fake.sock","instance_id":"inst-1","api_revision":4}' >"$F/status.json"
+    [ -f "$F/status.json" ] || printf '{"endpoint":"unix:///tmp/fm-rex-fake.sock","instance_id":"inst-1","api_revision":5}' >"$F/status.json"
     emit "$F/status.json" ;;
   api)
     if [ "${1:-}" = call ]; then emit "$F/api-call.json" 1; fi
@@ -93,10 +96,6 @@ case "$cmd" in
       rename) exit 0 ;;
     esac
     emit "$F/window-new.json" 1 ;;
-  events)
-    [ -f "$F/events.exit" ] && exit "$(cat "$F/events.exit")"
-    cat "$F/events.jsonl" 2>/dev/null
-    exec sleep 30 ;;
   kill) exit "$(cat "$F/kill.exit" 2>/dev/null || echo 0)" ;;
   split) emit "$F/split.json" 1 ;;
   wait) exit "$(cat "$F/wait.exit" 2>/dev/null || echo 0)" ;;
@@ -112,7 +111,9 @@ case "$cmd" in
     case "$sub" in
       inspect) emit "$F/inspect/$(key "$1").json" ;;
       ls) b="$F/blocks/$(key "$(opt -s "$@")").json"; [ -f "$b" ] || printf '{"blocks":[]}' >"$b"; emit "$b" ;;
-      call) emit "$F/call/$(key "$(opt -b "$@")").${5:-}.json" ;;
+      call)
+        [ "${5:-}" != resize ] || exit "$(cat "$F/resize.exit" 2>/dev/null || echo 0)"
+        emit "$F/call/$(key "$(opt -b "$@")").${5:-}.json" ;;
       rename) exit "$(cat "$F/rename.exit" 2>/dev/null || echo 0)" ;;
       close)
         [ -f "$F/close-removes" ] && rm -f "$F/inspect/$(key "${3:-}").json"
@@ -148,6 +149,14 @@ process_json() { # <bid> <json>
 }
 
 calls() { tr '\037' ' ' <"$FAKE/log"; }
+
+# screen_json: <bid> <rows> <content> - the block's size and the content of
+# its styled `format` read (scrollback plus the full grid, rows joined by
+# CRLF, then the cursor position the read appends).
+screen_json() { # <bid> <rows> <content>
+  printf '{"columns":200,"rows":%s}' "$2" >"$FAKE/call/block_$1.size.json"
+  jq -nc --arg c "$3" '{content: $c}' >"$FAKE/call/block_$1.format.json"
+}
 
 ORIG_PATH=$PATH
 # shellcheck source=/dev/null
@@ -202,18 +211,22 @@ test_server_resolution_prefers_the_task_record() {
 test_version_gate() {
   local out
   new_case version
-  fm_backend_rex_version_check || fail "API revision 4 with every method should pass"
-  printf '{"endpoint":"x","instance_id":"i","api_revision":3}' >"$FAKE/status.json"
-  out=$(fm_backend_rex_version_check 2>&1) && fail "API revision 3 must refuse"
-  assert_contains "$out" "older than the verified floor 4" "the API floor refusal should name the floor"
+  fm_backend_rex_version_check || fail "API revision 5 with every method should pass"
+  printf '{"endpoint":"x","instance_id":"i","api_revision":4}' >"$FAKE/status.json"
+  out=$(fm_backend_rex_version_check 2>&1) && fail "a server at API revision 4 must refuse"
+  assert_contains "$out" "speaks API revision 4, older than the verified floor 5" "the server floor refusal should name the floor"
   rm -f "$FAKE/status.json"
+  printf '4\n' >"$FAKE/version-api"
+  out=$(fm_backend_rex_version_check 2>&1) && fail "a CLI at API revision 4 must refuse"
+  assert_contains "$out" "rex CLI speaks API revision 4" "the CLI floor refusal should name the CLI"
+  rm -f "$FAKE/version-api"
   printf 'block.close\n' >"$FAKE/methods"
   out=$(fm_backend_rex_version_check 2>&1) && fail "a missing API method must refuse"
   assert_contains "$out" "lacks the required API method" "a missing method should be named"
   printf '4' >"$FAKE/exit"
   out=$(fm_backend_rex_version_check 2>&1) && fail "an unreachable server must refuse"
   assert_contains "$out" "never starts the Rex server" "the unreachable refusal should say Firstmate never starts it"
-  pass "rex: the version gate checks the server API floor and methods and refuses an unreachable server"
+  pass "rex: the version gate checks the CLI and server API floor and the methods, and refuses an unreachable server"
 }
 
 test_container_ensure_pins_server_and_instance() {
@@ -243,6 +256,8 @@ test_create_task_creates_the_fm_local_session_with_the_task_as_first_tab() {
   calls | grep -q " window new " && fail "a new fm-local session needs no second tab"
   calls | grep -q " block rename -s session:$SID block:$BID $(fm_backend_rex_scoped_name fm-t1)" \
     || fail "the block must be labeled with the home-scoped name"
+  calls | grep -q ' block call -s session:'"$SID"' -b block:'"$BID"' resize {"columns":200,"rows":50}' \
+    || fail "a new task block must be resized to 200x50: $(calls)"
 
   new_case create-existing
   printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
@@ -374,28 +389,83 @@ test_capture_send_and_keys() {
   pass "rex: capture tails without CR, text rides stdin, keys normalize, and unknown keys refuse"
 }
 
+test_derived_viewport_and_cursor() {
+  local out
+  new_case viewport
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  screen_json "$BID" 3 $'old scrollback\r\nrow one\r\n\033[1mrow two\033[0m\r\n\033[2;4H'
+  out=$(fm_backend_visible_capture rex "$T" fm-t1)
+  [ "$out" = "row one"$'\n'"row two" ] || fail "the viewport must be the last size.rows rows, plain, got '$out'"
+  [ "$(fm_backend_visible_capture rex "$T" fm-t1 | awk 'END { print NR }')" = 3 ] \
+    || fail "the viewport must restore the implicit empty bottom row to exactly size.rows lines"
+  fm_backend_rex_screen_read "$T" fm-t1 || fail "screen_read failed"
+  [ "$FM_BACKEND_REX_CURSOR_Y" = 1 ] || fail "the trailing cursor position must become the 0-based viewport row, got '$FM_BACKEND_REX_CURSOR_Y'"
+  case "$FM_BACKEND_REX_SCREEN" in *$'\033[1m'*) ;; *) fail "the styled viewport must keep SGR styling" ;; esac
+  case "$FM_BACKEND_REX_SCREEN" in *H*) fail "the cursor sequence must be stripped from the viewport" ;; esac
+  screen_json "$BID" 3 $'a\r\nb\r\nc\033[9;1H'
+  fm_backend_rex_screen_read "$T" fm-t1 || fail "screen_read failed"
+  [ -z "$FM_BACKEND_REX_CURSOR_Y" ] || fail "a cursor outside the viewport must read as no cursor"
+  fm_backend_visible_capture_supported rex || fail "rex must be a verified visible-capture backend"
+  rm -f "$FAKE/inspect/block_$BID.json"
+  fm_backend_visible_capture rex "$T" fm-t1 >/dev/null 2>&1 && fail "a gone block must not produce a viewport"
+  pass "rex: the viewport is derived from the styled format read's last size.rows rows, with its trailing cursor row"
+}
+
 test_composer_state_and_submit() {
   local out
   new_case composer
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
-  printf '\033[38;5;5m❯\033[0m \r\n' >"$FAKE/capture/block_$BID.vt"
+  screen_json "$BID" 3 $'\033[38;5;5m\xe2\x9d\xaf\033[0m \r\n\r\n\033[1;3H'
   out=$(fm_backend_rex_composer_state "$T" fm-t1)
-  [ "$out" = empty ] || fail "a bare styled prompt should read empty, got '$out'"
-  printf '\033[38;5;5m❯\033[0m typed text\r\n' >"$FAKE/capture/block_$BID.vt"
+  [ "$out" = empty ] || fail "a bare styled prompt holding the cursor should read empty, got '$out'"
+  screen_json "$BID" 3 $'\033[38;5;5m\xe2\x9d\xaf\033[0m typed text\r\n\r\n\033[1;14H'
   out=$(fm_backend_rex_composer_state "$T" fm-t1)
   [ "$out" = pending ] || fail "typed text should read pending, got '$out'"
+  screen_json "$BID" 3 $'\033[38;5;5m\xe2\x9d\xaf\033[0m typed text\r\n\r\n'
+  out=$(fm_backend_rex_composer_state "$T" fm-t1)
+  [ "$out" = pending ] || fail "a cursorless read should fall back to the bottom-most shape, got '$out'"
   rm -f "$FAKE/inspect/block_$BID.json"
   out=$(fm_backend_rex_composer_state "$T" fm-t1)
   [ "$out" = unknown ] || fail "an unreadable composer should read unknown, got '$out'"
   out=$(fm_backend_rex_send_text_submit "$T" "hello" 2 0 0 fm-t1)
   [ "$out" = send-failed ] || fail "a submit to a gone block should report send-failed, got '$out'"
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
-  printf '\033[38;5;5m❯\033[0m \r\n' >"$FAKE/capture/block_$BID.vt"
+  screen_json "$BID" 3 $'\033[38;5;5m\xe2\x9d\xaf\033[0m \r\n\r\n\033[1;3H'
   out=$(fm_backend_rex_send_text_submit "$T" "hello" 2 0 0 fm-t1)
   [ "$out" = empty ] || fail "a landed submit should report empty, got '$out'"
   out=$(fm_backend_composer_state rex "$T" fm-t1)
   [ "$out" = empty ] || fail "fm_backend_composer_state should route rex, got '$out'"
-  pass "rex: the styled composer capture feeds the shared classifier and the shared submit core"
+  pass "rex: the derived viewport and its cursor row feed the shared classifier and the shared submit core"
+}
+
+# fixture_screen: <bid> <cursor "row;col" or empty> - the recorded OpenCode
+# 1.19.3 idle screen (tests/fixtures/rex-opencode-1.19.3/) as the block's
+# 50-row format read, with its trailing cursor replaced.
+fixture_screen() { # <bid> <cursor>
+  local content
+  content=$(sed '$ s/\x1b\[[0-9]*;[0-9]*H$//' "$ROOT/tests/fixtures/rex-opencode-1.19.3/opencode-1.19.3-idle-format.vt" && printf x)
+  content=${content%x}
+  [ -z "$2" ] || content="$content"$'\033['"$2"H
+  screen_json "$1" 50 "$content"
+}
+
+test_composer_reads_the_cursor_row_on_a_real_screen() {
+  local out
+  new_case composer-cursor
+  inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  fixture_screen "$BID" "45;6"
+  out=$(fm_backend_composer_state rex "$T" fm-t1)
+  [ "$out" = empty ] || fail "an idle OpenCode 1.19.3 composer under the cursor must read empty despite the status line below it, got '$out'"
+  fm_backend_rex_screen_read "$T" fm-t1 || fail "screen_read failed"
+  [ "$FM_BACKEND_REX_CURSOR_Y" = 44 ] || fail "the cursor row must be 0-based within the derived viewport, got '$FM_BACKEND_REX_CURSOR_Y'"
+  fixture_screen "$BID" ""
+  out=$(fm_backend_composer_state rex "$T" fm-t1)
+  [ "$out" != empty ] && [ "$out" != pending ] || fail "the same screen read cursorless must not claim a definite verdict, got '$out'"
+  fixture_screen "$BID" "99;1"
+  [ "$(fm_backend_composer_state rex "$T" fm-t1)" = "$out" ] || fail "a cursor outside the viewport must fall back to the cursorless read"
+  fixture_screen "$BID" "1;1"
+  [ "$(fm_backend_composer_state rex "$T" fm-t1)" = "$out" ] || fail "a cursor parked outside any composer must fall back to the cursorless read"
+  pass "rex: the composer holding the cursor decides on a real OpenCode screen; a cursor outside any composer falls back to the cursorless read"
 }
 
 # --- liveness, absence, kill ---------------------------------------------------
@@ -413,6 +483,12 @@ test_agent_state_mapping() {
   process_json "$BID" '{"child":{"pid":1},"foreground":{"pid":999999,"name":"sleep","path":"/bin/sleep","argv0":"sleep"},"last_exit":null}'
   out=$(fm_backend_agent_state rex "$T")
   [ "$out" = ambiguous ] || fail "a non-agent, non-shell foreground should read ambiguous, got '$out'"
+  process_json "$BID" '{"child":{"pid":1},"foreground":{"pid":999999,"name":"zsh","path":"/bin/zsh","argv0":"zsh"},"ancestors":[{"pid":999998,"name":"2.1.306","path":"/Users/me/.local/share/claude/versions/2.1.306","argv0":"claude"},{"pid":999997,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"}],"last_exit":null}'
+  out=$(fm_backend_agent_state rex "$T")
+  [ "$out" = alive ] || fail "a harness among the foreground's ancestors (a shell escape) should read alive, got '$out'"
+  process_json "$BID" '{"child":{"pid":1},"foreground":null,"last_exit":null}'
+  out=$(fm_backend_agent_state rex "$T")
+  [ "$out" = ambiguous ] || fail "a block with no foreground process yet should read ambiguous, got '$out'"
   process_json "$BID" '{"child":{"pid":1},"foreground":{"pid":999999,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"},"last_exit":{"exit_code":0}}'
   out=$(fm_backend_agent_state rex "$T")
   [ "$out" = dead ] || fail "a recorded last_exit should read dead, got '$out'"
@@ -424,7 +500,7 @@ test_agent_state_mapping() {
   [ "$out" = unreadable ] || fail "an unreachable server must read unreadable, never missing, got '$out'"
   out=$(fm_backend_agent_state rex "not-a-target")
   [ "$out" = unreadable ] || fail "a malformed target should read unreadable, got '$out'"
-  pass "rex: agent_state maps agent/shell/other foregrounds, last_exit, exit 3, and exit 4"
+  pass "rex: agent_state maps agent (foreground or ancestor), shell, and other foregrounds, last_exit, exit 3, and exit 4"
 }
 
 test_absence_verdict() {
@@ -447,11 +523,10 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   fm_backend_kill rex "$T" "" fm-t1 || fail "kill should succeed"
   calls | grep -q " block close -s session:$SID block:$BID" || fail "kill must close the exact block"
   calls | grep -q " kill session:$SID" || fail "an emptied fm-local session should be retired"
-  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
-    && fail "a block Firstmate closed itself must never escalate as dead"
+  fm_backend_rex_commit_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "" "" blocked claude-code)"
   fm_backend_clear_transition rex "$STATE" "$T"
-  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
-    || fail "clearing the transition must re-arm the dead edge"
+  fm_transition_apply "$STATE" "$FM_BACKEND_REX_ESCALATED_PREFIX" "$SID" "$(fm_transition_record "$BID" "" "" blocked claude-code)" >/dev/null \
+    || fail "clearing the transition must re-arm the blocked edge"
 
   new_case kill-keep
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
@@ -482,9 +557,7 @@ test_kill_closes_proves_gone_and_retires_the_home_session() {
   inspect_json "$BID" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
   out=$(fm_backend_kill rex "$T" "" fm-t1 2>&1) && fail "a block still present after close must fail"
   assert_contains "$out" "still present" "the stuck-close refusal should say so"
-  fm_backend_rex_apply_transition "$STATE" "$SID" "$(fm_transition_record "$BID" "$SID" "" dead "")" >/dev/null \
-    || fail "a close that did not take must leave the block's dead edge armed"
-  pass "rex: kill closes the exact block, proves exit 3, pre-commits its dead edge, retires only this home's emptied session, and refuses blind outcomes"
+  pass "rex: kill closes the exact block, proves exit 3, retires only this home's emptied session, and refuses blind outcomes"
 }
 
 test_list_live_filters_by_home_scope() {
@@ -580,8 +653,9 @@ test_side_pane_helper() {
   calls | grep -q "^clean -S $SERVER --autostart=false split -s session:$LSID -b block:$LBID --split below --ratio 35 --focus=false --keep-open --label $label/tests -c $PWD --json -- make test\$" \
     || fail "open must split the worker's own pane unfocused and labeled, with REX_* scrubbed: $(calls | grep split)"
   for opt in --wait --right "--ratio 50" --below; do
-    # shellcheck disable=SC2086
-    rc=0; side open dev $opt -- npm run dev >/dev/null 2>&1 || rc=$?
+    rc=0
+    # shellcheck disable=SC2086 # $opt is deliberately split into its words
+    side open dev $opt -- npm run dev >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 2 ] || fail "open must reject the removed option $opt as a usage error, got $rc"
   done
   rc=0; side open dev npm run dev >/dev/null 2>&1 || rc=$?
@@ -800,6 +874,34 @@ test_reclaim_prefers_the_recorded_session() {
   out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "$LSID") || fail "reclaim create_task failed"
   [ "$out" = "$SID $WID $BID" ] || fail "a recorded session no longer labeled fm-local must not be reused, got '$out'"
   pass "rex: a reclaim mints its tab in the recorded session while live and labeled, else in this home's session"
+}
+
+test_reclaim_replaces_a_husk_and_refuses_a_live_one() {
+  local out husk=01a15f2e-c301-7b2b-a2fb-00000000beef
+  new_case reclaim-husk
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s"}]}' "$husk" "$(fm_backend_rex_scoped_name fm-t1)" >"$FAKE/blocks/session_$SID.json"
+  inspect_json "$husk" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  process_json "$husk" '{"child":{"pid":1},"foreground":{"pid":999999,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"},"last_exit":null}'
+  : >"$FAKE/close-removes"
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "" "" spawn 2>&1) && fail "an ordinary spawn must refuse a block already carrying its label"
+  assert_contains "$out" "already exists" "the duplicate refusal should say so"
+  calls | grep -q " block close " && fail "an ordinary spawn must never close a block carrying its label"
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "" "" reclaim) || fail "a reclaim must replace a bare-shell husk"
+  [ "$out" = "$SID $WID $BID" ] || fail "the reclaim must open its fresh tab, got '$out'"
+  calls | grep -q " block close -s session:$SID block:$husk" || fail "the husk must be closed by its exact id"
+
+  new_case reclaim-live-husk
+  printf '{"sessions":[{"session_id":"session:%s","label":"fm-local"}]}' "$SID" >"$FAKE/ls.json"
+  printf '{"blocks":[{"block_id":"block:%s","label":"%s"}]}' "$husk" "$(fm_backend_rex_scoped_name fm-t1)" >"$FAKE/blocks/session_$SID.json"
+  inspect_json "$husk" "$SID" "$(fm_backend_rex_scoped_name fm-t1)"
+  process_json "$husk" '{"child":{"pid":1},"foreground":{"pid":999999,"name":"2.1.306","path":"/Users/me/.local/share/claude/versions/2.1.306","argv0":"claude"},"last_exit":null}'
+  window_new_json
+  out=$(fm_backend_rex_create_task fm-t1 /work/proj "" "" "" reclaim 2>&1) && fail "a reclaim must refuse a labeled block that still runs an agent"
+  assert_contains "$out" "is not a bare shell (alive)" "the live-husk refusal should name its state"
+  calls | grep -q " block close " && fail "a live agent's block must never be closed"
+  pass "rex: a reclaim closes a bare-shell husk carrying its label and refuses one that still runs an agent; a spawn refuses both"
 }
 
 test_retirement_covers_secondmate_sessions_and_detached_blocks() {
@@ -1079,107 +1181,133 @@ test_mark_read_and_tab_rename() {
   pass "rex: mark_read reports only Firstmate's record and fails on an unreadable pane; tab rename renames only on change"
 }
 
-test_busy_state_trusts_only_proven_program_status() {
+# status_json: the block's program-status records.
+status_json() { # <bid> <records-json-array>
+  printf '{"records":%s}' "$2" >"$FAKE/call/block_$1.program_status.json"
+}
+
+test_busy_state_trusts_only_live_owners() {
   mark_case busy
-  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":4242,"name":"2.1.308","path":"/Users/x/.local/share/claude/versions/2.1.308","argv0":"claude"}}'
-  printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  [ "$(fm_backend_rex_busy_state "$T")" = busy ] || fail "a proven harness's working record over a live agent is busy"
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":4242,"name":"node","path":"/usr/bin/node","argv0":"node"},"ancestors":[{"pid":4241,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"}]}'
+  status_json "$BID" '[{"state":"working","app":"some-harness","owner":{"pid":4242}}]'
+  [ "$(fm_backend_rex_busy_state "$T")" = busy ] || fail "a root working record owned by the foreground process is busy"
   [ "$(fm_backend_busy_state rex "$T")" = busy ] || fail "the dispatcher must route rex busy_state"
-  printf '{"records":[{"state":"blocked","kind":"permission","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  status_json "$BID" '[{"state":"working","app":"some-harness","owner":{"pid":4241}}]'
+  [ "$(fm_backend_rex_busy_state "$T")" = busy ] || fail "a record owned by a foreground ancestor is trusted too"
+  status_json "$BID" '[{"state":"blocked","kind":"permission","app":"some-harness","owner":{"pid":4242}}]'
   [ "$(fm_backend_rex_busy_state "$T")" = idle ] || fail "blocked is waiting on the human, so idle"
-  printf '{"records":[{"state":"working","app":"some-tool"},{"id":"fm","state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "an unproven app or a child record must never read busy"
-  printf '{"records":[{"state":"working","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":1,"name":"zsh","path":"/bin/zsh","argv0":"-zsh"}}'
-  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "a working record left over a shell must not read busy"
-  pass "rex: busy_state trusts only a proven harness's own root record, and busy also needs a live agent"
+  status_json "$BID" '[{"state":"working","app":"some-harness","owner":{"pid":777}}]'
+  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "a record whose owner left the foreground chain must never read busy"
+  status_json "$BID" '[{"id":"fm/validate","state":"working","app":"firstmate","owner":{"pid":4242}},{"state":"working","app":"firstmate","owner":{"pid":4242}},{"id":"sub","state":"working","app":"some-harness","owner":{"pid":4242}}]'
+  [ "$(fm_backend_rex_busy_state "$T")" = unknown ] || fail "Firstmate's own records and child records must never read busy"
+  pass "rex: busy_state trusts only a harness root record whose owner is in the block's foreground chain"
 }
 
 test_submit_confirms_from_a_working_edge() {
   local out
   mark_case submit
-  printf '{"records":[{"state":"working","app":"claude-code","updated_at":"t2"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":4242,"name":"node","path":"/usr/bin/node","argv0":"node"}}'
+  status_json "$BID" '[{"state":"working","app":"claude-code","updated_at":"t2","owner":{"pid":4242}}]'
   out=$(FM_BACKEND_REX_SUBMIT_BASELINE=$'done\tt1' fm_backend_rex_submit_state "$T" fm-t1)
   [ "$out" = empty ] || fail "a done -> working edge after the submit confirms it, got '$out'"
   out=$(FM_BACKEND_REX_SUBMIT_BASELINE='' fm_backend_rex_submit_state "$T" fm-t1)
   [ "$out" = empty ] || fail "a first working record after the submit confirms it, got '$out'"
   out=$(FM_BACKEND_REX_SUBMIT_BASELINE=$'working\tt1' fm_backend_rex_submit_state "$T" fm-t1)
   [ "$out" = unknown ] || fail "an agent already working before the submit proves nothing, got '$out'"
-  printf '{"records":[{"state":"working","app":"some-tool"}]}' >"$FAKE/call/block_$BID.program_status.json"
+  status_json "$BID" '[{"state":"working","app":"claude-code","owner":{"pid":777}}]'
   out=$(FM_BACKEND_REX_SUBMIT_BASELINE='' fm_backend_rex_submit_state "$T" fm-t1)
-  [ "$out" = unknown ] || fail "an unproven app's working record proves nothing, got '$out'"
-  pass "rex: submit confirmation accepts a proven harness's not-working -> working edge and nothing else"
+  [ "$out" = unknown ] || fail "an untrusted owner's working record proves nothing, got '$out'"
+  pass "rex: submit confirmation accepts a trusted root record's not-working -> working edge and nothing else"
 }
 
-events_line() { # <block-uuid> <state> <app> [id]
-  printf '{"type":"session_event","payload":{"session_id":"session:%s","event":{"type":"block_event","payload":{"block_id":"block:%s","name":"program_status_changed","payload":{"id":"%s","record":{"state":"%s","app":"%s"}}}}}}\n' \
-    "$SID" "$1" "${4:-}" "$2" "$3"
-}
-
-test_wait_transition_reads_rex_events() {
-  local out rc other=01a15f2e-c301-7b2b-a2fb-000000000001
-  new_case events
-  export FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
+# push_case: a case whose watched block is live with a trusted foreground
+# (pid 4242) and whose event reader replays $FAKE/stream, one line per edge,
+# after `@subscribed` (unless $FAKE/no-subscribe exists).
+push_case() { # <name>
+  new_case "$1"
   inspect_json "$BID" "$SID"
-  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
-  {
-    printf '{"type":"session_event","payload":{"event":{"type":"client_connected"}}}\n'
-    events_line "$BID" blocked firstmate fm
-    events_line "$other" blocked claude-code
-    events_line "$BID" blocked claude-code
-  } >"$FAKE/events.jsonl"
+  process_json "$BID" '{"last_exit":null,"child":{"pid":1},"foreground":{"pid":4242,"name":"node","path":"/usr/bin/node","argv0":"node"}}'
+  status_json "$BID" '[]'
+  : >"$FAKE/stream"
+  cat >"$CASE/reader" <<'SH'
+#!/usr/bin/env bash
+F=${FM_REX_FAKE:?}
+printf '%s\n' "$*" >"$F/reader-args"
+[ -e "$F/reader-fails" ] && exit 1
+[ -e "$F/no-subscribe" ] || echo @subscribed
+cat "$F/stream"
+[ -e "$F/reader-ends" ] && exit 0
+sleep "$2"
+SH
+  chmod +x "$CASE/reader"
+  export FM_BACKEND_REX_EVENT_READER="$CASE/reader" FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
+}
+
+stream_line() { # <state> <kind> <app> <owner-pid> <msg> [block-uuid]
+  printf 'block:%s\t%s\t%s\t%s\t%s\t%s\n' "${6:-$BID}" "$1" "$2" "$3" "$4" "$5" >>"$FAKE/stream"
+}
+
+test_wait_transition_reads_the_event_reader() {
+  local out rc other=01a15f2e-c301-7b2b-a2fb-000000000001
+  push_case push
+  stream_line blocked permission claude-code 4242 "Allow the edit?" "$other"
+  stream_line blocked question claude-code 4242 "Which branch?"
   out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T")
   rc=$?
-  [ "$rc" -eq 0 ] || fail "a watched root blocked record must be actionable (rc=$rc)"
-  [ "$out" = "$BID"$'\t'"$SID"$'\t\t'"blocked"$'\t'"claude-code" ] || fail "unexpected record '$out'"
-  calls | grep -q " events -s session:$SID --json" || fail "the reader must stream exactly the task session: $(calls)"
+  [ "$rc" -eq 0 ] || fail "a watched trusted blocked edge must be actionable (rc=$rc)"
+  [ "$out" = "$BID"$'\t\t\t'"blocked"$'\t'"claude-code"$'\t'"question: Which branch?" ] || fail "unexpected record '$out'"
+  [ "$(cat "$FAKE/reader-args")" = "session:$SID 5 block:$BID" ] || fail "the reader must watch exactly the task session and block, got '$(cat "$FAKE/reader-args")'"
   fm_backend_rex_commit_transition "$STATE" "$SID" "$out" || fail "commit failed"
   out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
   rc=$?
   [ "$rc" -eq 1 ] || fail "an escalated pane must not re-escalate before a working edge (rc=$rc, '$out')"
-  { printf '{"type":"x"}\n'; events_line "$BID" working claude-code; events_line "$BID" blocked claude-code; } >"$FAKE/events.jsonl"
+  : >"$FAKE/stream"
+  stream_line working "" claude-code 4242 ""
+  stream_line blocked auth claude-code 4242 "Log in"
   out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a working edge must re-arm the next blocked edge"
+  [ "$(fm_transition_detail "$out")" = "auth: Log in" ] || fail "the detail must carry the kind and message, got '$out'"
 
-  new_case events-own
-  inspect_json "$BID" "$SID"
-  printf '{"records":[{"id":"fm","state":"blocked","app":"firstmate"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  { printf '{"type":"x"}\n'; events_line "$BID" blocked firstmate fm; events_line "$BID" blocked claude-code sub/agent; } >"$FAKE/events.jsonl"
+  push_case push-untrusted
+  stream_line blocked permission claude-code 777 "stale record"
   out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
   rc=$?
-  [ "$rc" -eq 1 ] || fail "Firstmate's own marks and child records must never wake the watcher (rc=$rc, '$out')"
+  [ "$rc" -eq 1 ] || fail "a blocked edge whose owner is not in the foreground chain must be ignored (rc=$rc, '$out')"
 
-  new_case events-reconcile
-  inspect_json "$BID" "$SID"
-  printf '{"records":[{"state":"blocked","kind":"permission","app":"claude-code"}]}' >"$FAKE/call/block_$BID.program_status.json"
-  printf '{"type":"x"}\n' >"$FAKE/events.jsonl"
+  push_case push-reconcile
+  status_json "$BID" '[{"state":"blocked","kind":"permission","app":"claude-code","msg":"Run it?","owner":{"pid":4242}},{"id":"fm","state":"blocked","kind":"question","app":"firstmate","owner":{"pid":4242}}]'
   out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a pane already blocked at subscribe must be returned by the reconcile"
-  [ "$(fm_transition_to_status "$out")" = blocked ] || fail "reconcile must report the blocked state, got '$out'"
+  [ "$(fm_transition_detail "$out")" = "permission: Run it?" ] || fail "the reconcile must report the harness's own record, got '$out'"
+  fm_backend_rex_commit_transition "$STATE" "$SID" "$out"
+  out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
+  [ "$?" -eq 1 ] || fail "a still-blocked pane must not be re-delivered by the next reconcile ('$out')"
 
-  new_case events-dead
-  inspect_json "$BID" "$SID"
-  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
-  { printf '{"type":"x"}\n'
-    printf '{"type":"session_event","payload":{"event":{"type":"block_event","payload":{"block_id":"block:%s","name":"child_exited","payload":{"exit_code":0}}}}}\n' "$BID"
-  } >"$FAKE/events.jsonl"
-  : >"$(fm_backend_rex_escalation_marker "$STATE" "$T")"
-  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "child_exited on a watched block must be actionable, even after its blocked edge escalated"
-  [ "$(fm_transition_to_status "$out")" = dead ] || fail "child_exited must normalize to dead, got '$out'"
+  push_case push-own-marks
+  status_json "$BID" '[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","owner":{"pid":4242}}]'
+  out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
+  [ "$?" -eq 1 ] || fail "Firstmate's own mark must never wake the watcher through the reconcile ('$out')"
 
-  new_case events-gone
-  printf '{"records":[]}' >"$FAKE/call/block_$BID.program_status.json"
-  printf '{"type":"x"}\n' >"$FAKE/events.jsonl"
-  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T") || fail "a block gone (exit 3) at subscribe must reconcile as dead"
-  [ "$(fm_transition_to_status "$out")" = dead ] || fail "exit 3 at reconcile must be dead, got '$out'"
-
-  new_case events-unreachable
-  inspect_json "$BID" "$SID"
-  printf '4' >"$FAKE/events.exit"
-  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T")
+  push_case push-gone
+  stream_line gone "" "" "" "program exited"
+  SECONDS=0
+  out=$(fm_backend_rex_wait_transition "$SID" 20 "$STATE" "$T")
   rc=$?
-  [ "$rc" -eq 2 ] || fail "a stream that exits 4 makes the wait unusable (2), never a verdict (rc=$rc, '$out')"
-  [ -z "$out" ] || fail "an unreachable server must never produce a record, got '$out'"
-  unset FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED
-  pass "rex: the event wait escalates a watched root blocked or dead edge once, ignores Firstmate's own marks, reconciles on subscribe, and treats exit 4 as unusable"
+  [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "a gone edge must end the wait with no record (rc=$rc, '$out')"
+  [ "$SECONDS" -lt 10 ] || fail "a gone edge must end the wait at once, not after the budget"
+
+  push_case push-fails
+  : >"$FAKE/reader-fails"
+  out=$(fm_backend_rex_wait_transition "$SID" 2 "$STATE" "$T")
+  [ "$?" -eq 2 ] || fail "a reader that cannot start makes the wait unusable (2)"
+  rm -f "$FAKE/reader-fails"
+  : >"$FAKE/no-subscribe"
+  out=$(fm_backend_rex_wait_transition "$SID" 1 "$STATE" "$T")
+  [ "$?" -eq 2 ] || fail "a reader that never subscribes makes the wait unusable (2)"
+  rm -f "$FAKE/no-subscribe"
+  : >"$FAKE/reader-ends"
+  out=$(fm_backend_rex_wait_transition "$SID" 5 "$STATE" "$T")
+  [ "$?" -eq 2 ] || fail "a reader that ends before its deadline makes the wait unusable (2)"
+  unset FM_BACKEND_REX_EVENT_READER FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED
+  pass "rex: the event wait escalates a trusted blocked edge once with its kind and message, reconciles on subscribe, ignores untrusted owners and Firstmate's own marks, ends at once on a gone edge, and falls back on a failed reader"
 }
 
 # marks_status: write <task>'s status log line.
@@ -1390,7 +1518,9 @@ test_create_task_in_rex_never_uses_the_supervisor_session
 test_parse_target
 test_target_ready_checks_session_and_label
 test_capture_send_and_keys
+test_derived_viewport_and_cursor
 test_composer_state_and_submit
+test_composer_reads_the_cursor_row_on_a_real_screen
 test_agent_state_mapping
 test_absence_verdict
 test_kill_closes_proves_gone_and_retires_the_home_session
@@ -1403,6 +1533,7 @@ test_secondmate_gets_its_own_session_as_first_tab
 test_secondmate_home_workers_join_its_session
 test_secondmate_relaunch_reuses_its_recorded_live_session
 test_reclaim_prefers_the_recorded_session
+test_reclaim_replaces_a_husk_and_refuses_a_live_one
 test_retirement_covers_secondmate_sessions_and_detached_blocks
 test_child_teardown_scoping_as_the_child_home
 test_supervisor_discovery_requires_proof
@@ -1413,9 +1544,9 @@ test_tab_label_is_sidebar_sized
 test_mark_is_one_status_record_plus_optional_notification
 test_mark_read_and_tab_rename
 test_progress_and_tint_sequences
-test_busy_state_trusts_only_proven_program_status
+test_busy_state_trusts_only_live_owners
 test_submit_confirms_from_a_working_edge
-test_wait_transition_reads_rex_events
+test_wait_transition_reads_the_event_reader
 test_marks_producer_converges_and_notifies_once
 test_nm_run_progress_reads_captured_status
 test_marks_producer_shows_validation_progress_and_tint

@@ -336,9 +336,20 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# Whether a raw fm_backend_agent_state reading on <backend> goes through
+# fm_control_endpoint_absence_verdict before a recovery verb (exit, relaunch)
+# acts or refuses. Only `missing` does, on every backend: an `unreadable`
+# endpoint (a Rex server that is stopped or unreachable included, since
+# Firstmate never starts one) stays unproven and refuses. Passive readers keep
+# the raw state.
+fm_control_absence_recheck_applies() {  # <backend> <raw-state>
+  [ "${2-}" = missing ]
+}
+
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
 # that an endpoint reading `missing` is actually GONE rather than merely
-# unreachable from this seat. Call it only for a `missing` raw state.
+# unreachable from this seat. Call it only for a raw state that
+# fm_control_absence_recheck_applies accepts.
 #
 # Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
 # unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
@@ -373,10 +384,11 @@ fm_control_backend_state_verified() {  # <backend>
 #     There is no read available here that closes that gap, so tmux always
 #     returns `unproven` and both verbs refuse. tmux is left exactly as
 #     deadlocked as it was before this change - no worse - but deliberately.
-#   rex CAN prove it. The record carries the server endpoint, and every read
-#     addresses that server by full block id with autostart off, so `missing`
-#     is the reachable recorded server answering "not found" (exit 3) while an
-#     unreachable one reads `unreadable` and stays unproven.
+#   rex CAN prove it. Rex never reuses an id, and the record carries the
+#     server endpoint the task was created on; every read addresses that
+#     server by full block id with autostart off, so `missing` is the
+#     reachable recorded server answering "not found" (exit 3), while an
+#     unreachable or stopped one reads `unreadable` and stays unproven.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.

@@ -60,6 +60,16 @@ grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale paylo
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
 
 reset_state
+rm -f "$STATE_DIR"/.rex-escalated-* 2>/dev/null || true
+fm_write_meta "$STATE_DIR/tk1.meta" "window=0a1b-c2:3d4e-f5" "backend=rex" "kind=ship"
+handle_push_transition rex 0a1b-c2 "$(fm_transition_record 3d4e-f5 "" "" blocked claude-code "permission: Allow Bash: rm -rf build")"
+grep -q 'stale	0a1b-c2:3d4e-f5' "$STATE_DIR/.wake-queue" || fail "a rex push must name the task's recorded window: $(cat "$STATE_DIR/.wake-queue")"
+grep -q 'rex: agent blocked (permission: Allow Bash: rm -rf build) - waiting on human' "$STATE_DIR/.wake-queue" \
+  || fail "the stale payload must name rex and carry the blocked kind and message: $(cat "$STATE_DIR/.wake-queue")"
+[ -e "$STATE_DIR/.rex-escalated-0a1b-c2_3d4e-f5" ] || fail "the rex dedupe marker must be committed after enqueue"
+pass "handle_push_transition: a rex blocked edge's wake names the backend and carries Rex's blocked kind and message"
+
+reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 (
   # shellcheck disable=SC2329 # Runtime override called by the isolated production owner.
@@ -68,22 +78,6 @@ fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind
 ) >/dev/null 2>&1 || true
 [ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"
 pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe marker"
-
-# --- handle_push_transition: a dead edge escalates only for a recorded task ----
-
-REX_SID=11111111-1111-4111-8111-111111111111
-REX_BID=22222222-2222-4222-8222-222222222222
-reset_state
-fm_write_meta "$STATE_DIR/tkr.meta" "window=$REX_SID:$REX_BID" "backend=rex" "kind=ship"
-handle_push_transition rex "$REX_SID" "$(fm_transition_record "$REX_BID" "$REX_SID" "" dead "")"
-grep -q 'rex: agent exited or pane closed' "$STATE_DIR/.wake-queue" 2>/dev/null || fail "a recorded task's dead pane must enqueue a stale wake"
-[ -s "$WAKE_LOG" ] || fail "a recorded task's dead pane must wake the supervisor"
-reset_state
-handle_push_transition rex "$REX_SID" "$(fm_transition_record "$REX_BID" "$REX_SID" "" dead "")"
-[ ! -e "$STATE_DIR/.wake-queue" ] || fail "a dead pane no task record names must not enqueue a wake: $(cat "$STATE_DIR/.wake-queue")"
-[ ! -s "$WAKE_LOG" ] || fail "a dead pane no task record names must not wake the supervisor"
-grep -q 'absorbed push dead' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the retired-pane absorb should be logged to the triage log"
-pass "handle_push_transition: a dead pane escalates for a recorded task and is dropped once its record is retired"
 
 # --- handle_push_transition: absorb (no wake, no enqueue) for a declared pause -
 

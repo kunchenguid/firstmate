@@ -3,10 +3,11 @@
 # adapter (bin/backends/rex.sh). It provisions a private headless Rex server
 # through bin/fm-rex-lab.sh (never the live server; the lab's tripwire checks
 # the live server is untouched) and drives the adapter against it: session and
-# tab creation, labels, focus, live cwd, send and keys, capture, agent state
-# from real processes, Firstmate's attention marks, notifications, validation
-# progress, and state tint, the real `rex events` push wait, close, exit 3 and
-# exit 4, and the autostart refusal.
+# tab creation, labels, focus, the 200x50 resize, live cwd, send and keys,
+# capture and the derived viewport, agent state from real processes, trusted
+# program status, Firstmate's attention marks, notifications, validation
+# progress, and state tint, the real `rex do` push wait, close, exit 3 and
+# exit 4, the autostart refusal, and recovery after a server restart.
 # Runs by default where rex and jq are installed; FM_REX_SMOKE=0 disables it.
 set -u
 
@@ -39,6 +40,8 @@ WORK=$(cd "$TMP_ROOT/work/proj" && pwd -P)
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source rex || smoke_fail "could not source the rex adapter"
+# shellcheck source=bin/fm-control-lib.sh
+. "$ROOT/bin/fm-control-lib.sh"
 
 wait_capture() { # <target> <label> <needle>
   local i
@@ -83,7 +86,9 @@ VIEW=$(fm_backend_rex_cli session inspect "session:$SID" --json) || smoke_fail "
   || smoke_fail "the tab label is not the sidebar-sized fallback"
 fm_backend_rex_create_task fm-smoke-a "$WORK" >/dev/null 2>&1 && smoke_fail "a duplicate scoped label was not refused"
 fm_backend_rex_target_ready "$TA" fm-smoke-a || smoke_fail "the new block is not ready under its scoped label"
-pass "rex smoke: one fm-local session holding exactly the task tabs, unfocused labeled tabs, and duplicate refusal"
+SIZE=$(fm_backend_rex_block_call "$TB" size)
+[ "$(printf '%s' "$SIZE" | jq -r '"\(.columns)x\(.rows)"')" = 200x50 ] || smoke_fail "a new task tab's block must be resized to 200x50, got $SIZE"
+pass "rex smoke: one fm-local session holding exactly the task tabs, unfocused labeled 200x50 tabs, and duplicate refusal"
 
 CWD=$(fm_backend_rex_current_path "$TA" fm-smoke-a)
 [ "$CWD" = "$WORK" ] || smoke_fail "current_path read '$CWD', expected '$WORK'"
@@ -109,10 +114,31 @@ pass "rex smoke: agent_state reads real foreground processes (shell dead, other 
 
 fm_backend_rex_send_text_line "$TA" "clear; seq 1 80" fm-smoke-a || smoke_fail "could not print scrollback"
 wait_capture "$TA" fm-smoke-a 80 || smoke_fail "seq output never appeared"
-ROWS=$(fm_backend_rex_block_call "$TA" size | jq -r .rows)
+ROWS=$(fm_backend_rex_rows "$TA") || smoke_fail "could not read the block's rows"
 LINES=$(fm_backend_rex_cli capture -s "session:$SID" -b "block:$BID" | wc -l | tr -d ' ')
-[ "$LINES" -gt "$ROWS" ] || smoke_fail "rex capture returned $LINES lines on a $ROWS-row screen; a viewport-only capture now exists, so revisit FM_BACKEND_VISIBLE_CAPTURE"
-pass "rex smoke: capture includes scrollback ($LINES lines, $ROWS rows), so rex stays out of the viewport-capture list"
+[ "$LINES" -gt "$ROWS" ] || smoke_fail "rex capture returned $LINES lines on a $ROWS-row screen; a viewport-only capture now exists, so revisit the derived viewport"
+VISIBLE=$(fm_backend_visible_capture rex "$TA" fm-smoke-a && printf x) || smoke_fail "the derived viewport could not be read"
+VLINES=$(printf '%s' "${VISIBLE%x}" | awk 'END { print NR }')
+[ "$VLINES" = "$ROWS" ] || smoke_fail "the derived viewport must be exactly size.rows ($ROWS) lines, got $VLINES"
+printf '%s' "${VISIBLE%x}" | grep -qx 80 || smoke_fail "the derived viewport must show the newest output"
+printf '%s' "${VISIBLE%x}" | grep -qx 1 && smoke_fail "the derived viewport must not reach back into scrollback"
+fm_backend_rex_screen_read "$TA" fm-smoke-a || smoke_fail "screen_read failed"
+[ -n "$FM_BACKEND_REX_CURSOR_Y" ] || smoke_fail "the styled read reported no cursor row"
+pass "rex smoke: capture includes scrollback ($LINES lines), and the derived viewport is exactly the $ROWS screen rows with the cursor on row $FM_BACKEND_REX_CURSOR_Y"
+
+# Program status counts only while its owner is in the foreground chain, and
+# Firstmate's own records never count.
+fm_backend_rex_send_text_line "$TA" "clear; printf '\\033]7501;state=working:app=smoke-harness\\033\\\\'" fm-smoke-a || smoke_fail "could not report working from the pane"
+reads_busy() { [ "$(fm_backend_rex_busy_state "$TA")" = busy ]; }
+for _ in $(seq 1 40); do reads_busy && break; sleep 0.1; done
+reads_busy || smoke_fail "a working record from the foreground shell must read busy: $(fm_backend_rex_block_call "$TA" program_status)"
+fm_backend_rex_send_text_line "$TA" "printf '\\033]7501;state=idle:app=smoke-harness\\033\\\\'" fm-smoke-a || smoke_fail "could not report idle from the pane"
+for _ in $(seq 1 40); do [ "$(fm_backend_rex_busy_state "$TA")" = idle ] && break; sleep 0.1; done
+[ "$(fm_backend_rex_busy_state "$TA")" = idle ] || smoke_fail "an idle record from the foreground shell must read idle"
+fm_backend_rex_progress "$TA" 50 "Validating" fm-smoke-a || smoke_fail "the progress record could not be written"
+[ "$(fm_backend_rex_busy_state "$TA")" = idle ] || smoke_fail "Firstmate's own working progress record must never read busy"
+fm_backend_rex_progress "$TA" clear "" fm-smoke-a || smoke_fail "the progress record could not be cleared"
+pass "rex smoke: a harness root record from the foreground shell drives busy_state, and Firstmate's own records never do"
 
 LIVE=$(fm_backend_rex_list_live)
 printf '%s\n' "$LIVE" | grep -qx "$TA"$'\t'fm-smoke-a || smoke_fail "list_live did not list task a"
@@ -236,8 +262,9 @@ fm_backend_rex_tint "$TB" 'red' fm-smoke-b && smoke_fail "a tint that is not #rr
 fm_backend_rex_tint "$TB" '#2b2614' fm-smoke-other && smoke_fail "a tint for another task's label must be refused"
 pass "rex smoke: a tint reaches the pane's own background query ($BG1) and a reset restores it ($BG2)"
 
-# The push wait over a real stream: a root blocked report from inside the pane
-# is the actionable edge, and the pane's program exiting is dead.
+# The push wait over the real `rex do` reader: a root blocked report from
+# inside the pane is the actionable edge, Firstmate's own blocked mark is not,
+# and the pane's program exiting ends the wait at once with no record.
 IDS=$(fm_backend_rex_create_task fm-smoke-c "$WORK") || smoke_fail "third create_task failed"
 read -r _ _ BID_C <<EOF
 $IDS
@@ -248,25 +275,32 @@ WAIT_OUT="$TMP_ROOT/wait.out"
 ( fm_backend_rex_wait_transition "$SID" 20 "$STATE" "$TC" >"$WAIT_OUT"; printf "\nrc=%s\n" "$?" >>"$WAIT_OUT" ) &
 WAIT_PID=$!
 sleep 3
-fm_backend_rex_send_text_line "$TC" "printf '\\033]7501;state=blocked:kind=permission:app=smoke-probe\\033\\\\'" fm-smoke-c || smoke_fail "could not report blocked from the pane"
+fm_backend_rex_mark "$TC" blocked question "Needs your decision" fm-smoke-c || smoke_fail "the mark could not be written"
+sleep 1
+fm_backend_rex_send_text_line "$TC" "printf '\\033]7501;state=blocked:kind=permission:app=smoke-probe:msg=%s\\033\\\\' \"\$(printf 'Allow it?' | base64)\"" fm-smoke-c || smoke_fail "could not report blocked from the pane"
 wait "$WAIT_PID"
 grep -q '^rc=0$' "$WAIT_OUT" || smoke_fail "the real stream's blocked report did not end the wait: $(cat "$WAIT_OUT")"
 [ "$(fm_transition_to_status "$(head -1 "$WAIT_OUT")")" = blocked ] || smoke_fail "the record is not blocked: $(cat "$WAIT_OUT")"
 [ "$(fm_transition_pane_id "$(head -1 "$WAIT_OUT")")" = "$BID_C" ] || smoke_fail "the record names another block: $(cat "$WAIT_OUT")"
+[ "$(fm_transition_agent "$(head -1 "$WAIT_OUT")")" = smoke-probe ] || smoke_fail "Firstmate's own mark ended the wait instead of the harness's report: $(cat "$WAIT_OUT")"
+[ "$(fm_transition_detail "$(head -1 "$WAIT_OUT")")" = "permission: Allow it?" ] || smoke_fail "the record must carry Rex's blocked kind and message: $(cat "$WAIT_OUT")"
+fm_backend_rex_mark "$TC" clear "" "" fm-smoke-c || smoke_fail "the mark could not be cleared"
 fm_backend_rex_commit_transition "$STATE" "$SID" "$(head -1 "$WAIT_OUT")"
 ( fm_backend_rex_wait_transition "$SID" 20 "$STATE" "$TC" >"$WAIT_OUT"; printf "\nrc=%s\n" "$?" >>"$WAIT_OUT" ) &
 WAIT_PID=$!
 sleep 3
+WAIT_START=$SECONDS
 fm_backend_rex_send_text_line "$TC" "exit" fm-smoke-c || smoke_fail "could not exit the third pane's shell"
 wait "$WAIT_PID"
-grep -q '^rc=0$' "$WAIT_OUT" || smoke_fail "the pane's program exiting did not end the wait: $(cat "$WAIT_OUT")"
-[ "$(fm_transition_to_status "$(head -1 "$WAIT_OUT")")" = dead ] || smoke_fail "an exited pane is not dead: $(cat "$WAIT_OUT")"
+grep -q '^rc=1$' "$WAIT_OUT" || smoke_fail "the pane's program exiting must end the wait with no record: $(cat "$WAIT_OUT")"
+[ -z "$(head -1 "$WAIT_OUT")" ] || smoke_fail "an exited pane must produce no record: $(cat "$WAIT_OUT")"
+[ $((SECONDS - WAIT_START)) -lt 12 ] || smoke_fail "the pane's program exiting did not end the wait at once"
 fm_backend_kill rex "$TC" "" fm-smoke-c || smoke_fail "kill of task c failed"
 rc=0
 FM_BACKEND_REX_SERVER="unix://$TMP_ROOT/dead.sock" FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 \
   fm_backend_rex_wait_transition "$SID" 3 "$STATE" "$TB" >/dev/null || rc=$?
 [ "$rc" -eq 2 ] || smoke_fail "an unreachable server's stream must make the wait unusable (2), got $rc"
-pass "rex smoke: the event wait returns a real blocked report and a real exit as dead, and an unreachable server is unusable, never dead"
+pass "rex smoke: the event wait returns a real blocked report with its kind and message, ignores Firstmate's own mark, ends at once when the pane's program exits, and an unreachable server is unusable, never dead"
 
 fm_backend_kill rex "$TA" "" fm-smoke-a || smoke_fail "kill of task a failed"
 fm_backend_rex_cli block inspect "block:$BID" --json >/dev/null 2>&1
@@ -316,3 +350,16 @@ FM_BACKEND_REX_SERVER="unix://$DEAD_SOCK" fm_backend_rex_cli ls --json >/dev/nul
 [ "$?" -eq 4 ] || smoke_fail "an unreachable server did not answer exit 4"
 [ ! -e "$DEAD_SOCK" ] || smoke_fail "a call against a missing socket autostarted a server"
 pass "rex smoke: an unreachable server is exit 4 and unreadable, and nothing autostarts"
+
+# A server restart ends every session on it: once the server is back, the old
+# block is proven gone by the same recorded server.
+IDS=$(fm_backend_rex_create_task fm-smoke-r "$WORK") || smoke_fail "restart task create_task failed"
+read -r R_SID _ R_BID <<EOF
+$IDS
+EOF
+TR="$R_SID:$R_BID"
+state=$(wait_state "$TR" dead) || smoke_fail "the restart task's shell read '$state', expected dead"
+"$LAB_HELPER" restart "$LAB" >/dev/null || smoke_fail "the lab server did not restart"
+[ "$(fm_backend_rex_agent_state "$TR")" = missing ] || smoke_fail "a block lost with the restarted server must read missing from the recorded server"
+[ "$(fm_control_endpoint_absence_verdict rex "$TR" | cut -f1)" = gone ] || smoke_fail "the absence proof must read gone after the restart"
+pass "rex smoke: after a server restart the recorded server proves the old block gone"

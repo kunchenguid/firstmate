@@ -122,7 +122,7 @@ for _ in $(seq 1 10); do
   sleep 1
 done
 [ "$COMPOSER" = empty ] || {
-  fm_backend_rex_composer_capture "$TARGET" "$LABEL" | tail -n 12 | sed 's/\x1b\[[0-9;]*m//g; s/^/# /' >&2
+  fm_backend_rex_visible_capture_vt "$TARGET" "$LABEL" | tail -n 12 | sed 's/\x1b\[[0-9;]*m//g; s/^/# /' >&2
   fail "rex classified the real Claude idle composer as '$COMPOSER' ($VERSIONS)"
 }
 pass "rex classifies the real Claude idle composer as empty"

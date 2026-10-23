@@ -7,12 +7,12 @@
 # OSC 7501 program-status records until the worker reports done, and prints the
 # states each harness published. Absent harnesses are reported, never skipped
 # silently; a run that exercised no harness fails rather than passing vacuously.
-# Claude Code is the one harness whose program status drives busy_state and
-# submit confirmation (FM_BACKEND_REX_STATUS_APPS), so the guard fails naming
-# its version if Claude stops publishing `working`, or if its root record still
-# reads `working` once the worker has reported done and its turn has ended.
-# Other harnesses are evidence for docs/verification/runtime-backends.md, never
-# a failure.
+# Any harness's trusted root record drives busy_state and submit confirmation
+# (bin/backends/rex.sh "program status"), and Claude Code is the harness that
+# path is verified on, so the guard fails naming its version if Claude stops
+# publishing `working`, or if its root record still reads `working` once the
+# worker has reported done and its turn has ended. Other harnesses are
+# evidence for docs/verification/runtime-backends.md, never a failure.
 set -u
 
 # shellcheck source=tests/lib.sh

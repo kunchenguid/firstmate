@@ -495,6 +495,39 @@ test_backend_paseo_is_never_autodetected() {
   pass "fm_backend_detect/fm_backend_name: paseo is never auto-detected from PASEO_* markers or its bundle id (tmux default stays silent); only FM_BACKEND or config/backend select it"
 }
 
+# Rex auto-detection (docs/rex-backend.md "Selection and detection"): tmux and
+# herdr nested inside a Rex block win (innermost first), and REX_* markers
+# alone - inherited by every descendant, a nested tmux included - never select
+# rex without the structural proof tests/fm-backend-rex.test.sh exercises
+# against a fake Rex server.
+test_backend_rex_autodetect() {
+  local dir cfg cfg_tmux out rex_block rex_session
+  dir="$TMP_ROOT/rex-autodetect"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
+  mkdir -p "$cfg" "$cfg_tmux"; printf 'tmux\n' > "$cfg_tmux/backend"
+  rex_block='block:01a161a0-3364-72a7-8f87-97e42e4e5ea6'
+  rex_session='session:01a161a0-3364-72a7-8f87-97e42e4e5ea7'
+
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier PASEO_AGENT_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" \
+    REX_BIN_DIR="$dir/no-rex" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-rex" FM_REX_SERVER=unix:///nonexistent-fm-rex.sock \
+    TERM_PROGRAM=rex REX_BLOCK="$rex_block" REX_SESSION="$rex_session" fm_backend_detect 2>/dev/null); then
+    fail "inherited REX_* markers without a provable Rex pane must not detect a backend, got '$out'"
+  fi
+
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; TMUX='fake,1,0' TERM_PROGRAM=rex REX_BLOCK="$rex_block" REX_SESSION="$rex_session" fm_backend_detect)
+  [ "$out" = tmux ] || fail "tmux nested in a Rex block should detect tmux, got '$out'"
+  out=$(unset TMUX CMUX_WORKSPACE_ID PASEO_AGENT_ID; HERDR_ENV=1 TERM_PROGRAM=rex REX_BLOCK="$rex_block" REX_SESSION="$rex_session" fm_backend_detect)
+  [ "$out" = herdr ] || fail "herdr nested in a Rex block should detect herdr, got '$out'"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; TERM_PROGRAM=rex REX_BLOCK="$rex_block" REX_SESSION="$rex_session" FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND must win over Rex auto-detection, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; TERM_PROGRAM=rex REX_BLOCK="$rex_block" REX_SESSION="$rex_session" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_tmux" fm_backend_name)
+  [ "$out" = tmux ] || fail "config/backend must win over Rex auto-detection, got '$out'"
+
+  fm_backend_validate_spawn rex 2>/dev/null || fail "rex must be a known spawn-capable backend"
+
+  pass "fm_backend_detect/fm_backend_name: REX_* markers alone never select rex; nested tmux/herdr win; explicit config wins"
+}
+
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
 # runtime auto-detection, even when a detection marker points the other way.
 test_backend_name_explicit_beats_detection() {
@@ -1289,6 +1322,7 @@ test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
 test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_paseo_is_never_autodetected
+test_backend_rex_autodetect
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable

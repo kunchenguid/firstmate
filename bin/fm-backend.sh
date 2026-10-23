@@ -32,8 +32,8 @@
 # auto-detection. Paseo stamps PASEO_* markers into every descendant process
 # (a tmux server started from a Paseo tab inherits them), so an inherited
 # marker is not a selection; see docs/paseo-backend.md. P7 adds
-# bin/backends/rex.sh, also EXPERIMENTAL and spawn-capable for ships and
-# scouts, behind `--backend rex`/`FM_BACKEND=rex`/config/backend, and behind
+# bin/backends/rex.sh, also EXPERIMENTAL and spawn-capable for ships, scouts,
+# and secondmates, behind `--backend rex`/`FM_BACKEND=rex`/config/backend, and behind
 # runtime auto-detection only when firstmate's own Rex pane is proven
 # structurally (REX_* markers leak into descendants exactly like Paseo's);
 # see docs/rex-backend.md.
@@ -79,8 +79,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # paseo is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij/cmux - verified against the real Paseo daemon on 127.0.0.1:6767
 # (docs/paseo-backend.md).
-# rex is EXPERIMENTAL and spawn-capable for ships and scouts, session-provider-
-# only like herdr - verified against Rex API revision 4 (docs/rex-backend.md).
+# rex is EXPERIMENTAL and spawn-capable, session-provider-only like herdr -
+# verified against the real Rex server at API revision 5 (docs/rex-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex"
@@ -129,7 +129,6 @@ fm_backend_is_known() {  # <name>
 # cmux-provided shell, but cmux cannot run nested inside either of them, so a
 # tmux or herdr marker set alongside CMUX_WORKSPACE_ID always means that
 # multiplexer is the innermost, currently-executing layer and must win.
-#
 # cmux FALLBACK signals (docs/cmux-backend.md "Runtime auto-detection" owns
 # the empirical record): cmux's bundled `claude` PATH shim routes through
 # cmux-claude-wrapper, whose passthrough path unsets every CMUX_* variable
@@ -148,7 +147,9 @@ fm_backend_is_known() {  # <name>
 #      scrubbed entirely (no bundle id to inherit); NOT usable from inside
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
-# Rex is checked after tmux and herdr and before cmux. Its REX_* markers reach
+# Rex is checked after tmux and herdr, which win through their own markers
+# when nested inside a Rex pane, and before cmux, whose markers a Rex server
+# started from a cmux tab could have inherited. Its REX_* markers reach
 # every descendant, including a tmux server started from a Rex pane, so they
 # never select Rex alone: fm_backend_rex_detect also requires REX_BLOCK to be
 # live on the Rex server inside REX_SESSION with that block's child process an
@@ -740,7 +741,7 @@ fm_backend_source() {  # <name>
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
     rex)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh
       ;;
     *)
       return 1
@@ -884,11 +885,11 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # pending live verification: its `read-screen` without `--scrollback` plausibly
 # reads only the viewport, but that has not been observed on a real cmux, and
 # the adapter's own capture opts into history with `--scrollback`. orca's
-# `terminal read --limit` is a history read with no viewport mode. rex is absent
-# because `rex capture` and its `format` method both return scrollback with
-# trailing blank screen rows omitted, so the viewport cannot be located
-# (docs/verification/runtime-backends.md#rex).
-FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij"
+# `terminal read --limit` is a history read with no viewport mode. rex has no
+# viewport-only read either; its viewport is DERIVED as the last size.rows rows
+# of the styled capture, which always ends with the full screen grid
+# (bin/backends/rex.sh's header owns the derivation and its verified basis).
+FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex"
 
 # fm_backend_visible_capture_supported: whether <backend> can read the visible
 # viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
@@ -979,7 +980,8 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # refusal and must not delete the durable records that are the only thing
 # naming the endpoint (bin/fm-teardown.sh's retain-and-stop path).
 # How much each adapter can prove differs, and no arm ever guesses: tmux
-# resolves a failed close against the window's exact recorded identity, Orca
+# resolves a failed close against the window's exact recorded identity, Rex
+# proves the closed block gone through a structured not-found, Orca
 # reports a close its missing CLI never attempted, and the remaining arms
 # still report 0 for a close command that failed after being accepted.
 # docs/verification/runtime-backends.md "Endpoint close" is the per-backend
@@ -1148,7 +1150,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # which verifies a registered agent against `pane process-info` and the real
 # process table, so a registration Herdr kept over a shell-only pane reads
 # `dead` here (issue #4115) - then maps a positively stopped session server to
-# `missing` only in this recovery-grade view. Zellij remains unverified because
+# `missing` only in this recovery-grade view. The Rex adapter classifies its
+# structured process view (foreground process and ancestors) through the same
+# shared classifier and reads a structured not-found as `missing`. Zellij
+# remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
 # empirically validated. Orca, cmux, and paseo do not support secondmate spawns.
 # The Rex adapter reads the recorded full block id on the recorded server:
@@ -1183,9 +1188,9 @@ fm_backend_agent_alive() {  # <backend> <target>
 # fm_backend_has_push whether a window's backend can push semantic state changes,
 # and for those backends replaces its blind `sleep POLL` with a bounded wait on
 # fm_backend_wait_transition. Every push-capable backend reuses the shared
-# normalized-transition shape and policy table (bin/fm-transition-lib.sh); herdr
-# (docs/herdr-backend.md "Native pane.agent_status_changed push escalation")
-# and rex (docs/rex-backend.md "Event push") implement the surface. A backend with no native push
+# normalized-transition shape, policy table, and dedupe (bin/fm-transition-lib.sh);
+# herdr (docs/herdr-backend.md "Push events and polling fallback") and rex
+# (docs/rex-backend.md "Push events") implement the surface. A backend with no native push
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 

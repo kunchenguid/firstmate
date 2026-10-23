@@ -2210,8 +2210,8 @@ The real smoke proves daemon reachability, shared-workspace creation and adoptio
 
 ## Rex
 
-The current compatibility floor is Rex API revision 4 plus the block methods the adapter calls (`block.close`, `session.new_window`, `session.set_block_label`, `com.superlogical.terminal.process`, and `com.superlogical.terminal.format`).
-The active evidence, recorded 2026-10-21, uses `rex 0.0.1792519967-gd05acf` (commit d05acfc, built 2026-10-20, API revision 4, supports 0 to 4) on macOS arm64 with the Rex Beta app.
+The current compatibility floor is Rex API revision 5 for both the CLI and the server, plus the block methods the adapter calls (`block.close`, `session.new_window`, `session.set_block_label`, `com.superlogical.terminal.process`, and `com.superlogical.terminal.format`).
+The CLI findings below were first recorded 2026-10-21 with `rex 0.0.1792519967-gd05acf` (API revision 4) and rechecked where they matter on 2026-10-23 with `rex 0.0.1792607779-g171246` (commit 1712469, built 2026-10-21, API revision 5, supports 0 to 5) on macOS arm64 with the Rex Beta app; the merged adapter's suites below ran on that API revision 5 build.
 
 Every probe ran on a private headless server started with `rex server run` on a short `/tmp` socket through `bin/fm-rex-lab.sh`, driven with `-S <socket> --autostart=false`, and stopped through that socket; the captain's app-owned server was only listed, and the lab's teardown tripwire confirmed its instance id and sessions were unchanged.
 
@@ -2219,15 +2219,17 @@ Current active CLI findings:
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
-| Version gate | `version --json`, `server status --json` | Reports `api_revision` and the server's `instance_id` without starting anything when `--autostart=false` is passed. |
+| Version gate | `version`, `server status --json` | `version` prints `api: revision 5 (supports 0 to 5)` for the CLI, and `server status` reports the server's `api_revision` and `instance_id`, without starting anything when `--autostart=false` is passed. |
 | Autostart | any call with the default `--autostart` against a missing socket | Starts a fresh, empty server at that socket; with `--autostart=false` the same call exits 4 and creates nothing (the smoke checks the socket never appears). |
 | Session create | `new <label> -c <dir> --window <tab> --keep-open --json` | Creates a session with one initial window and block under that tab label; the adapter uses it as the task's tab, so a new `fm-local` or `fm-<id>` session holds only task tabs. |
 | Tab create | `window new -s <session> tab -c <dir> --focus=false --keep-open --json` | Adds a tab without moving the session's active window; returns the typed session, window, and block ids. |
 | Block label | `block rename -s <session> <block> <label>` | Sets the label; labels are not unique, and a label-addressed command that matches two blocks refuses as ambiguous, so the adapter addresses blocks by full id only. |
 | Inspect | `block inspect <block-id> --json` | Returns the block's session, label, and `last_exit`; a closed block's full id exits 3. |
-| Foreground process | `block call ... com.superlogical.terminal.process` | Reports the foreground pid, argv, and cwd; the cwd follows a `cd` in the shell, so spawn-time worktree discovery reads it directly. |
+| Foreground process | `block call ... com.superlogical.terminal.process` | Reports `foreground{pid,name,path,argv0,cwd}`, its `ancestors[]`, and `last_exit`; the cwd follows a `cd` or a nested shell, so spawn-time worktree discovery reads it directly, and a Claude Code 2.1.308 block read `{"name":"2.1.308","argv0":"claude"}` with ancestors `zsh`, `login`. |
 | Send | text on `send -s <session> -b <block>` standard input | Arrives literally, including option-shaped text such as `-n not-an-option`; a trailing newline submits. |
-| Capture | `capture -s <session> -b <block> --trim` and `--format vt` | Both include scrollback and omit trailing blank screen rows: 83 lines came back from a 24-row screen, so the visible screen cannot be located. `--format vt` keeps SGR styling. |
+| Capture | `capture -s <session> -b <block> --trim` | Includes scrollback: 83 lines came back from a 24-row screen. |
+| Styled read with cursor | `block call ... com.superlogical.terminal.format '{"format":"vt","extra_cursor":true}'` | On 2026-10-23 a 24-row block holding two output lines and a prompt returned all 24 grid rows joined by CRLF, the blank ones included and the empty bottom row implicit, followed by the cursor as `ESC[5;3H` with a 1-based screen row; the adapter derives the viewport as the last `size.rows` rows and anchors the composer on that row. On 2026-10-22 an idle OpenCode 1.19.3 at 200x50 ended `ESC[45;6H`, inside its composer, with its status line drawn below it (`tests/fixtures/rex-opencode-1.19.3/`). |
+| Resize | `block call ... resize '{"columns":200,"rows":50}'` | Applied to a block opened with `window new` (`size` then read `200x50`, `owner` null); the initial block of a session `new` just created reported the creating CLI client as its `owner` and kept 80x24. |
 | Close | `block close -s <session> <block-id>` | Closes only that block and its tab; the sibling tab and the session stay live, and a later inspect of the block exits 3. |
 | Session retire | `kill <session-id>` after the last tab closes | Closes the emptied home session; it runs under the home-wide `state/.rex-session.lock` shared with spawn. |
 | Unreachable server | any call against a dead socket | Exits 4, which the adapter reads as unknown, never gone. |
@@ -2235,22 +2237,33 @@ Current active CLI findings:
 | Detached block | `api call -s <session> session.new_block '{"flavor":"com.superlogical.terminal.shell","label":...,"options":{"cwd":...,"initial_input":...}}'` | Creates a block in no tab (`placement` reads `detached`) running a login shell that receives the input; `session inspect` omits it, `block ls -s <session> --json` lists it, and closing it by full id is then proven by exit 3. |
 | Detached foreground | `block call ... com.superlogical.terminal.process` on a detached zsh block after `exec <cmd>` | Reports `login` as the foreground, because zsh hands the terminal back to its parent on `exec`; the away-mode test finds the daemon among the processes on the block's tty instead. |
 
-Environment markers: a Rex pane exports `REX_SERVER`, `REX_SESSION`, `REX_BLOCK`, `REX_CLIENT`, and `REX_BIN_DIR`, and a tmux server started from a Rex pane passes them to its own panes, so a marker alone never selects Rex.
+Environment markers: a Rex pane exports `REX_SERVER`, `REX_SESSION`, `REX_BLOCK`, `REX_CLIENT`, `REX_BIN_DIR`, and `TERM_PROGRAM=rex`, and a tmux server started from a Rex pane passes them to its own panes, so a marker alone never selects Rex.
 `fm_backend_detect` selects Rex only when `REX_BLOCK` inspects live on the server, sits in `REX_SESSION`, and that block's process is an ancestor of the detecting process.
 Several commands fall back to `REX_BLOCK` or the focused block when no target is passed, so the adapter strips those markers from its own calls and always passes full ids.
 Children of a server started with `rex server run` get no `REX_SERVER`, and Rex children inherit the login shell's environment rather than the calling CLI's, so `fm-spawn.sh` exports the recorded server into the worker's shell.
 
-```sh
-tests/fm-backend-rex.test.sh
-tests/fm-backend-rex-smoke.test.sh
-tests/fm-afk-inject-rex-e2e.test.sh
-tests/fm-remote-doctor-rex.test.sh
-FM_REX_SECONDMATE_E2E=1 tests/fm-rex-secondmate-e2e.test.sh
-FM_REX_CLAUDE_LIVE=1 tests/fm-rex-claude-live-e2e.test.sh
-```
+[Regression entry points](../rex-backend.md#regression-entry-points) lists the suites.
+The fake-binary suite pins the call contract (`-S`, `--autostart=false`, full ids, stripped markers), server resolution, the CLI and server version gate, `fm-local` and `fm-<id>` placement with its adopt, reuse, and refusal paths, the supervisor-session exclusion, the 200x50 resize, reclaim husk cleanup, keys, the derived viewport and its cursor row, the cursor-anchored composer with its cursorless fallback, agent state from the foreground process and its ancestors, the owner-trust rule for program status, the absence verdict, the kill and session-retirement matrix, detection, supervisor discovery, the detached block, the push wait over a replayed reader, and the away launcher's record lifecycle.
+On 2026-10-23 the real smoke on a lab server passed:
 
-The fake-binary suite pins the call contract (`-S`, `--autostart=false`, full ids, stripped markers), server resolution, the version gate, `fm-local` and `fm-<id>` placement with its adopt, reuse, and refusal paths, the supervisor-session exclusion, keys, composer, agent state, the absence verdict, the kill and session-retirement matrix, detection, supervisor discovery, the detached block, and the away launcher's record lifecycle.
-The real smoke proves one unfocused `fm-local` session holding exactly the task tabs, duplicate-label refusal, live cwd, literal send and keys, agent state from real processes (an idle shell reads dead, `sleep` reads ambiguous, a `claude`-named process reads alive), the scrollback capture, worker side panes and their cleanup, block-only close with exit 3, session retirement after the last tab, a second mate pane as the first tab of its `fm-<id>` session with a worker spawned from inside that pane joining the same session, and exit 4 with nothing autostarted.
+```text
+ok - rex smoke: the private server passes the version gate and its instance is recorded
+ok - rex smoke: one fm-local session holding exactly the task tabs, unfocused labeled 200x50 tabs, and duplicate refusal
+ok - rex smoke: current_path is the live foreground cwd and an idle shell reads dead
+ok - rex smoke: text rides stdin literally and submits with Enter
+ok - rex smoke: agent_state reads real foreground processes (shell dead, other ambiguous, harness-named alive)
+ok - rex smoke: capture includes scrollback (83 lines), and the derived viewport is exactly the 24 screen rows with the cursor on row 23
+ok - rex smoke: a harness root record from the foreground shell drives busy_state, and Firstmate's own records never do
+ok - rex smoke: list_live finds this home's tabs
+ok - rex smoke: a worker opens unfocused labeled side panes from its own pane, and cleanup closes exactly those, leaving no orphan tab
+ok - rex smoke: a mark is an invisible id=fm record titled with the tab label plus a streamed desktop notification ({"title":"Smoke · tab","body":"Needs your decision"}), a progress record carries its percentage, clearing the mark removes both, the harness's root record is untouched and the sequence streams exactly one notification; a tab rename takes
+ok - rex smoke: a tint reaches the pane's own background query (rgb:2b2b/2626/1414) and a reset restores it (none)
+ok - rex smoke: the event wait returns a real blocked report with its kind and message, ignores Firstmate's own mark, ends at once when the pane's program exits, and an unreachable server is unusable, never dead
+ok - rex smoke: kill proves exit 3 and retires the emptied home session only after its last tab
+ok - rex smoke: a secondmate pane is the first tab of its fm-<id> session and its own worker joins that session
+ok - rex smoke: an unreachable server is exit 4 and unreadable, and nothing autostarts
+ok - rex smoke: after a server restart the recorded server proves the old block gone
+```
 
 On 2026-10-22, with the same Rex build on lab servers, the token-free away-mode guard passed:
 
@@ -2273,7 +2286,7 @@ ok - real Pi/Rex: a single fm-teardown retires the secondmate, its session, home
 
 One of four consecutive runs of that guard missed the doorbell wait before passing on rerun; the other three passed.
 On 2026-10-22 the last case passed on a lab server with `rex 0.0.1792607779-g171246` and `pi 1.3.0`, leaving nothing for a second teardown run.
-A Pi composer on Rex reads `unknown`, because the classifier runs without a cursor row and Pi's prompt carries no identifying border, so an away-mode inject into a Pi supervisor defers rather than types.
+With the cursor row and the identity probe, Pi's idle composer reads `empty` on Rex (see "Worker tools on Rex" below).
 
 ### Remote second mate on a real host
 
@@ -2309,7 +2322,7 @@ info - Claude program states observed on Rex: done,working (claude 2.1.306 (Clau
 
 ### Attention marks, events, and program status
 
-On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers, these probes back [Attention marks](../rex-backend.md#attention-marks), [Event push](../rex-backend.md#event-push), and [Busy and submit signals](../rex-backend.md#busy-and-submit-signals):
+On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers, these probes back [Attention marks](../rex-backend.md#attention-marks) and [Busy and submit signals](../rex-backend.md#busy-and-submit-signals):
 
 | Guarantee | Probe | Result |
 | --- | --- | --- |
@@ -2320,8 +2333,6 @@ On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers
 | Progress record | `printf '\033]7501;state=working:app=firstmate:id=fm/validate:progress=33:title=<b64>:msg=<b64>\033\\'` | `program_status` lists it with `"progress":33`; a later `state=clear:id=fm` streams `program_status_removed` with `ids` `["fm","fm/validate"]` and reason `clear`. |
 | One notification | a stand-in harness root record (`state=done:app=smoke-harness`), then a mark with its OSC 777, two progress reports, and a mark clear, all while `rex events` streams | The stream carries exactly one `desktop_notification`, no `app=firstmate` record without an id, and the root record still reads `done`, `app=smoke-harness` afterwards. |
 | Tint | `printf '\033]11;#2b2614\033\\'`, then `printf '\033]111\033\\'`, each followed by an OSC 11 query from a program in the pane | The query answers `rgb:2b2b/2626/1414` after the set; on a headless lab server with no client theme it gets no answer before the set and again after the reset. |
-| Event shapes | `rex events -s <session> --json` | Prints nothing on subscribe and replays nothing; any CLI client touching the session streams `client_connected`, and blocks stream `program_status_changed` (`payload.id`, `payload.record`), `child_exited`, `process_changed`, and `window_label_changed`, while a closed block streams `block_closed`. |
-| Unreachable server | `rex events` against a dead socket | Exits 4; the wait returns to polling and never reads it as a dead worker. |
 | Root status | real Claude Code 2.1.308 in a lab pane | Publishes root records with `app=claude-code` and `state=working` while it runs. |
 
 Rex sounds and notifications follow each pane's root program status, not a child record such as `id=fm` ("Sounds and notifications now follow the main program's status instead of each sub-agent's", Rex preview.16 release notes), so every new attention mark also carries the OSC 777 notification above.
@@ -2337,12 +2348,11 @@ The real smoke on a lab server passed:
 ```text
 ok - rex smoke: a mark is an invisible id=fm record titled with the tab label plus a streamed desktop notification ({"title":"Smoke · tab","body":"Needs your decision"}), a progress record carries its percentage, clearing the mark removes both, the harness's root record is untouched and the sequence streams exactly one notification; a tab rename takes
 ok - rex smoke: a tint reaches the pane's own background query (rgb:2b2b/2626/1414) and a reset restores it (none)
-ok - rex smoke: the event wait returns a real blocked report and a real exit as dead, and an unreachable server is unusable, never dead
 ```
 
 Whether the app shows the record title in hover cards and notifications, and how the tint looks against a theme, could not be observed headless for the same reason.
 
-The opt-in per-harness guard records which root program states each installed harness publishes on Rex; only harnesses it proves are trusted for busy state and submit confirmation:
+The opt-in per-harness guard records which root program states each installed harness publishes on Rex:
 
 ```sh
 FM_REX_STATUS_LIVE=1 tests/fm-rex-program-status-live-e2e.test.sh
@@ -2357,11 +2367,11 @@ On 2026-10-22, with the same Rex build:
 | OpenCode | v2.0.15 | none | no, it stopped at a prompt within the 180-second window |
 | Pi | 1.3.0 | none | yes |
 | Grok | 1.0.41 | none | yes |
-| Kimi | 0.42.0 | not launched, because Rex refuses Kimi spawns (no viewport capture) | no |
+| Kimi | 0.42.0 | not recorded in that run | no |
 | Cursor Agent | 2026.09.23-86fc751 | none | yes |
 | omp | 18.12.4 | `idle` (`app=omp`) | yes |
 
-Only Claude Code is trusted for busy state and submit confirmation today; Codex and omp publish root records too and can join `FM_BACKEND_REX_STATUS_APPS` once a guard proves their `working` edge across a full prompt.
+Any harness's root record counts under the owner-trust rule ([Busy and submit signals](../rex-backend.md#busy-and-submit-signals)), as positive busy evidence only; the guard fails only for Claude Code, the harness that rule is verified on across full turns.
 
 ### Command palette
 
@@ -2411,6 +2421,92 @@ On 2026-10-22, with `rex 0.0.1792519967-gd05acf` (API revision 4) on lab servers
 | Pane limit | `rex server start --help` | `--max-panes N` refuses new panes once a window holds N (default 64). |
 
 The real smoke runs `fm-rex-side.sh` inside a task pane, then proves the test pane's exit status in `list` and its kept output, an unchanged focus, cleanup closing both side panes while a foreign pane in the same tab survives, and no tab left once that foreign pane closes.
+
+### Push events
+
+Recorded on 2026-10-22 and rechecked on 2026-10-23 with `rex 0.0.1792607779-g171246` (API revision 5).
+A program status edge drives the event reader as Rex delivers it in `terminal.program_status_changed`, with `ev.record` carrying `state`, `kind`, `app`, `msg`, and `owner.pid`; `terminal.child_exited` and `block_closed` name the block whose program exited or which closed.
+`rex do -s <session> --for <N>s <script.lua> --args '<json>'` sends its `listening:` banner to stderr and each handler's `print` to stdout line by line, runs `rex.after(0, ...)` once the handlers are listening, exits 0 at the `--for` deadline, and exits nonzero for a session that does not exist.
+The real smoke above shows Firstmate's own `id=fm` blocked mark never ending the wait, while the harness's root report does.
+
+```text
+$ bash tests/fm-backend-rex-eventwait-smoke.test.sh   # 2026-10-23, lab server
+ok - real rex: the push capability gate passes on the recorded server without starting one
+ok - real rex: a driven blocked edge returns its record, with Rex's kind and message, 790ms after the report was sent
+ok - real rex: the watcher fast path enqueues a stale wake carrying Rex's blocked kind and message
+ok - real rex: an escalated block is not re-delivered and the reader runs its whole budget (2495ms for 2s)
+ok - real rex: closing a watched block ends the wait 554ms later for an immediate poll
+ok - real rex: a reader that cannot start returns 2 and the watcher falls back to polling
+```
+
+Real harness edges on that build, each captured by `fm_backend_wait_transition rex` running across the harness's launch or turn:
+
+- Claude Code 2.1.308 asking an `AskUserQuestion` question reported `{"state":"blocked","kind":"question","app":"claude-code","msg":"answer: red or blue? (red · blue)","owner":{"pid":27995,"name":"2.1.308"}}`, and the wait returned the record `...|blocked|claude-code|question: answer: red or blue? (red · blue)` 106ms after Rex's `updated_at` for it.
+- Grok 1.0.67's workspace-trust dialog reported `blocked` with kind `permission`, and the wait returned `...|blocked|grok-build|permission: Trust this folder?`.
+- Codex 0.163.0's workspace-trust dialog reported no program status, so it reached no push edge.
+
+### Worker tools on Rex
+
+Recorded on 2026-10-22 with `rex 0.0.1792607779-g171246` (API revision 5).
+Each installed tool ran in its own scratch session through the real control plane: `fm-spawn.sh --relaunch` launched it on a bare-shell task tab with a one-word prompt, then `bin/fm-peek.sh`, a `bin/fm-send.sh` steer it answered, `bin/fm-control.sh` `interrupt` during a `sleep 40` turn, `exit`, a second `exit`, and `relaunch` with a second one-word prompt.
+Busy and composer state were polled every second through `fm_backend_busy_state` and `fm_backend_composer_state`.
+Every tool below printed `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`, then `stopped`, then `already-stopped`, then `relaunched`, and answered both prompts.
+
+| Tool and version | Model | Program status (OSC 7501) | Busy source read on Rex | Composer |
+| --- | --- | --- | --- | --- |
+| Claude Code 2.1.308 | `haiku` | `working`, `done`, `blocked` (`claude-code`) | `claude-hook` | `empty` idle and after each submit |
+| Codex 0.163.0 | `gpt-6-luna` | `working`, `idle` (`codex`) | `unknown codex-unverified`, the shared Codex contract | `empty` |
+| Grok 1.0.67 | default | `working`, `done`, `blocked` (`grok-build`) | `rex-native` while working, `grok-regex` after | `empty` |
+| OpenCode 1.19.3 | `openai/gpt-6-luna-fast` | none | `opencode-plugin` | `empty` with the cursor-anchored read |
+| Pi 0.87.0 and Pi signed 0.87.0 | `openai-codex/gpt-6-luna` | none | `pi-ext` | `empty` |
+| Muse Code 1.4.11 | default | `working`, `done` (`muse`) | `rex-native` while working, `muse-session-log` after | `empty` |
+| Devin 3000.11.1 | default | none | `devin-hook` | `empty` |
+
+OpenCode 1.19.3 draws a status line below its composer, so the cursorless bottom-most read reported `unknown` and exit, relaunch, and steers refused until the composer read anchored on Rex's cursor row.
+Codex and Grok each showed a workspace-trust dialog for the scratch repository, which the run answered as an operator before the steps above.
+The launches set `DISABLE_AUTOUPDATER=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, and `MUSE_NO_AUTO_UPDATE=1`, and every tool's version was unchanged afterwards.
+
+Untested on Rex:
+
+- Cursor Agent 2026.09.28 is installed but not signed in on this machine; its tab showed `Press any key to log in...`, the composer read `unknown`, and `exit` correctly refused to type into that screen.
+- Kimi, Oh My Pi, Gemini, Rovo Dev, Antigravity, Command Code, and Polytoken are not installed here, so Command Code stays refused on Rex.
+
+The idle composer of every installed tool the live guard covers, read on Rex with and without the cursor, on 2026-10-22 with the tools above already trusting the scratch directory:
+
+```text
+$ FM_REX_COMPOSER_LIVE=1 bash tests/fm-backend-rex-composer-live-e2e.test.sh
+ok - claude (2.1.308 (Claude Code)): real idle composer classifies empty on rex
+ok - claude (2.1.308 (Claude Code)): the same idle screen read cursorless is not pending (verdict: empty)
+ok - codex (codex-cli 0.163.0): real idle composer classifies empty on rex
+ok - codex (codex-cli 0.163.0): the same idle screen read cursorless is not pending (verdict: empty)
+ok - opencode (1.19.3): real idle composer classifies empty on rex
+ok - opencode (1.19.3): the same idle screen read cursorless is not pending (verdict: unknown)
+ok - pi (0.87.0): real idle composer classifies empty on rex
+ok - pi (0.87.0): the same idle screen read cursorless is not pending (verdict: empty)
+ok - grok (grok 1.0.67 (2fe064390d07) [stable]): real idle composer classifies empty on rex
+ok - grok (grok 1.0.67 (2fe064390d07) [stable]): the same idle screen read cursorless is not pending (verdict: empty)
+ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): real idle composer classifies empty on rex
+ok - muse (Muse Code 1.4.11 (1.4.11-R6667.1)): the same idle screen read cursorless is not pending (verdict: unknown)
+```
+
+On 2026-10-23 the merged adapter reran the guard on a lab server from a task worktree that Codex, Grok, and Kimi did not yet trust:
+
+```text
+ok - claude (2.1.309 (Claude Code)): real idle composer classifies empty on rex
+ok - claude (2.1.309 (Claude Code)): the same idle screen read cursorless is not pending (verdict: empty)
+not ok - codex (codex-cli 0.163.0): idle composer never classified empty on rex (last verdict: pending)
+ok - opencode (opencode v2.0.15): real idle composer classifies empty on rex
+ok - opencode (opencode v2.0.15): the same idle screen read cursorless is not pending (verdict: unknown)
+ok - pi (1.3.0): real idle composer classifies empty on rex
+ok - pi (1.3.0): the same idle screen read cursorless is not pending (verdict: empty)
+not ok - grok (grok 1.0.67 (2fe064390d07) [stable]): idle composer never classified empty on rex (last verdict: unknown)
+not ok - kimi (0.42.0): idle composer never classified empty on rex (last verdict: pending)
+# harness absent, not verified here: muse
+```
+
+Each of the three failures was its tool's own folder-trust dialog, shown in the guard's screen tail, which correctly never reads as an empty composer; the guard does not answer trust dialogs, so Kimi's composer on Rex remains unverified.
+
+Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
 
 ## Codex App host tools
 
