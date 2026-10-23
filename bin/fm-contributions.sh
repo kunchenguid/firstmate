@@ -111,7 +111,8 @@
 # observation reads the account's stored token with gh auth token into memory
 # and hands it to each of its own gh reads as GH_TOKEN in that read's
 # environment, never in a command line, file or log, and never through gh auth
-# switch or a GH_CONFIG_DIR. A failed or empty token read is a genuine failure
+# switch or a GH_CONFIG_DIR. A token read killed at its five-second bound or
+# the deadline is budget refusal; a failed or empty one is a genuine failure
 # named as that account's identity read, and a malformed or unreadable file
 # refuses every URL rather than read it with the ambient identity; either
 # stays unavailable, in rotation and unretired until it is fixed. An
