@@ -27,6 +27,10 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
+#   When config/herdr-lifecycle-spawn-guard exists, a brief naming
+#   bin/fm-herdr-lab.sh or a listed Herdr session/server lifecycle command must
+#   carry the Herdr isolation contract emitted by bin/fm-brief.sh --herdr-lab;
+#   the refusal names the first such match.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -98,29 +102,34 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
+#   OpenCode 2 has no interactive model or effort flag, so its selected model
+#   and effort are written as the build agent's model and variant inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   re-verified on opencode 2.0.21); without a model the effort axis is recorded
+#   but omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
-#   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
-#   docs/cmux-backend.md),
+#   environment: $TMUX, HERDR_ENV=1, TERM_PROGRAM=rex with REX_BLOCK, or cmux
+#   runtime signals (via bin/fm-backend.sh's fm_backend_detect, with cmux
+#   fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
-#   adapter, and experimental zellij, orca, cmux, and paseo adapters. Orca owns
+#   adapter, and experimental zellij, orca, cmux, paseo, and rex adapters. Orca owns
 #   both the task worktree and terminal, so ship/scout Orca spawns do not run
-#   treehouse get; cmux and paseo are session providers only, exactly like
-#   herdr/zellij, so they do. Auto-detected herdr stays silent like tmux;
+#   treehouse get; cmux, paseo, and rex are session providers only, exactly like
+#   herdr/zellij, so they do. Auto-detected herdr and rex stay silent like tmux;
 #   auto-detected cmux prints a loud stderr notice; zellij, orca, and paseo are
 #   never auto-detected (paseo's markers leak into every descendant process).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux and paseo do not support --secondmate
 #   spawns yet.
+#   A rex crewmate or scout opens one tab in the Rex session the launching
+#   firstmate runs in when it runs directly inside Rex, otherwise in its home's
+#   own Rex session; a --secondmate launch opens its tab in that secondmate
+#   home's own Rex session (bin/backends/rex.sh owns placement).
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -354,7 +363,8 @@
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
-#   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
+#   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION TERM_PROGRAM
+#   REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above, plus the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
@@ -476,6 +486,10 @@
 #     __COMMANDCODEBIN__ resolved Command Code executable
 #     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __OPENCODEBIN__ quoted concrete opencode executable path resolved from PATH -
+#                  the same binary the version-gate probe reads, so the recorded
+#                  major can never describe a different executable than the pane
+#                  runs (empty resolution falls back to a bare `opencode`)
 #     __POLYTOKENBIN__ resolved, polytoken-verified executable for a polytoken launch
 #     __POLYTOKENCONFIG__ firstmate-owned per-task polytoken config dir (mirrored
 #                  operator config with the unattended permission posture enforced)
@@ -2100,7 +2114,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
+  # one into the same endpoint, and only tmux, herdr, and rex have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
@@ -2118,12 +2132,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
+  # inferred from a failed read - and only HERDR and REX can prove it:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
+  #   rex   - the recorded block is re-read on the server the record names
+  #           (rex_server); Rex never reuses an id, so its structured
+  #           not-found there proves the block itself is gone. A Rex
+  #           `unreadable` is rechecked too, because a stopped Rex server
+  #           reads as unreachable to a read that never starts it
+  #           (fm_control_absence_recheck_applies owns that rule).
   #   tmux  - REFUSES, always. A task record carries no socket identity for its
   #           endpoint, and a server-wide inventory describes only the server
   #           this process addresses, so no read available here can tell "gone"
@@ -2136,14 +2156,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
-    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
+  if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
+    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
       dead) RELAUNCH_STATE=dead ;;
       alive) RELAUNCH_STATE=alive ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
+        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads '$RELAUNCH_STATE', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
         exit 1
         ;;
     esac
@@ -2206,6 +2226,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  if [ "$BACKEND" = rex ]; then
+    FM_REX_TASK_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" rex_session_id)
+    FM_REX_TASK_WINDOW_ID=$(fm_meta_get "$RELAUNCH_META" rex_window_id)
+    FM_REX_TASK_BLOCK_ID=$(fm_meta_get "$RELAUNCH_META" rex_block_id)
+    FM_REX_TASK_SERVER=$(fm_meta_get "$RELAUNCH_META" rex_server)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -2436,7 +2462,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2987,7 +3013,8 @@ muse_worker_meta_api_key_present() {
   fi
   [ "$BACKEND" = tmux ] || return 1
   if [ -n "${TMUX:-}" ]; then
-    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
+    fm_backend_source tmux >/dev/null 2>&1 || return 1
+    session=$(fm_backend_tmux_own_session 2>/dev/null) || return 1
   else
     tmux has-session -t firstmate 2>/dev/null || return 1
     session=firstmate
@@ -3048,10 +3075,18 @@ relaunch_resume_args() {  # <harness> <backend> <target>
 }
 
 model_flag_for_harness() {
-  local harness=$1 model=$2
+  local harness=$1 model=$2 oc_major=${3:-}
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  opencode)
+    # OpenCode 1.x takes the model as an interactive --model flag; 2.x removed
+    # it, so there the model rides OPENCODE_CONFIG_CONTENT via
+    # effort_flag_for_harness instead. The caller normalizes an undetected
+    # (empty/unparseable) major to 1, so only a parsed major >= 2 omits --model.
+    [ "$oc_major" = 1 ] || return 0
+    printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   # polytoken encodes reasoning effort inside the model reference, so the
@@ -3065,8 +3100,10 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2 model=${3:-}
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  local harness=$1 effort=$2 model=${3:-} oc_major=${4:-}
+  if [ "$harness" != opencode ]; then
+    [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  fi
   case "$harness" in
   claude)
     case "$effort" in
@@ -3132,32 +3169,38 @@ effort_flag_for_harness() {
     ;;
   opencode)
     # opencode's interactive `opencode --prompt` launch has no effort flag
-    # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # (`opencode run --variant` is a different, non-interactive mode), so the
+    # reasoning axis rides the OPENCODE_CONFIG_CONTENT JSON the launch already
+    # writes, keyed per-model as a variant. The variant is emitted only when the
+    # resolved model's provider is known to expose that effort (`anthropic/*`:
+    # high|max, `openai/*`: low|medium|high|xhigh); other providers, absent
+    # effort, or out-of-family efforts omit it (record-and-omit, as codex and
+    # grok do). Without a resolved model there is nothing to key to. The
+    # fragment lands inside the launch's single-quoted assignment, so a literal
+    # quote in the model id must close and reopen that quoting. The config SHAPE
+    # is version-sensitive: 1.x carries the effort as agent.build.variant only
+    # (the model still arrives via --model, config schema verified on 1.18.32);
+    # 2.x dropped --model, so there the model is pinned both globally and on the
+    # build agent alongside the variant (re-verified on 2.0.21). The caller
+    # normalizes an undetected (empty/unparseable) major to 1, so only a parsed
+    # major >= 2 takes the 2.x shape.
     [ -n "$model" ] && [ "$model" != default ] || return 0
-    case "${model%%/*}:$effort" in
-    anthropic:high | anthropic:max) ;;
-    openai:low | openai:medium | openai:high | openai:xhigh) ;;
-    *) return 0 ;;
-    esac
-    local model_json
+    local model_json variant_fragment=
     model_json=$(json_escape "$model")
     model_json=${model_json//\'/\'\\\'\'}
-    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
+    case "${model%%/*}:$effort" in
+    anthropic:high | anthropic:max | openai:low | openai:medium | openai:high | openai:xhigh)
+      variant_fragment=",\"variant\":\"$effort\""
+      ;;
+    esac
+    if [ "$oc_major" = 1 ]; then
+      # 1.x: the build agent carries model + variant only for a recognized
+      # effort; with no variant the launch keeps its permission-only config.
+      [ -n "$variant_fragment" ] || return 0
+      printf ',"agent":{"build":{"model":"%s"%s}}' "$model_json" "$variant_fragment"
+    else
+      printf ',"model":"%s","agent":{"build":{"model":"%s"%s}}' "$model_json" "$model_json" "$variant_fragment"
+    fi
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
@@ -3566,6 +3609,16 @@ fi
   exit 1
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  HERDR_LIFECYCLE_BRIEF_GUARD=$(fm_config_source_present "$CONFIG/herdr-lifecycle-spawn-guard") || exit 1
+  if [ "$HERDR_LIFECYCLE_BRIEF_GUARD" = 1 ]; then
+    HERDR_LIFECYCLE_COMMAND=$(perl -ne '
+      if (m{(bin/fm-herdr-lab\.sh|(?<![[:alnum:]_])herdr[[:space:]]+(?:session|server)[[:space:]]+(?:start|stop|delete|restart|reload-config|live-handoff)(?![[:alnum:]_-]))}) { print $1; exit }
+    ' -- "$BRIEF")
+    if [ -n "$HERDR_LIFECYCLE_COMMAND" ] && ! grep -Fq '# Herdr isolation - HARD SAFETY CONTRACT' "$BRIEF"; then
+      echo "error: $BRIEF names the Herdr lifecycle command \`$HERDR_LIFECYCLE_COMMAND\` but lacks the Herdr isolation contract; regenerate it with bin/fm-brief.sh --herdr-lab" >&2
+      exit 1
+    fi
+  fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
     exit 1
@@ -4161,6 +4214,48 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = rex ]; then
+    # The recorded endpoint is authoritatively gone, so there is nothing to
+    # adopt: create ONE fresh endpoint for the same task, opened directly in the
+    # recorded worktree. The record published below writes window= and the rex
+    # ids from these values, which is the whole rebind - the task id, brief,
+    # worktree, armed poll and status log are untouched.
+    #
+    # Rex reaches here only on a PROVEN-gone block: its never-reused ids
+    # answer a structured not-found from the server the record names
+    # (fm_control_endpoint_absence_verdict owns that argument). The tab is
+    # re-created in the RECORDED session while that session survives. A Rex
+    # session never survives its server, so when the session itself is gone
+    # the task goes where an ordinary spawn from this seat would put it; that
+    # is the reclaim that recovers a server restart. Both placements open the
+    # tab in reclaim mode, so a bare-shell husk an earlier refused reclaim left
+    # carrying this task's label is replaced rather than blocking every retry.
+    fm_backend_rex_container_ensure || exit 1
+    FM_REX_TASK_SERVER=$(fm_backend_rex_server_endpoint) || {
+      echo "error: could not read the Rex server endpoint to record for $W" >&2
+      exit 1
+    }
+    rex_rebind_status=0
+    REX_TASK_IDS=$(fm_backend_rex_create_task_in_session "$FM_REX_TASK_SESSION_ID" "$W" "$WT") \
+      || rex_rebind_status=$?
+    case "$rex_rebind_status" in
+      0) ;;
+      2) REX_TASK_IDS=$(fm_backend_rex_create_task "$W" "$WT" launcher-home reclaim) || exit 1 ;;
+      *)
+        echo "error: task $ID's endpoint could not be re-created in its recorded Rex session $FM_REX_TASK_SESSION_ID; see the refusal above for what failed" >&2
+        exit 1
+        ;;
+    esac
+    read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
+$REX_TASK_IDS
+EOF
+    if [ -z "$FM_REX_TASK_SESSION_ID" ] || [ -z "$FM_REX_TASK_BLOCK_ID" ]; then
+      echo "error: rex did not return a session/block id for $W" >&2
+      exit 1
+    fi
+    T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
+    SES=${T%%:*}
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -4168,11 +4263,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr is the ONLY backend that reaches here: the gate above rebinds only
-    # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
-    # every read is scoped to the session the record names
-    # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
-    # secondmate were already refused, so there is no dispatch left to make.
+    # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
+    # the session the record names (fm_control_endpoint_absence_verdict owns
+    # that argument). tmux and every secondmate were already refused, and rex
+    # took the branch above, so there is no dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4467,6 +4561,37 @@ EOF
     fi
     T="$FM_PASEO_TASK_TERMINAL_ID:$FM_PASEO_TASK_WORKSPACE_ID"
     ;;
+  rex)
+    # A --secondmate launch stands up the OTHER home's own Rex session, so it
+    # shadows FM_HOME for the session label exactly as herdr does; every other
+    # kind goes beside this launcher (bin/backends/rex.sh owns placement).
+    fm_backend_rex_container_ensure || exit 1
+    FM_REX_TASK_SERVER=$(fm_backend_rex_server_endpoint) || {
+      echo "error: could not read the Rex server endpoint to record for $W" >&2
+      exit 1
+    }
+    # The session lock follows the shadowed home too, so the secondmate's own
+    # cleanup serializes against this launch on the same lock file.
+    REX_LABEL_HOME=$FM_HOME
+    REX_LABEL_ROOT=$FM_ROOT
+    REX_LABEL_STATE=$STATE
+    REX_LAUNCHER_RELATIONSHIP=launcher-home
+    if [ "$KIND" = secondmate ]; then
+      REX_LABEL_HOME=$PROJ_ABS
+      REX_LABEL_ROOT=$PROJ_ABS
+      REX_LABEL_STATE=$PROJ_ABS/state
+      REX_LAUNCHER_RELATIONSHIP=other-home
+    fi
+    REX_TASK_IDS=$(FM_HOME="$REX_LABEL_HOME" FM_ROOT="$REX_LABEL_ROOT" STATE="$REX_LABEL_STATE" fm_backend_rex_create_task "$W" "$PROJ_ABS" "$REX_LAUNCHER_RELATIONSHIP") || exit 1
+    read -r FM_REX_TASK_SESSION_ID FM_REX_TASK_WINDOW_ID FM_REX_TASK_BLOCK_ID <<EOF
+$REX_TASK_IDS
+EOF
+    if [ -z "$FM_REX_TASK_SESSION_ID" ] || [ -z "$FM_REX_TASK_BLOCK_ID" ]; then
+      echo "error: rex did not return a session/block id for $W" >&2
+      exit 1
+    fi
+    T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -4519,6 +4644,7 @@ spawn_send_text_line() { # <target> <text>
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   paseo) fm_backend_paseo_send_text_line "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_text_line "$1" "$2" "$W" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -4528,6 +4654,7 @@ spawn_current_path() { # <target>
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   paseo) fm_backend_paseo_current_path "$1" "$W" ;;
+  rex) fm_backend_rex_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -4538,6 +4665,7 @@ spawn_send_literal() { # <target> <text>
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
   cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
   paseo) fm_backend_paseo_send_literal "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_literal "$1" "$2" "$W" ;;
   esac
 }
 spawn_send_key() { # <target> <key>
@@ -4548,6 +4676,7 @@ spawn_send_key() { # <target> <key>
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   paseo) fm_backend_paseo_send_key "$1" "$2" "$W" ;;
+  rex) fm_backend_rex_send_key "$1" "$2" "$W" ;;
   esac
 }
 
@@ -4821,6 +4950,50 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
+# OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
+# releases (2.0.11) only prefill the composer and never submit it, while later
+# ones (2.0.22) submit it on their own. This post-launch gate makes both work:
+# the turn has started once the worker's own busy-state plugin has written a
+# record (source opencode-plugin; the arm-time record is source fm-spawn), so
+# the gate waits for that. If none arrives within the settle window it sends
+# one Enter once the shared composer classifier reads the brief as pending -
+# skipped when it proves the composer empty, since the brief has then already
+# left it - and keeps waiting. An unknown read (a TUI that has not drawn yet)
+# keeps polling and only spends the Enter at the later submit deadline, so a
+# backend whose classifier can only answer unknown still gets its one Enter.
+# The composer is only a veto, never proof of delivery: OpenCode 2's sidebar
+# can make an already-submitted composer read pending.
+opencode2_turn_started() {
+  local rec
+  rec=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || return 1
+  set -f
+  # shellcheck disable=SC2086 # the record is four space-separated tokens
+  set -- $rec
+  set +f
+  [ "${2:-}" = opencode-plugin ]
+}
+
+opencode2_wait_for_delivery() {
+  local i=0 max=${FM_OPENCODE_DELIVERY_POLLS:-120} interval=${FM_OPENCODE_POLL_INTERVAL:-0.5}
+  local settle=${FM_OPENCODE_SUBMIT_SETTLE_POLLS:-20} deadline=${FM_OPENCODE_SUBMIT_DEADLINE_POLLS:-80}
+  local sent=0 composer
+  while [ "$i" -lt "$max" ]; do
+    opencode2_turn_started && return 0
+    if [ "$sent" -eq 0 ] && [ "$i" -ge "$settle" ]; then
+      composer=$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)
+      if [ "$composer" != unknown ] || [ "$i" -ge "$deadline" ]; then
+        sent=1
+        if [ "$composer" != empty ]; then
+          spawn_send_key "$T" Enter || return 1
+        fi
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  opencode2_turn_started
+}
+
 # agy carries its brief on the launch command, so it needs no delivery gate,
 # but a worktree agy does not trust parks the TUI on the folder-trust dialog
 # and an unanswered dialog sends the turn into agy's scratch directory instead
@@ -4987,7 +5160,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ]; then
+    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
@@ -5218,6 +5391,46 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+# OpenCode changed its interactive launch surface, its composer exit key, and
+# its plugin surface between the 1.x and 2.x lines: 2.x dropped the top-level
+# --model flag (the model rides OPENCODE_CONFIG_CONTENT instead), exits on a raw
+# Ctrl-C, and reports activity through session.execution.* events from a plugin
+# that exports a default definition; 1.x takes --model, exits on /exit, and
+# reports through session.status/session.idle. Detect the installed major once,
+# here, before the busy-state plugin is provisioned below, so the plugin shape,
+# the launch shape, and fm-control's recorded exit mechanics all key off the one
+# resolved version. Only a parsed major >= 2 selects the 2.x shape: an
+# undetectable probe (opencode unresolvable, or --version without a parseable
+# x.y.z) falls back to the 1.x shape everywhere - --model, the 1.x config and
+# busy-state plugin, and the version-agnostic /exit - matching the pre-gate
+# behavior.
+# Resolve the opencode executable exactly once, to the absolute path the worker
+# pane's launch will run (baked into the launch command as __OPENCODEBIN__
+# below). The probe reads that same binary, so the recorded major can never
+# describe a different executable than the pane starts: a PATH that resolves one
+# opencode here and another in the pane can no longer make the launch drop
+# --model or fm-control pick the wrong exit key. An unresolvable executable
+# leaves the version empty - the probe records no version (1.x launch/exit
+# defaults) and the launch falls back to a bare `opencode` the pane resolves
+# itself, exactly as before this gate existed.
+OPENCODE_BIN=
+OPENCODE_VERSION=
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_BIN=$(resolve_pi_executable opencode) || OPENCODE_BIN=
+  if [ -n "$OPENCODE_BIN" ]; then
+    OPENCODE_VERSION=$("$OPENCODE_BIN" --version 2>/dev/null \
+      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  fi
+fi
+# The effective major the launch, plugin, and exit shapes branch on. A resolved
+# x.y.z yields its numeric major (the grep above guarantees digits); an empty or
+# unparseable probe falls back to 1, so only a genuine major >= 2 ever takes the
+# 2.x path.
+case "$OPENCODE_VERSION" in
+'') OPENCODE_MAJOR=1 ;;
+*) OPENCODE_MAJOR=${OPENCODE_VERSION%%.*} ;;
+esac
+
 # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
 # adapter with a verified semantic source, including a --secondmate launch.
 # The parent watcher reads this home's record; skipping the arm left a
@@ -5266,6 +5479,10 @@ BUSY_GEN=
   esac
   case "$WIRING_HARNESS" in
   claude* | opencode* | pi | pi-signed | omp)
+    # opencode arms on every detected major: OpenCode 2 and the OpenCode 1 /
+    # undetected->1.x path both provision a busy-state plugin below that needs
+    # this gen, so gating the arm on major >= 2 would leave OpenCode 1 without
+    # the busy-state wiring it had before the OpenCode 2 port.
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
       exit 1
@@ -5400,8 +5617,115 @@ EOF
     fi
     ;;
   opencode*)
+    # The worker's generated busy-state plugin is version-keyed off the major
+    # resolved above. A detected OpenCode 2 (major >= 2) gets the
+    # session.execution.* plugin that exports a default definition with setup();
+    # OpenCode 1.x and an undetected install that falls back to 1.x get the
+    # pre-port session.status / session.idle plugin, so OpenCode 1 keeps the
+    # busy-state wiring it had before the OpenCode 2 port. OpenCode 1 genuinely
+    # needs a busy plugin, so gating it off entirely would regress OpenCode 1
+    # from its pre-port behavior; only the plugin SHAPE is version-gated.
     mkdir -p "$WT/.opencode/plugins"
-    cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+    if [ "$OPENCODE_MAJOR" -ge 2 ]; then
+      cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state comes from OpenCode 2's session.execution.started and terminal
+// session.execution.* events, with the OpenCode 1 session.status/session.idle
+// names retained as legacy inputs. Scoping latches the first session that
+// reports activity and ignores other sessions until the latched session settles,
+// so a child's terminal event can never clear the worker's busy state. The
+// turn-ended touch stays the watcher's wake NOTIFICATION, never current-state
+// truth.
+import { execFile } from "node:child_process";
+const notifyTurnEnd = $busy_notify_turnend;
+const busyEvent = (state, event) =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
+    ], () => resolve());
+  });
+const touchTurnEnded = () =>
+  new Promise((resolve) => {
+    execFile("touch", ["$TURNEND"], () => resolve());
+  });
+const eventType = (event) => event && (event.type || event.name) || "";
+const eventProperties = (event) => event && (event.properties || event.data) || {};
+const sessionID = (event) => {
+  const properties = eventProperties(event);
+  return properties.sessionID || properties.sessionId || (properties.session && properties.session.id) || properties.id || "";
+};
+const setupEventSubscription = (ctx, handler) => {
+  if (!ctx || !ctx.event || !ctx.event.subscribe) return false;
+  const controller = new AbortController();
+  void (async () => {
+    try {
+      const stream = await ctx.event.subscribe({ signal: controller.signal, onActivity() {} });
+      for await (const event of stream) await handler(event);
+    } catch {
+    }
+  })();
+  return true;
+};
+const makeHandler = () => {
+  let activeSession = null;
+  return async (event) => {
+    const type = eventType(event);
+    const id = sessionID(event);
+    if (type === "session.execution.started") {
+      if (activeSession === null) activeSession = id;
+      if (id === activeSession) await busyEvent("busy", "session-execution-started");
+      return;
+    }
+    if (type === "session.execution.succeeded" || type === "session.execution.interrupted" || type === "session.execution.failed") {
+      if (id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", type.replace(/\./g, "-"));
+      }
+      if (notifyTurnEnd) await touchTurnEnded();
+      return;
+    }
+    if (type === "session.status") {
+      const properties = eventProperties(event);
+      const statusType = properties.status && properties.status.type;
+      if (statusType === "busy" || statusType === "retry") {
+        if (activeSession === null) activeSession = id;
+        if (id === activeSession) await busyEvent("busy", "session-" + statusType);
+        return;
+      }
+      if (statusType === "idle" && id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-status-idle");
+      }
+      return;
+    }
+    if (type === "session.idle") {
+      if (id === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-idle");
+      }
+      if (notifyTurnEnd) await touchTurnEnded();
+    }
+  };
+};
+export const FmBusyState = async () => {
+  const handleEvent = makeHandler();
+  return {
+    event: async ({ event }) => handleEvent(event),
+  };
+};
+
+export default {
+  id: "fm.busy-state",
+  server: FmBusyState,
+  setup(ctx) {
+    setupEventSubscription(ctx, makeHandler());
+  },
+};
+EOF
+    else
+      cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's session.status events: busy and retry
@@ -5453,6 +5777,7 @@ export const FmBusyState = async () => {
   };
 };
 EOF
+    fi
     exclude_path '.opencode/plugins/fm-busy-state.js'
     ;;
   pi | pi-signed)
@@ -5820,7 +6145,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5845,6 +6170,10 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # The detected OpenCode major, recorded so fm-control sends the exit key this
+  # agent's TUI understands. Written only when a version was resolved, so a
+  # non-opencode or undetectable task record stays byte-identical.
+  [ -z "$OPENCODE_VERSION" ] || echo "opencode_version=$OPENCODE_VERSION"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -5878,6 +6207,12 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = paseo ]; then
     echo "paseo_terminal_id=$FM_PASEO_TASK_TERMINAL_ID"
     echo "paseo_workspace_id=$FM_PASEO_TASK_WORKSPACE_ID"
+  fi
+  if [ "$BACKEND" = rex ]; then
+    echo "rex_server=$FM_REX_TASK_SERVER"
+    echo "rex_session_id=$FM_REX_TASK_SESSION_ID"
+    echo "rex_window_id=$FM_REX_TASK_WINDOW_ID"
+    echo "rex_block_id=$FM_REX_TASK_BLOCK_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -5988,10 +6323,10 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
@@ -6055,6 +6390,22 @@ commandcode)
   LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+opencode)
+  # The resolved absolute path probed for the version gate above, so the pane
+  # runs exactly the binary whose major was recorded. An unresolved executable
+  # keeps the bare `opencode` the pane resolves itself (pre-gate fallback).
+  # A detected OpenCode 2 also gets --standalone: its default launch attaches to
+  # the shared background service, which hosts plugins with the service's own
+  # environment and ignores this pane's OPENCODE_CONFIG_CONTENT, so per-worker
+  # model, permissions, FM_HOME, and lock ancestry would be wrong.
+  if [ -n "$OPENCODE_BIN" ]; then
+    oc_launch_bin=$(shell_quote "$OPENCODE_BIN")
+  else
+    oc_launch_bin=opencode
+  fi
+  [ "$OPENCODE_MAJOR" -lt 2 ] || oc_launch_bin="$oc_launch_bin --standalone"
+  LAUNCH=${LAUNCH//__OPENCODEBIN__/"$oc_launch_bin"}
+  ;;
 polytoken)
   LAUNCH=${LAUNCH//__POLYTOKENBIN__/"$(shell_quote "$POLYTOKEN_BIN")"}
   LAUNCH=${LAUNCH//__POLYTOKENCONFIG__/"$(shell_quote "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")")"}
@@ -6296,6 +6647,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
+    TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_FORWARD_NAMES; do
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -6459,6 +6811,14 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = opencode ] && [ "$OPENCODE_MAJOR" -ge 2 ]; then
+  if ! opencode2_wait_for_delivery; then
+    printf '%s\n' "$(status_stamp_line "failed: opencode $OPENCODE_VERSION did not start the brief turn in window $T")" >>"$STATE/$ID.status"
+    echo "error: opencode $OPENCODE_VERSION did not start the brief turn; inspect window $T" >&2
+    rovo_endpoint_cleanup
     exit 1
   fi
 fi

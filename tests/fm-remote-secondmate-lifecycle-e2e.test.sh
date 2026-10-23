@@ -1310,7 +1310,7 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 3000 ]; do
   sleep 0.02
   watch_wait=$((watch_wait + 1))
 done
@@ -1587,6 +1587,12 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
+# Opt-in archival must cover the parent-side status on the real remote path.
+touch "$PARENT/config/status-archive"
+printf 'working: remote task history\ndone: remote task complete\n' > "$PARENT/state/ios.status"
+cp "$PARENT/state/ios.status" "$TMP_ROOT/remote-status.expected"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/remote-meta.saved"
+grep '^- ios ' "$PARENT/data/secondmates.md" > "$TMP_ROOT/remote-route.saved"
 FM_FAKE_SSH_MODE=retire-lost-slot remote_env "$ROOT/bin/fm-teardown.sh" ios \
   > "$TMP_ROOT/teardown-serialized.out" 2> "$TMP_ROOT/teardown-serialized.err" &
 teardown_pid=$!
@@ -1636,5 +1642,52 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
+cmp -s "$TMP_ROOT/remote-status.expected" "$PARENT/data/ios/status.log" \
+  || fail "remote retirement lost the parent-side status history"
+assert_absent "$PARENT/state/ios.status" "remote retirement left the archived status live"
+pass "remote retirement archives the complete parent-side status log when enabled"
+
+# Reconcile an already-retired remote home with no parent-side status. Holding
+# an unrelated presentation lock proves the no-op without risking an unbounded
+# hang if that fast path regresses.
+mv "$PARENT/data/ios" "$TMP_ROOT/remote-archive.saved"
+cp "$TMP_ROOT/remote-meta.saved" "$PARENT/state/ios.meta"
+cat "$TMP_ROOT/remote-route.saved" >> "$PARENT/data/secondmates.md"
+mkdir -p "$PARENT/state/.status-presentation-lock"
+printf '%s\n' "$$" > "$PARENT/state/.status-presentation-lock/pid"
+printf 'neighbor\tidentity\t0\t0\n' > "$PARENT/state/.status-presentation-cursor"
+cp "$PARENT/state/.status-presentation-cursor" "$TMP_ROOT/remote-cursor.expected"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+remote_noop_rc=0
+remote_env fm_run_timed 60 "$ROOT/bin/fm-teardown.sh" ios \
+  > "$TMP_ROOT/remote-noop.out" 2> "$TMP_ROOT/remote-noop.err" || remote_noop_rc=$?
+[ "$remote_noop_rc" -eq 0 ] || fail "remote missing-status retirement failed or timed out ($remote_noop_rc): $(cat "$TMP_ROOT/remote-noop.err")"
+assert_grep 'teardown ios complete (remote ' "$TMP_ROOT/remote-noop.out" "no-op did not drive remote retirement"
+cmp -s "$TMP_ROOT/remote-cursor.expected" "$PARENT/state/.status-presentation-cursor" \
+  || fail "remote no-op rewrote the neighboring cursor"
+assert_present "$PARENT/state/.status-presentation-lock" "remote no-op acquired another presenter's lock"
+assert_absent "$PARENT/data/ios" "remote no-op created an empty archive directory"
+assert_absent "$PARENT/state/ios.meta" "remote no-op retained stale parent metadata"
+assert_absent "$REMOTE_HOME" "remote no-op recreated the retired remote home"
+pass "remote missing-status retirement remains lock-free with archival enabled"
+
+# An absent home accepts exactly the retire dispatcher's arguments, and an
+# invalid option still fails with usage instead of reporting a retirement.
+remote_control_retire() { # <args...>
+  FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" retire "$@"
+}
+retired_rc=0
+remote_control_retire ios --force > "$TMP_ROOT/retired-force.out" 2>&1 || retired_rc=$?
+[ "$retired_rc" -eq 0 ] || fail "forced retirement of an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-force.out")"
+assert_grep 'already-retired: ios' "$TMP_ROOT/retired-force.out" "forced retirement of an absent home was not a no-op"
+bogus_rc=0
+remote_control_retire ios --bogus > "$TMP_ROOT/retired-bogus.out" 2>&1 || bogus_rc=$?
+[ "$bogus_rc" -eq 2 ] || fail "an invalid retire option on an absent home did not fail with usage (exit $bogus_rc)"
+assert_grep 'fm-remote-secondmate-control.sh retire <id> [--force]' "$TMP_ROOT/retired-bogus.out" "an invalid retire option did not print usage"
+assert_no_grep 'already-retired' "$TMP_ROOT/retired-bogus.out" "an invalid retire option reported a retirement"
+assert_absent "$REMOTE_HOME" "retiring an absent home recreated it"
+pass "an absent remote home retires only with the dispatcher's arguments and is never recreated"
 
 echo "ALL TESTS PASSED"

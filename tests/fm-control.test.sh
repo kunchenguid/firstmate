@@ -150,6 +150,13 @@ case "${1:-}" in
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
       fi
+      if [ -n "${FM_FAKE_SECOND_CTRL_C_STOPS_AGENT:-}" ] && [ "$payload" = C-c ]; then
+        if [ -e "$D/first-ctrl-c" ]; then
+          printf 'zsh' > "$D/command"
+        else
+          : > "$D/first-ctrl-c"
+        fi
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
           : > "$D/muse-ack-pending"
@@ -261,6 +268,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_SECOND_CTRL_C_STOPS_AGENT="${FM_FAKE_SECOND_CTRL_C_STOPS_AGENT:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
     "$CONTROL" "$@" 2>&1
 }
@@ -299,6 +307,69 @@ test_exit_types_each_harness_verified_command() {
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
   pass "fm-control exit: every verified harness gets its own verified exit command"
+}
+
+# OpenCode's composer exit key changed between major lines: 1.x exits on the
+# typed /exit, 2.x on a raw Ctrl-C. Spawn records the detected major in meta;
+# fm-control must send the key the recorded version's TUI understands. The
+# default adapter contract above (no opencode_version) already proves the
+# version-agnostic /exit fallback; this locks both recorded branches.
+test_opencode_exit_matches_recorded_major() {
+  local dir out rc
+  # 1.x: the recorded major keeps the typed /exit command.
+  dir=$(new_case exit-opencode1)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=1.18.32\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a recorded OpenCode 1.x task should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "OpenCode 1.x exit must type /exit, got: $(literals "$dir")"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "OpenCode 1.x exit must send no control key, got: $(keys_sent "$dir")"
+  assert_contains "$out" "stopped t1 harness=opencode" "OpenCode 1.x exit should report the stop"
+
+  # 2.x: the recorded major clears the composer with Ctrl-U, then exits on a
+  # raw Ctrl-C, and types nothing. An agent that stops on that Ctrl-C gets no
+  # second one.
+  dir=$(new_case exit-opencode2)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=2.0.21\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a recorded OpenCode 2.x task should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir" | paste -sd' ' -)" = "C-u C-c" ] \
+    || fail "OpenCode 2.x exit must send Ctrl-U then one Ctrl-C, got keys: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "OpenCode 2.x exit must type no composer text, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=opencode" "OpenCode 2.x exit should report the stop"
+  pass "fm-control exit: a recorded OpenCode major picks /exit (1.x) or Ctrl-U then Ctrl-C (2.x)"
+}
+
+# An OpenCode 2 TUI whose first Ctrl-C only clears leftover composer text stays
+# alive; exit sends exactly one more Ctrl-C and then confirms the stop.
+test_opencode2_exit_retries_ctrl_c_once() {
+  local dir out rc
+  dir=$(new_case exit-opencode2-retry)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=2.0.22\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_SECOND_CTRL_C_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on an OpenCode 2.x task needing a second Ctrl-C should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir" | paste -sd' ' -)" = "C-u C-c C-c" ] \
+    || fail "OpenCode 2.x exit must retry Ctrl-C once while the agent lives, got keys: $(keys_sent "$dir")"
+  assert_contains "$out" "stopped t1 harness=opencode" "OpenCode 2.x exit should report the stop after the retry"
+
+  dir=$(new_case exit-opencode2-stuck)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=2.0.22\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "exit on an OpenCode 2.x agent that never stops must fail"$'\n'"$out"
+  [ "$(keys_sent "$dir" | paste -sd' ' -)" = "C-u C-c C-c" ] \
+    || fail "OpenCode 2.x exit must retry Ctrl-C only once, got keys: $(keys_sent "$dir")"
+  assert_contains "$out" "exit=unconfirmed" "a still-alive OpenCode 2.x agent must report an unconfirmed exit"
+  pass "fm-control exit: OpenCode 2.x retries Ctrl-C exactly once while the agent is still alive"
 }
 
 test_interrupt_sends_each_harness_verified_key() {
@@ -506,7 +577,7 @@ test_unverified_harness_is_refused() {
 
 test_backend_key_capability_matrix() {
   local backend key
-  for backend in tmux herdr zellij cmux paseo; do
+  for backend in tmux herdr zellij cmux paseo rex; do
     # C-u is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
     for key in Escape Enter C-c C-u; do
@@ -636,9 +707,10 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
   pass "fm-control relaunch: commandcode off tmux and herdr is refused before the running agent is stopped"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
+test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  fm_control_backend_state_verified rex || fail "rex has a recovery-grade classifier"
   local backend
   for backend in zellij orca cmux paseo; do
     fm_control_backend_state_verified "$backend" \
@@ -1215,6 +1287,8 @@ EOF
 }
 
 test_exit_types_each_harness_verified_command
+test_opencode_exit_matches_recorded_major
+test_opencode2_exit_retries_ctrl_c_once
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press
@@ -1231,7 +1305,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

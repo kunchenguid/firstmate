@@ -318,6 +318,18 @@
 # ledger. It runs before the task branch it attributes runs by is deleted and
 # before state/<id>.meta is removed, and is best effort: a failure warns and
 # never blocks cleanup.
+# Opt-in config/status-archive preserves retired status logs in
+# data/<id>/status.log, then status.<N>.log for reused IDs. The presentation
+# lock covers archive publication, cursor retirement, then the existing live
+# status and bookkeeping removal. A failed publication leaves live state intact.
+# Forced child retirement uses data/<id>/children/<child-id>/ (recursively),
+# outside the home being removed. Remote-home retirement with no status is a
+# no-op. Symlinked/non-regular sources and symlinked archive directories refuse
+# cleanup rather than following them; the configured data root may be a symlink.
+# Existing archive filenames are never overwritten. Each archival prunes owned
+# logs and orphaned staging files older than 30 completed days by mtime.
+# Pruning failures warn, never abort teardown, and leave other task data and
+# symlinks alone.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -401,6 +413,79 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# Archive paths live only in teardown; presentation/wake readers stay unaware.
+teardown_archive_directory() {  # <directory>
+  if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
+    echo "error: unsafe status archive directory: $1" >&2
+    return 1
+  fi
+  mkdir -p -- "$1"
+}
+
+teardown_prune_status_archives() {  # <task-directory>
+  local dir=$1 child file suffix
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  while IFS= read -r -d '' file; do
+    suffix=${file##*/}
+    case "$suffix" in
+      status.log|.status-archive.*) ;;
+      *) suffix=${suffix#status.}; suffix=${suffix%.log}
+         case "$suffix" in ''|*[!0-9]*) continue ;; esac ;;
+    esac
+    rm -f -- "$file" || echo "warning: could not prune status archive: $file" >&2
+  done < <(find "$dir" -maxdepth 1 -type f \
+    \( -name status.log -o -name 'status.[0-9]*.log' -o -name '.status-archive.*' \) \
+    -mtime +30 -print0 || echo "warning: could not scan status archives: $dir" >&2)
+  [ ! -L "$dir/children" ] || return 0
+  for child in "$dir/children"/*; do
+    teardown_prune_status_archives "$child"
+  done
+  return 0
+}
+
+teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
+  local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry
+  if [ ! -e "$CONFIG/status-archive" ]; then
+    status_retire_presentation_task "$state" "$task"
+    return $?
+  fi
+  # Preserve the remote-home no-op, including its lock-free fast path.
+  if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ]; then
+    status_retire_presentation_task "$state" "$task"
+    return $?
+  fi
+  if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ]; then
+    echo "error: unsafe status archive source: $state/$task.status" >&2
+    return 1
+  fi
+  # The configured root may itself be relocated through a symlink; only
+  # archive components below that trusted root must refuse symlinks.
+  mkdir -p -- "$DATA" || return 1
+  dir=$(CDPATH='' cd -- "$DATA" && pwd -P) || return 1
+  while [ -n "$relative" ]; do
+    part=${relative%%/*}
+    fm_task_id_path_safe "$part" || {
+      echo "error: unsafe status archive path component: $part" >&2
+      return 1
+    }
+    dir="$dir/$part"
+    teardown_archive_directory "$dir" || return 1
+    case "$relative" in */*) relative=${relative#*/} ;; *) relative= ;; esac
+  done
+  archive="$dir/status.log"
+  while [ -e "$archive" ] || [ -L "$archive" ]; do
+    n=$((n + 1))
+    archive="$dir/status.$n.log"
+  done
+  status_retire_presentation_task "$state" "$task" "$archive" || {
+    echo "error: status archival failed for $task; retaining live status for retry" >&2
+    return 1
+  }
+  for entry in "$DATA"/*; do
+    teardown_prune_status_archives "$entry"
+  done
+}
+
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1094,7 +1179,7 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
-  status_retire_presentation_task "$STATE" "$ID" || return 1
+  teardown_retire_status "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
     "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
@@ -1506,18 +1591,6 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
@@ -1592,7 +1665,7 @@ pr_is_merged() {
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
@@ -3148,7 +3221,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fi
   done
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
+    # shellcheck source=/dev/null
     . "$SCRIPT_DIR/fm-wake-lib.sh"
   fi
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
@@ -3285,7 +3358,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3324,6 +3397,15 @@ cleanup_firstmate_home_children() {
         # cleanup must verify child tabs as that child home, not the parent.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
+      elif [ "$child_backend" = rex ]; then
+        child_rex_home=$home
+        if [ "$child_kind" = secondmate ]; then
+          child_rex_home=$(meta_value "$child_meta" home)
+          [ -n "$child_rex_home" ] || child_rex_home=$child_wt
+        fi
+        ( unset FM_ROOT_OVERRIDE; FM_HOME="$child_rex_home" FM_ROOT="$child_rex_home" STATE="$child_rex_home/state" \
+          fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" ) \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
@@ -3333,7 +3415,7 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return $?
+        cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
@@ -3388,7 +3470,7 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
@@ -3786,6 +3868,10 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+  ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
+    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
@@ -3878,7 +3964,7 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
-status_retire_presentation_task "$STATE" "$ID" || exit 1
+teardown_retire_status "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
