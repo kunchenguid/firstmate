@@ -1166,7 +1166,7 @@ test_squash_merged_rebased_branch_allows() {
 # Override tea to answer one login for git.example.org and a pull request
 # read through "tea api" with the supplied merged flag and head.
 add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3
+  local case_dir=$1 merged=$2 head=$3 state=${4:-closed}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
@@ -1175,9 +1175,56 @@ if [ "\${1:-} \${2:-}" = "login list" ]; then
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1
-printf '{"state":"closed","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
+printf '{"state":"$state","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
 SH
   chmod +x "$case_dir/fakebin/tea"
+}
+
+test_no_mistakes_pushed_with_open_forgejo_pr_allowed() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-open-forgejo-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://git.example.org/team/repo/pulls/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_axi_error "$case_dir"
+  add_tea_pull_for_head "$case_dir" false "$head" open
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-pushed-open-forgejo-pr: teardown should proceed"
+  pass "pushed work with a recorded open Forgejo PR is not refused"
+}
+
+test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-closed-forgejo-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://git.example.org/team/repo/pulls/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_axi_error "$case_dir"
+  add_tea_pull_for_head "$case_dir" false "$head" closed
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-pushed-closed-forgejo-pr: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-pushed-closed-forgejo-pr: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-closed-forgejo-pr "$head"
+  pass "pushed work with a closed-unmerged Forgejo PR is refused and retained"
 }
 
 # A Forgejo task whose default branch moved on after the squash merge, editing
@@ -5875,6 +5922,8 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
+test_no_mistakes_pushed_with_open_forgejo_pr_allowed
+test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
