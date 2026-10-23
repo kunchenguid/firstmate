@@ -72,6 +72,12 @@ cat > "$REMOTE_ROOT/bin/fm-timeout-job.sh" <<'SH'
 #!/bin/bash
 sleep 3
 SH
+# Joins the lane's process group, the state a failed job-control setpgid leaves
+# the command in, so its own named group no longer exists while it runs.
+cat > "$REMOTE_ROOT/bin/fm-leave-group-job.sh" <<'SH'
+#!/bin/bash
+exec /usr/bin/perl -MPOSIX=setpgid -e 'setpgid(0, getpgrp(getppid())) or exit 3; sleep 6'
+SH
 cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 #!/bin/bash
 sleep "$1"
@@ -454,6 +460,17 @@ fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the worker did not terminate an over-time job"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out job could not be reaped"
 pass "the worker enforces the job timeout and publishes its result"
+
+LEAVE_GROUP_STARTED=$SECONDS
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-leave-group-job.sh < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+LEAVE_GROUP_ELAPSED=$((SECONDS - LEAVE_GROUP_STARTED))
+[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] \
+  || fail "a job outside its own process group escaped the timeout (exit $FM_REMOTE_JOB_EXIT after ${LEAVE_GROUP_ELAPSED}s)"
+[ "$LEAVE_GROUP_ELAPSED" -le 4 ] || fail "a job outside its own process group ran ${LEAVE_GROUP_ELAPSED}s past a 1s timeout"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out ungrouped job could not be reaped"
+pass "the worker still times out a job that is not in its own process group"
 
 QUEUED_SIDE_EFFECT="$TMP_ROOT/queued-side-effect"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null

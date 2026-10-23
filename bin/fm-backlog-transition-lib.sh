@@ -661,12 +661,32 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$authorized_data" reopen "$id"
 }
 
+# Prints the canonical path. On failure it prints the reason instead - the
+# first path component lstat refuses and its errno, or the failing perl status -
+# so a caller's error names why a directory that exists could not be resolved.
 fm_backlog_canonical_existing() {
-  LC_ALL=C perl -MCwd=realpath -e '
+  local out status
+  out=$(LC_ALL=C perl -MCwd=realpath -e '
     my $resolved = realpath($ARGV[0]);
-    exit 1 unless defined $resolved;
+    if (!defined $resolved) {
+      my ($reason, $prefix) = ("$!", $ARGV[0] =~ m{\A/} ? "" : ".");
+      for my $part (grep { length } split m{/}, $ARGV[0]) {
+        $prefix .= "/$part";
+        next if lstat $prefix;
+        $reason = "$prefix: $!";
+        last;
+      }
+      print $reason;
+      exit 1;
+    }
     print $resolved;
-  ' "$1" 2>/dev/null
+  ' "$1" 2>/dev/null)
+  status=$?
+  if [ "$status" -ne 0 ] && { [ "$status" -ne 1 ] || [ -z "$out" ]; }; then
+    out="perl exited with status $status"
+  fi
+  printf '%s' "$out"
+  return "$status"
 }
 
 fm_backlog_record_parent_authorized() {  # <path> <label> <root> [parent-only]
@@ -676,7 +696,7 @@ fm_backlog_record_parent_authorized() {  # <path> <label> <root> [parent-only]
   [ "$parent" != "$path" ] || parent=.
   base=${path##*/}
   root_resolved=$(fm_backlog_canonical_existing "$root") || {
-    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root"
+    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root ($root_resolved)"
     return 1
   }
   [ -d "$root_resolved" ] || {
@@ -687,7 +707,7 @@ fm_backlog_record_parent_authorized() {  # <path> <label> <root> [parent-only]
     case "$root" in
       "$FM_HOME"|"$FM_HOME"/*)
         home_resolved=$(fm_backlog_canonical_existing "$FM_HOME") || {
-          FM_BACKLOG_TRANSITION_ERROR="$label home directory cannot be resolved at $FM_HOME"
+          FM_BACKLOG_TRANSITION_ERROR="$label home directory cannot be resolved at $FM_HOME ($home_resolved)"
           return 1
         }
         case "$root_resolved" in
@@ -701,13 +721,13 @@ fm_backlog_record_parent_authorized() {  # <path> <label> <root> [parent-only]
     esac
   fi
   parent_resolved=$(fm_backlog_canonical_existing "$parent") || {
-    FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path"
+    FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path ($parent_resolved)"
     return 1
   }
   expected_path=${parent_resolved%/}/$base
   if [ -z "$parent_only" ] && { [ -e "$path" ] || [ -L "$path" ]; }; then
     path_resolved=$(fm_backlog_canonical_existing "$path") || {
-      FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path"
+      FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path ($path_resolved)"
       return 1
     }
     [ "$path_resolved" = "$expected_path" ] || final_matches=0
@@ -840,9 +860,19 @@ fm_backlog_dispatch_transition() {
   esac
 }
 
+# 0 only when lstat itself reports nothing at <path>; a refused or unreadable
+# lookup is not proof of absence.
+fm_backlog_path_absent() {  # <path>
+  LC_ALL=C perl -e 'exit 1 if lstat $ARGV[0]; exit(($!{ENOENT} || $!{ENOTDIR}) ? 0 : 1)' "$1" 2>/dev/null
+}
+
+# A provisional record this dispatch never published leaves nothing to roll
+# back, so its proven absence is a completed removal even when the authorized
+# directory cannot be resolved; only a record that may exist needs that check.
 fm_backlog_dispatch_rollback() {
   local meta=$1 busy_script=$2 state=$3 id=$4 gen=$5 failed=0
-  fm_backlog_record_remove "$meta" "provisional task record" "$state" || failed=1
+  fm_backlog_path_absent "$meta" \
+    || fm_backlog_record_remove "$meta" "provisional task record" "$state" || failed=1
   if [ -n "$gen" ]; then
     "$busy_script" retire "$state" "$id" --gen "$gen" >/dev/null 2>&1 || failed=1
     if [ -e "$state/$id.busy-state" ] || [ -L "$state/$id.busy-state" ] \

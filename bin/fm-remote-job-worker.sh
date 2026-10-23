@@ -372,6 +372,28 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
   esac
 }
 
+# A running command normally owns the process group named after it, but it can
+# end up outside that group: macOS bash 3.2 job control intermittently fails
+# both setpgid calls with EPERM, leaving the command in the lane's own group,
+# and a command may move itself elsewhere. The unreaped command process then
+# still identifies the job, so supervision falls back to it rather than ending
+# at once and leaving the timeout, cancellation, and preemption unenforced. A
+# zombie leader no longer counts, and the lane's group is never signaled.
+worker_job_running() { # <command-pid>
+  local state
+  worker_process_or_group_alive group "$1" && return 0
+  state=$(/bin/ps -p "$1" -o state= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$state" in ''|Z*) return 1 ;; esac
+}
+
+worker_signal_job() { # <signal> <command-pid>
+  if worker_process_or_group_alive group "$2"; then
+    worker_signal_process_or_group group "$1" "$2"
+  else
+    worker_signal_process_or_group process "$1" "$2"
+  fi
+}
+
 worker_supervisor_identity_status() { # <job-dir> <pid>
   local job=$1 pid=$2 recorded_start actual_start
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
@@ -699,29 +721,35 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   group_file="$job/.claim/group"
   group_start_file="$job/.claim/group_start"
   armed_file="$job/.claim/armed"
+  # The fork runs with stderr closed off and the command gets it back from fd
+  # 8, so bash 3.2's own "child setpgid ... Operation not permitted" race
+  # message (worker_job_running) is not relayed as the job's stderr.
   set -m
-  (
-    while [ ! -f "$armed_file" ] || [ -L "$armed_file" ]; do
-      [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || exit 125
-      sleep 0.01
-    done
-    exec "$@"
-  ) &
+  {
+    (
+      exec 2>&8 8>&-
+      while [ ! -f "$armed_file" ] || [ -L "$armed_file" ]; do
+        [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || exit 125
+        sleep 0.01
+      done
+      exec "$@"
+    ) &
+  } 8>&2 2>/dev/null
   group_pid=$!
   set +m
   group_start=$(fm_remote_job_process_start "$group_pid") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_tmp=$(umask 077; mktemp "$job/.claim/.group.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_start_tmp=$(umask 077; mktemp "$job/.claim/.group_start.XXXXXX") || {
     rm -f -- "$group_tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
@@ -731,52 +759,52 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     || ! mv -f -- "$group_start_tmp" "$group_start_file" \
     || ! mv -f -- "$group_tmp" "$group_file"; then
     rm -f -- "$group_tmp" "$group_start_tmp" "$group_file" "$group_start_file"
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   fi
   tmp=$(umask 077; mktemp "$job/.claim/.armed.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$armed_file"; then
     rm -f -- "$tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    worker_signal_job KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   fi
   deadline=$((SECONDS + timeout))
   next_check=$((SECONDS + 1))
-  while worker_process_or_group_alive group "$group_pid"; do
+  while worker_job_running "$group_pid"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      worker_signal_process_or_group group TERM "$group_pid"
-      worker_signal_process_or_group group KILL "$group_pid"
+      worker_signal_job TERM "$group_pid"
+      worker_signal_job KILL "$group_pid"
       timed_out=1
       break
     fi
     if [ "$SECONDS" -ge "$next_check" ]; then
       if fm_remote_job_cancelled "$job"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        worker_signal_job TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while worker_job_running "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        worker_signal_job KILL "$group_pid"
         cancelled=1
         break
       fi
       if [ "$WORKER_PREEMPTIBLE" -eq 1 ] && worker_preempting_waiter_exists "$WORKER_LANE_HOME"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        worker_signal_job TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while worker_job_running "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        worker_signal_job KILL "$group_pid"
         WORKER_PREEMPTED=1
         break
       fi
