@@ -149,6 +149,7 @@ printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
 [ "${1:-}" = --json ] || exit 2
 cat "${QUOTA_AXI_FIXTURE:?}"
+printf 'quota\n' >> "${PI_CALLS:?}.order"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
@@ -158,10 +159,13 @@ cat > "$FAKEBIN/pi" <<'SH'
 # resolver refreshed; FAKE_PI_FAIL=1 simulates a failed refresh.
 set -u
 printf '%s\n' "$*" >> "${PI_CALLS:?}"
+printf '%s\t%s\t%s\n' "${0##*/}" "${PI_CODING_AGENT_DIR-unset}" "$*" >> "$PI_CALLS.identities"
+printf '%s\n' "$*" >> "$PI_CALLS.order"
 [ "${FAKE_PI_FAIL:-0}" = 1 ] && exit 1
 exit 0
 SH
 chmod +x "$FAKEBIN/pi"
+cp "$FAKEBIN/pi" "$FAKEBIN/pi-signed"
 
 RESPONSE="$TMP_ROOT/response.json"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env" PI_CALLS="$LOG/pi.calls"
@@ -1030,6 +1034,68 @@ assert_contains "$out" '  status: clear' "a failed Pi refresh never changes the 
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a failed Pi refresh still resolves"
 pass "Pi provider sessions refresh before the quota read, once each, never fatal"
 
+for default_form in array object; do
+  jq --arg form "$default_form" '
+    .default = [{harness: "pi", model: "anthropic/claude-sonnet-5", provider: "claude"},
+                {harness: "pi", model: "openai-codex/gpt-5.6-sol", provider: "codex"}]
+    | if $form == "object" then .default = .default[0] else . end
+  ' "$BASE_RULES" > "$RULES"
+  for choice in default rule_1; do
+    reset_log
+    write_response "$RESPONSE" "$choice" 0.9
+    TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+    expect_code 0 "$code" "$default_form default refresh exits 0 through $choice"
+    assert_contains "$out" '  status: clear' "$default_form default resolves through $choice"
+    assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "$default_form default is used through $choice"
+    assert_equals $'auth check --provider anthropic\nauth check --provider openai-codex\nquota' "$(cat "$LOG/pi.calls.order")" "$default_form defaults and rules refresh once before quota through $choice"
+  done
+done
+cp "$BASE_RULES" "$RULES"
+pass "Pi refresh includes root defaults in both forms and both fallback paths"
+
+PIN_ROOT="$TMP_ROOT/work account"
+mkdir -p "$PIN_ROOT"
+printf '%s\n' "$PIN_ROOT" openai-codex > "$HOME_DIR/config/pi-account"
+write_response "$RESPONSE" rule_4 0.9
+for harness in pi pi-signed; do
+  jq --arg harness "$harness" '.rules[1].use[0].harness = $harness' "$BASE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY PI_CODING_AGENT_DIR="$TMP_ROOT/personal" run code out err "$BRIEF"
+  expect_code 0 "$code" "$harness pinned refresh exits 0"
+  assert_contains "$out" '  status: clear' "$harness pinned refresh preserves routing"
+  assert_equals "$harness"$'\t'"$PIN_ROOT"$'\t''auth check --provider openai-codex' "$(cat "$LOG/pi.calls.identities")" "$harness refresh uses its executable and pinned root"
+done
+SIGNED_BIN="$TMP_ROOT/signed-only-bin"
+mkdir -p "$SIGNED_BIN"
+for command_name in bash chmod cp date dirname jq mktemp mv rm awk cat env head perl sed tr grep; do
+  ln -s "$(command -v "$command_name")" "$SIGNED_BIN/$command_name"
+done
+for command_name in curl quota-axi pi-signed; do
+  ln -s "$FAKEBIN/$command_name" "$SIGNED_BIN/$command_name"
+done
+reset_log
+TYPESAFE_API_KEY=$KEY FAKEBIN="$SIGNED_BIN" BASE_PATH="$SIGNED_BIN" run code out err "$BRIEF"
+expect_code 0 "$code" "pi-signed alone exits 0"
+assert_contains "$out" '  status: clear' "pi-signed alone preserves routing"
+assert_equals 'pi-signed'$'\t'"$PIN_ROOT"$'\t''auth check --provider openai-codex' "$(cat "$LOG/pi.calls.identities")" "pi-signed refresh runs when pi is absent"
+for pin in undeclared malformed; do
+  if [ "$pin" = undeclared ]; then
+    printf '%s\n' "$PIN_ROOT" anthropic > "$HOME_DIR/config/pi-account"
+  else
+    printf 'invalid\n' > "$HOME_DIR/config/pi-account"
+  fi
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: clear' "$pin pin leaves refresh nonfatal"
+  assert_absent "$LOG/pi.calls" "$pin pin never refreshes an ambient account"
+done
+rm -f "$HOME_DIR/config/pi-account"
+reset_log
+TYPESAFE_API_KEY=$KEY PI_CODING_AGENT_DIR="$PIN_ROOT" run code out err "$BRIEF"
+assert_equals 'pi-signed'$'\t'"$PIN_ROOT"$'\t''auth check --provider openai-codex' "$(cat "$LOG/pi.calls.identities")" "an absent pin preserves the ambient Pi root"
+cp "$BASE_RULES" "$RULES"
+pass "Pi refresh preserves executable and account selection without ambient fallback on pin refusal"
+
 # --- determinism: same brief and snapshot give the same profile every run -------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -1047,7 +1113,7 @@ UNTIL_RULES="$TMP_ROOT/until-rules.json"
 cat > "$UNTIL_RULES" <<'JSON'
 {
   "rules": [
-    { "when": "Expired work.", "until": "2000-01-01T00:00:00Z", "use": { "harness": "claude", "model": "opus" } },
+    { "when": "Expired work.", "until": "2000-01-01T00:00:00Z", "use": { "harness": "pi", "model": "expired-provider/model", "provider": "codex" } },
     { "when": "Live work.", "until": "2999-01-01T00:00:00Z", "use": { "harness": "cursor", "model": "cursor-grok-4.6-high" } }
   ]
 }
@@ -1067,6 +1133,7 @@ assert_contains "$out" '  rule: rule_1 (Live work.)' "the live rule keeps its te
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "the live rule's profile is chosen"
 assert_equals '["default","rule_1"]' "$(jq -c '.questions.rule.criteria | keys' "$LOG/body")" "the expired rule never reaches the option list"
 assert_not_contains "$(cat "$LOG/body")" 'Expired work.' "the expired rule's when text never leaves the machine"
+assert_absent "$LOG/pi.calls" "expired Pi profiles never trigger refresh"
 
 cat > "$RULES" <<'JSON'
 { "rules": [ { "when": "Expired work.", "until": "2000-01-01T00:00:00Z", "use": { "harness": "claude", "model": "opus" } } ] }
@@ -1079,6 +1146,90 @@ assert_absent "$LOG/argv" "all-expired rules never call curl"
 assert_absent "$LOG/quota-axi.calls" "all-expired rules never read quota"
 cp "$BASE_RULES" "$RULES"
 pass "until: expired rules leave the option list before the model sees them"
+
+for until in 2999-13-40T25:61:61Z 2000-13-01T00:00:00Z 2999-02-29T00:00:00Z \
+  2100-02-29T00:00:00Z 2001-02-29T00:00:00Z 2999-04-31T00:00:00Z \
+  2999-01-01T24:00:00Z 2999-01-01T00:60:00Z 2999-01-01T00:00:60Z \
+  $'2999-01-01T00:00:00Z\n'; do
+  jq --arg until "$until" '.rules[0].until = $until' "$BASE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid UTC instant is rejected: $until"
+  assert_contains "$err" 'malformed rules file:' "invalid UTC instant is a configuration error"
+  assert_equals '' "$out" "invalid UTC instant emits no routing result"
+  assert_absent "$LOG/argv" "invalid UTC instant never reaches the decision provider"
+  assert_absent "$LOG/pi.calls" "invalid UTC instant never refreshes credentials"
+  assert_absent "$LOG/quota-axi.calls" "invalid UTC instant never reads quota"
+done
+write_response "$RESPONSE" rule_4 0.9
+for until in 2400-02-29T00:00:00Z 2996-02-29T23:59:59Z; do
+  jq --arg until "$until" '.rules[0].until = $until' "$BASE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "valid leap day is accepted: $until"
+  assert_contains "$out" '  status: clear' "valid leap day preserves routing"
+done
+cp "$BASE_RULES" "$RULES"
+pass "until rejects invalid calendar dates and clock values before expiry filtering"
+
+PRIVATE_TMP="$TMP_ROOT/private-tmp"
+PRIVACY_BIN="$TMP_ROOT/privacy-bin"
+mkdir -p "$PRIVATE_TMP" "$PRIVACY_BIN"
+export REAL_JQ="$(command -v jq)" REAL_CHMOD="$(command -v chmod)" REAL_MV="$(command -v mv)" FILTER_LOG="$LOG/filter-mode"
+for command_name in curl quota-axi pi pi-signed; do
+  ln -s "$FAKEBIN/$command_name" "$PRIVACY_BIN/$command_name"
+done
+cat > "$PRIVACY_BIN/jq" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --arg ] && [ "${2:-}" = now ]; then
+  perl -e 'my @s = stat STDOUT; @s or die "stat stdout: $!"; open my $log, ">", $ENV{FILTER_LOG} or die $!; printf $log "%03o\n", $s[2] & 0777;'
+  "$REAL_JQ" "$@" || exit "$?"
+  [ "${FILTER_FAIL:-}" != jq ] || exit 1
+  exit 0
+fi
+exec "$REAL_JQ" "$@"
+SH
+cat > "$PRIVACY_BIN/chmod" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FILTER_LOG" ] && [ "${FILTER_FAIL:-}" = chmod ]; then exit 1; fi
+exec "$REAL_CHMOD" "$@"
+SH
+cat > "$PRIVACY_BIN/mv" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FILTER_LOG" ] && [ "${FILTER_FAIL:-}" = mv ]; then exit 1; fi
+exec "$REAL_MV" "$@"
+SH
+chmod +x "$PRIVACY_BIN/jq" "$PRIVACY_BIN/chmod" "$PRIVACY_BIN/mv"
+for filter_fail in none jq chmod mv; do
+  reset_log
+  TYPESAFE_API_KEY=$KEY TMPDIR="$PRIVATE_TMP" FAKEBIN="$PRIVACY_BIN" FILTER_FAIL="$filter_fail" run code out err "$BRIEF"
+  if [ "$filter_fail" = none ]; then
+    expect_code 0 "$code" "private filtering succeeds"
+    assert_contains "$out" '  status: clear' "private filtering preserves routing"
+  else
+    expect_code 2 "$code" "$filter_fail failure exits 2"
+    assert_absent "$LOG/argv" "$filter_fail failure sends no request"
+  fi
+  assert_equals 600 "$(cat "$FILTER_LOG")" "$filter_fail filter output is private before its first write"
+  assert_equals '' "$(rg --files --hidden --no-ignore "$PRIVATE_TMP")" "$filter_fail exit removes all rule snapshots"
+done
+pass "rule snapshots stay private before writing and are removed on success and failures"
+
+for provider in typesafe openrouter; do
+  for choice in rule_9 rule_0; do
+    reset_log
+    write_response "$RESPONSE" "$choice" 0.4
+    FM_DISPATCH_PROVIDER="$provider" FM_DISPATCH_MODEL=jev-latest TYPESAFE_API_KEY=$KEY \
+      OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+    expect_code 0 "$code" "$provider unknown choice remains a nonfatal error"
+    assert_contains "$out" '  status: error' "$provider rejects $choice before low-confidence substitution"
+    assert_contains "$out" '  reason: response is not a rule Choice answer' "$provider rejects an unoffered choice"
+    assert_not_contains "$out" '  profile:' "$provider never dispatches an unoffered choice"
+    assert_absent "$LOG/pi.calls" "$provider rejects the choice before credential refresh"
+    assert_absent "$LOG/quota-axi.calls" "$provider rejects the choice before quota"
+  done
+done
+pass "both decision providers reject unknown choices before confidence fallback"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
@@ -1138,11 +1289,11 @@ reset_log
 write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
-assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "unknown rule id is rejected at the response boundary"
 write_response "$RESPONSE" rule_0 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "rule zero is an error outcome"
-assert_contains "$out" '  reason: rule rule_0 is not in the rules file' "rule zero cannot alias the final rule"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "rule zero cannot alias the final rule"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"

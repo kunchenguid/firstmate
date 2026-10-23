@@ -108,6 +108,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 QUOTA_MAX_AGE=2m
@@ -132,7 +134,7 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES='' FILTERED_RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -184,7 +186,7 @@ esac
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
 RULES=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RULES"' EXIT
+trap 'rm -f "$RULES" "$FILTERED_RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
@@ -231,7 +233,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
   elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
   elif any((.rules // [])[]; has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1)) then "min_confidence must be a number from 0 through 1 when present"
-  elif any((.rules // [])[]; has("until") and ((.until | type) != "string" or ((.until | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) | not))) then "until must be an ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ) when present"
+  elif any((.rules // [])[]; has("until") and ((.until | type) != "string" or ((.until | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")) | not))) then "until must be an ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ) when present"
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
@@ -249,15 +251,22 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
 ' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES_PATH (not JSON)"
 [ -z "$rules_err" ] || die "malformed rules file: $RULES_PATH - $rules_err"
 
+while IFS= read -r until; do
+  normalized_until=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$until" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "$until" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || normalized_until=''
+  [ "$normalized_until" = "$until" ] \
+    || die "malformed rules file: $RULES_PATH - until must be a valid ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ)"
+done < <(jq -r '.rules[]? | select(has("until")) | .until' "$RULES")
+
 # A rule whose declared `until` instant has passed leaves the option list
 # before the question is built; same-format UTC strings compare in order.
 NOW_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || die "could not read the current time"
-if ! jq --arg now "$NOW_UTC" '.rules = [(.rules // [])[] | select((.until // "") == "" or .until > $now)]' "$RULES" > "$RULES.until"; then
-  rm -f "$RULES.until"
+FILTERED_RULES=$(mktemp) || die "mktemp failed"
+if ! jq --arg now "$NOW_UTC" '.rules = [(.rules // [])[] | select((.until // "") == "" or .until > $now)]' "$RULES" > "$FILTERED_RULES"; then
   die "could not filter expired rules: $RULES_PATH"
 fi
-chmod 400 "$RULES.until" || die "could not protect filtered rules: $RULES_PATH"
-mv -f "$RULES.until" "$RULES" || die "could not replace the rules snapshot: $RULES_PATH"
+chmod 400 "$FILTERED_RULES" || die "could not protect filtered rules: $RULES_PATH"
+mv -f "$FILTERED_RULES" "$RULES" || die "could not replace the rules snapshot: $RULES_PATH"
 
 missing_provider=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -304,7 +313,7 @@ RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
+trap 'rm -f "$RULES" "$FILTERED_RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
 never_send_off() {
   echo "dispatch-resolve: off ($1; nothing sent)" >&2
@@ -403,6 +412,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
+    (.answers.rule.choice as $choice | ($choices | index($choice)) != null) and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
     (.answers.rule.probabilities | type) == "object" and
@@ -419,16 +429,28 @@ jq -e --slurpfile rules "$RULES" '
 # Pi renews a provider session token only on use, so refresh each Pi provider
 # the live rules name first; bounded per provider and never fatal, because a
 # failed or absent refresh only leaves that lane's quota where it was.
-if command -v pi >/dev/null 2>&1; then
-  while IFS= read -r pi_provider; do
-    [ -n "$pi_provider" ] || continue
-    fm_run_timed "$PI_REFRESH_TIMEOUT" pi auth check --provider "$pi_provider" >/dev/null 2>&1 || :
+if pi_account=$(fm_worker_account_resolve pi "$CONFIG" config/pi-account 2>/dev/null); then
+  pi_root=${pi_account#*$'\t'}
+  pi_providers=${pi_root#*$'\t'}
+  pi_root=${pi_root%%$'\t'*}
+  while IFS=$'\t' read -r pi_harness pi_provider; do
+    pi_bin=$(type -P -- "$pi_harness") || continue
+    pi_command=("$pi_bin" auth check --provider "$pi_provider")
+    if [ -n "$pi_account" ]; then
+      case " $pi_providers " in
+        *" $pi_provider "*) ;;
+        *) continue ;;
+      esac
+      pi_command=(env "PI_CODING_AGENT_DIR=$pi_root" "${pi_command[@]}")
+    fi
+    fm_run_timed "$PI_REFRESH_TIMEOUT" "${pi_command[@]}" >/dev/null 2>&1 </dev/null || :
   done < <(jq -r '
     def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-    [((.rules // [])[]) | profiles(.use)[], (profiles(.default // null))[]]
-    | map(select(.harness == "pi" or .harness == "pi-signed") | (.model // ""))
-    | map(select(contains("/")) | split("/") | first)
-    | unique | .[]' "$RULES")
+    ([(.rules // [])[] | profiles(.use)[]] + profiles(.default))
+    | map(select(.harness == "pi" or .harness == "pi-signed")
+        | select((.model // "") | test("^[^/]+/.+"))
+        | [.harness, (.model | split("/") | first)])
+    | unique | .[] | @tsv' "$RULES")
 fi
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json --max-age "$QUOTA_MAX_AGE" > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
@@ -508,10 +530,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       end
     end;
   def rule_at($c):
-    if ($c | test("^rule_[1-9][0-9]*$")) then
-      ($c | ltrimstr("rule_") | tonumber) as $n |
-      if $n <= (($cfg.rules // []) | length) then $cfg.rules[$n - 1] else null end
-    else null end;
+    if $c == "default" then null
+    else $cfg.rules[($c | ltrimstr("rule_") | tonumber) - 1] end;
   def declared_confidence($c): rule_at($c) as $x | $x != null and ($x | has("min_confidence"));
   def confidence_floor($c): if declared_confidence($c) then rule_at($c).min_confidence else ($floor | tonumber) end;
   ($a.choice) as $picked |
@@ -545,12 +565,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   (if $fb.to then $fb.to elif $lc.top then $lc.top else $picked end) as $choice |
   (rule_at($choice)) as $rule |
   (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
-  (if $choice != "default" and $rule == null then []
-   elif $rule == null then profiles($cfg.default // null)
+  (if $rule == null then profiles($cfg.default // null)
    else profiles($rule.use)
    end) as $answer_use |
-  (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
-   elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
+  (if $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
    elif ($rule.approval // "") == "captain" then {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
    elif $rule_floor_state == "unknown" then {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
    elif $rule_floor_state == "below"
@@ -566,8 +584,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
   as $ev |
   ($sel.note + (if $lc.top then " (low confidence: answer confidence \($a.confidence) below floor \($floor))" else "" end)) as $note |
-  if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $fb.below and $fb.global and $lc.tie then
+  if $fb.below and $fb.global and $lc.tie then
     $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor); top-probability tie", candidates: ($answer_use | map(evaluate(.)))}
   elif $fb.below and ($fb.global | not) and ($fb.to | not) then
     $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: ($answer_use | map(evaluate(.)))}
