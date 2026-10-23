@@ -4952,6 +4952,7 @@ fm_test_run \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \
+  test_status_and_turn_end_batch_queue_one_row \
   test_turn_ended_churning_pane_absorbed \
   test_turn_ended_churn_resets_prior_stale_classification \
   test_turn_ended_churn_resets_wedge_state_before_stale_poll \
