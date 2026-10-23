@@ -134,7 +134,7 @@ These asks to Superlogical are deliberately unfiled, pending a later decision; e
 - **Dropping `working` and `blocked` program-status records when their owner exits**: native busy state could be trusted without cross-checking every record against the live process view.
 - **A documented compatibility floor and machine-readable version output with the API revision**: the version gate would stop parsing `rex version` text.
 - **A per-session or per-block opt-out for the agent hook's automatic session rename**: a harness running in a task tab could not rename the session that holds the captain's or other tasks' tabs.
-  Until then, a ship or scout launched on Rex is told in its launch role contract to ignore that prompt.
+  Until then, a ship or scout launched on Rex is told in its launch role contract to ignore that prompt, and a Rex second mate in a private launch copy of its charter.
 - **A configurable default size for unviewed blocks**: spawn would no longer need to resize every new 80x24 task block to 200x50.
 - **`rex` on `PATH` inside blocks even when shell startup files reset it**: the adapter could drop its `REX_BIN_DIR` and server-bundle fallbacks.
 

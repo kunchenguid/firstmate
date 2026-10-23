@@ -3721,6 +3721,20 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
+elif [ "$KIND" = secondmate ] && [ "$BACKEND" = rex ]; then
+  # A Rex second mate launches from a private copy of its charter carrying the
+  # Rex session-rename guard (FM_BRIEF_REX_RENAME_GUARD); the charter itself is
+  # never rewritten, and other backends launch from the charter unchanged.
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-charter.md"
+  BRIEF_TMP="$DATA/$ID/.launch-charter.md.${BASHPID:-$$}"
+  if ! { mkdir -p "$DATA/$ID" &&
+    { cat "$SOURCE_BRIEF" && printf '\n%s\n' "$FM_BRIEF_REX_RENAME_GUARD"; } >"$BRIEF_TMP" &&
+    mv "$BRIEF_TMP" "$BRIEF"; }; then
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not render the Rex launch copy of $SOURCE_BRIEF" >&2
+    exit 1
+  fi
 fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
