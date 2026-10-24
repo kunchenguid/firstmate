@@ -80,7 +80,6 @@ new_case() {
   WT="$CASE/wt"
   FAKEBIN=$(fm_test_make_spawn_fakebin "$CASE/fake")
   make_account_fakes "$FAKEBIN" "$CASE"
-  make_pool_fake "$FAKEBIN" "$CASE"
   fm_test_spawn_home "$HOME_DIR" "$2"
   fm_git_worktree "$PROJ" "$WT" "wt-$1"
   mkdir -p "$HOME_DIR/user-home"
@@ -137,7 +136,6 @@ test_absent_pin_keeps_the_launch_unchanged() {
     "an unpinned launch must keep forwarding the invoking process's own Claude root"
   assert_grep "ANTHROPIC_API_KEY=ambient-pane-key" "$CASE/claude-worker" \
     "an unpinned launch must leave the pane's environment credentials alone"
-  assert_absent "$CASE/pool-calls" "a home with no pool file must never run the pool command"
 
   new_case absent-pi pi
   out=$(spawn_ship acct-absent-pi --model gpt-5.5); rc=$?
@@ -386,226 +384,6 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
-# make_pool_fake: a fake `byokit-accounts` that speaks the real pick contract.
-# It prints the canned <case>/pick-<tool>.json, exits with <case>/pick.rc when
-# that file holds a non-zero status and adds one plain stderr line, and records
-# its argv so a test can prove the tool and pool folder it was asked about.
-make_pool_fake() {
-  local fakebin=$1 dir=$2
-  cat > "$fakebin/byokit-accounts" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> '$dir/pool-calls'
-rc=0
-[ ! -f '$dir/pick.rc' ] || rc=\$(cat '$dir/pick.rc')
-[ ! -f "$dir/pick-\${2:-none}.json" ] || cat "$dir/pick-\${2:-none}.json"
-[ "\$rc" = 0 ] || printf 'error: No %s account can take a run right now.\n' "\${2:-none}" >&2
-exit "\$rc"
-SH
-  chmod +x "$fakebin/byokit-accounts"
-}
-
-# enable_pool <home-dir> <pool-state-dir> [<command>]: writes config/account-pool.
-enable_pool() {
-  {
-    [ -z "${3:-}" ] || printf 'command=%s\n' "$3"
-    printf 'state=%s\n' "$2"
-  } > "$1/config/account-pool"
-  mkdir -p "$2"
-}
-
-# pool_pick_ok <case-dir> <tool> <id> <var> <folder> <unset-json-array>
-pool_pick_ok() {
-  printf '{"ok":true,"id":"%s","tool":"%s","name":"Pool","room":{"left":80,"freshness":"fresh"},"windows":[],"rows":[{"id":"%s","tool":"%s","name":"Pool","state":"ready","room":{"left":80,"freshness":"fresh"}}],"readAt":1,"set":{"%s":"%s"},"unset":%s}\n' \
-    "$3" "$2" "$3" "$2" "$4" "$5" "$6" > "$1/pick-$2.json"
-  rm -f "$1/pick.rc"
-}
-
-# pool_pick_answer <case-dir> <tool> <answer-json>: write one raw pick answer,
-# so a test can drive a malformed or unusable contract through the real spawn.
-pool_pick_answer() {
-  printf '%s\n' "$3" > "$1/pick-$2.json"
-  rm -f "$1/pick.rc"
-}
-
-test_pool_selects_an_account_when_no_pin_applies() {
-  local out rc id=acct-pool canary
-  new_case pool-claude claude
-  enable_pool "$HOME_DIR" "$CASE/pool" "$FAKEBIN/byokit-accounts"
-  mkdir -p "$CASE/pool/claude"
-  printf 'pool-credential-canary\n' > "$CASE/pool/claude/.credentials.json"
-  pool_pick_ok "$CASE" claude pa_aa11bb22 CLAUDE_CONFIG_DIR "$CASE/pool/claude" \
-    '["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_USE_BEDROCK"]'
-  out=$(spawn_ship "$id"); rc=$?
-  expect_code 0 "$rc" "a pool spawn with no pin should succeed: $out"
-  assert_contains "$out" "account=pa_aa11bb22" "the spawn should report the picked account"
-  assert_grep "account=pa_aa11bb22" "$HOME_DIR/state/$id.meta" "the task record should carry the picked account"
-  assert_grep "pick claude --json --state $CASE/pool" "$CASE/pool-calls" "the pick should name the mapped tool and the pool folder"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/pool/claude" "$CASE/claude-worker" "the worker should run under the picked account folder"
-  for canary in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_USE_BEDROCK; do
-    assert_grep "$canary=unset" "$CASE/claude-worker" "the pick's unset list should shed $canary"
-  done
-  # No credential may reach the launch line, the task record, the status file, or any message.
-  printf '%s\n' "$out" > "$CASE/spawn.out"
-  for f in "$CASE/launch.log" "$CASE/spawn.out" "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"; do
-    [ -e "$f" ] || continue
-    for canary in pool-credential-canary ambient-invoker-key ambient-pane-key; do
-      assert_no_grep "$canary" "$f" "$canary must never reach $f"
-    done
-  done
-  pass "the pool picks an account, the launch carries its folder, and no credential is recorded"
-}
-
-test_pool_sheds_exactly_the_picks_unset_list() {
-  local out rc id=acct-pool-shed
-  new_case pool-shed claude
-  enable_pool "$HOME_DIR" "$CASE/pool"
-  mkdir -p "$CASE/pool/claude"
-  pool_pick_ok "$CASE" claude pa_ee55ff66 CLAUDE_CONFIG_DIR "$CASE/pool/claude" '[]'
-  out=$(spawn_ship "$id"); rc=$?
-  expect_code 0 "$rc" "a pool pick with an empty unset list should succeed: $out"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/pool/claude" "$CASE/claude-worker" \
-    "the worker should run under the picked account folder"
-  assert_grep "ANTHROPIC_API_KEY=ambient-pane-key" "$CASE/claude-worker" \
-    "an empty pick unset list must leave the pane's credentials alone rather than shed the pin's list"
-  assert_grep "CLAUDE_CODE_USE_BEDROCK=1" "$CASE/claude-worker" \
-    "an empty pick unset list must leave every ambient credential alone"
-  pass "the pool sheds exactly the pick's unset list"
-}
-
-test_a_pin_still_wins_over_the_pool() {
-  local out rc id=acct-pool-pin
-  new_case pool-pin claude
-  enable_pool "$HOME_DIR" "$CASE/pool"
-  pool_pick_ok "$CASE" claude pa_aa11bb22 CLAUDE_CONFIG_DIR "$CASE/pool/claude" '["ANTHROPIC_API_KEY"]'
-  signed_in_claude_root "$CASE/work"
-  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
-  out=$(spawn_ship "$id"); rc=$?
-  expect_code 0 "$rc" "a pinned home with a pool file should still succeed: $out"
-  assert_contains "$out" "account=$CASE/work" "the pin should win over the pool"
-  assert_absent "$CASE/pool-calls" "a pin should keep the pool from being asked"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "the worker should run under the pin, not the pool"
-  pass "a home pin still wins over the pool"
-}
-
-test_pool_refusals_create_nothing() {
-  local out rc
-  new_case pool-refusal claude
-  enable_pool "$HOME_DIR" "$CASE/pool"
-  printf '1\n' > "$CASE/pick.rc"
-  cat > "$CASE/pick-claude.json" <<'JSON'
-{"ok":false,"tool":"claude","reason":"No claude account can take a run right now.","rows":[{"id":"pa_a","tool":"claude","name":"Work","state":"resting","restUntil":9999999999999},{"id":"pa_b","tool":"claude","name":"Personal","state":"signed_out"}]}
-JSON
-  out=$(spawn_ship acct-pool-none); rc=$?
-  expect_code 1 "$rc" "a failed pool pick must refuse the spawn"
-  assert_refused_before_launch acct-pool-none "$out" "cannot start a claude worker"
-  assert_contains "$out" "Work resting, Personal signed out" "the refusal should say who is resting or signed out"
-  assert_contains "$out" "byokit-accounts add claude" "the refusal should name the login to do"
-
-  new_case pool-malformed claude
-  printf '# a comment\n\ncommand=/usr/bin/byokit-accounts\n' > "$HOME_DIR/config/account-pool"
-  out=$(spawn_ship acct-pool-bad); rc=$?
-  expect_code 1 "$rc" "a pool file with no state= must refuse"
-  assert_refused_before_launch acct-pool-bad "$out" "config/account-pool must name the pool folder"
-  assert_absent "$CASE/pool-calls" "a malformed pool file must refuse before running the command"
-  pass "a failed pick and a malformed pool file both refuse before launch"
-}
-
-test_pool_refuses_an_unusable_answer() {
-  local out rc n=0 answer
-  while IFS= read -r answer; do
-    n=$((n + 1))
-    new_case "pool-bad-$n" claude
-    enable_pool "$HOME_DIR" "$CASE/pool"
-    mkdir -p "$CASE/pool/claude"
-    printf '{}\n' > "$CASE/pool/login.json"
-    pool_pick_answer "$CASE" claude "${answer//FOLDER/$CASE/pool/claude}"
-    out=$(spawn_ship "acct-pool-bad-$n"); rc=$?
-    expect_code 1 "$rc" "an unusable pick answer must refuse the spawn ($answer): $out"
-    assert_refused_before_launch "acct-pool-bad-$n" "$out" "answered with an unusable claude account selection"
-  done <<'ANSWERS'
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER"},"unset":"ANTHROPIC_API_KEY"}
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER"},"unset":[123]}
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER"},"unset":{"CLAUDE_CONFIG_DIR":"/x"}}
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER"},"unset":["A B"]}
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER"},"unset":["1BAD"]}
-{"id":"pa_x","set":{"HOME":"FOLDER"},"unset":[]}
-{"id":"pa_x","set":{"CLAUDE_CONFIG_DIR":"FOLDER/login.json"},"unset":[]}
-ANSWERS
-  pass "the pool refuses a malformed unset list, a foreign store variable, and a non-directory folder"
-}
-
-test_pool_refuses_raw_commands_before_selection() {
-  local out rc tool var raw id n=0
-  for tool in claude codex pi; do
-    new_case "pool-raw-$tool" "$tool"
-    cat > "$FAKEBIN/treehouse" <<SH
-#!/usr/bin/env bash
-printf '%s\\n' "\$*" >> '$CASE/copy-calls'
-exit 1
-SH
-    enable_pool "$HOME_DIR" "$CASE/pool state"
-    mkdir -p "$CASE/pool state/selected folder"
-    printf 'pool-secret-canary\n' > "$CASE/pool state/selected folder/login.json"
-    case "$tool" in
-      claude) var=CLAUDE_CONFIG_DIR ;;
-      codex) var=CODEX_HOME ;;
-      pi) var=PI_CODING_AGENT_DIR ;;
-    esac
-    pool_pick_ok "$CASE" "$tool" pa_cc33dd44 "$var" "$CASE/pool state/selected folder" '["ANTHROPIC_API_KEY"]'
-    for raw in "$tool --print raw" \
-      "$var='$CASE/other folder' $tool --print raw" \
-      "ANTHROPIC_API_KEY=raw-secret-canary $tool --print raw" \
-      "env $var='$CASE/other folder' $tool --print raw" \
-      "sh -c 'exec $tool --print raw'"; do
-      n=$((n + 1))
-      id="acct-pool-raw-$n"
-      out=$(spawn_ship "$id" --harness "$raw"); rc=$?
-      expect_code 1 "$rc" "a raw $tool command must refuse while the pool is on"
-      assert_refused_before_launch "$id" "$out" "config/account-pool does not support raw launch commands"
-      assert_contains "$out" "use a named harness" "the refusal should explain how to proceed"
-      assert_not_contains "$out" "secret-canary" "the refusal must not echo credentials or raw arguments"
-      assert_absent "$CASE/pool-calls" "raw commands must refuse before account selection"
-      assert_absent "$HOME_DIR/state/$id.status" "raw commands must not publish worker status"
-      assert_absent "$CASE/copy-calls" "raw commands must not call the copy allocator"
-    done
-  done
-
-  # A pin still wins for named launches, but does not reopen the raw escape hatch.
-  new_case pool-raw-pin claude
-  enable_pool "$HOME_DIR" "$CASE/pool"
-  signed_in_claude_root "$CASE/work"
-  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
-  out=$(spawn_ship acct-pool-raw-pin --harness 'claude --print raw'); rc=$?
-  expect_code 1 "$rc" "a pin must not permit a raw command while the pool is on"
-  assert_refused_before_launch acct-pool-raw-pin "$out" "use a named harness"
-  assert_absent "$CASE/claude-checks" "raw commands must refuse before the pin's sign-in check"
-  assert_absent "$CASE/pool-calls" "raw commands must refuse before the pool pick"
-  pass "a pool home refuses plain, overriding, env, and shell-wrapped raw commands before account selection"
-}
-
-test_pool_config_broken_symlink_refuses() {
-  local out rc id=acct-pool-link
-  new_case pool-link claude
-  ln -s "$CASE/missing-pool-file" "$HOME_DIR/config/account-pool"
-  out=$(spawn_ship "$id"); rc=$?
-  expect_code 1 "$rc" "a config/account-pool broken symlink must refuse the spawn"
-  assert_refused_before_launch "$id" "$out" "config/account-pool must be a readable regular file"
-  assert_absent "$CASE/pool-calls" "a broken pool symlink must refuse before running the command"
-
-  new_case pool-link-ok claude
-  mkdir -p "$CASE/pool/claude"
-  printf 'state=%s\n' "$CASE/pool" > "$CASE/pool.conf"
-  ln -s "$CASE/pool.conf" "$HOME_DIR/config/account-pool"
-  pool_pick_ok "$CASE" claude pa_aa11bb22 CLAUDE_CONFIG_DIR "$CASE/pool/claude" '["ANTHROPIC_API_KEY"]'
-  out=$(spawn_ship acct-pool-link-ok); rc=$?
-  expect_code 0 "$rc" "a config/account-pool symlink to a readable file should still be a usable pool: $out"
-  assert_contains "$out" "account=pa_aa11bb22" "the pool behind a symlink should still be picked"
-  pass "a broken config/account-pool symlink refuses, and a resolvable one still works"
-}
-
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -619,12 +397,5 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
-test_pool_selects_an_account_when_no_pin_applies
-test_pool_sheds_exactly_the_picks_unset_list
-test_pool_refuses_an_unusable_answer
-test_pool_refuses_raw_commands_before_selection
-test_pool_config_broken_symlink_refuses
-test_a_pin_still_wins_over_the_pool
-test_pool_refusals_create_nothing
 
 echo "# all fm-worker-account tests passed"

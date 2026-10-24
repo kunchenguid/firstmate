@@ -59,7 +59,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <id|next>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -88,15 +88,6 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
-#   --account <id|next> is the control plane's relaunch axis, carried here to
-#   the launch owner: an explicit id selects that account, and 'next' is
-#   honored only on an fm-control-driven relaunch, whose pre-stop gate has
-#   already rested the recorded account, so here it just picks plainly; a
-#   direct relaunch refuses 'next' rather than silently re-picking the same
-#   account. A fresh spawn refuses it, an explicit id whose answer is a
-#   different account refuses rather than launching the wrong one, and a home
-#   whose pool cannot answer it at all refuses rather than launching on the
-#   ambient login.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -382,12 +373,11 @@
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
-#   Opt-in. Without a pin or pool, a Claude or Pi launch is unchanged: Claude still
+#   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
 #   destination pane's ambient account. A present file pins every launch of
-#   that runner from this home - ship, scout, local secondmate, and relaunch -
-#   to the declared account root. Raw launch eligibility is owned by the worker
-#   account sections in docs/configuration.md. The spawn
+#   that runner from this home - ship, scout, local secondmate, raw Claude
+#   command, and relaunch - to the declared account root, and the spawn
 #   refuses before any endpoint, worktree, or record exists when the file is
 #   malformed, the root is unusable, or the runner's own check says it is not
 #   signed in. A pinned Claude launch sheds the environment credentials Claude
@@ -397,16 +387,6 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
-# Worker account pool (config/account-pool):
-#   Opt-in and secondary to the pin. When no pin applies and the harness maps to
-#   a BYOKit pool tool (claude, codex, pi, pi-signed), the launch asks
-#   `byokit-accounts pick` for the account with the most room and carries its
-#   folder as an `env -u <name> ... <VAR>=<folder>` prefix, folder paths only and
-#   never a secret; a failed pick refuses before anything exists, naming the login
-#   to do. Raw launch commands refuse while config/account-pool exists; use a
-#   named harness. A relaunch's --account <id> prefers that account in the pick
-#   and refuses when the pool answers with a different one. The pick is recorded
-#   as account=. bin/fm-account-pool-lib.sh owns it.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -735,8 +715,14 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
-# shellcheck source=bin/fm-account-pool-lib.sh
-. "$SCRIPT_DIR/fm-account-pool-lib.sh"
+# Account-pool hook (firstmate-addons/account-pool): a no-op when the add-on is absent.
+_fm_ap=${FM_ADDONS_DIR:-${FM_HOME:-$SCRIPT_DIR/..}/projects/firstmate-addons}/account-pool/bin/fm-account-pool-lib.sh
+if [ -r "$_fm_ap" ]; then
+  # shellcheck source=/dev/null
+  . "$_fm_ap" || { printf 'error: the account-pool add-on at %s failed to load; fix or remove it\n' "$_fm_ap" >&2; exit 1; }
+else
+  fm_account_hook() { :; }
+fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -766,13 +752,12 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
-ACCOUNT_ARG=
-ACCOUNT_SET=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
 POS=()
 want_value=
+eval "$(fm_account_hook argv "$@")"
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -821,10 +806,6 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
-      ;;
-    account)
-      ACCOUNT_ARG=$a
-      ACCOUNT_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -895,24 +876,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
-  --account) want_value=account ;;
-  --account=*)
-    ACCOUNT_ARG=${a#--account=}
-    ACCOUNT_SET=1
-    ;;
   *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || {
   echo "error: --$want_value requires a value" >&2
-  exit 1
-}
-[ "$ACCOUNT_SET" -eq 0 ] || [ -n "$ACCOUNT_ARG" ] || {
-  echo "error: --account requires a non-empty value" >&2
-  exit 1
-}
-[ "$ACCOUNT_SET" -eq 0 ] || fm_account_pool_want_valid "$ACCOUNT_ARG" || {
-  echo "error: --account takes 'next' or one pool account id, not '$ACCOUNT_ARG'" >&2
   exit 1
 }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
@@ -972,6 +940,7 @@ esac
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
+fm_account_hook spawn-validate || exit 1
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2
@@ -1001,19 +970,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
     exit 1
   }
-  [ "$ACCOUNT_SET" -eq 0 ] || [ "$ACCOUNT_ARG" != next ] || [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] || {
-    echo "error: --account next rests the recorded account only in fm-control's pre-stop gate; a direct relaunch would ignore it and may re-pick the same account - use 'bin/fm-control.sh <task-id> relaunch --account next'" >&2
-    exit 1
-  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
   # and record no delivery posture; secondmate spawns hardcode theirs.
-  [ "$ACCOUNT_SET" -eq 0 ] || {
-    echo "error: --account applies to a relaunch only; a fresh launch picks its pool account on its own" >&2
-    exit 1
-  }
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
@@ -2555,10 +2516,7 @@ launch_template() {
 
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
-  if [ -e "$CONFIG/account-pool" ] || [ -L "$CONFIG/account-pool" ]; then
-    echo "error: config/account-pool does not support raw launch commands; use a named harness such as --harness claude, --harness codex, or --harness pi so the selected account cannot be overridden" >&2
-    exit 1
-  fi
+  fm_account_hook raw-launch "$CONFIG" || exit 1
   RAW_LAUNCH=1
   LAUNCH=$ARG3
   HARNESS=""
@@ -2758,35 +2716,7 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     unset CLAUDE_CONFIG_DIR
   fi
 fi
-# Worker account pool (bin/fm-account-pool-lib.sh): resolved beside the pin,
-# before any endpoint, worktree, or record exists, and only when no pin applies.
-# A picked Claude root is exported here because the trust registration below
-# writes the store the worker will actually read.
-[ -z "$WORKER_ACCOUNT" ] || [ "$ACCOUNT_SET" -eq 0 ] || {
-  echo "error: this home pins $HARNESS workers to one account, and the pin wins over --account '$ACCOUNT_ARG'; change or remove the pin file, or relaunch without it" >&2
-  exit 1
-}
-POOL_ACCOUNT=
-if [ -z "$WORKER_ACCOUNT" ]; then
-  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG" "$ACCOUNT_ARG") || exit 1
-  [ "$ACCOUNT_SET" -eq 0 ] || [ -n "$POOL_ACCOUNT" ] || {
-    echo "error: this home has no account pool for $HARNESS workers (no config/account-pool, or $HARNESS has no pool tool), so --account '$ACCOUNT_ARG' cannot be honored; add config/account-pool or relaunch without it" >&2
-    exit 1
-  }
-fi
-POOL_ACCOUNT_ID=
-POOL_ACCOUNT_VAR=
-POOL_ACCOUNT_FOLDER=
-POOL_ACCOUNT_UNSET=
-if [ -n "$POOL_ACCOUNT" ]; then
-  POOL_ACCOUNT_ID=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 1)
-  POOL_ACCOUNT_VAR=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 2)
-  POOL_ACCOUNT_FOLDER=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 3)
-  POOL_ACCOUNT_UNSET=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 4)
-  if [ "$POOL_ACCOUNT_VAR" = CLAUDE_CONFIG_DIR ]; then
-    export CLAUDE_CONFIG_DIR=$POOL_ACCOUNT_FOLDER
-  fi
-fi
+fm_account_hook spawn-pick "$HARNESS" "$CONFIG" "$WORKER_ACCOUNT" "${POOL_ACCOUNT_WANT:-}" || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -5567,11 +5497,11 @@ preserve_relaunch_meta() {
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # The worker account pin or pool pick, only when this home declares one, so
-  # an unpinned, pool-less task record stays byte-identical.
+  # The worker account pin, only when this home declares one, so an unpinned
+  # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
-  [ -z "$POOL_ACCOUNT" ] || echo "account=$POOL_ACCOUNT_ID"
+  fm_account_hook record-line
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   if declare -F fm_receipts_inherit >/dev/null && ! fm_receipts_inherit "$BRIEF" "${RELAUNCH_META:-}"; then
@@ -5864,9 +5794,7 @@ esac
 # an unset value is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login. The
-# account pool's pick replaces it the same way, carrying the picked folder as
-# `env -u <name> ... <VAR>=<folder>` (bin/fm-account-pool-lib.sh).
+# sheds the environment credentials Claude ranks above the root's login.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -5880,11 +5808,10 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ -n "$POOL_ACCOUNT" ]; then
-  LAUNCH="$(fm_worker_account_claude_shed "$POOL_ACCOUNT_UNSET") $POOL_ACCOUNT_VAR=$(shell_quote "$POOL_ACCOUNT_FOLDER") $LAUNCH"
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+fm_account_hook launch-prefix "$HARNESS" "$WORKER_ACCOUNT"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
@@ -6272,7 +6199,7 @@ SPAWN_DELIVERY=
 SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT" ] || SPAWN_ACCOUNT=" account=$WORKER_ACCOUNT_DECLARED"
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
-[ -z "$POOL_ACCOUNT" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account=$POOL_ACCOUNT_ID"
+fm_account_hook spawn-line
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
 # Herdr assigns every agent a random call-sign at start and fresh ones across

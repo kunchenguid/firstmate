@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker account pool](#worker-account-pool-configaccount-pool), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [launch environment hook](#launch-environment-hook-configlaunch-env-hook) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [launch environment hook](#launch-environment-hook-configlaunch-env-hook) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [host memory guard](#host-memory-guard-confighost-memory) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1031,7 +1031,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
-The pin is opt-in: without a pin or [account pool](#worker-account-pool-configaccount-pool), every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
+The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
 
 Both files are local and gitignored.
 
@@ -1055,8 +1055,7 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 
 ### Launch scope and sign-in checks
 
-When a file is present, every permitted launch of that runner from this home uses it: ships, scouts, local secondmate agents, and relaunches.
-Raw Claude launch eligibility is governed by the [account pool contract](#worker-account-pool-configaccount-pool).
+When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
@@ -1078,44 +1077,7 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
-
-## Worker account pool (config/account-pool)
-
-A home that keeps a pool of logins for one tool can have its launches pick the account with the most room instead of always starting on the one default login.
-The pool is opt-in and secondary to the pin: with no file every launch is unchanged, and a home pin always wins for its own named runner.
-The file is local and gitignored.
-It holds one `state=<absolute pool folder>`, the folder that holds the pool's `pool.json`, and optionally one `command=<byokit-accounts command>`, either a bare name resolved from `PATH` (the default `byokit-accounts`) or an absolute path.
-Blank lines and `#` comments are ignored, and a file with no usable `state=`, a relative `state=` path, or a `command=` value that names a relative path, refuses the launch and names the file.
-
-The pool applies only to the harnesses whose pool tool exists today: `claude` to `claude`, `codex` to `codex`, and `pi` and `pi-signed` to `pi`.
-Every other named harness keeps today's behavior; the Cursor and OpenCode Go pools are later work.
-When no pin applies and the harness is mapped, Firstmate runs `<command> pick <tool> --json --state <state>` before any endpoint, local copy, or task record exists, and before a relaunch stops the running worker, and the command answers with the account with the most room among that tool's ready, not-resting accounts, from the same list the captain reads and switches with `byokit-accounts list` and `byokit-accounts use`.
-
-A launch carries the picked folder the same way a pin carries its root: an `env -u <name> ... <VAR>=<folder>` prefix on the launch line, so the launch line and the task record hold folder paths only.
-No key, token, or login file ever reaches a launch line, a task record, a log, a status line, or an error message.
-The spawn prints the pick as `account=<id>` and records the same field in the task record.
-While `config/account-pool` exists, raw launch commands refuse before account selection or endpoint, local-copy, or task-record creation, even when a pin applies.
-Use a named harness such as `--harness claude`, `--harness codex`, or `--harness pi` so a command or shell wrapper cannot bypass or override the selected account.
-
-A malformed file (including a `config/account-pool` that exists but is not a readable regular file, such as a broken symlink), a `pick` that exits non-zero, an answer whose `unset` is not an array of environment-variable names, or an answer that names no usable account folder - not the tool's own store variable (`CLAUDE_CONFIG_DIR` for Claude, `CODEX_HOME` for Codex, `PI_CODING_AGENT_DIR` for Pi) or not an existing readable, searchable directory - refuses the launch before anything is created.
-A failed `pick` refusal names the tool and the login to do and says which accounts are resting or signed out, in the tone of the pin's sign-in refusal; Firstmate never falls back to an ambient login or copies a credential.
-Like the pin, the pool is not inherited into secondmate homes: a local secondmate agent launches on the launching home's pool, while the secondmate's own workers read the secondmate home's file.
-
-### Moving one worker between accounts (relaunch --account)
-
-`bin/fm-control.sh <task-id> relaunch --account <id|next>` moves a running worker onto a different pool account while it replaces the agent, and the local copy, its commits, and its uncommitted work stay exactly as they are, as with any relaunch.
-
-`--account <id>` selects that account for this launch, and it is the only way to select an OpenCode Go one; the launch refuses unless the pool answers with exactly that account, so an account that is resting, signed out, or another tool's is never launched by accident.
-`--account next` rests the account the running worker launched on, for that account's own default rest, and launches the worker on another one; `byokit-accounts unrest <id>` returns a rested account to the rotation.
-
-Every choice is validated before the running agent is stopped: a malformed choice, a harness whose pool tool does not exist yet, a home with no `config/account-pool`, `next` on a task that records no pool account to move from, an OpenCode Go account or a worker on an `opencode-go` provider (the approved plan's terms review keeps Go moves manual, and the refusal names the manual command), an account that cannot take the worker, or a pick that answers with a different account than the requested one. One refusal can land after the stop: the launch owner re-picks when the replacement launches, so pool state that changed in between - a concurrent launch taking the account, or it going not-ready - refuses there rather than launching a wrong or unavailable account, and the rollback then reports the stopped agent with its work preserved.
-With exactly one account in the pool, `next` rests it and then refuses, so the running worker keeps working while its account rests; relaunch again with no flag, or with `--account <id>`.
-A home pin still wins: with a pin file for that runner, `--account` refuses rather than being silently ignored.
-Moving a worker also asks the pool command for three things a plain launch never does: an explicit id picks with `--prefer <id>` added, and the answer must be exactly that account; `next` reads the recorded account with `status <id> --json --state <state>` - its `.tool` decides whether the account may move automatically - and rests it with `rest <id> --json --state <state>`. A custom `command=` that lacks any of these gets a plain fail-closed refusal rather than a half-performed move.
-
-The replacement records the selected account as `account=`, exactly as a spawn-time pick does, and the rest and the pick follow the same folder-paths-only rule: no key, token, or login file reaches a command line, a task record, a log, or an error message.
-
-[`bin/fm-account-pool-lib.sh`](../bin/fm-account-pool-lib.sh) owns parsing, the harness-to-tool map, the `pick` invocation, the relaunch-time rest and choice gate, and the refusal messages; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-line mechanics.
+The worker account pool (`config/account-pool` and `relaunch --account`) is owned by the firstmate-addons `account-pool` add-on, not this fork.
 
 ## Lavish server address (config/lavish-axi-host)
 
