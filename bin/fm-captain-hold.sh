@@ -21,7 +21,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] [--link <url>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -56,6 +56,10 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# `--link` appends one http(s) URL, such as the review board the captain answers
+# on, to the parent mirror line a mate home publishes, so the call reaches the
+# parent under its one hold key and never needs a second keyed line that no
+# answer closes. It is not stored in the task.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -1048,7 +1052,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' link='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -1059,12 +1063,24 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --link) shift; link=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  if [ -n "$link" ]; then
+    validate_one_line link "$link"
+    case "$link" in
+      https://*|http://*) : ;;
+      *) fail "--link must be an http(s) URL: $link" ;;
+    esac
+    case "$(fm_parent_channel_clean_note "$reason - $link")" in
+      *"$link") : ;;
+      *) fail "--link does not fit the parent line after the reason; shorten the reason" ;;
+    esac
+  fi
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1154,7 +1170,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason${link:+ - $link}"
   printf '%s\n' "$id"
 }
 
