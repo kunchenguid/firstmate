@@ -48,7 +48,7 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 
@@ -377,27 +377,14 @@ if [ "\${1:-}" = clone ]; then
 fi
 if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
   && [ "\$(dirname "\${!#}")" = "\$FM_FAKE_CLONE_HOLD_DIR" ]; then
-  hold_dest="\${!#}"
-  "$REAL_GIT" "\$@" &
-  hold_git=\$!
-  hold_state() { ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]'; }
-  while [ ! -d "\$hold_dest/.git/objects" ]; do
-    case "\$(hold_state)" in ''|Z*) wait "\$hold_git"; exit \$? ;; esac
-    sleep 0.005
-  done
-  kill -STOP "\$hold_git" 2>/dev/null || true
-  while :; do
-    case "\$(hold_state)" in
-      T*) break ;;
-      ''|Z*) wait "\$hold_git"; exit \$? ;;
-    esac
-    sleep 0.005
-  done
+  printf -v hold_upload_pack '%q upload-pack' "$FAKEBIN/git"
+  FM_FAKE_CLONE_HOLD_DEST="\${!#}" exec "$REAL_GIT" clone --no-local --upload-pack="\$hold_upload_pack" "\${@:2}"
+fi
+if [ "\${1:-}" = upload-pack ] && [ -n "\${FM_FAKE_CLONE_HOLD_DEST:-}" ]; then
+  [ -d "\$FM_FAKE_CLONE_HOLD_DEST/.git/objects" ] || exit 1
+  if "$REAL_GIT" -C "\$FM_FAKE_CLONE_HOLD_DEST" rev-parse --verify HEAD >/dev/null 2>&1; then exit 1; fi
   touch "$TMP_ROOT/race-clone.held"
   while [ ! -f "$TMP_ROOT/race-clone.release" ] && [ -d "$TMP_ROOT" ]; do sleep 0.02; done
-  kill -CONT "\$hold_git" 2>/dev/null || true
-  wait "\$hold_git"
-  exit \$?
 fi
 exec "$REAL_GIT" "\$@"
 SH
