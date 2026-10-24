@@ -252,6 +252,11 @@ fi
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
+# A verified `captain-held` transfer (fm-classify-lib.sh's
+# FM_CLASSIFY_CAPTAIN_HELD_VERB) reports `parked`: the crew's decision now waits
+# on the captain through a durable hold, and its detail names the hold so it is
+# not mistaken for a gate the crew itself must answer. Only the status line is
+# read, so the reading is the same before and after the backlog hold exists.
 # A ship `done:` is not current-state done while bin/fm-dod-lib.sh refuses the
 # named-head reachability gate: that claim is blocked so a disposable copy is
 # not treated as finished-and-safe.
@@ -268,6 +273,10 @@ map_log_state() {  # <line>
     echo paused
     return
   fi
+  if status_is_captain_held "$1"; then
+    echo parked
+    return
+  fi
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
@@ -276,6 +285,16 @@ map_log_state() {  # <line>
     failed)         echo failed ;;
     *)              echo unknown ;;
   esac
+}
+
+# The status-log detail for <line>: its note, prefixed for a captain-held
+# transfer so its parked reading names who owes the answer.
+log_state_detail() {  # <line>
+  if status_is_captain_held "$1"; then
+    printf 'captain-held: %s' "$(status_line_note "$1")"
+  else
+    status_line_note "$1"
+  fi
 }
 
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
@@ -303,7 +322,7 @@ if [ -n "$REMOTE_HOST" ]; then
       if [ -n "$LOG_VERB" ]; then
         LOG_STATE=$(map_log_state "$LOG_LINE")
         if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
+          emit "$LOG_STATE" status-log "$(log_state_detail "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
         fi
       fi
       emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
@@ -1388,7 +1407,7 @@ if [ -n "$LOG_VERB" ]; then
   fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    emit "$LOG_STATE" status-log "$(log_state_detail "$LOG_LINE")"
   fi
 fi
 

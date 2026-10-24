@@ -3031,6 +3031,44 @@ test_no_run_idle_pane_paused() {
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
+# (g'') no run + idle live pane whose current declaration is a verified
+# `captain-held` transfer -> state: parked, never unknown. The crew-state read is
+# status-log only, so it must hold both before and after the matching backlog
+# hold exists in the home's backlog.
+test_no_run_idle_pane_captain_held() {
+  reset_fakes
+  local d out
+  d=$(new_case captain-held)
+  make_repo_on_branch "$d/wt" fm/feat-held
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/data"
+  fm_write_meta "$d/state/feat-held.meta" "window=fm:fm-feat-held" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision [key=q1]: which database?\ncaptain-held [key=q1]: tracked by feat-held-db\n' \
+    > "$d/state/feat-held.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-held
+  out=$(FM_HOME="$d" run_crew_state "$d" feat-held)
+  assert_contains "$out" "state: parked" "captain-held log before the backlog hold -> parked"
+  assert_contains "$out" "source: status-log" "captain-held before the backlog hold -> status-log source"
+  assert_contains "$out" "captain-held: tracked by feat-held-db" "captain-held detail names the hold"
+  cat > "$d/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] feat-held-db - Choose the database (repo: sample) (kind: captain) (hold: which database?) (hold-kind: captain)
+
+## Done
+EOF
+  out=$(FM_HOME="$d" run_crew_state "$d" feat-held)
+  assert_contains "$out" "state: parked" "captain-held log after the backlog hold -> parked"
+  assert_contains "$out" "captain-held: tracked by feat-held-db" "captain-held detail survives the backlog hold"
+  printf 'The captain is reviewing the options.\n\n' >> "$d/state/feat-held.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" feat-held)
+  assert_contains "$out" "state: parked" "continuation prose preserves the captain-held reading"
+  pass "no run + idle pane on a captain-held status reports state: parked, never unknown"
+}
+
 test_secondmate_open_block_survives_unrelated_append() {
   reset_fakes
   local d out suffix gen
@@ -5928,6 +5966,7 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
+test_no_run_idle_pane_captain_held
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
