@@ -690,6 +690,7 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+Your first action is to append a \`working:\` status line with the rule 4 command under Rules, then begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.
 
 $TASK_SECTION
 
@@ -762,6 +763,7 @@ DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CO
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+Once the Setup isolation check passes, your first action is to append a \`working:\` status line with the rule 4 command under Rules, then begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.
 
 $TASK_SECTION
 

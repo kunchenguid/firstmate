@@ -712,6 +712,33 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+# The worker's opening turn must not end at an announcement: the first
+# instruction after the identity line tells it to append its status line and
+# then begin work, and points at rule 4 rather than duplicating the command.
+test_crewmate_scaffolds_open_with_status_then_work() {
+  local home id brief second
+  home="$TMP_ROOT/opening-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-opening-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    second=$(sed -n 2p "$brief")
+    # shellcheck disable=SC2016 # The backticks are literal brief text.
+    case "$second" in
+      *'our first action is to append a `working:` status line with the rule 4 command under Rules, then begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.') ;;
+      *) fail "$kind scaffold does not open with the status-then-work instruction (got: $second)" ;;
+    esac
+    assert_grep "4. Report status by appending one line:" "$brief" \
+      "$kind scaffold lost the rule 4 status protocol the opening points to"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds open with status-then-work"
+}
+
 # Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
 # firstmate to fill `{TASK}` and `{FIRSTMATE_SPEC}`. The unguarded Herdr gate used
 # to quote `{TASK}` in its own prose, so that documented global replace spliced
@@ -1708,3 +1735,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_crewmate_scaffolds_open_with_status_then_work
