@@ -428,7 +428,7 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   # the lock: the record writer refuses an away mandate for a read-only
   # session, so a fixture cannot stage one under a live holder.
   FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" enter >/dev/null 2>&1
-  printf '%s\n' "$holder_pid" > "$st_away/state/.lock" 
+  printf '%s\n' "$holder_pid" > "$st_away/state/.lock"
   out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'replace the mandate' 2>&1)
   rc=$?
