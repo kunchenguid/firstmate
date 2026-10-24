@@ -24,6 +24,7 @@
     "operator-example"
   ],
   "readmeSetupTargets": [
+    "docs/context-continuity.md",
     "docs/configuration.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
@@ -335,6 +336,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/context-continuity.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
@@ -520,6 +525,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/context-continuity.md",
       "audience": "maintainer-verification"
     },
     {
