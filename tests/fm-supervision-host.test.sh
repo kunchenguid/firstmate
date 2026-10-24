@@ -3227,6 +3227,13 @@ assert_lost_handoff_keeps_watching() {  # <boundary|pass-through>
   fi
   wait_until 250 hook_exited "$home" || fail "$mode: no hand-back"
   assert_rewoke_main "$home" "$mode"
+  # The hand-back keeps the row the default path writes: it is what the
+  # diagnosis of an unsupervised home reads first.
+  if [ "$mode" = boundary ]; then
+    assert_re '	boundary	after [0-9]+s$' "$home/state/.supervision-host.log" "$mode: the hand-back dropped the boundary row"
+  else
+    assert_re '	pass-through	attended	main-only	' "$home/state/.supervision-host.log" "$mode: the hand-back dropped the pass-through row"
+  fi
   kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
   # Drop the continuation entirely: no drain, acknowledgement, or Stop follows.
   watcher_live "$home" || fail "$mode: lost continuation left no verified watcher"
@@ -3262,6 +3269,27 @@ assert_lost_handoff_keeps_watching() {  # <boundary|pass-through>
 
 test_lost_boundary_handoff() { assert_lost_handoff_keeps_watching boundary; }
 test_lost_pass_through_handoff() { assert_lost_handoff_keeps_watching pass-through; }
+
+# A close that turns main-only at its turn hands back through the same opt-in
+# path and must keep its pass-through row too.
+test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row() {
+  local home
+  home=$(make_primary_home hook-turns-main-only-ack)
+  : > "$home/config/supervision-handoff-ack"
+  turn_main_only_at_second_offer "$home"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "ack turns-main-only: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "ack turns-main-only: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close was not accepted before it turned main-only"
+  assert_rewoke_main "$home" "ack turns-main-only"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "ack turns-main-only: the close was not handed back for acknowledgement"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "ack turns-main-only: the hand-back dropped the pass-through row"
+  watcher_live "$home" || fail "ack turns-main-only: the hand-back left no watcher"
+  stop_home_processes "$home"
+  pass "host+hook: an acknowledged hand-back at the turn keeps its pass-through row"
+}
 
 # The transport fixture exercises the existing busy/composer/submit readers,
 # not a Claude run: live continuation acceptance remains a documented limit.
@@ -3333,6 +3361,7 @@ test_returned_driver_is_caught_attended
 test_returned_driver_is_caught_away
 test_lost_boundary_handoff
 test_lost_pass_through_handoff
+test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row
 test_handoff_retry_respects_the_receiving_pane
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn

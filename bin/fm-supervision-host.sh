@@ -526,6 +526,8 @@ turn_crosses_boundary() {
 # home's watcher, print any close already read so main drains it, then the
 # boundary line.
 boundary_exit() {
+  park_elapsed
+  log_line "boundary	after ${PARK_ELAPSED}s"
   acknowledged_handback 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn'
   retire_arm "$ARM_PID" "$ARM_OUT"
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
@@ -534,8 +536,6 @@ boundary_exit() {
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
-  park_elapsed
-  log_line "boundary	after ${PARK_ELAPSED}s"
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -1213,8 +1213,8 @@ while :; do
   handle_wake "$REASON"
   HANDLE_RC=$?
   if [ "$HANDLE_RC" -eq 2 ]; then
-    acknowledged_handback
     log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
+    acknowledged_handback
     # The successor this turn already started and confirmed stays up. Retiring
     # it is what left no watcher after a close that became main-only.
     detach_successor
