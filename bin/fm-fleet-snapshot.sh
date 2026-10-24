@@ -24,7 +24,9 @@
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
 #     and hold_bucket fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
-#     structured record is Done, and missing ids stay open.
+#     structured record is Done in the backlog or in the Done archive (the
+#     home's .tasks.toml [markdown] archive, else data/done-archive.md), and
+#     missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
@@ -132,6 +134,41 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 BACKLOG="$DATA/backlog.md"
+# The Done archive tasks-axi writes: the [markdown] archive key of the home's
+# .tasks.toml, relative to the data directory's parent where tasks-axi runs,
+# else the tracked default beside the backlog.
+done_archive_path() {
+  local root archive=
+  root=$(dirname "$DATA")
+  [ -f "$root/.tasks.toml" ] && archive=$(LC_ALL=C awk '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^\[/) {
+        sub(/[[:space:]]*#.*/, "", line); sub(/[[:space:]]+$/, "", line)
+        if (line ~ /^\[[^]]+\]$/) inmarkdown = (line == "[markdown]")
+        next
+      }
+      if (inmarkdown && sub(/^archive[[:space:]]*=[[:space:]]*/, "", line)) {
+        # A quoted value ends at its closing quote, so # inside it is kept.
+        q = substr(line, 1, 1)
+        if (q == "\"" || q == "'\''") {
+          line = substr(line, 2); line = substr(line, 1, index(line, q) - 1)
+        } else {
+          sub(/[[:space:]]*#.*/, "", line); sub(/[[:space:]]+$/, "", line)
+        }
+        print line
+        exit
+      }
+    }
+  ' "$root/.tasks.toml")
+  case "$archive" in
+    '') printf '%s\n' "$DATA/done-archive.md" ;;
+    /*) printf '%s\n' "$archive" ;;
+    *) printf '%s\n' "$root/$archive" ;;
+  esac
+}
+DONE_ARCHIVE=$(done_archive_path)
 SNAPSHOT_NOW=${FM_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ -n "${FM_SNAPSHOT_NOW_EPOCH:-}" ]; then
   SNAPSHOT_EPOCH=$FM_SNAPSHOT_NOW_EPOCH
@@ -383,8 +420,9 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
+backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG; Done ids also come from $DONE_ARCHIVE
+  local backlog=${1:-$BACKLOG} archive=$DONE_ARCHIVE
+  [ -f "$archive" ] || archive=/dev/null
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
@@ -393,7 +431,8 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
+    --rawfile archive "$archive" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -545,7 +584,10 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
+    | (reduce ($records[] | select(.structured)) as $record (
+         (reduce ($archive | split("\n")[]
+            | capture("^[-*][[:space:]]+\\[[xX]\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+")?
+            | .id) as $id ({}; .[$id] = true));
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
     | .records |= map(
         if .structured then
