@@ -1280,8 +1280,10 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
 
 # A second task closes the successor while the first turn still owns handling
 # Its queued rows keep that handling episode open after the first turn's ack
-assert_main_only_close_after_handled_turn() {  # <restore|refuse>
-  local mode=$1 home successor real_mktemp
+# uncomputable: branch eligibility then fails, so the close passes through for
+# that reason instead of as main-only
+assert_main_only_close_after_handled_turn() {  # <restore|refuse|uncomputable>
+  local mode=$1 home successor real_mktemp real_node
   home=$(make_primary_home "hook-inherited-handling-$mode")
   ln -s "$ROOT/.agents" "$home/.agents"
   cat > "$home/engine-delayed" <<'SH'
@@ -1306,6 +1308,17 @@ exec "$real_mktemp" "\$@"
 SH
     chmod +x "$home/fakebin/mktemp"
   fi
+  if [ "$mode" = uncomputable ]; then
+    real_node=$(command -v node)
+    cat > "$home/fakebin/node" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'fm-branch-dispatch.mjs offer'*) [ ! -e "\$FM_HOME/fail-offer" ] || exit 1 ;;
+esac
+exec "$real_node" "\$@"
+SH
+    chmod +x "$home/fakebin/node"
+  fi
   FM_TEST_ENGINE_ORIGINAL="$STUB" FM_SUPERVISION_ENGINE_CLAUDE_BIN="$home/engine-delayed" start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "inherited handling: no watcher started"
@@ -1321,11 +1334,17 @@ SH
   assert_re '^pending:handling:' "$home/state/.watcher-down" \
     "fixture: the first turn did not leave an inherited handling episode"
   [ "$mode" != refuse ] || : > "$home/fail-downtime-write"
+  [ "$mode" != uncomputable ] || : > "$home/fail-offer"
   : > "$home/before-return.release"
   wait_until 250 hook_exited "$home" || fail "inherited handling: the Stop hook did not finish"
   assert_re 'handled.*posture=attended' "$home/state/.supervision-host.log" "the first turn must finish"
-  assert_re 'pass-through[[:space:]]+attended[[:space:]]+main-only[[:space:]]+signal: .*beta.status' \
-    "$home/state/.supervision-host.log" "the second close must use the initial main-only path"
+  if [ "$mode" = uncomputable ]; then
+    assert_re 'pass-through[[:space:]]+attended[[:space:]]+branch eligibility could not be computed[[:space:]]+signal: .*beta.status' \
+      "$home/state/.supervision-host.log" "fixture: the second close must pass through as uncomputable"
+  else
+    assert_re 'pass-through[[:space:]]+attended[[:space:]]+main-only[[:space:]]+signal: .*beta.status' \
+      "$home/state/.supervision-host.log" "the second close must use the initial main-only path"
+  fi
   assert_grep 'beta.status' "$home/state/.wake-queue" "the main-owned rows must remain queued"
   [ "$(engine_calls "$home")" -eq 1 ] || fail "the engine took the main-only close"
   if [ "$mode" = restore ]; then
@@ -1333,6 +1352,10 @@ SH
     assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
       "the inherited episode must become deliverable downtime"
     watcher_live "$home" || fail "the repaired hand-back must keep its successor alive"
+  elif [ "$mode" = uncomputable ]; then
+    assert_rewoke_main "$home" "inherited handling, uncomputable"
+    assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
+      "the inherited episode must become deliverable downtime on every pass-through"
   else
     expect_code 2 "$(cat "$home/hook.rc")" "restore refusal must notify main rather than exit silently"
     assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "the failure notice must reach main"
@@ -1346,6 +1369,11 @@ SH
 test_main_only_close_after_handled_turn_restores_inherited_handling() {
   assert_main_only_close_after_handled_turn restore
   pass "host+hook: a main-only close after a handled turn restores inherited handling and rewakes main"
+}
+
+test_uncomputable_close_after_handled_turn_restores_inherited_handling() {
+  assert_main_only_close_after_handled_turn uncomputable
+  pass "host+hook: a pass-through for any reason after a handled turn restores inherited handling and rewakes main"
 }
 
 test_main_only_close_after_handled_turn_delivers_restore_failure() {
@@ -3206,6 +3234,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 }
 
 test_main_only_close_after_handled_turn_restores_inherited_handling
+test_uncomputable_close_after_handled_turn_restores_inherited_handling
 test_main_only_close_after_handled_turn_delivers_restore_failure
 test_returned_driver_is_caught_attended
 test_returned_driver_is_caught_away
