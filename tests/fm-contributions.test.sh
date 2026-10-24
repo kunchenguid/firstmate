@@ -7,6 +7,8 @@ TMP_ROOT=$(fm_test_tmproot fm-contributions)
 NOW=2026-09-16T08:00:00Z
 HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# The clock fixture must also work on hosts without /bin/date.
+REAL_DATE=$(command -v date) || fail 'date is required for contribution fixtures'
 
 new_home() {
   local home="$TMP_ROOT/$1"
@@ -19,7 +21,7 @@ new_home() {
 }
 
 bearings() {
-  PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$1/fakebin:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$1/state" FM_DATA_OVERRIDE="$1/data" FM_CONFIG_OVERRIDE="$1/config" \
     FM_BEARINGS_NOW="$NOW" "$ROOT/bin/fm-bearings-snapshot.sh" --json
 }
@@ -102,7 +104,7 @@ test_newest_check_has_no_verdict() {
 
 
 # Budget seconds left depend on the wall clock unless a test freezes it.
-mask_budget() { sed -E 's/ with -?[0-9]+s of budget left: / with Ns of budget left: /'; }
+mask_budget() { sed -E 's/ with -?[0-9]+s of budget left: / with Ns of budget left: /g'; }
 
 forge_home() {
   local home=$1
@@ -155,7 +157,7 @@ with_home() {
   PATH="$home/fakebin:$PATH" FORGE="$home/forge" HEAD_A="$HEAD_A" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home/root" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_CONTRIBUTIONS_NOW="$NOW" "$@"
+    FM_TEST_REAL_DATE="$REAL_DATE" FM_CONTRIBUTIONS_NOW="$NOW" "$@"
 }
 
 registered_checks() {
@@ -870,6 +872,20 @@ case "$fault:$*" in
     ;;
   down:*) printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
   not-found:'api repos/o/r/'*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
+  private-500-checks:'api repos/o/r/commits/'*'/check-runs?'*|private-500-both:'api repos/o/r/commits/'*'/check-runs?'*)
+    printf 'gh: Internal Server Error (HTTP 500)\nPRIVATE_DIAGNOSTIC_SENTINEL\n' >&2; exit 1 ;;
+  private-500-statuses:'api repos/o/r/commits/'*'/statuses?'*|private-500-both:'api repos/o/r/commits/'*'/statuses?'*)
+    printf 'gh: Internal Server Error (HTTP 500)\nPRIVATE_DIAGNOSTIC_SENTINEL\n' >&2; exit 1 ;;
+  oversized-error:'api repos/o/r/pulls/8/reviews?'*)
+    head -c 5000 /dev/zero | tr '\0' x >&2
+    printf '\ngh: HTTP 500\nPRIVATE_DIAGNOSTIC_SENTINEL\n' >&2; exit 1 ;;
+  invalid-http:'api repos/o/r/pulls/8/reviews?'*) printf 'gh: HTTP 5000\n' >&2; exit 1 ;;
+  boundary-http:'api repos/o/r/pulls/8/reviews?'*)
+    head -c 4088 /dev/zero | tr '\0' x >&2
+    printf '\ngh: HTTP 500\n' >&2; exit 1 ;;
+  silent-failure:'pr view '*) exit 3 ;;
+  schema-after-read-failure:'api repos/o/r/pulls/8/reviews?'*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
+  schema-after-read-failure:'api repos/o/r/pulls/9') printf '{"state":"open","user":null}\n'; exit 0 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
   headless:'pr view '*) printf '{"headRefOid":null,"reviewDecision":"APPROVED"}\n'; exit 0 ;;
@@ -879,7 +895,7 @@ SH
   # A controllable clock lets the budget expire between two forge calls.
   cat > "$home/fakebin/date" <<'SH'
 #!/bin/sh
-if [ "$*" = +%s ] && [ -f "$FORGE/clock" ]; then cat "$FORGE/clock"; else exec /bin/date "$@"; fi
+if [ "$*" = +%s ] && [ -f "$FORGE/clock" ]; then cat "$FORGE/clock"; else exec "$FM_TEST_REAL_DATE" "$@"; fi
 SH
   chmod +x "$home/fakebin/gh" "$home/fakebin/date"
 }
@@ -893,7 +909,7 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
   # Both modes freeze the clock: an unfrozen one can tick past a one-second
   # budget before the first forge call, so nothing is ever observed.
-  /bin/date +%s > "$home/forge/clock"
+  "$REAL_DATE" +%s > "$home/forge/clock"
   printf '%s\n' "$mode" > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"
@@ -915,13 +931,13 @@ test_genuine_failure_near_deadline_is_unavailable() {
   forge_home "$home"
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  /bin/date +%s > "$home/forge/clock"
+  "$REAL_DATE" +%s > "$home/forge/clock"
   printf 'fail-late\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a genuine forge failure'
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: HTTP 502' ] \
     || fail "a genuine forge failure past the deadline was swallowed or lost its cause: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)"' \
+    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: HTTP 502"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error, its cause and wakes'
 }
@@ -946,7 +962,7 @@ test_http_500_once_retries_without_waking() {
 }
 
 test_http_500_twice_records_the_failed_read() {
-  local home out calls why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  local home out calls why='reviews read exited 1 with Ns of budget left: HTTP 500'
   home=$(new_home retry-http-500-twice)
   forge_home "$home"
   wrap_forge "$home"
@@ -963,7 +979,7 @@ test_http_500_twice_records_the_failed_read() {
 }
 
 test_http_404_is_not_retried() {
-  local home out calls why='core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
+  local home out calls why='core read exited 1 with Ns of budget left: HTTP 404'
   home=$(new_home no-retry-http-404)
   forge_home "$home"
   wrap_forge "$home"
@@ -988,7 +1004,7 @@ test_real_gh_errors_drive_retry_and_summary() {
   printf 'real-reviews\n' > "$home/forge/fault"
   out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a real gh DNS error shape'
-  why='reviews read exited 1 with Ns of budget left: error connecting to no-such-host-f67.invalid'
+  why='reviews read exited 1 with Ns of budget left: DNS error'
   [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
     || fail "a persistent DNS error did not print one unavailable line: $out"
   calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
@@ -1011,7 +1027,7 @@ test_real_gh_errors_drive_retry_and_summary() {
     printf 'real-reviews\n' > "$home/forge/fault"
     out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail "poll failed on a real gh $summary shape"
-    why="reviews read exited 1 with Ns of budget left: $message"
+    why="reviews read exited 1 with Ns of budget left: $summary"
     [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
       || fail "a persistent $summary did not print one unavailable line: $out"
     calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
@@ -1031,7 +1047,7 @@ test_real_gh_errors_drive_retry_and_summary() {
     printf 'real-closing\n' > "$home/forge/fault"
     out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail 'poll failed on a real gh GraphQL not-found shape'
-    why="head read exited 1 with Ns of budget left: $message"
+    why="head read exited 1 with Ns of budget left: request failed"
     [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
       || fail "a GraphQL not-found did not print one unavailable line: $out"
     calls=$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")
@@ -1048,7 +1064,7 @@ test_real_gh_errors_drive_retry_and_summary() {
     printf 'real-core\n' > "$home/forge/fault"
     out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail "poll failed on a real gh HTTP $status shape"
-    why="core read exited 1 with Ns of budget left: $message"
+    why="core read exited 1 with Ns of budget left: HTTP $status"
     [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
       || fail "HTTP $status did not print one unavailable line: $out"
     calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
@@ -1068,7 +1084,7 @@ test_real_gh_errors_drive_retry_and_summary() {
     printf 'real-core\n' > "$home/forge/fault"
     out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail "poll failed on a real gh $status HTTP 403 shape"
-    why="core read exited 1 with Ns of budget left: $message"
+    why="core read exited 1 with Ns of budget left: HTTP 403"
     [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
       || fail "a persistent $status HTTP 403 did not print one unavailable line: $out"
     [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = "$calls" ] \
@@ -1084,7 +1100,7 @@ test_real_gh_errors_drive_retry_and_summary() {
     printf 'real-core\n' > "$home/forge/fault"
     out=$(with_home "$home" env FORGE_ERROR_TEXT="gh: HTTP $status" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail "poll failed on bare gh HTTP $status"
-    why="core read exited 1 with Ns of budget left: gh: HTTP $status"
+    why="core read exited 1 with Ns of budget left: HTTP $status"
     [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
       || fail "bare gh HTTP $status did not print one unavailable line: $out"
     calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
@@ -1099,7 +1115,7 @@ test_real_gh_errors_drive_retry_and_summary() {
   printf 'real-core\n' > "$home/forge/fault"
   out=$(with_home "$home" env FORGE_ERROR_TEXT='gh: HTTP 404' "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on bare gh HTTP 404'
-  why='core read exited 1 with Ns of budget left: gh: HTTP 404'
+  why='core read exited 1 with Ns of budget left: HTTP 404'
   [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
     || fail "bare gh HTTP 404 did not print one unavailable line: $out"
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
@@ -1113,7 +1129,7 @@ test_real_gh_errors_drive_retry_and_summary() {
   printf 'real-core\n' > "$home/forge/fault"
   out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503: Service Unavailable' "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a line-leading HTTP status'
-  why='core read exited 1 with Ns of budget left: HTTP 503: Service Unavailable'
+  why='core read exited 1 with Ns of budget left: HTTP 503'
   [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
     || fail "a line-leading HTTP 503 did not print one unavailable line: $out"
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
@@ -1127,7 +1143,7 @@ test_real_gh_errors_drive_retry_and_summary() {
   printf 'real-closing\n' > "$home/forge/fault"
   out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503 (https://api.github.com/graphql)' "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a message-less GraphQL HTTP status'
-  why='head read exited 1 with Ns of budget left: HTTP 503 (https://api.github.com/graphql)'
+  why='head read exited 1 with Ns of budget left: HTTP 503'
   [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
     || fail "a message-less GraphQL HTTP 503 did not print one unavailable line: $out"
   [ "$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")" = 2 ] \
@@ -1141,7 +1157,7 @@ test_real_gh_errors_drive_retry_and_summary() {
   printf 'real-core\n' > "$home/forge/fault"
   out=$(with_home "$home" env FORGE_ERROR_TEXT='process killed outside the read bound' FORGE_ERROR_RC=137 \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed after an external exit 137'
-  why='core read exited 137 with Ns of budget left: process killed outside the read bound'
+  why='core read exited 137 with Ns of budget left: request failed'
   [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
     || fail "an external exit 137 was treated as budget refusal: $out"
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
@@ -1152,7 +1168,7 @@ test_real_gh_errors_drive_retry_and_summary() {
 }
 
 test_next_url_does_not_inherit_a_forge_diagnostic() {
-  local home out pull_line issue_line why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  local home out pull_line issue_line why='reviews read exited 1 with Ns of budget left: HTTP 500'
   home=$(new_home next-url-no-stale-diagnostic)
   forge_home "$home"
   wrap_forge "$home"
@@ -1193,7 +1209,7 @@ test_shared_url_observed_once() {
     [ "$calls" = 1 ] || fail "a URL owned by two tasks was observed $calls times in one poll ($mode)"
     case "$mode" in
       ok) why= ;;
-      fail) why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)' ;;
+      fail) why='reviews read exited 1 with Ns of budget left: HTTP 500' ;;
       head) why='head changed during observation' ;;
       headless) why='head read named no head commit' ;;
     esac
@@ -1343,7 +1359,7 @@ test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain() {
   wrap_forge "$home"
   printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  /bin/date +%s > "$home/forge/clock"
+  "$REAL_DATE" +%s > "$home/forge/clock"
   printf 'reserve\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'reservation poll failed'
@@ -1381,7 +1397,7 @@ test_slow_read_deadline_kill_is_budget_refusal() {
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  /bin/date +%s > "$home/forge/clock"
+  "$REAL_DATE" +%s > "$home/forge/clock"
   printf 'latency\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=6 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a deadline-killed slow read'
@@ -1404,10 +1420,10 @@ test_unmeasured_url_does_not_starve_the_tail() {
   printf 'slow-wave\n' > "$home/forge/fault"
   for cycle in 0 1 2; do
     at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + ($cycle + 1) * 300) | todateiso8601')
-    started=$(/bin/date +%s)
+    started=$("$REAL_DATE" +%s)
     out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
       || fail 'poll failed after an unmeasured first URL'
-    elapsed=$(( $(/bin/date +%s) - started ))
+    elapsed=$(( $("$REAL_DATE" +%s) - started ))
     [ -z "$out" ] || fail "a poll after an unmeasured URL printed a wake: $out"
     [ "$elapsed" -le 23 ] || fail "poll exceeded its elapsed budget: $elapsed seconds"
     if [ "$cycle" -eq 0 ]; then
@@ -1443,10 +1459,10 @@ test_unmeasured_url_does_not_starve_the_tail() {
   printf 'latency\n' > "$home/forge/fault"
   for cycle in 0 1 2 3 4 5; do
     at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + $cycle * 300) | todateiso8601')
-    started=$(/bin/date +%s)
+    started=$("$REAL_DATE" +%s)
     out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=3 "$ROOT/bin/fm-contributions.sh" poll) \
       || fail 'sustained slow-read poll failed'
-    elapsed=$(( $(/bin/date +%s) - started ))
+    elapsed=$(( $("$REAL_DATE" +%s) - started ))
     [ "$elapsed" -ge 9 ] && [ "$elapsed" -le 23 ] \
       || fail "slow successful poll did not respect its elapsed budget: $elapsed seconds"
     [ -z "$out" ] || fail "slow successful reads printed a wake: $out"
@@ -1480,7 +1496,7 @@ test_budget_is_cut_down_to_the_watcher_check_bound() {
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  /bin/date +%s > "$home/forge/clock"
+  "$REAL_DATE" +%s > "$home/forge/clock"
   printf 'hang\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CHECK_TIMEOUT=6 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed under a small watcher check bound'
@@ -1501,11 +1517,11 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     # Freeze the clock: an unfrozen one can tick past the one-second budget
     # before the first forge call, so nothing is ever observed.
-    /bin/date +%s > "$home/forge/clock"
+    "$REAL_DATE" +%s > "$home/forge/clock"
     printf 'hang\n' > "$home/forge/fault"
     # Freeze the clock. An unfrozen one-second budget can tick past before the
     # first forge call, so the generated check never writes forge/calls.
-    /bin/date +%s > "$home/forge/clock"
+    "$REAL_DATE" +%s > "$home/forge/clock"
     if [ "$mode" = configured ]; then
       with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
         || fail 'arm with a configured budget failed'
@@ -1526,7 +1542,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
-  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)'
+  local why='core read exited 1 with Ns of budget left: HTTP 502'
   local home out line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home failure-episode)
   forge_home "$home"
@@ -1560,7 +1576,7 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
-  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)' home out task
+  local why='core read exited 1 with Ns of budget left: HTTP 502' home out task
   local line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home late-owner-failure-episode)
   forge_home "$home"
@@ -1594,7 +1610,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 
 test_retire_ends_observation_of_a_gone_contribution() {
   local home out url=https://github.com/o/r/pull/8
-  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
+  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: HTTP 404'
   home=$(new_home retire-gone)
   forge_home "$home"
   wrap_forge "$home"
@@ -1939,8 +1955,133 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
   pass 'arm copies a configured reply age into the generated check'
 }
 
+test_http_500_diagnostic_is_stage_only_and_keeps_pending() {
+  local home out mode expected
+  for mode in checks statuses both; do
+    home=$(new_home "http-500-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    mutate_record "$home" delivery ".records[0].pending=[{token:\"preserved\"}] | .records[0].seen=[\"preserved\"]
+      | .records[0].notified=[\"preserved\"] | .records[0].verdict={head:\"$HEAD_A\",actor:\"maintainer\",
+        source:\"https://github.com/o/r/pull/8#issuecomment-99\",summary:\"awaiting maintainer\"}"
+    cp "$home/data/delivery/contributions.json" "$home/prior.json"
+    printf 'private-500-%s\n' "$mode" > "$home/forge/fault"
+    case "$mode" in
+      checks) expected='checks read exited 1 with Ns of budget left: HTTP 500' ;;
+      statuses) expected='statuses read exited 1 with Ns of budget left: HTTP 500' ;;
+      both) expected='checks read exited 1 with Ns of budget left: HTTP 500; statuses read exited 1 with Ns of budget left: HTTP 500' ;;
+    esac
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2> "$home/poll.err") \
+      || fail 'HTTP 500 fixture poll failed'
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $expected" ] \
+      || fail "HTTP 500 notification did not retain only fixed stage, numeric status and exit: $out"
+    [ ! -s "$home/poll.err" ] || fail 'forge stderr escaped into poll stderr'
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $expected" ] \
+      || fail 'HTTP 500 error did not retain only fixed stage, numeric status and exit'
+    jq -e --slurpfile prior "$home/prior.json" '.records[0] as $r | $prior[0].records[0] as $p
+      | $r.error != null and $r.observation == $p.observation and $r.pending == $p.pending
+        and $r.seen == $p.seen and $r.notified == $p.notified and $r.verdict == $p.verdict' \
+      "$home/data/delivery/contributions.json" >/dev/null || fail 'HTTP 500 changed pending, verdict or prior observation evidence'
+    if grep -F 'PRIVATE_DIAGNOSTIC_SENTINEL' "$home/data/delivery/contributions.json" "$home/poll.err" >/dev/null; then
+      fail 'untrusted forge stderr was retained outside scratch'
+    fi
+    [ ! -s "$home/state/.wake-queue" ] || fail 'a read failure replayed an already notified pending signal'
+    [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] || fail 'diagnostics repeated the core read'
+    : > "$home/forge/fault"
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'recovery observation failed'
+    [ -z "$out" ] || fail 'a successful recovery printed a failure'
+    jq -e --slurpfile prior "$home/prior.json" '.records[0] | .error == null
+      and .pending == $prior[0].records[0].pending and .verdict == $prior[0].records[0].verdict' \
+      "$home/data/delivery/contributions.json" >/dev/null || fail 'recovery did not clear the error while retaining pending and verdict'
+  done
+  pass 'HTTP 500 names every failed read stage without raw stderr or pending/verdict changes'
+}
+
+test_missing_or_out_of_bound_http_status_is_not_fabricated() {
+  local home out mode expected
+  for mode in silent-failure oversized-error invalid-http boundary-http; do
+    home=$(new_home "http-unavailable-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf '%s\n' "$mode" > "$home/forge/fault"
+    case "$mode" in
+      silent-failure) expected='head read exited 3 with Ns of budget left: request failed' ;;
+      *) expected='reviews read exited 1 with Ns of budget left: request failed' ;;
+    esac
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'missing-status poll failed'
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $expected" ] \
+      || fail "a missing, oversized or invalid HTTP status was fabricated ($mode): $out"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $expected" ] \
+      || fail 'a missing-status failure lost its fixed stage and native exit'
+    if grep -F 'PRIVATE_DIAGNOSTIC_SENTINEL' "$home/data/delivery/contributions.json" >/dev/null; then
+      fail 'untrusted forge stderr was retained outside scratch'
+    fi
+  done
+  pass 'missing, oversized and invalid HTTP-status text is not fabricated beyond a fixed stage/exit reason'
+}
+
+test_diagnostic_budget_cut_keeps_record_bytes() {
+  local home out mode
+  for mode in exhaust hang; do
+    home=$(new_home "diagnostic-budget-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    cp "$home/data/delivery/contributions.json" "$home/prior.json"
+    date +%s > "$home/forge/clock"
+    printf '%s\n' "$mode" > "$home/forge/fault"
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll 2> "$home/poll.err") \
+      || fail 'budget-cut diagnostic poll failed'
+    [ ! -s "$home/poll.err" ] || fail 'budget-cut fixture could not read its clock'
+    grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'budget-cut fixture never started an observation'
+    [ -z "$out" ] || fail 'budget refusal emitted a forge diagnostic'
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+      || fail 'budget refusal changed prior record bytes'
+    [ ! -s "$home/state/.wake-queue" ] || fail 'budget refusal enqueued a signal'
+  done
+  pass 'mid-wave deadline and per-read timeout leave prior record bytes and signals untouched'
+}
+
+test_head_drift_diagnostic_never_accepts_mixed_observation() {
+  local home out
+  home=$(new_home diagnostic-head)
+  forge_home "$home"
+  wrap_forge "$home"
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  printf 'head\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'head-change poll failed'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - head changed during observation' ] \
+    || fail "head drift was reported as a forge HTTP failure: $out"
+  jq -e --slurpfile prior "$home/prior.json" '.records[0] | .error == "forge observation unavailable: head changed during observation"
+    and .observation == $prior[0].records[0].observation' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'head drift accepted a mixed observation'
+  pass 'head drift stays distinct from HTTP failure and never accepts mixed-head evidence'
+}
+
+test_schema_failure_does_not_inherit_http_diagnostic() {
+  local home out
+  home=$(new_home diagnostic-schema)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  cp "$home/data/second/contributions.json" "$home/prior.json"
+  "$REAL_DATE" +%s > "$home/forge/clock"
+  printf 'schema-after-read-failure\n' > "$home/forge/fault"
+  # This pinned bucket visits the HTTP-failing URL before the malformed one.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'malformed-core poll failed'
+  jq -e '.records[0].error != null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the preceding failed forge read never seeded a diagnostic'
+  grep -Fxq 'api repos/o/r/pulls/9' "$home/forge/calls" || fail 'the second URL was not attempted'
+  jq -e --slurpfile prior "$home/prior.json" '.records[0] | .error == "forge observation unavailable: core read returned an unexpected shape"
+    and .observation == $prior[0].records[0].observation' "$home/data/second/contributions.json" >/dev/null \
+    || fail 'malformed core response inherited HTTP evidence or replaced the prior observation'
+  printf '%s\n' "$out" | grep -Fxq 'contributions: observation unavailable for https://github.com/o/r/pull/9 - core read returned an unexpected shape' \
+    || fail 'the second notification inherited the prior HTTP status'
+  pass 'response validation failure never inherits HTTP diagnostics from a different URL'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable test_http_500_diagnostic_is_stage_only_and_keeps_pending test_missing_or_out_of_bound_http_status_is_not_fabricated test_diagnostic_budget_cut_keeps_record_bytes test_head_drift_diagnostic_never_accepts_mixed_observation test_schema_failure_does_not_inherit_http_diagnostic; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
