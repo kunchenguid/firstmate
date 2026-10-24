@@ -80,8 +80,12 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-treehouse version v0.4.2 (fake)}"
   exit 0
 fi
+if [ "${1:-}" = lease ] && [ "${2:-}" = --help ]; then
+  [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ] && exit 0
+  exit 1
+fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
+  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ] || [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = get-only ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
@@ -337,9 +341,10 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.6^1^manual^empty^^
+treehouse in-place lease support is accepted silently^1^0.2.6^1^manual^empty^^
 absent treehouse reports a missing tool^absent^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease support; upgrade: treehouse update)^NEEDS_GH_AUTH
+treehouse get-only lease support requires upgrade^get-only^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires treehouse lease support; upgrade: treehouse update)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.6^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi reports an upgrade by default^1^0.1.0^1^-^exact^OUTDATED: tasks-axi (installed: 0.1.0; requires 0.2.6; upgrade: npm install -g tasks-axi)^
