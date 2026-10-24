@@ -347,8 +347,8 @@ settings_write() {
 
 # Pi consults a saved decision first and defaultProjectTrust only when none
 # exists. An operator who configured Pi never to auto-trust project folders must
-# therefore get no entry, a named reason, and a spawn that still proceeds to the
-# confirmation Pi itself would render.
+# therefore get no entry and a report of the degraded launch Pi itself applies,
+# without any promise of a dialog Pi will not render.
 test_default_trust_never_writes_nothing() {
   local rec out store settings
   rec=$(make_case trust-never)
@@ -362,8 +362,16 @@ test_default_trust_never_writes_nothing() {
   assert_contains "$out" 'defaultProjectTrust to "never"' \
     "the report must name the setting that suppressed the write"
   assert_contains "$out" "$settings" "the report must name the settings file it read"
-  assert_contains "$out" "human confirmation" \
-    "the report must say the worker will need a human confirmation"
+  assert_contains "$out" "renders no dialog" \
+    "the report must say Pi renders no dialog under 'never'"
+  assert_contains "$out" "project settings" \
+    "the report must explain what the 'never' worker launches without"
+  assert_not_contains "$out" "human confirmation" \
+    "a 'never' policy must not promise a confirmation Pi never renders"
+  assert_not_contains "$out" "will need" \
+    "a 'never' policy must not promise a confirmation Pi never renders"
+  assert_not_contains "$out" "needs a human" \
+    "a 'never' policy must not promise a confirmation Pi never renders"
   assert_not_contains "$out" "trusted:" "a 'never' policy must not report the worktree as trusted"
   assert_absent "$store" "a 'never' policy must write no trust entry"
   pass "defaultProjectTrust never is reported and never overridden"
@@ -592,6 +600,9 @@ EOF
     --mode no-mistakes --yolo off)
   expect_code 0 $? "a 'never' policy must not refuse the spawn: $out"
   assert_contains "$out" "$settings" "the spawn must name the settings file that suppressed the write"
+  assert_contains "$out" "renders no dialog" "the spawn must explain that Pi renders no dialog under 'never'"
+  assert_not_contains "$out" "human confirmation" \
+    "the spawn must not promise a confirmation Pi never renders"
   assert_absent "$store" "a 'never' policy must leave the trust store unwritten"
   [ -s "$CASE/launch.log" ] || fail "a 'never' policy must still launch the worker"
   pass "a pi spawn under defaultProjectTrust never launches without pre-registering trust"
