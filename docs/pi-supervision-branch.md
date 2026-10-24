@@ -634,6 +634,7 @@ It sets these limits:
 ### Cleanup after task completion
 
 Ordinary cleanup of landed ships and completed scouts needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+For a pull-request ship, the branch's landed moment is forge merge evidence, never teardown success: a branch pushed to a remote is safe to clean up whether or not its pull request merged, so for the branch actor [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) refuses a ship task that is not local-only until the forge proves the merge (its header owns the rule).
 The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [captain-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
@@ -684,7 +685,7 @@ For the away posture:
 
 `tests/fm-wake-drain-outcome-backstop.test.sh` covers keyless resurfacing, causal suppression, same-second ordering, one-shot presentation, first-drain index self-healing under the outcome lock, store-fault fail-closed behavior, bounded history cost and output, and the oversized-line limit.
 
-`tests/fm-teardown.test.sh` covers removal of the retired task's outcome index and the append-side rule that a post-teardown report does not recreate it.
+`tests/fm-teardown.test.sh` covers removal of the retired task's outcome index and the append-side rule that a post-teardown report does not recreate it, and, with `tests/fm-teardown-endpoint-safety.test.sh`, the branch merge-proof rule: a pushed open, unreachable, missing-worktree, or reassigned-slot pull request refuses the branch actor, a merged one tears down, and main's pushed-branch cleanup is unchanged.
 
 Other tests remain where they were:
 
