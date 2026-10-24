@@ -45,6 +45,13 @@
 #                dev.firstmate.remote-job is loaded only in gui/<uid>
 #       unknown  none of the above; XPC_SERVICE_NAME alone, including value 0,
 #                does not prove an Aqua birth
+#   fm_remote_herdr_gui_job_has_pid <uid> <label> <pid>
+#     Succeeds when launchctl reports <pid> as the running pid of gui/<uid>/<label>.
+#   fm_remote_herdr_owner_has_live_guard <pid>
+#     Succeeds when the parent of <pid> is the running pid of the gui/<uid>
+#     launchd job named by its XPC_SERVICE_NAME, that is a live guard. A
+#     server whose guard is gone (reparented to pid 1) or that an older guard
+#     exec'd as the job itself does not have one.
 #   fm_remote_herdr_birth_is_aqua <birth>
 #     Succeeds only for launchd and worker. `unknown` is deliberately not
 #     Aqua: a server that cannot prove its birth is treated like a foreign one,
@@ -102,16 +109,26 @@ fm_remote_herdr_process_ancestry() { # <pid>
   done
 }
 
-fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
-  local uid=$1 label=$2 pid=$3 job
-  [ -n "$label" ] && [ "$label" != 0 ] || return 1
-  job=$(launchctl print "gui/$uid/$label" 2>/dev/null) || return 1
-  if printf '%s\n' "$job" | awk -v expected="$pid" '
+fm_remote_herdr_gui_job_has_pid() { # <uid> <label> <pid>
+  launchctl print "gui/$1/$2" 2>/dev/null | awk -v expected="$3" '
     $1 == "pid" && $2 == "=" && $3 == expected { found = 1 }
     END { exit found ? 0 : 1 }
-  '; then
-    return 0
-  fi
+  '
+}
+
+fm_remote_herdr_owner_has_live_guard() { # <pid>
+  local ppid label
+  ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  label=$(fm_remote_herdr_process_env "$1" | sed -n 's/^XPC_SERVICE_NAME=//p' | head -1)
+  [ -n "$ppid" ] && [ "$ppid" != 1 ] && [ -n "$label" ] \
+    && fm_remote_herdr_gui_job_has_pid "$(id -u)" "$label" "$ppid"
+}
+
+fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
+  local uid=$1 label=$2 pid=$3
+  [ -n "$label" ] && [ "$label" != 0 ] || return 1
+  launchctl print "gui/$uid/$label" >/dev/null 2>&1 || return 1
+  fm_remote_herdr_gui_job_has_pid "$uid" "$label" "$pid" && return 0
   ! launchctl print "user/$uid/$label" >/dev/null 2>&1
 }
 
