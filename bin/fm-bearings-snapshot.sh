@@ -29,7 +29,11 @@
 # from every readable secondmate ledger, independently of that home's
 # bearings_state. Each row's name is the durable task title when nonblank and
 # its durable task id otherwise, so renderers always receive a task-identifying
-# label instead of having to substitute run status. A home classified
+# label instead of having to substitute run status. Each row's
+# owned is false for a live worker with no In flight backlog item (a
+# secondmate child the home summary marks owned:false, or a main task whose
+# backlog row is not In flight), so unowned live work stays visible but is
+# never presented as ordinary owned In-flight work. A home classified
 # captain_decision because it has an open
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
@@ -145,7 +149,7 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing,owned},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
@@ -510,7 +514,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        owned:(.backlog.state == "in_flight")
       } ]
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
@@ -521,7 +526,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             name:((.name // "") as $name
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
-            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
+            doing:((.doing // .state) | trunc(90)),
+            owned:(.owned != false)} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
