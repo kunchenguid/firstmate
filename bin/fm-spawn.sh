@@ -4061,12 +4061,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
-# Refuse before Treehouse can allocate or reset any slot on an older build.
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] &&
-  ! treehouse lease --help >/dev/null 2>&1; then
-  echo "error: treehouse requires treehouse lease support; upgrade: treehouse update; refusing to acquire an unprotected pooled copy" >&2
-  exit 1
-fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -4759,6 +4753,12 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# Refuse before Treehouse can allocate or reset any slot on an older build.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] &&
+  ! treehouse lease --help >/dev/null 2>&1; then
+  echo "error: treehouse requires treehouse lease support; upgrade: treehouse update; refusing to acquire an unprotected pooled copy" >&2
+  exit 1
+fi
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a

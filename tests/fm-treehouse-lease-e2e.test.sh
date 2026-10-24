@@ -7,6 +7,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_live_gate default-on FM_TEST_TREEHOUSE_LEASE,FM_LIVE treehouse || exit $?
+fm_git_identity
 TMP_ROOT=$(fm_test_tmproot fm-treehouse-lease)
 TREEHOUSE=$(command -v treehouse)
 export HOME="$TMP_ROOT/home" XDG_CONFIG_HOME="$TMP_ROOT/home/.config"
