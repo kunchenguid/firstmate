@@ -2235,6 +2235,9 @@ case "$PROVIDER" in
       --resource "$AZURE_DEVOPS_RESOURCE_ID" --headers 'Content-Type=application/json' \
       --body "@$azure_devops_body" --only-show-errors --output json 2>&1) || merge_status=$?
     rm -f "$azure_devops_body"
+    # az also exits non-zero when the connection drops after Azure DevOps has
+    # applied the PATCH, so a failed request is read back once, and a pull
+    # request already completed from the verified head is treated as landed.
     if [ "$merge_status" -ne 0 ]; then
       azure_devops_confirm_rc=0
       azure_devops_confirm_merged || azure_devops_confirm_rc=$?
