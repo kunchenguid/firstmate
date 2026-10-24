@@ -682,6 +682,24 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Claude permission-prompt wake
+
+Verified 2026-10-18 on macOS with Claude Code 2.1.302.
+The live guard loads the generated worker hooks into a real Claude process in a plain PTY under `--permission-mode auto`.
+An explicit Bash ask rule produces a rendered approval prompt and a `PermissionRequest` event.
+The production watcher delivers its durable decision signal before the 3600-second busy bound; the complete guard took 24.167 seconds.
+The watcher uses isolated endpoint fixtures; the prompt and hook event come from the installed Claude binary.
+The guard sends no keys and confines settings and credential copies to its disposable test directory.
+`bin/fm-busy-event.sh` owns request identity and deduplication; `tests/fm-claude-permission.test.sh` checks repeated requests and stale incarnations.
+
+```sh
+FM_CLAUDE_PERMISSION_LIVE=1 bash bin/fm-test-run.sh tests/fm-claude-permission-live-e2e.test.sh
+```
+
+```text
+ok - claude 2.1.302 (Claude Code): real auto-mode PermissionRequest produces a decision signal within 120s, before the 3600s busy bound; no keys sent
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
