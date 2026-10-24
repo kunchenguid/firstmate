@@ -47,7 +47,8 @@ Give the captain a concise session-only recap without gathering fresh state.
 8. After the normal recap, when the existing visibly open decision inventory contains decisions, begin a guided decision-clearing flow by presenting only the single open decision judged most impactful by the first mate.
    Say the ordering is the first mate's pick.
    Give enough escalation-quality context to decide easily: the decision, why it matters, the options, and a recommendation.
-9. When the captain answers the presented decision, present the next highest-impact decision from that existing inventory in the same form.
+9. When the captain answers the presented decision, present the next decision from that existing inventory in the same form, grouped by project: first every remaining decision for the same project as the one just answered, highest impact first, then the highest-impact decision of another project with its project's remaining decisions after it.
+   Name the project and how many of its decisions remain with each one, so one project's decisions are answered together; decisions whose project the visible history does not name form one group of their own, and grouping never skips a decision.
    Continue one decision at a time until none remain, without starting this flow when the inventory is empty.
 
 The current `/ahoy` message is outside the recap interval.

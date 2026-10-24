@@ -3,8 +3,9 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
-# a supervision-host home the supervision session's new and unprocessed
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, the
+# captain's opt-in focus window or its due held outcomes (bin/fm-focus.sh), and
+# on a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
@@ -809,6 +810,18 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   return "$rc"
 }
 
+# Print the captain's focus window reminder or its due held outcomes
+# (bin/fm-focus.sh owns the records and the section's wording). Main only: the
+# held outcomes are captain-facing, and main is the one that tells the captain.
+# Nothing prints when no window was ever set, and a failure here never fails
+# the drain because the section only adds a reminder to durable records.
+print_focus_section() {
+  [ "$ACTOR" = main ] || return 0
+  [ -e "$STATE/focus-window" ] || [ -s "$STATE/focus-held.jsonl" ] || return 0
+  "$SCRIPT_DIR/fm-focus.sh" drain-section \
+    || printf 'FOCUS WINDOW: the focus records could not be read; run bin/fm-focus.sh status\n'
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -988,6 +1001,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  print_focus_section
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
@@ -1010,6 +1024,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    print_focus_section
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
@@ -1073,6 +1088,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+print_focus_section
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

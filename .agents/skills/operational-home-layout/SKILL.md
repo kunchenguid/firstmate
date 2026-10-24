@@ -135,6 +135,7 @@ state/               runtime records and signals; gitignored
   .afk-contract      the away or quiet posture record; bin/fm-afk-contract.sh owns its mode, schema, entry, archive, and lock contract; its sibling .afk-contract.lock serializes actions authorized by the live record
   afk-contracts/     archived away and quiet records; bin/fm-afk-contract.sh owns their archive contract
   .afk               durable away/quiet-mode daemon flag on the harnesses that still launch the daemon (never on Pi); present = sub-supervisor may inject escalations, first line `away` (default, set by /afk, cleared on user return) or `quiet` (set by /quiet, cleared only on explicit /quiet off) per the single owner fm_afk_mode() in bin/fm-wake-lib.sh
+  focus-window focus-windows/ focus-held.jsonl .focus-held-delivered .focus.lock  the captain's opt-in project focus window, its archived records, the append-only held-delivery obligations, main's delivered marker, and their lock; absent unless the captain ran /focus; bin/fm-focus.sh owns every format and the delivery contract
   .lock-session      trusted Claude session-lock sidecar; written only by bin/fm-lock.sh; never touch
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .paseo-workspace.lock  Paseo backend lock serializing a spawn's workspace choice and tab creation against retiring an emptied workspace; bin/backends/paseo.sh owns it; never touch
