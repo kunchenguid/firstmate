@@ -77,11 +77,12 @@ Where that cursor-anchored read is `unknown`, as for a harness that parks its cu
 
 The `process` block method reports the foreground process with its cwd, its ancestors, and the last exit.
 Spawn's worktree discovery reads the foreground cwd, which follows the nested subshell `treehouse get` opens.
-Agent state is recovery-grade: a verified harness anywhere in the foreground process or its ancestors reads `alive`, a shell foreground with no harness above it reads `dead`, an exited terminal child reads `dead`, anything else reads `ambiguous`, a structured not-found reads `missing`, and an unreachable server reads `unreadable`.
+Agent state is recovery-grade: a verified harness anywhere in the foreground process or its ancestors, or among a shell foreground's live descendants, reads `alive`, a shell foreground with no harness above or below it reads `dead`, an exited terminal child reads `dead`, anything else reads `ambiguous`, a structured not-found reads `missing`, and an unreachable server reads `unreadable`.
+The descendant check exists because a login shell that starts the harness through a wrapper in its own process group, such as a fish function or a shell shim, stays the reported foreground process while the harness runs below it.
 Passive reads never start a server.
 
 Rex records Program Status Protocol (OSC 7501) reports per block; [worker-tool verification](verification/runtime-backends.md#worker-tools-on-rex) owns the versioned reporting coverage.
-A record counts only while the process that reported it is the foreground process or one of its ancestors, because without shell integration a `working` record outlives the command that reported it.
+A record counts only while the process that reported it is the foreground process, one of its ancestors, or a harness running below a shell foreground, because without shell integration a `working` record outlives the command that reported it.
 That native state is positive busy evidence only, exactly like Herdr's, so the harness's own lifecycle stays the busy authority.
 
 ## Push events

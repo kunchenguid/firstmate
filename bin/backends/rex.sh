@@ -675,16 +675,79 @@ fm_backend_rex_process_kind() {  # <pid> <name> <path> <argv0>
   printf '%s' "$kind"
 }
 
+# fm_backend_rex_descendant_harness_pids: the pids of <pid>'s live
+# descendants that the shared classifier names a verified harness, one per
+# line, from the local process table; fails when the table cannot be read.
+# Rex reports a block's foreground process and its ancestors only, so a
+# harness a login shell launched through a wrapper in the shell's own process
+# group (a fish function, a bash shim) sits below a shell foreground.
+fm_backend_rex_descendant_harness_pids() {  # <pid>
+  local root=$1 comms args pid name line
+  comms=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) && [ -n "$comms" ] || return 1
+  args=$(LC_ALL=C ps -axo pid=,args= 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pid name line; do
+    [ -n "$pid" ] || continue
+    [ "$(fm_agent_process_classify "$name" "${line%%[[:space:]]*}" "$line" "$pid")" != agent ] || printf '%s\n' "$pid"
+  done <<EOF
+$({ printf '%s\n--\n' "$comms"; printf '%s\n' "$args"; } | awk -v root="$root" '
+  $0 == "--" { phase = 2; next }
+  {
+    line = $0
+    gsub(/\t/, " ", line)
+    if (phase != 2) {
+      n++; pid[n] = $1; ppid[n] = $2
+      sub(/^[ ]*[0-9]+[ ]+[0-9]+[ ]+/, "", line)
+      comm[n] = line
+    } else {
+      p = $1
+      sub(/^[ ]*[0-9]+[ ]*/, "", line)
+      argv[p] = line
+    }
+  }
+  END {
+    want[root] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (i = 1; i <= n; i++) {
+        if ((ppid[i] in want) && !(pid[i] in want)) { want[pid[i]] = 1; changed = 1 }
+      }
+    }
+    for (i = 1; i <= n; i++) {
+      if ((pid[i] in want) && pid[i] != root) printf "%s\t%s\t%s\n", pid[i], comm[i], argv[pid[i]]
+    }
+  }')
+EOF
+}
+
+# fm_backend_rex_shell_harness_pids: after fm_backend_rex_process_chain, the
+# harness pids running below a shell foreground (see
+# fm_backend_rex_descendant_harness_pids); nothing for any other foreground.
+# Fails when the foreground is a shell and the process table cannot be read.
+fm_backend_rex_shell_harness_pids() {
+  local role pid name path argv0
+  while IFS=$'\t' read -r role pid name path argv0; do
+    [ "$role" = foreground ] || continue
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$(fm_backend_rex_process_kind "$pid" "$name" "$path" "$argv0")" = shell ] || return 0
+    fm_backend_rex_descendant_harness_pids "$pid"
+    return
+  done <<EOF
+$FM_BACKEND_REX_CHAIN
+EOF
+}
+
 # fm_backend_rex_agent_state: the recovery-grade agent/endpoint state (the
 # vocabulary is owned by bin/fm-backend.sh's fm_backend_agent_state), from
 # Rex's structured process view. A verified harness anywhere in the
 # foreground process or its ancestors is `alive` (a harness running a pager
-# or an interactive shell escape is still there); a shell foreground with no
-# harness above it is `dead`; anything else is `ambiguous`. A structured
-# not-found is `missing`; an unreachable server or a bad read is
-# `unreadable`. Read-only: it never starts a server.
+# or an interactive shell escape is still there), and so is one running below
+# a shell foreground; a shell foreground with no harness above or below it is
+# `dead`; anything else is `ambiguous`. A structured not-found is `missing`;
+# an unreachable server or a bad read is `unreadable`. Read-only: it never
+# starts a server.
 fm_backend_rex_agent_state() {  # <target>
-  local role pid name path argv0 kind fg_kind='' seen=0
+  local role pid name path argv0 kind fg_kind='' seen=0 below
   if ! fm_backend_rex_process_chain "$1"; then
     case "$FM_BACKEND_REX_READ_CLASS" in
       missing) printf 'missing' ;;
@@ -714,25 +777,31 @@ EOF
     fi
     return 0
   fi
-  case "$fg_kind" in
-    shell) printf 'dead' ;;
-    *) printf 'ambiguous' ;;
-  esac
+  [ "$fg_kind" = shell ] || { printf 'ambiguous'; return 0; }
+  below=$(fm_backend_rex_shell_harness_pids) || { printf 'ambiguous'; return 0; }
+  if [ -n "$below" ]; then
+    printf 'alive'
+  else
+    printf 'dead'
+  fi
 }
 
-# fm_backend_rex_live_pids: the block's foreground pid and its ancestors' pids
-# as a JSON array, from the process view; fails when the block cannot be read.
+# fm_backend_rex_live_pids: the block's foreground pid, its ancestors' pids,
+# and any harness pids below a shell foreground, as a JSON array, from the
+# process view; fails when the block cannot be read.
 fm_backend_rex_live_pids() {  # <target>
+  local below
   fm_backend_rex_process_chain "$1" || return 1
-  printf '%s\n' "$FM_BACKEND_REX_CHAIN" | cut -f2 \
+  below=$(fm_backend_rex_shell_harness_pids) || below=
+  { printf '%s\n' "$FM_BACKEND_REX_CHAIN" | cut -f2; printf '%s\n' "$below"; } \
     | jq -Rsc 'split("\n") | map(select(test("^[0-9]+$")) | tonumber)' 2>/dev/null
 }
 
 # fm_backend_rex_owner_trusted: THE trust rule for an OSC 7501 record. A record
-# counts only while its reporting process is the block's foreground process or
-# one of its ancestors: without shell integration a `working` record outlives
-# the command that reported it (verified live), so no self-report outranks the
-# process view.
+# counts only while its reporting process is the block's foreground process,
+# one of its ancestors, or a harness running below a shell foreground: without
+# shell integration a `working` record outlives the command that reported it
+# (verified live), so no self-report outranks the process view.
 fm_backend_rex_owner_trusted() {  # <target> <owner-pid>
   local live
   case "$2" in ''|*[!0-9]*) return 1 ;; esac
