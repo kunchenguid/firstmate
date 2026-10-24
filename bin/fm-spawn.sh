@@ -5333,6 +5333,32 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
+# Opt-in Herdr-native worktree nesting (config/herdr-worktree-nesting=on): now
+# that the isolated worktree is known and before anything records the endpoint,
+# move the live task pane into a Herdr worktree workspace bound to the exact
+# launcher workspace, so the sidebar indents the task under its parent and shows
+# the task branch. Purely visual: any refusal keeps the original endpoint, and
+# only an ambiguous move (endpoint unprovable) stops the spawn.
+if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ] &&
+  [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_PANE_ID:-}" ] &&
+  fm_backend_herdr_nesting_enabled "$CONFIG"; then
+  set +e
+  fm_backend_herdr_nest_task "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID" "$WT" "$W"
+  HERDR_NEST_STATUS=$?
+  set -e
+  case "$HERDR_NEST_STATUS" in
+  0)
+    HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_NEST_WORKSPACE_ID
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_NEST_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_NEST_PANE_ID
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    WT_TARGET=$T
+    ;;
+  2) exit 1 ;;
+  3) : ;;
+  *) echo "warning: herdr worktree nesting unavailable for $ID; keeping the flat task tab" >&2 ;;
+  esac
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi

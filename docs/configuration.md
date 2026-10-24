@@ -532,6 +532,8 @@ The local `config/herdr-presentation-spaces` file instead opts a home out of, or
 The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 The local `config/herdr-project-groups` file opts a home in to display-only Herdr project groups; [Project groups](herdr-backend.md#project-groups) owns its values, rules, tags, inheritance, and limits.
 
+The local `config/herdr-worktree-nesting` file opts a flat-layout home into showing each task as a Herdr-native worktree child of its launcher workspace; [Worktree nesting](herdr-backend.md#worktree-nesting) owns its accepted values, fallback behavior, and teardown contract.
+
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
 
