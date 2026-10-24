@@ -631,15 +631,28 @@ async function validateSourceRoot(home, input) {
 }
 
 async function makeManagedTreeRemovable(root) {
-  const info = await maybeLstat(root);
-  if (!info) return;
-  if (!info.isDirectory() || info.isSymbolicLink()) return;
-  await chmod(root, 0o700);
-  const names = await readdir(root);
+  let handle;
+  try {
+    handle = await open(root, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    return;
+  }
+  let isDir = false;
+  try {
+    const stat = await handle.stat();
+    if (stat.isDirectory()) {
+      isDir = true;
+      await handle.chmod(0o700);
+    }
+  } finally {
+    await handle.close();
+  }
+  if (!isDir) return;
+  const names = await readdir(root).catch(() => []);
   for (const name of names) {
     const child = path.join(root, name);
-    const childInfo = await lstat(child);
-    if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
+    const childInfo = await maybeLstat(child);
+    if (childInfo && childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
       await makeManagedTreeRemovable(child);
     }
   }
