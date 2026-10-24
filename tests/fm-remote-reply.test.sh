@@ -53,6 +53,10 @@ if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
+# Ghost transport: the remote end never answers and never closes the link.
+[ -z "${FM_REMOTE_REPLY_HANG_READ:-}" ] || { sleep 3600; exit 90; }
+# The remote job worker's own execution deadline, reporting through fm-on.
+[ -z "${FM_REMOTE_REPLY_REMOTE_TIMEOUT_READ:-}" ] || exit 124
 host=$1
 entry=$2
 shift 2
@@ -898,6 +902,45 @@ set -e
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "a preempted reply poll published a caught-up watermark"
 pass "a preempted reply poll reports a closed window without publishing channel freshness"
+
+# A ghost transport - the remote end died without closing the link - holds the
+# read open past its window, and keepalive probes do not always convict it.
+# The poll's hard bound kills it and reports a closed window so the runner
+# relistens; like a preemption it proves no caught-up watermark. An outer 20s
+# deadline keeps a bound regression from stalling the suite on the fixture's
+# hour-long sleep: a working bound exits 75 within about 3 seconds.
+rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
+ghost_started=$(date +%s)
+set +e
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+remote_env env FM_REMOTE_REPLY_HANG_READ=1 FM_REMOTE_REPLY_WAIT_SECONDS=60 FM_REMOTE_REPLY_BOUND_SECONDS=3 \
+  bash -c '. "$1/bin/fm-timeout-lib.sh" || exit 97; fm_run_timed 20 "$2" source "$3"' \
+  _ "$ROOT" "$ADAPTER" ios > "$TMP_ROOT/ghost-source.out" 2>&1
+ghost_rc=$?
+set -e
+ghost_elapsed=$(($(date +%s) - ghost_started))
+[ "$ghost_rc" -eq 75 ] \
+  || fail "a ghost reply poll did not report a closed window inside its bound: $ghost_rc"
+[ "$ghost_elapsed" -lt 15 ] \
+  || fail "a ghost reply poll took ${ghost_elapsed}s, past its 3s bound and toward the outer 20s deadline"
+assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
+  "a ghost reply poll published a caught-up watermark"
+pass "a ghost reply poll dies at its hard bound and relistens without a watermark"
+
+# The remote job worker's own execution deadline also surfaces as a timeout
+# status, but it means the read FAILED: the poll must exit like any other
+# failed read rather than relisten into a worker that may keep missing its
+# deadline, and it proves nothing about channel freshness.
+rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
+set +e
+FM_REMOTE_REPLY_REMOTE_TIMEOUT_READ=1 remote_env "$ADAPTER" source ios > /dev/null 2>&1
+remote_deadline_rc=$?
+set -e
+[ "$remote_deadline_rc" -eq 124 ] \
+  || fail "a remote read deadline was relistened as a closed window: $remote_deadline_rc"
+assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
+  "a remote read deadline published a caught-up watermark"
+pass "a remote read deadline exits as a failed read instead of relistening"
 
 # The per-cycle liveness probe is a non-preemptible job for the same remote home,
 # so the job worker preempts the listener's long-poll on every watcher cycle.
