@@ -81,8 +81,12 @@
 #
 # On macOS the worker is Firstmate's Aqua LaunchAgent
 # dev.firstmate.remote-job at ~/Library/LaunchAgents/dev.firstmate.remote-job.plist
-# with logs under ~/Library/Logs. Linux starts the same worker process without
-# an Aqua requirement. The launch-agent renderer and repair helpers here are
+# with logs under ~/Library/Logs. The agent runs the worker as an argument to an
+# explicit bash >= 4 (fm_remote_job_resolve_bash) instead of as its own Program:
+# macOS privacy protection judges a background job by the interpreter it runs,
+# and Apple's /bin/bash (3.2) cannot be granted access to a code root under
+# ~/Documents, while Homebrew's bash can. Linux starts the same worker process
+# without an Aqua requirement. The launch-agent renderer and repair helpers here are
 # shared by the entrypoint and remote doctor so their ownership cannot drift.
 #
 # The Linux start path puts the worker tree in its own process group, so
@@ -898,11 +902,39 @@ fm_remote_job_plist_safe_path() {
   case "$1" in *'&'*|*'<'*|*'>'*|*'"'*|*"'"*) return 1 ;; esac
 }
 
+# The bash that runs the macOS worker: Homebrew's, then the first bash on
+# PATH. Only a bash >= 4 qualifies; stock macOS /bin/bash 3.2 lacks BASHPID.
+# Sets FM_REMOTE_JOB_BASH_BIN and returns 1 when none qualifies. Under
+# FM_TEST_SEAM=1, FM_TEST_REMOTE_JOB_BASH replaces the candidates so a suite
+# does not depend on the bash its host installs.
+fm_remote_job_resolve_bash() {
+  local candidate version
+  FM_REMOTE_JOB_BASH_BIN=
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_TEST_REMOTE_JOB_BASH:-}" ]; then
+    set -- "$FM_TEST_REMOTE_JOB_BASH"
+  else
+    set -- /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"
+  fi
+  for candidate in "$@"; do
+    case "$candidate" in /*) ;; *) continue ;; esac
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    # shellcheck disable=SC2016 # The candidate bash, not this shell, expands the version.
+    version=$("$candidate" -c 'printf %s "${BASH_VERSINFO[0]}"' 2>/dev/null) || continue
+    case "$version" in ''|*[!0-9]*) continue ;; esac
+    [ "$version" -ge 4 ] || continue
+    FM_REMOTE_JOB_BASH_BIN=$candidate
+    return 0
+  done
+  return 1
+}
+
 fm_remote_job_render_launchagent() { # <remote-root> <account-home>
   local root=$1 account_home=$2 worker
   worker="$root/bin/fm-remote-job-worker.sh"
   fm_remote_job_launchagent_paths "$account_home"
-  fm_remote_job_plist_safe_path "$worker" && fm_remote_job_plist_safe_path "$account_home" &&
+  fm_remote_job_resolve_bash || return 1
+  fm_remote_job_plist_safe_path "$FM_REMOTE_JOB_BASH_BIN" && fm_remote_job_plist_safe_path "$worker" &&
+    fm_remote_job_plist_safe_path "$account_home" &&
     fm_remote_job_plist_safe_path "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG" || return 1
   cat <<XML
 <?xml version="1.0" encoding="UTF-8"?>
@@ -913,6 +945,7 @@ fm_remote_job_render_launchagent() { # <remote-root> <account-home>
 	<string>$FM_REMOTE_JOB_LABEL</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>$FM_REMOTE_JOB_BASH_BIN</string>
 		<string>$worker</string>
 	</array>
 	<key>EnvironmentVariables</key>
@@ -1235,6 +1268,10 @@ fm_remote_job_write_launchagent() { # <remote-root> <account-home>
   fi
   [ -d "$FM_REMOTE_JOB_LAUNCH_AGENT_DIR" ] && [ ! -L "$FM_REMOTE_JOB_LAUNCH_AGENT_DIR" ] || return 1
   [ -d "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG_DIR" ] && [ ! -L "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG_DIR" ] || return 1
+  fm_remote_job_resolve_bash || {
+    FM_REMOTE_JOB_ERROR="no bash 4 or newer is installed to run the remote job worker; install one (brew install bash) and rerun"
+    return 1
+  }
   tmp="$FM_REMOTE_JOB_LAUNCH_AGENT_DIR/.$FM_REMOTE_JOB_LABEL.plist.tmp.${BASHPID:-$$}"
   fm_remote_job_render_launchagent "$root" "$account_home" > "$tmp" || {
     rm -f -- "$tmp"
@@ -1472,7 +1509,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     FM_ROOT_OVERRIDE="$root" \
     FM_REMOTE_JOB_STATE_ROOT="$FM_REMOTE_JOB_STATE" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
-    "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
+    "$BASH" "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac

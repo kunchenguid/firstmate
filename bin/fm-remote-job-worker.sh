@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Long-lived per-account worker for remote fm-on jobs.
 #
 # This process is launched by the Firstmate-owned dev.firstmate.remote-job
@@ -1098,10 +1098,11 @@ worker_lane_execute() { # <account-home> <job-dir>
 # children, and a zombie group leader keeps its process group signalable, so a
 # subshell-hosted monitor loop can believe a finished command is still running
 # until the job deadline. A top-level shell is the context the monitor loop
-# has always run in.
+# has always run in. The lane runs under this process's own bash rather than
+# the script's shebang, so the interpreter the LaunchAgent chose carries over.
 worker_start_lane() { # <job-dir> <home>
   local job=$1 home=$2 lane_pid lane_start
-  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
+  "$BASH" "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
   lane_pid=$!
   WORKER_ACTIVITY=1
   lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
@@ -1301,7 +1302,7 @@ worker_supervise_linux() {
       return 0
     fi
     started=$SECONDS
-    "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
+    "$BASH" "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
     WORKER_SUPERVISED_PID=$!
     wait "$WORKER_SUPERVISED_PID" 2>/dev/null
     child_status=$?

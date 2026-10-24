@@ -120,7 +120,7 @@ start_worker() {
     fm_remote_job_start_linux_worker "$root" "$account_home" >&2 || exit 1
     deadline=$(( $(date +%s) + 10 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-      pid=$(pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
+      pid=$(pgrep -f "^/([^ ]*/)?bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
       if pid_is_numeric "$pid"; then
         printf '%s\n' "$pid"
         exit 0
@@ -228,3 +228,38 @@ pass "the reaper stops an abandoned worker's whole tree"
 out=$("$REAPER" 2>&1) || fail "a repeat reaper run failed: $out"
 assert_not_contains "$out" "$STALE" "the reaper reported an already-stopped worker"
 pass "the reaper is idempotent"
+
+# A worker launched through the shared start path, like every current one, must
+# stay recognisable to the sweep whatever its script's shebang resolves to. The
+# stand-in keeps the real worker's shebang and its supervisor's respawn shape
+# but never inspects its code root, so only the reaper can stop it.
+
+CASE3="$TMP_ROOT/case3"
+mkdir -p "$CASE3/account" "$CASE3/remote-root/bin"
+head -n 1 "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE3/remote-root/bin/fm-remote-job-worker.sh"
+cat >> "$CASE3/remote-root/bin/fm-remote-job-worker.sh" <<'SH'
+set -u
+if [ "${1:-}" = --serve ]; then
+  while :; do sleep 0.2; done
+fi
+while :; do
+  "$BASH" "$0" --serve &
+  wait $! 2>/dev/null
+  sleep 0.2
+done
+SH
+chmod +x "$CASE3/remote-root/bin/fm-remote-job-worker.sh"
+printf 'fixture\n' > "$CASE3/remote-root/AGENTS.md"
+STARTED=$(start_worker "$CASE3/remote-root" "$CASE3/account" "$CASE3/remote-jobs") ||
+  fail "the shared start path did not launch the worker under an absolute interpreter path"
+track "$STARTED"
+wait_child "$STARTED" 10 || fail "the started stand-in never started its serving child"
+STARTED_SERVE=$(pgrep -P "$STARTED" | head -n 1)
+
+rm -rf "$CASE3/remote-root"
+
+out=$("$REAPER" 2>&1) || fail "the reaper failed: $out"
+assert_contains "$out" "$STARTED" "the reaper did not recognise a worker launched through the shared start path"
+wait_gone "$STARTED" 20 || fail "a worker launched through the shared start path survived the reaper"
+wait_gone "$STARTED_SERVE" 20 || fail "the started worker's serving child survived the reaper"
+pass "the reaper stops a worker launched through the shared start path"
