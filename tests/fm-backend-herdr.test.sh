@@ -1089,6 +1089,35 @@ test_launcher_identity_refuses_an_unreadable_pane() {
   pass "fm_backend_herdr_launcher_identity: refuses when the launcher's own pane no longer resolves"
 }
 
+test_launcher_identity_refuses_a_pane_that_no_longer_exists() {
+  local dir log resp fb out status shape
+  for shape in gone-pane empty-tab; do
+    dir="$TMP_ROOT/launcher-stale-$shape"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+    case "$shape" in
+      # A destroyed pane id: herdr answers `pane get` with the pane it still
+      # has, so the exact-id filter keeps nothing and the launcher is gone.
+      gone-pane) printf '{"result":{"pane":{"pane_id":"w7:p9","tab_id":"w7:t9","workspace_id":"w7"}}}\n' > "$resp/2.out" ;;
+      # A pane record that names no tab at all.
+      empty-tab) printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"","workspace_id":"w7"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+    status=$?
+    expect_code 1 "$status" "a launcher pane id that no longer exists must refuse, not fall back to a label search"
+    assert_contains "$out" "w7:p3" "the stale-pane refusal did not name the stale pane id"
+    assert_contains "$out" "no longer exists" "the stale-pane refusal did not say the pane is gone"
+    assert_contains "$out" "HERDR_PANE_ID" "the stale-pane refusal did not name HERDR_PANE_ID as a value to refresh"
+    assert_contains "$out" "HERDR_TAB_ID" "the stale-pane refusal did not name HERDR_TAB_ID as a value to refresh"
+    assert_contains "$out" "HERDR_WORKSPACE_ID" "the stale-pane refusal did not name HERDR_WORKSPACE_ID as a value to refresh"
+    assert_not_contains "$out" "ambiguous tab or workspace" "the stale-pane refusal still blamed an ambiguity that does not exist"
+    assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "a stale launcher pane must not mint or pick a workspace"
+  done
+  pass "fm_backend_herdr_launcher_identity: names a stale launcher pane id as gone and names the values to refresh"
+}
+
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree() {
   local dir log resp fb out status
   dir="$TMP_ROOT/launcher-contradictory"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5981,6 +6010,7 @@ test_launcher_identity_refuses_a_pane_from_another_session_name
 test_launcher_identity_refuses_a_missing_server_socket
 test_launcher_identity_refuses_a_pane_from_another_server_socket
 test_launcher_identity_refuses_an_unreadable_pane
+test_launcher_identity_refuses_a_pane_that_no_longer_exists
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree
 test_launcher_identity_refuses_a_workspace_missing_from_the_session
 test_workspace_ensure_prefers_the_launcher_over_the_first_label_match
