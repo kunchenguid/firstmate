@@ -7,6 +7,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$ROOT/bin/fm-quota-axi-lib.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
@@ -414,15 +416,8 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.51'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi" "$fakebin/no-mistakes" "$fakebin/tasks-axi" "$fakebin/quota-axi"
+  fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION "$FM_QUOTA_AXI_MIN"
+  chmod +x "$fakebin/gh-axi" "$fakebin/no-mistakes" "$fakebin/tasks-axi"
 }
 
 new_git_world() {

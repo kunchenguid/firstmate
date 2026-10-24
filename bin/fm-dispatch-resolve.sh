@@ -12,23 +12,27 @@
 #   key lives in a non-exported shell variable and reaches curl through fd 3,
 #   never argv, logs, or child environments.
 #
-# What it does when on with at least one rule: one POST with the project name and the brief's
+# What it does when on with at least one unexpired rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
 #   scout brief (the whole brief when it has neither section), as state and
-#   ONE Choice question whose options are every rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. The provider
-#   returns the matched rule, a probability per option, and a confidence. Everything
-#   after that is jq: the confidence floor (0.6 on the answer confidence, or a
-#   rule's declared `min_confidence` on that rule's probability, falling to the
-#   most probable other option that clears its own floor), the rule's declared
+#   ONE Choice question whose options are every unexpired rule's `when` from
+#   config/crew-dispatch.json plus one fixed generic none option. The `until`
+#   contract is owned by docs/configuration.md "Crew dispatch profiles".
+#   The provider returns the matched rule, a probability per option, and a
+#   confidence. Code applies the documented confidence and fallback policy, the rule's declared
 #   `approval` and `floor`, each profile's declared `provider` and `floor`, the
 #   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
 #   candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
-#   the eligible candidates. The model never sees quota, catalogs, approvals,
-#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
+#   candidate is unmeasured, never blocked), read with --max-age 2m of bounded
+#   reuse to reduce repeated vendor reads, and the spendPriority argmax over
+#   the eligible candidates. Before the quota read, each distinct Pi
+#   executable/provider pair from live rules or the top-level default gets
+#   `<pi|pi-signed> auth check --provider <p>` (10 seconds, never fatal),
+#   subject to the account-pin rules in the operator contract below.
+#   The model never sees quota, catalogs, approvals,
+#   confidence floors, `why`, or `use`. With no unexpired rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
@@ -51,10 +55,14 @@
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
-#   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
-#   ambiguous -> confidence below the floor; decide as today from the probabilities
+#   clear     -> pass the profile line to fm-spawn.sh unchanged
+#   ambiguous -> a rule missed its declared floor with no qualifying runner-up,
+#     a runner-up tie, or a below-floor answer whose top options tie; decide as
+#     today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
+#   Confidence and fallback policy: docs/configuration.md
+#   "Confidence and fallback rules".
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, missing jq, an unknown
@@ -65,9 +73,8 @@
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
 #
-# Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
-#   the captain-approval gate, or fm-spawn.sh validation; it publishes one
-#   inspectable answer plus every candidate's evidence, in code.
+# Authority: AGENTS.md section 4 owns dispatch intake and override limits.
+#   This tool does not replace captain approval or fm-spawn.sh validation.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -90,10 +97,16 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
+QUOTA_MAX_AGE=2m
+PI_REFRESH_TIMEOUT=10
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
@@ -114,7 +127,7 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES='' FILTERED_RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -166,7 +179,7 @@ esac
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
 RULES=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RULES"' EXIT
+trap 'rm -f "$RULES" "$FILTERED_RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
@@ -213,6 +226,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
   elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
   elif any((.rules // [])[]; has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1)) then "min_confidence must be a number from 0 through 1 when present"
+  elif any((.rules // [])[]; has("until") and ((.until | type) != "string" or ((.until | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")) | not))) then "until must be an ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ) when present"
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
@@ -229,6 +243,22 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   else empty end
 ' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES_PATH (not JSON)"
 [ -z "$rules_err" ] || die "malformed rules file: $RULES_PATH - $rules_err"
+
+while IFS= read -r until; do
+  normalized_until=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$until" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "$until" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || normalized_until=''
+  [ "$normalized_until" = "$until" ] \
+    || die "malformed rules file: $RULES_PATH - until must be a valid ISO 8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ)"
+done < <(jq -r '.rules[]? | select(has("until")) | .until' "$RULES")
+
+# Same-format UTC strings compare in chronological order.
+NOW_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || die "could not read the current time"
+FILTERED_RULES=$(mktemp) || die "mktemp failed"
+if ! jq --arg now "$NOW_UTC" '.rules = [(.rules // [])[] | select((.until // "") == "" or .until > $now)]' "$RULES" > "$FILTERED_RULES"; then
+  die "could not filter expired rules: $RULES_PATH"
+fi
+chmod 400 "$FILTERED_RULES" || die "could not protect filtered rules: $RULES_PATH"
+mv -f "$FILTERED_RULES" "$RULES" || die "could not replace the rules snapshot: $RULES_PATH"
 
 missing_provider=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -275,7 +305,7 @@ RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
+trap 'rm -f "$RULES" "$FILTERED_RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
 never_send_off() {
   echo "dispatch-resolve: off ($1; nothing sent)" >&2
@@ -374,6 +404,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
+    (.answers.rule.choice as $choice | ($choices | index($choice)) != null) and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
     (.answers.rule.probabilities | type) == "object" and
@@ -386,9 +417,34 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
-# ---- quota evidence: one quota-axi --json snapshot -----------------------------
+# ---- quota evidence: one bounded-reuse quota-axi --json snapshot -------------
+# Pi renews tokens only on use; a failed refresh must not block dispatch or
+# bypass the configured account pin.
+if pi_account=$(fm_worker_account_resolve pi "$CONFIG" config/pi-account 2>/dev/null); then
+  pi_root=${pi_account#*$'\t'}
+  pi_providers=${pi_root#*$'\t'}
+  pi_root=${pi_root%%$'\t'*}
+  while IFS=$'\t' read -r pi_harness pi_provider; do
+    pi_bin=$(type -P -- "$pi_harness") || continue
+    pi_command=("$pi_bin" auth check --provider "$pi_provider")
+    if [ -n "$pi_account" ]; then
+      case " $pi_providers " in
+        *" $pi_provider "*) ;;
+        *) continue ;;
+      esac
+      pi_command=(env "PI_CODING_AGENT_DIR=$pi_root" "${pi_command[@]}")
+    fi
+    fm_run_timed "$PI_REFRESH_TIMEOUT" "${pi_command[@]}" >/dev/null 2>&1 </dev/null || :
+  done < <(jq -r '
+    def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+    ([(.rules // [])[] | profiles(.use)[]] + profiles(.default))
+    | map(select(.harness == "pi" or .harness == "pi-signed")
+        | select((.model // "") | test("^[^/]+/.+"))
+        | [.harness, (.model | split("/") | first)])
+    | unique | .[] | @tsv' "$RULES")
+fi
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+quota-axi --json --max-age "$QUOTA_MAX_AGE" > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
@@ -465,19 +521,15 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       end
     end;
   def rule_at($c):
-    if ($c | test("^rule_[1-9][0-9]*$")) then
-      ($c | ltrimstr("rule_") | tonumber) as $n |
-      if $n <= (($cfg.rules // []) | length) then $cfg.rules[$n - 1] else null end
-    else null end;
+    if $c == "default" then null
+    else $cfg.rules[($c | ltrimstr("rule_") | tonumber) - 1] end;
   def declared_confidence($c): rule_at($c) as $x | $x != null and ($x | has("min_confidence"));
   def confidence_floor($c): if declared_confidence($c) then rule_at($c).min_confidence else ($floor | tonumber) end;
   ($a.choice) as $picked |
   (confidence_floor($picked)) as $picked_floor |
-  # A declared floor is checked against the probability of that option whether
-  # it is the pick or a runner-up, so a runner-up never needs weaker support
-  # than it would as the pick. Only a rule that declares its own floor falls
-  # through to a runner-up, so a file with no declared floors keeps the single
-  # global floor on the answer confidence exactly.
+  # Declared floors require the same option probability for picks and runner-ups.
+  # Their fallback stays separate from the low-confidence path so a declared
+  # floor miss cannot bypass the required runner-up support.
   (if declared_confidence($picked) | not then
      (if $a.confidence >= $picked_floor then {below: false} else {below: true, global: true} end)
    elif $a.probabilities[$picked] >= $picked_floor then {below: false}
@@ -488,15 +540,24 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
      elif ($ok | length) > 1 and $ok[1].value == $ok[0].value then {below: true, why: "runner-up tie"}
      else {below: true, to: $ok[0].key, p: $ok[0].value, to_floor: confidence_floor($ok[0].key)} end
    end) as $fb |
-  (if $fb.to then $fb.to else $picked end) as $choice |
+  # Below the global floor the most probable option that clears its own
+  # declared floor still resolves, marked low confidence, so a borderline
+  # brief never falls to a hand pick on its own; a tie at the top stays
+  # ambiguous. Declared per-rule floors are untouched: a rule that misses its
+  # own min_confidence never enters this fallback.
+  (if $fb.below and $fb.global then
+     ([$a.probabilities | to_entries[] | select((declared_confidence(.key) | not) or (.value >= confidence_floor(.key)))]
+       | sort_by(-.value)) as $ranked |
+     if ($ranked | length) > 1 and $ranked[0].value == $ranked[1].value then {tie: true}
+     else {top: $ranked[0].key} end
+   else {} end) as $lc |
+  (if $fb.to then $fb.to elif $lc.top then $lc.top else $picked end) as $choice |
   (rule_at($choice)) as $rule |
   (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
-  (if $choice != "default" and $rule == null then []
-   elif $rule == null then profiles($cfg.default // null)
+  (if $rule == null then profiles($cfg.default // null)
    else profiles($rule.use)
    end) as $answer_use |
-  (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
-   elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
+  (if $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
    elif ($rule.approval // "") == "captain" then {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
    elif $rule_floor_state == "unknown" then {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
    elif $rule_floor_state == "below"
@@ -511,24 +572,24 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   }
   + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
   as $ev |
-  if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $fb.below and $fb.global then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
-  elif $fb.below and ($fb.to | not) then
+  ($sel.note + (if $lc.top then " (low confidence: answer confidence \($a.confidence) below floor \($floor))" else "" end)) as $note |
+  if $fb.below and $fb.global and $lc.tie then
+    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor); top-probability tie", candidates: ($answer_use | map(evaluate(.)))}
+  elif $fb.below and ($fb.global | not) and ($fb.to | not) then
     $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
-  elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
+  elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
-    if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
+    if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $note, candidates: $cands}
     else
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
-      if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
-      else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
+      if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $note, candidates: $cands}
+      else $ev + {status: "clear", note: $note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
              {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
            else {} end)
