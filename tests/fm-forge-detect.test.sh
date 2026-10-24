@@ -66,6 +66,43 @@ test_other_remotes_propose_none() {
   pass "a remote carrying neither Gerrit fact proposes forge=none"
 }
 
+# An origin on an Azure DevOps Services host proposes azure-devops, in both
+# HTTPS URL forms and the SSH form, and the evidence names only the host: an
+# HTTPS remote can carry a personal access token as its userinfo.
+test_azure_devops_hosts_propose_azure_devops() {
+  local clone out url host
+  for url in \
+    'https://fabrikam@dev.azure.com/fabrikam/Fabrikam/_git/web-app|dev.azure.com' \
+    'https://fabrikam.visualstudio.com/DefaultCollection/Assistant/_git/Assistant|fabrikam.visualstudio.com' \
+    'https://contoso.visualstudio.com/DefaultCollection/Contoso%20Core/_git/Evaluation|contoso.visualstudio.com' \
+    'git@ssh.dev.azure.com:v3/fabrikam/Fabrikam/web-app|ssh.dev.azure.com' \
+    'https://someone:fixture-token-value@Dev.Azure.com/org/project/_git/repo|dev.azure.com'
+  do
+    host=${url##*|}
+    url=${url%|*}
+    clone=$(new_clone "ado-$(printf '%s' "$url" | cksum | cut -d' ' -f1)")
+    git -C "$clone" remote add origin "$url"
+    out=$("$DETECT" "$clone") || fail "detection failed on an Azure DevOps origin"
+    [ "$out" = "forge=azure-devops evidence=origin remote host $host is an Azure DevOps Services host" ] \
+      || fail "an Azure DevOps origin did not propose azure-devops naming only its host: $out"
+  done
+
+  clone=$(new_clone ado-lookalike)
+  git -C "$clone" remote add origin https://dev.azure.com.example/org/project/_git/repo
+  out=$("$DETECT" "$clone") || fail "detection failed on a lookalike host"
+  [ "$out" = forge=none ] || fail "a host that only starts with dev.azure.com proposed a forge: $out"
+
+  clone=$(new_clone ado-gerrit-wins)
+  git -C "$clone" remote add origin https://dev.azure.com/org/project/_git/repo
+  git -C "$clone" config --add remote.origin.push 'HEAD:refs/for/master'
+  out=$("$DETECT" "$clone") || fail "detection failed on a clone with both facts"
+  case "$out" in
+    forge=gerrit*) ;;
+    *) fail "a Gerrit push refspec no longer took precedence over the host: $out" ;;
+  esac
+  pass "an Azure DevOps Services origin host proposes forge=azure-devops and names only the host"
+}
+
 test_detection_writes_nothing() {
   local clone before after
   clone=$(new_clone read-only)
@@ -90,6 +127,7 @@ test_not_a_clone_is_an_error() {
 test_ssh_port_29418_proposes_gerrit
 test_refs_for_push_refspec_proposes_gerrit
 test_other_remotes_propose_none
+test_azure_devops_hosts_propose_azure_devops
 test_detection_writes_nothing
 test_not_a_clone_is_an_error
 echo "# all fm-forge-detect tests passed"
