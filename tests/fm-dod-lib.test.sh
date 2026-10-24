@@ -270,7 +270,8 @@ test_ci_ready_requires_pr_reference() {
     'PR #12 checks green' \
     'checks green: PR#12' \
     'https://gitlab.com/o/r/-/merge_requests/5 checks green' \
-    'https://git.example.org/team/repo/pulls/12 checks green'; do
+    'https://git.example.org/team/repo/pulls/12 checks green' \
+    'PR https://contoso.visualstudio.com/Contoso%20Core/_git/Evaluation/pullrequest/4242 checks green'; do
     fm_dod_note_reports_ci_ready "$note" \
       || fail "CI-ready PR reference rejected: $note"
   done
