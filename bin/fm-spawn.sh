@@ -4025,6 +4025,20 @@ spawn_endpoint_hint() {
   fi
 }
 
+# Treehouse never hands out a dirty slot, so a pool whose idle slots are all
+# dirty leaves `treehouse get` in the project and the settle wait expires with
+# no sign of why. Name those slots from Treehouse's own status so the refusal
+# points at the leftovers to clear. Best effort: no jq, a failed or slow status,
+# or no dirty slot adds nothing.
+spawn_treehouse_dirty_slots_note() {
+  local listing slots
+  command -v jq >/dev/null 2>&1 || return 0
+  listing=$(cd "$PROJ_ABS" 2>/dev/null && fm_run_timed 10 treehouse status --json 2>/dev/null < /dev/null) || return 0
+  slots=$(printf '%s' "$listing" | jq -r '[.[]? | select(.status == "dirty") | .path] | join(", ")' 2>/dev/null) || return 0
+  [ -n "$slots" ] || return 0
+  printf '; treehouse skips dirty pool slots, and these hold uncommitted or untracked files: %s' "$slots"
+}
+
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
@@ -5309,7 +5323,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS')$(spawn_treehouse_dirty_slots_note); $(spawn_endpoint_hint)" >&2
     exit 1
   fi
 

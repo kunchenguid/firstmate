@@ -1509,7 +1509,8 @@ prepare_scout_teardown() {
   printf '%s\n' 'decisions_reviewed=1' >> "$case_dir/state/task-x1.meta"
 }
 
-# Clone a nested repository into the copy and add one plain scratch file.
+# Clone a nested repository into the copy, clone it again under an untracked
+# .scout/ scratch directory beside a scratch script, and add one plain scratch file.
 seed_nested_clone_and_scratch() {
   local case_dir=$1 wt=$2
   git init -q "$case_dir/nested-src"
@@ -1517,6 +1518,9 @@ seed_nested_clone_and_scratch() {
   git -C "$case_dir/nested-src" add payload.txt
   git -C "$case_dir/nested-src" -c user.email=t@t -c user.name=t commit -q -m payload
   git clone -q "$case_dir/nested-src" "$wt/scratch-clone"
+  mkdir -p "$wt/.scout"
+  git clone -q "$case_dir/nested-src" "$wt/.scout/sibling-repo"
+  printf 'echo measure\n' > "$wt/.scout/measure.sh"
   printf 'scratch\n' > "$wt/scratch.txt"
 }
 
@@ -1550,7 +1554,8 @@ test_scout_nested_clone_returns_with_no_untracked_entries() {
     || fail "scout-nested-clean: untracked entries remain: $(git -C "$wt" status --porcelain --untracked-files=all)"
   assert_absent "$wt/scratch-clone" "scout-nested-clean: nested clone survived return"
   assert_absent "$wt/scratch.txt" "scout-nested-clean: scratch file survived return"
-  pass "scout copy with a nested clone and a scratch file returns with no untracked entries"
+  assert_absent "$wt/.scout" "scout-nested-clean: .scout scratch directory survived return"
+  pass "scout copy with nested clones and scratch files returns with no untracked entries"
 }
 
 test_ship_nested_clone_is_refused_and_bytes_stay() {
