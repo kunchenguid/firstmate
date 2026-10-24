@@ -106,7 +106,7 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, devin,
 # commandcode, and polytoken are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
@@ -116,7 +116,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -495,6 +495,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    agy) printf '%s\n' "$wt/.agents/hooks.json" ;;
     # commandcode leaves none: its tracked mod (bin/fm-commandcode-mod.ts) takes
     # the generation from its own launch command, so the retired process
     # takes its wiring with it.
@@ -564,3 +565,61 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     *) return 0 ;;
   esac
 }
+
+# Clear per-task wiring artifacts left behind by a previous incarnation of a harness.
+# For agy, if .agents/hooks.json contains hooks other than fm-crew-busy, it prunes
+# fm-crew-busy rather than removing the entire file.
+fm_control_clear_harness_wiring() {  # <harness> <worktree> <state-dir> <id> [kind]
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
+  local token_path token auth_path path other_keys tmp_hooks head_hooks
+  harness=$(fm_control_harness_family "$harness") || harness=
+  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
+  token=
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token <"$token_path" || [ -n "$token" ] || return 1
+  fi
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  if [ -n "$auth_path" ]; then
+    rm -f -- "$auth_path" || return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ "$harness" = polytoken ]; then
+      case "$path" in
+        "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
+      esac
+    fi
+    if [ "$harness" = agy ] && [ "$path" = "$wt/.agents/hooks.json" ] && [ -f "$path" ] && command -v jq >/dev/null 2>&1; then
+      tmp_hooks="$path.tmp.$$"
+      if jq 'del(."fm-crew-busy")' "$path" > "$tmp_hooks" 2>/dev/null; then
+        mv -f "$tmp_hooks" "$path"
+      else
+        rm -f "$tmp_hooks"
+      fi
+      if git -C "$wt" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1; then
+        git -C "$wt" update-index --no-skip-worktree .agents/hooks.json 2>/dev/null || true
+        head_hooks=$(git -C "$wt" show HEAD:.agents/hooks.json 2>/dev/null || true)
+        if [ -n "$head_hooks" ] && jq -e -n --arg a "$head_hooks" --arg b "$(cat "$path")" '($a | fromjson) == ($b | fromjson)' >/dev/null 2>&1; then
+          git -C "$wt" checkout -- .agents/hooks.json 2>/dev/null || true
+        fi
+      else
+        other_keys=$(jq 'keys | length' "$path" 2>/dev/null || echo 0)
+        case "$other_keys" in ''|*[!0-9]*) other_keys=0 ;; esac
+        if [ "$other_keys" -eq 0 ]; then
+          rm -f -- "$path" || return 1
+        fi
+      fi
+      continue
+    fi
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$kind")
+EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -rf -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
+EOF
+}
+

@@ -68,12 +68,15 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#   separated  - pi, polytoken, agy: content rows between two solid horizontal
+#                `─` rules, with no side border (pi and polytoken carry no
+#                prompt glyph; agy leads its first row with `>` and may append
+#                a `─`-bounded `● [HH:MM:SS] <cmd> running` background-task
+#                tray immediately below the closing rule). Provable only with
+#                a live agent identity reporting an idle/done owner (herdr
+#                `agent get`; the tmux foreground-process probe), because a
+#                blank or `>`-prefixed region between two transcript rules is
+#                otherwise unidentifiable without identity.
 #                A separated pair that closes over a bare AGENT-GLYPH row is a
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
@@ -383,9 +386,10 @@ fm_composer_strip_ghost() {
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
 # agy's `esc to cancel` is part of the union for the same reason: an explicit
-# tmux agy endpoint reaches the submit core with no recorded harness, and its
-# bare `>` composer verdict is `unknown`, so the busy footer is the only
-# turn-started acknowledgement that path can read.
+# tmux agy endpoint reaches the submit core with no recorded harness, and a
+# backend without identity capability reads its `>` composer verdict as
+# `unknown`, so the busy footer is the turn-started acknowledgement that path
+# can read.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
@@ -548,6 +552,14 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # Consulted only as the dead-shell exception below, never as composer content,
 # so the same string typed between the separator pair still reads pending.
 FM_COMPOSER_PI_STATUS_RE_DEFAULT='^\$[0-9]+(\.[0-9]+)?([[:space:]]|$)'
+# Antigravity CLI (agy) renders a background-task tray immediately below its
+# composer's bottom `─` rule when one or more background run_command tasks are
+# active (`  ● [09:03:38] bin/fm-watch-arm.sh running`, closed by a third `─`
+# rule above `? for shortcuts`; verified live on agy 1.4.5, Herdr backend).
+# Recognised only so that a task-tray block immediately below a valid `>`-led
+# separator pair does not overwrite the composer pair above it during the
+# separator scan.
+FM_COMPOSER_AGY_TASK_TRAY_RE_DEFAULT='^● \[[0-9]{2}:[0-9]{2}:[0-9]{2}\] .+ running$'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
@@ -873,6 +885,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
   FM_COMPOSER_SCAN_PI_PAIR_VALID=0
+  FM_COMPOSER_SCAN_PI_FIRST_GT=0
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
@@ -888,6 +901,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local pi_first_gt=0 pi_all_agy_tray=1
   local probe row_glyph row_glyph_row
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
@@ -933,27 +947,53 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
+    # Exception: Antigravity CLI (agy) draws active background run_command
+    # tasks (`  ● [HH:MM:SS] <cmd> running`) between the composer's bottom `─`
+    # rule and a third `─` rule above its status line; when such a tray closes
+    # immediately below a valid `>`-led composer pair (and the cursor is not
+    # inside the tray), keep the composer pair above it.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
-        FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
-        FM_COMPOSER_SCAN_PI_OPEN=$pi_open
-        FM_COMPOSER_SCAN_PI_CLOSE=$row
-        if [ "$pi_lines" -le "$pi_max" ]; then
-          FM_COMPOSER_SCAN_PI_PAIR_VALID=1
+        if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+           && [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] \
+           && [ "$FM_COMPOSER_SCAN_PI_FIRST_GT" = 1 ] \
+           && [ "$pi_open" -eq "$FM_COMPOSER_SCAN_PI_CLOSE" ] \
+           && [ "$pi_lines" -gt 0 ] \
+           && [ "$pi_all_agy_tray" = 1 ] \
+           && ! { [ -n "$cy" ] && [ "$cy" -gt "$pi_open" ] && [ "$cy" -lt "$row" ]; }; then
+          :
         else
-          FM_COMPOSER_SCAN_PI_PAIR_VALID=0
+          FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
+          FM_COMPOSER_SCAN_PI_OPEN=$pi_open
+          FM_COMPOSER_SCAN_PI_CLOSE=$row
+          if [ "$pi_lines" -le "$pi_max" ]; then
+            FM_COMPOSER_SCAN_PI_PAIR_VALID=1
+          else
+            FM_COMPOSER_SCAN_PI_PAIR_VALID=0
+          fi
+          FM_COMPOSER_SCAN_PI_FIRST_GT=$pi_first_gt
+          FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
+          FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
         fi
-        FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
-        FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
       fi
       pi_open=$row
       pi_lines=0
+      pi_first_gt=0
+      pi_all_agy_tray=1
       pi_glyph_row=-1
       pi_glyph=''
     else
       if [ "$pi_open" -ge 0 ]; then
         pi_lines=$((pi_lines + 1))
+        if [ "$pi_lines" -eq 1 ]; then
+          case "$trimmed" in
+            '>'*) pi_first_gt=1 ;;
+          esac
+        fi
+        if [ "$pi_all_agy_tray" = 1 ] && ! _fm_composer_row_is_agy_task_tray "$trimmed"; then
+          pi_all_agy_tray=0
+        fi
         if [ "$pi_glyph_row" -lt 0 ] && [ "$row_glyph_row" -ge 0 ]; then
           pi_glyph_row=$row_glyph_row
           pi_glyph=$row_glyph
@@ -1317,6 +1357,13 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 # the separated pair; a `$` cost cell must not count as a dead-shell prompt.
 _fm_composer_row_is_pi_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "$FM_COMPOSER_PI_STATUS_RE_DEFAULT" sensitive
+}
+
+# _fm_composer_row_is_agy_task_tray: 0 when the trimmed row is an active
+# background-task tray entry that agy draws in a `─`-bounded block immediately
+# below its composer's bottom rule.
+_fm_composer_row_is_agy_task_tray() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "$FM_COMPOSER_AGY_TASK_TRAY_RE_DEFAULT" sensitive
 }
 
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
@@ -1890,6 +1937,14 @@ EOF
           content=${content#*"$glyph"}
         fi
         ;;
+      pi)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && [ "$FM_COMPOSER_SCAN_PI_FIRST_GT" = 1 ]; then
+          case "$content" in
+            '>'*) content=${content#>} ;;
+          esac
+        fi
+        ;;
       leftbar)
         case "$content" in '┃'*) content=${content#┃} ;; esac
         fm_composer_normalize_trim_var content
@@ -2187,13 +2242,22 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
-_fm_composer_classify_pi_rows() {  # <screen> <styled>
-  local screen=$1 styled=$2 row raw content
-  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+_fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
+  local screen=$1 styled=$2 agent=${3:-pi} first row raw content
+  first=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  row=$first
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
+    if [ "$agent" = agy ] && [ "$row" -eq "$first" ]; then
+      case "$content" in
+        '>'*)
+          content=${content#>}
+          fm_composer_normalize_trim_var content
+          ;;
+      esac
+    fi
     if [ -n "$content" ]; then
       printf 'pending'
       return 0
@@ -2218,7 +2282,8 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
+  if [ "$agent" = pi ] || [ "$agent" = polytoken ] \
+     || { [ "$agent" = agy ] && [ "$FM_COMPOSER_SCAN_PI_FIRST_GT" = 1 ]; }; then
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
@@ -2257,12 +2322,20 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   # polytoken keeps the strict unknown - its composer really is empty
   # mid-turn (Enter queues, verified live), but the unknown keeps the
   # busy-queue conversion honest through the submit cores.
-  if { [ "$agent" != pi ] && [ "$agent" != polytoken ]; } \
+  # agy (Antigravity CLI, verified live on 1.4.5) is the third verified owner:
+  # a full-width separator pair whose first row leads with `>` (`> ` when
+  # empty, `> <draft>` when pending), optionally followed by a `─`-bounded
+  # `● [HH:MM:SS] <cmd> running` background-task tray above `? for shortcuts`.
+  if { [ "$agent" != pi ] && [ "$agent" != polytoken ] && [ "$agent" != agy ]; } \
     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  if [ "$agent" = agy ] && [ "$FM_COMPOSER_SCAN_PI_FIRST_GT" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  state=$(_fm_composer_classify_pi_rows "$screen" "$styled" "$agent")
   if [ "$state" = pending ]; then
     printf 'pending'
     return 0

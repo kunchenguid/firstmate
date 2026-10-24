@@ -1924,6 +1924,40 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+cleanup_worktree_agents_hooks() {  # <wt>
+  local wt=$1 hooks other_keys tmp_hooks head_hooks
+  [ -d "$wt" ] || return 0
+  hooks="$wt/.agents/hooks.json"
+  if [ -f "$hooks" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      tmp_hooks="$hooks.tmp.$$"
+      if jq 'del(."fm-crew-busy")' "$hooks" > "$tmp_hooks" 2>/dev/null; then
+        mv -f "$tmp_hooks" "$hooks"
+      else
+        rm -f "$tmp_hooks"
+      fi
+    fi
+    if git -C "$wt" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1; then
+      git -C "$wt" update-index --no-skip-worktree .agents/hooks.json 2>/dev/null || true
+      head_hooks=$(git -C "$wt" show HEAD:.agents/hooks.json 2>/dev/null || true)
+      if [ -n "$head_hooks" ] && command -v jq >/dev/null 2>&1 && \
+         jq -e -n --arg a "$head_hooks" --arg b "$(cat "$hooks")" '($a | fromjson) == ($b | fromjson)' >/dev/null 2>&1; then
+        git -C "$wt" checkout -- .agents/hooks.json 2>/dev/null || true
+      fi
+    else
+      if command -v jq >/dev/null 2>&1; then
+        other_keys=$(jq 'keys | length' "$hooks" 2>/dev/null || echo 0)
+        case "$other_keys" in ''|*[!0-9]*) other_keys=0 ;; esac
+        if [ "$other_keys" -eq 0 ]; then
+          rm -f "$hooks"
+        fi
+      else
+        rm -f "$hooks"
+      fi
+    fi
+  fi
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
@@ -2057,6 +2091,8 @@ validate_worktree_teardown_safety() {
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+
+  cleanup_worktree_agents_hooks "$WT"
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -3423,6 +3459,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        cleanup_worktree_agents_hooks "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -3443,6 +3480,7 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        cleanup_worktree_agents_hooks "$child_wt"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           teardown_scrub_scratch_copy "$child_wt" || return 1
           child_pool_slot=0
@@ -3764,6 +3802,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
     remove_harness_worktree_wiring "$WT"
+    cleanup_worktree_agents_hooks "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
@@ -3783,6 +3822,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   remove_harness_worktree_wiring "$WT"
+  cleanup_worktree_agents_hooks "$WT"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

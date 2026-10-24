@@ -38,6 +38,7 @@
 #                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   agy-hook         Antigravity CLI (agy) per-task hooks (PreInvocation / Stop)
 #   polytoken-hook   Polytoken pre_user_prompt / pre_model_turn open and stop
 #                    closes; a REST turn cancel emits no stop (verified live),
 #                    so the control plane writes the close itself
@@ -230,6 +231,7 @@ fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
     claude*) adapter=claude-hook ;;
+    agy*) adapter=agy-hook ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
