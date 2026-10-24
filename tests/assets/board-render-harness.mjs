@@ -5,7 +5,10 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], empty, more, error,
+//     answers:[{key,prompt,data}] }
+// `answers` is what each decision card queues through window.lavish.queuePrompt
+// when its first option is selected and its form submitted.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -27,6 +30,7 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: () => {},
     };
   }
   get textContent() {
@@ -37,7 +41,7 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, fn) { (this.listeners ||= {})[type] = fn; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -54,6 +58,8 @@ class Node {
 }
 
 const byId = new Map();
+const forms = [];
+const queued = [];
 const dataNode = new Node("script");
 dataNode.textContent = html
   .split('<script id="bearings-data" type="application/json">')[1]
@@ -61,7 +67,11 @@ dataNode.textContent = html
 byId.set("bearings-data", dataNode);
 
 globalThis.document = {
-  createElement: (tag) => new Node(tag),
+  createElement: (tag) => {
+    const n = new Node(tag);
+    if (tag === "form") forms.push(n);
+    return n;
+  },
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {
@@ -78,11 +88,33 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+globalThis.window = {
+  lavish: { queuePrompt: (prompt, ctx) => queued.push({ prompt, data: ctx.data }) },
+};
+globalThis.FormData = class {
+  constructor(form) {
+    this.inputs = [];
+    const walk = (n) => n.children.forEach((c) => { this.inputs.push(c); walk(c); });
+    walk(form);
+  }
+  get(name) {
+    const hit = this.inputs.find((c) => c.name === name && (c.type !== "radio" || c.checked));
+    return hit ? hit.value : null;
+  }
+};
+globalThis.setTimeout = () => 0;
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+
+const descendants = (n) => n.children.flatMap((c) => [c, ...descendants(c)]);
+for (const form of forms) {
+  const radio = descendants(form).find((c) => c.type === "radio");
+  if (radio) radio.checked = true;
+  form.listeners?.submit?.({ preventDefault() {} });
+}
+const answers = queued.map((q) => ({ key: q.data.question, prompt: q.prompt, data: q.data }));
 
 const badgesOf = (row) =>
   row.children
@@ -123,4 +155,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, empty, more, error: errorText, answers }) + "\n");
