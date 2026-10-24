@@ -655,7 +655,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def applicable($p; $lane; $m; $qs):
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(
-      .scope == "all_models" or .scope == "all_products" or
+      .scope == "all_models" or .scope == "all_products" or .scope == "included_quota" or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare))) or
       ($qs != null and .scope == $qs)
     )];

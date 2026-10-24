@@ -1,6 +1,8 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
+On 2026-10-24 Devin CLI 3000.11.205 (6dea39440ae3) re-proved spawn, hook busy and idle, idle interrupt, exit, relaunch, and teardown on included `swe-2-medium`.
+Resume, steering, the revert picker, busy interrupt, and the Herdr lab session remain the 3000.11.1 evidence.
 The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
@@ -13,9 +15,10 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Interrupt | One Esc, then a second only after the running turn renders `esc again to interrupt` and at least 0.5 seconds later; no restored draft and no clear key. An idle agent gets one press and `cancel=not-running`, because a fast idle pair opens the `/revert` picker, where Enter reverts file changes. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Devin discovers Firstmate's user skills from `~/.agents/skills`, and `fm-send` types the slash form through its popup settle. |
 | Resume | `devin -r <session-id>`; `--model` may switch the resumed session's model. |
-| Model flag | `--model <model-id>`, including `swe-2-medium` and account-listed `fusion-<lead>-sidekick-swe-2-medium` ids. |
+| Model flag | `--model <model-id>`, with `devin models list` marking included `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and pricing every other line, including SWE-2 Lightning. |
 | Effort flag | None; effort is encoded in the model id, and Firstmate records the independent axis without passing it. |
 | Model discovery | `devin models list`; authentication preflight is `devin auth status`. |
+| Quota | quota-axi provider `devin` and scope `included_quota` (the weekly included plan window), with the separate credits balance outside that window and the harness mapping owned by `bin/fm-quota-axi-lib.sh`. |
 | Marker | None; anchored native `devin` ancestry identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | The launch skips workspace trust for this run; the spawn owner carries the exact flags. |
 | Imported config | The worker config sets `read_config_from.claude` false, so no Claude Code hook, `CLAUDE.md` rule, `.claude/skills`, or Claude MCP entry is imported; `AGENTS.md` and `.agents/skills` still load. |
@@ -45,4 +48,4 @@ The shared slash-command settling path also handles `/quit` autocomplete.
 
 No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Devin.
 Do not launch a primary or secondmate with this adapter.
-ACP, quota-provider integration, and native Fusion subagent accounting remain separate follow-ups.
+ACP and native Fusion subagent accounting remain separate follow-ups.
