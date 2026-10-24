@@ -1575,7 +1575,9 @@ test_branch_prefix_command_is_shell_safe() {
   home="$TMP_ROOT/branch-prefix-shell-safe-home"
   marker="$TMP_ROOT/branch-prefix-shell-safe-marker"
   id='brief-branch-safe-g3'
-  prefix="\$(touch\${IFS}$marker)"
+  # Keep the literal ref valid even when TMPDIR contains a dot-prefixed component.
+  # shellcheck disable=SC2016 # Literal command substitution must remain unexpanded for the injection regression.
+  prefix='$(touch${IFS}${FM_TEST_BRANCH_MARKER})'
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix "$prefix" >/dev/null 2>&1 \
     || fail "a ref-format-valid metacharacter prefix should scaffold safely"
@@ -1585,7 +1587,7 @@ test_branch_prefix_command_is_shell_safe() {
   [ -n "$command" ] || fail "generated brief exposed no branch-creation command"
   repo="$TMP_ROOT/branch-prefix-shell-safe-repo"
   git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
-  ( cd "$repo" && eval "$command" ) || fail "generated branch-creation command did not run"
+  ( cd "$repo" && export FM_TEST_BRANCH_MARKER="$marker" && eval "$command" ) || fail "generated branch-creation command did not run"
   assert_absent "$marker" "generated branch command executed the prefix's command substitution"
   branch=$(git -C "$repo" branch --show-current)
   [ "$branch" = "$prefix$id" ] \
@@ -1667,6 +1669,80 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+# The emitted instructions are the public contract, not evidence of a filesystem sandbox.
+# Oracle: task scope and the approved authored/runtime/native/ignored-output map.
+# A Git-marked home must not turn task data into generated scratch permission.
+test_ship_storage_ownership_contract() {
+  local layout home id brief mode marker
+  for layout in git-directory git-file non-git; do
+    home="$TMP_ROOT/storage-$layout/home"
+    mkdir -p "$home/data"
+    marker="$TMP_ROOT/storage-$layout/.git"
+    case "$layout" in
+      git-directory) mkdir -p "$marker" ;;
+      git-file) printf 'gitdir: synthetic-only\n' > "$marker" ;;
+    esac
+    for mode in no-mistakes direct-PR local-only; do
+      id="storage-$mode"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null \
+        || fail "$layout/$mode: generation failed"
+      brief="$home/data/$id/brief.md"
+      assert_grep 'Authored project source, tests, and documentation' "$brief" "missing authored source ownership"
+      assert_grep "Authored private task instructions, reports, and handoffs belong in \`$home/data/$id/\`" "$brief" \
+        "missing bounded private-record ownership"
+      assert_grep 'outside every containing Git or source root' "$brief" "missing physical ancestor boundary"
+      assert_grep 'resolve its physical path and inspect all containing ancestors' "$brief" "missing check before generated writes"
+      assert_grep 'Gitignored or merely outside the app root is not enough' "$brief" "ignored task data still offered as scratch"
+      assert_grep 'actual executor-owned paths and explicit grants' "$brief" "native owner replaced by outer task data"
+      assert_grep 'Ordinary ignored build and dependency output stays with its source-copy owner' "$brief" "missing ordinary-output retention"
+      assert_grep 'Keep real HOME unchanged' "$brief" "missing real HOME boundary"
+      assert_grep 'not an exclusive filesystem sandbox or a publication secrecy filter' "$brief" "overclaimed path protection"
+      assert_grep 'existing publication owners and flags' "$brief" "path policy displaced publication controls"
+      assert_grep 'Preserve existing source, private records, proof, and unlanded work' "$brief" "missing preservation"
+      assert_no_grep 'keep proof and scratch output outside it, under' "$brief" "task data still offered for runtime output"
+      assert_grep 'Verify isolation before anything else' "$brief" "lost primary isolation"
+      assert_grep 'not the primary checkout firstmate operates from' "$brief" "lost primary refusal"
+      assert_grep "$home/state/$id.status" "$brief" "lost status authorization"
+      assert_grep "$home/state/$id.inbox" "$brief" "lost exact inbox authorization"
+      assert_grep 'Never administer infrastructure that every lane shares' "$brief" "lost infrastructure ownership"
+    done
+  done
+  pass "fm-brief.sh: ship output separates authored records, external runtime, native grants, and retained ignored output"
+}
+
+test_scout_storage_respects_explicit_task_scope() {
+  local layout home brief id ship_rule scout_rule
+  for layout in git-directory git-file non-git; do
+    home="$TMP_ROOT/storage-$layout/home"
+    id=storage-scout
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null \
+      || fail "$layout/scout: generation failed"
+    brief="$home/data/$id/brief.md"
+    # Fill the generated placeholders as a caller does, with a bounded read-only investigation.
+    perl -pi -e 's/\{TASK\}/Inspect the documented interface and report findings without changing source./g; s/\{FIRSTMATE_SPEC\}/Read-only source: no installations, edits, or commits. Write only the authored report in task data; generated CLI proof uses a physically checked external runtime root./g' "$brief"
+    assert_grep 'Read-only source: no installations, edits, or commits' "$brief" "lost explicit task scope"
+    assert_grep "only within the task's authorized scope" "$brief" "storage rule widened read-only task"
+    assert_grep 'does not gain installation, source-edit, or scratch-commit permission' "$brief" "scout grants arbitrary scratch work"
+    assert_no_grep 'install, run, edit, and make scratch commits freely' "$brief" "scout still grants arbitrary installations/commits"
+    assert_no_grep 'all of it is discarded at teardown' "$brief" "scout still authorizes unlanded discard"
+    assert_no_grep 'the only files you may write outside it are the report and the status file' "$brief" "scout denies runtime/inbox access"
+    assert_grep 'Verify isolation before anything else' "$brief" "scout missing isolation assertion"
+    assert_grep 'launched in primary checkout, not an isolated worktree' "$brief" "scout missing primary refusal"
+    assert_grep "$home/data/$id/report.md" "$brief" "lost authored report destination"
+    assert_grep "$home/state/$id.status" "$brief" "lost status access"
+    assert_grep "$home/state/$id.inbox" "$brief" "lost exact inbox access"
+    assert_grep 'acknowledge each handled message by moving it' "$brief" "lost inbox acknowledgement"
+    assert_grep 'Preserve existing source, private records, proof, and unlanded work' "$brief" "scout discards preservation"
+    ship_rule=$(awk '/^2\. Authored project/,/^3\./ { if ($0 !~ /^3\./ && $0 !~ /Leave tracked task changes/) { gsub(/storage-local-only/, "task"); print } }' "$home/data/storage-local-only/brief.md")
+    scout_rule=$(awk '/^2\. Authored project/,/^3\./ { if ($0 !~ /^3\./) { gsub(/storage-scout/, "task"); print } }' "$brief")
+    [ -n "$ship_rule" ] && [ "$ship_rule" = "$scout_rule" ] \
+      || fail "ship/scout storage contracts differ"
+  done
+  pass "fm-brief.sh: read-only scouts retain report/inbox/runtime access without scratch or discard authority"
+}
+
+test_ship_storage_ownership_contract
+test_scout_storage_respects_explicit_task_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
