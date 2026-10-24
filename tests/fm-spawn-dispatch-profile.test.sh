@@ -2059,6 +2059,31 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches() {
   pass "keep-ai-trailers is inherited so a secondmate's crew launch keeps AI trailers"
 }
 
+test_disable_worker_auto_memory_flag_reaches_only_when_present() {
+  local rec id out status launch
+  id=profile-claude-auto-memory-default-z28
+  rec=$(make_spawn_case profile-claude-auto-memory-default claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "default claude spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" 'CLAUDE_CODE_DISABLE_AUTO_MEMORY' \
+    "default claude worker launch must keep auto memory"
+
+  id=profile-claude-auto-memory-off-z29
+  rec=$(make_spawn_case profile-claude-auto-memory-off claude "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/disable-worker-auto-memory"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with disable-worker-auto-memory should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false' \
+    "opted-in claude worker launch did not disable auto memory"
+  pass "config/disable-worker-auto-memory turns Claude auto memory off for workers only when present"
+}
+
 test_claude_secondmate_launch_carries_the_attribution_policy() {
   local rec id sm out status launch
   id=profile-secondmate-attribution-z23
@@ -2793,6 +2818,7 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
+test_disable_worker_auto_memory_flag_reaches_only_when_present
 test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
