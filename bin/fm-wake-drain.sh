@@ -904,6 +904,10 @@ if [ -n "$ACK_THROUGH" ]; then
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
       exit 1
     }
+    fm_wake_commit_startup_receipts_through "$ACK_THROUGH" "$ELIGIBLE_ROWS_FILE" || {
+      echo "wake drain: startup delivery receipt could not be recorded safely" >&2
+      exit 1
+    }
   else
     awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" '
       BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
@@ -911,6 +915,10 @@ if [ -n "$ACK_THROUGH" ]; then
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
     fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
+      exit 1
+    }
+    fm_wake_commit_startup_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
+      echo "wake drain: startup delivery receipt could not be recorded safely" >&2
       exit 1
     }
   fi

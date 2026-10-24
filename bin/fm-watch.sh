@@ -3476,6 +3476,22 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Recover retained startup completion within the existing owned cycle. The
+  # entire transaction is bounded, including publication and nested wake locks;
+  # a refusal leaves its immutable result for a later ordinary poll.
+  # shellcheck source=bin/fm-startup-network-lib.sh
+  . "$SCRIPT_DIR/fm-startup-network-lib.sh"
+  startup_generation=$(fm_startup_field "$STATE/.startup-network.status" generation || true)
+  if fm_startup_result_path "$STATE" "$startup_generation" >/dev/null \
+    && ! fm_startup_result_settled "$STATE" "$startup_generation"; then
+    startup_recovery_seconds=${FM_SESSION_START_TIMEOUT:-5}
+    case "$startup_recovery_seconds" in ''|0|*[!0-9]*) startup_recovery_seconds=5 ;; esac
+    [ "$startup_recovery_seconds" -le 5 ] || startup_recovery_seconds=5
+    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      bash "$SCRIPT_DIR/fm-startup-network.sh" recover --generation "$startup_generation" \
+      "$startup_recovery_seconds" >/dev/null 2>&1 || true
+  fi
+
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true

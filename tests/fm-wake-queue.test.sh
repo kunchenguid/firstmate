@@ -10,6 +10,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -3608,6 +3610,232 @@ SH
   [ ! -s "$dir/tmux.log" ] || fail "an unreachable remote probe touched a local endpoint"
   pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
 }
+
+seed_startup_result() { # <state> <generation> [report]
+  local state=$1 generation=$2 report=${3-ACTIONABLE_RESULT}
+  mkdir -p "$state/.startup-network-results/$generation"
+  printf 'generation=%s\nstate=done\nreport_published=1\n' "$generation" > "$state/.startup-network.status"
+  printf 'generation=%s\nstate=done\n' "$generation" > "$state/.startup-network-results/$generation/status"
+  printf '%s\n' "$report" > "$state/.startup-network-results/$generation/report"
+}
+
+test_startup_receipt_requires_a_real_owned_row() {
+  local dir state rc generation
+  dir=$(make_case startup-premature-receipt)
+  state="$dir/state"
+  generation=fixture.5378.premature
+  seed_startup_result "$state" "$generation"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_startup_receipt_write "$2"
+    rc=$?
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit "$rc"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$generation" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a receipt was committed before any startup row existed"
+  assert_absent "$state/.startup-network-wake-receipts/$generation" "premature delivery evidence was persisted"
+  seed_startup_result "$state" "$generation" 'BOOTSTRAP_INFO: no actionable finding'
+  rc=0
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: clean' || rc=$?
+  [ "$rc" -ne 0 ] || fail "the queue accepted a clean startup result"
+  [ ! -s "$state/.wake-queue" ] || fail "a clean startup result appended a row"
+  pass "startup receipts require a real row and clean results cannot enqueue"
+}
+
+test_startup_interrupted_append_survives_consumer_removal() {
+  local dir state generation rc out err pid child
+  dir=$(make_case startup-interrupted-receipt)
+  state="$dir/state"
+  generation=fixture.5378.interrupted
+  seed_startup_result "$state" "$generation"
+  rc=0
+  # shellcheck disable=SC2016 # Expansion belongs to the timed fixture child.
+  fm_run_timed 3 env FM_STATE_OVERRIDE="$state" FM_STARTUP_FIXTURE_GENERATION="$generation" bash -c '
+    . "$1"
+    _fm_atomic_replace() {
+      if [ "$2" = "$STATE/.startup-network-wake-receipts/$FM_STARTUP_FIXTURE_GENERATION" ]; then
+        printf "%s\n" "${BASHPID:-$$}" > "$STATE/blocked-receipt-pid"
+        sleep 120 &
+        printf "%s\n" "$!" > "$STATE/blocked-receipt-child"
+        wait "$!"
+        return 1
+      fi
+      command mv -f -- "$1" "$2"
+    }
+    fm_wake_append check "startup-network:$FM_STARTUP_FIXTURE_GENERATION" "check: startup-network: interrupted fixture"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" >/dev/null 2>&1 || rc=$?
+  fm_timed_out "$rc" || fail "the receipt interruption did not reach its process-group bound"
+  pid=$(cat "$state/blocked-receipt-pid")
+  child=$(cat "$state/blocked-receipt-child")
+  ! kill -0 "$pid" 2>/dev/null || fail "the bounded append left its appender alive"
+  ! kill -0 "$child" 2>/dev/null || fail "the bounded append left its blocked receipt child alive"
+  [ "$(awk -F '\t' '$3 == "check" { n++ } END { print n+0 }' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the interrupted append did not retain its actual queue row"
+  assert_absent "$state/.startup-network-wake-receipts/$generation" "the interrupted receipt unexpectedly committed"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "interrupted startup drain failed"
+  ack_drain_err "$state" "$err" || fail "the consumer did not receipt the interrupted append"
+  [ ! -s "$state/.wake-queue" ] || fail "the interrupted startup row was not consumed"
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: retry' || fail "receipted retry failed"
+  [ ! -s "$state/.wake-queue" ] || fail "retry duplicated an interrupted append after consumption"
+  pass "startup append interruption remains once-only after consumer acknowledgement"
+}
+
+test_startup_receipt_failure_prevents_consumption() {
+  local dir state generation rc out err
+  dir=$(make_case startup-blocked-receipt)
+  state="$dir/state"
+  generation=fixture.5378.blocked
+  seed_startup_result "$state" "$generation"
+  mkdir -p "$state/.startup-network-wake-receipts/$generation"
+  rc=0
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: receipt failure' || rc=$?
+  [ "$rc" -ne 0 ] || fail "a blocked receipt reported successful delivery"
+  [ -s "$state/.wake-queue" ] || fail "receipt failure removed its queue row"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "blocked-receipt drain failed"
+  rc=0
+  ack_drain_err "$state" "$err" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "acknowledgement consumed a row without its receipt"
+  [ -s "$state/.wake-queue" ] || fail "failed acknowledgement lost the startup row"
+  rmdir "$state/.startup-network-wake-receipts/$generation"
+  ack_drain_err "$state" "$err" || fail "receipt failure was not recoverable"
+  [ ! -s "$state/.wake-queue" ] || fail "repaired acknowledgement did not consume the row"
+  pass "startup receipt failure leaves the owned row intact and retryable"
+}
+
+test_startup_producer_repairs_a_surviving_unreceipted_row() {
+  local dir state generation rc out err
+  dir=$(make_case startup-producer-repair)
+  state="$dir/state"
+  generation=fixture.5378.producer-repair
+  seed_startup_result "$state" "$generation"
+  mkdir -p "$state/.startup-network-wake-receipts/$generation"
+  rc=0
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: first row' || rc=$?
+  [ "$rc" -ne 0 ] || fail "blocked producer receipt reported success"
+  cp "$state/.wake-queue" "$dir/row.before"
+  cp "$state/.wake-queue.seq" "$dir/seq.before"
+  rmdir "$state/.startup-network-wake-receipts/$generation"
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: retried row' \
+    || fail "the producer did not repair its surviving row's receipt"
+  cmp -s "$state/.wake-queue" "$dir/row.before" || fail "producer repair changed or duplicated the original row"
+  cmp -s "$state/.wake-queue.seq" "$dir/seq.before" || fail "producer repair advanced the row sequence"
+  [ "$(cat "$state/.startup-network-wake-receipts/$generation")" = "$generation" ] \
+    || fail "producer repair did not commit the generation receipt"
+  out="$dir/drain.out"; err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "repaired producer row did not drain"
+  ack_drain_err "$state" "$err" || fail "repaired producer row did not acknowledge"
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: consumed retry' \
+    || fail "consumed producer-repair retry failed"
+  [ ! -s "$state/.wake-queue" ] || fail "retry duplicated the producer-repaired consumed row"
+  pass "startup producer repairs a surviving row before consumption without changing its sequence"
+}
+
+# Startup delivery tokens are an owned serialized protocol; exercise the real
+# append and acknowledgement interfaces, including retry after consumption.
+test_startup_generation_enqueue_is_once_after_consumption() {
+  local dir state generation key out err rows rc
+  dir=$(make_case startup-once)
+  state="$dir/state"
+  generation=fixture.5378.once
+  key="startup-network:$generation"
+  seed_startup_result "$state" "$generation"
+  append_wake "$state" check "$key" 'check: startup-network: fixture result' || fail "startup append refused its current generation"
+  append_wake "$state" check "$key" 'check: startup-network: fixture result' || fail "startup retry failed"
+  rows=$(awk -F '\t' -v key="$key" '$3 == "check" && $4 == key { n++ } END { print n+0 }' "$state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "startup retry created $rows rows for one generation"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "startup drain failed"
+  ack_drain_err "$state" "$err" || fail "startup acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "startup acknowledgement did not consume its row"
+  append_wake "$state" check "$key" 'check: startup-network: fixture result' || fail "consumed startup retry failed"
+  [ ! -s "$state/.wake-queue" ] || fail "consumption erased startup deduplication evidence"
+  printf 'generation=successor\nstate=done\nreport_published=1\n' > "$state/.startup-network.status"
+  rc=0
+  append_wake "$state" check "$key" 'check: startup-network: stale fixture result' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the queue accepted a superseded startup generation"
+  pass "startup generation append remains once-only after real drain and acknowledgement"
+}
+
+test_startup_concurrent_append_and_receipt_path_denials() {
+  local dir state generation pid pids='' rc key
+  dir=$(make_case startup-concurrent)
+  state="$dir/state"
+  generation=fixture.5378.concurrent
+  seed_startup_result "$state" "$generation"
+  for key in 1 2 3 4 5 6; do
+    append_wake "$state" check "startup-network:$generation" actionable &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || fail "concurrent startup append failed"; done
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" -eq 1 ] || fail "concurrent startup append duplicated its row"
+  generation=fixture.5378.symlink
+  seed_startup_result "$state" "$generation"
+  printf '%s\n' "$generation" > "$dir/foreign-receipt"
+  ln -s "$dir/foreign-receipt" "$state/.startup-network-wake-receipts/$generation"
+  rc=0
+  append_wake "$state" check "startup-network:$generation" actionable || rc=$?
+  [ "$rc" -ne 0 ] || fail "symlink receipt falsely settled delivery"
+  [ "$(cat "$dir/foreign-receipt")" = "$generation" ] || fail "receipt write mutated a foreign target"
+  dir=$(make_case startup-receipt-root-symlink)
+  state="$dir/state"
+  seed_startup_result "$state" "$generation"
+  mkdir "$dir/foreign-receipts"
+  printf '%s\n' "$generation" > "$dir/foreign-receipts/$generation"
+  ln -s "$dir/foreign-receipts" "$state/.startup-network-wake-receipts"
+  rc=0
+  append_wake "$state" check "startup-network:$generation" actionable || rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlink receipt root falsely settled delivery"
+  pass "startup append serializes concurrent producers and refuses symlink receipt evidence"
+}
+
+test_startup_consumer_receipts_follow_actor_and_cutoff() {
+  local dir state key rc
+  dir=$(make_case startup-receipt-partitions)
+  state="$dir/state"
+  # Produce actual rows, then remove only the disposable fixture receipts to
+  # model an interrupted producer. The real consumer must restore its own.
+  for key in main branch; do
+    seed_startup_result "$state" "fixture.5378.$key"
+    append_wake "$state" check "startup-network:fixture.5378.$key" actionable || fail "partition append failed"
+    rm "$state/.startup-network-wake-receipts/fixture.5378.$key"
+  done
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" startup-partition || fail "branch activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish startup-partition 2 || fail "branch grant failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch startup drain failed"
+  FM_SUPERVISION_ACTOR=branch ack_drain_err "$state" "$dir/branch.err" || fail "branch startup acknowledgement failed"
+  assert_absent "$state/.startup-network-wake-receipts/fixture.5378.main" "branch receipted a main-owned row"
+  [ -f "$state/.startup-network-wake-receipts/fixture.5378.branch" ] || fail "branch did not receipt its owned startup row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main startup drain failed"
+  seed_startup_result "$state" fixture.5378.future
+  append_wake "$state" check startup-network:fixture.5378.future actionable || fail "future startup append failed"
+  rm "$state/.startup-network-wake-receipts/fixture.5378.future"
+  ack_drain_err "$state" "$dir/main.err" || fail "main startup acknowledgement failed"
+  [ -f "$state/.startup-network-wake-receipts/fixture.5378.main" ] || fail "main did not receipt its presented row"
+  assert_absent "$state/.startup-network-wake-receipts/fixture.5378.future" "main receipted a row beyond its cutoff"
+  assert_grep fixture.5378.future "$state/.wake-queue" "main consumed the future row"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_startup_receipt_write fixture.5378.future' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unowned writer committed a receipt"
+  pass "startup consumer receipts are limited to actor-owned rows through the presented cutoff"
+}
+
+test_startup_concurrent_append_and_receipt_path_denials
+test_startup_consumer_receipts_follow_actor_and_cutoff
+
+test_startup_receipt_requires_a_real_owned_row
+test_startup_interrupted_append_survives_consumer_removal
+test_startup_receipt_failure_prevents_consumption
+test_startup_producer_repairs_a_surviving_unreceipted_row
+test_startup_generation_enqueue_is_once_after_consumption
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_lock_wait_returns_when_its_directory_is_removed

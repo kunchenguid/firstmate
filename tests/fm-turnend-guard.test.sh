@@ -16,6 +16,9 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
 
+FM_TEST_REAL_CAT=$(command -v cat)
+export FM_TEST_REAL_CAT
+
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -190,6 +193,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-startup-network-lib.sh" "$dir/bin/fm-startup-network-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
@@ -1316,6 +1320,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-startup-network-lib.sh" "$dir/bin/fm-startup-network-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
@@ -1471,12 +1476,12 @@ test_hook_claude_mode_terminal_boundary_excludes_starting_owner() {
   cat > "$fakebin/cat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "$FM_TERMINAL_ROLE_PATH" ] \
-  && [ "$(/bin/cat "$1" 2>/dev/null || true)" = terminal-check ] \
+  && [ "$("$FM_TEST_REAL_CAT" "$1" 2>/dev/null || true)" = terminal-check ] \
   && (set -C; : > "$FM_TERMINAL_ONCE") 2>/dev/null; then
   printf 'ready\n' > "$FM_TERMINAL_READY"
   IFS= read -r _ < "$FM_TERMINAL_RELEASE"
 fi
-exec /bin/cat "$@"
+exec "$FM_TEST_REAL_CAT" "$@"
 SH
   chmod +x "$fakebin/cat"
   (
@@ -2301,6 +2306,29 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
+
+test_predicate_startup_obligation_survives_receipt_until_ack() {
+  local state="$TMP_ROOT/pred-startup/state" generation=fixture.5378.handling err
+  mkdir -p "$state/.startup-network-results/$generation"
+  printf 'generation=%s\nstate=done\nreport_published=1\n' "$generation" > "$state/.startup-network.status"
+  printf 'generation=%s\nstate=done\n' "$generation" > "$state/.startup-network-results/$generation/status"
+  printf 'ACTIONABLE_RESULT\n' > "$state/.startup-network-results/$generation/report"
+  fm_supervision_needed "$state" || fail "retained startup-only completion lost supervision"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "startup-network:$2" actionable' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$generation" || fail "startup append failed"
+  fm_supervision_needed "$state" || fail "receipt settled primary handling before acknowledgement"
+  err="$state/drain.err"
+  FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || fail "startup drain failed"
+  local sequence recovery
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err")
+  recovery=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$recovery" \
+    || fail "startup acknowledgement failed"
+  if fm_supervision_needed "$state"; then fail "handled receipted startup completion kept supervision alive"; fi
+  pass "fm_supervision_needed: startup handling survives receipt and ends only after real acknowledgement"
+}
+
+test_predicate_startup_obligation_survives_receipt_until_ack
 
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon

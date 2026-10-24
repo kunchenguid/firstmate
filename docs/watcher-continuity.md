@@ -22,6 +22,9 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
+Startup-only work also keeps the shared supervision-needed predicate active through completion recovery and queued-row handling.
+The [deferred startup script's header](../bin/fm-startup-network.sh) owns generation fencing, bounded recovery, and the available-lifecycle prerequisite.
+
 | Harness | Re-arm owner |
 | --- | --- |
 | Pi | `.pi/extensions/fm-primary-pi-watch.ts` |
