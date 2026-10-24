@@ -89,7 +89,7 @@ Each launch also gets a generated role-and-home instruction overlay naming the a
 The launch boundary reads only that home copy: a symlinked, non-regular, or out-of-home copy is unsafe and is never read.
 When that copy is absent or unsafe and the parent copy `data/<id>/brief.md` is also absent, the launch refuses before any endpoint, metadata, or launch record exists, naming both checked paths and `bin/fm-home-seed.sh` as the fix; with the parent copy present, the overlay reports `CHARTER: MISSING` or `CHARTER: UNSAFE` and labels that copy as an explicitly labelled fallback.
 The overlay is written to `$DATA/<id>/secondmate-launch-brief.md` under the launching primary home's data dir (on a remote route, that host's): a record-backed harness (claude) publishes it as an operational-inbox record in the secondmate home's own state, while every other harness (pi/pi-signed/codex/...) receives that primary-home file on stdin.
-It scopes the boundary to the PRIMARY home: it names this home's own startup as the thing that takes this home's lock and arms this home's watcher, and forbids only startup against the primary home.
+It scopes the boundary to the PRIMARY home: it names this home's own startup as the thing that takes this home's lock and arms this home's watcher, and forbids only primary-home startup, never this home's own.
 [`sessionstart-nudge.md`](../../../docs/sessionstart-nudge.md#shared-wrapper-and-safety) owns the home-scoped secondmate startup posture `bin/fm-session-start.sh` runs in a marked secondmate home.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
