@@ -345,6 +345,40 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
   }
 }
 
+// This home's own bookkeeping appends to <task>.status (bin/fm-classify-lib.sh
+// "home-owned status-append ledger"): half-open byte ranges, valid only while
+// the ledger's identity matches the log. Any doubt returns no ranges, so the
+// span is judged exactly as before (the safe direction).
+function homeOwnedRanges(state: string, task: string, statusPath: string): Array<[number, number]> {
+  try {
+    const data = readFileSync(`${state}/.${task}.home-appends`, "utf8").split("\n");
+    if (data[0] !== "v1" || data[1] !== `ident=${statusFileIdentity(statusPath)}`) return [];
+    const ranges: Array<[number, number]> = [];
+    for (const row of data.slice(2)) {
+      const m = row.match(/^([0-9]+)\t([0-9]+)$/);
+      if (m && Number(m[2]) > Number(m[1])) ranges.push([Number(m[1]), Number(m[2])]);
+    }
+    return ranges;
+  } catch {
+    return [];
+  }
+}
+
+// Non-blank lines of <buf> starting at byte <base>, each with its absolute
+// [start, end) byte range including the newline.
+function linesWithOffsets(buf: Buffer, base: number): Array<{ line: string; start: number; end: number }> {
+  const out: Array<{ line: string; start: number; end: number }> = [];
+  let start = 0;
+  while (start < buf.length) {
+    const nl = buf.indexOf(10, start);
+    const end = nl < 0 ? buf.length : nl + 1;
+    const line = buf.subarray(start, nl < 0 ? buf.length : nl).toString("utf8").replace(/\r$/, "");
+    if (/\S/.test(line)) out.push({ line, start: base + start, end: base + end });
+    start = end;
+  }
+  return out;
+}
+
 // Walk the presented span in order: a resolution must close a decision that
 // was open immediately before that line, not one opened later in the span.
 // docs/pi-supervision-branch.md owns the routing contract.
@@ -355,9 +389,17 @@ function spanIsDecisionOwned(
   resolveVerb: string,
   heldVerb: string,
   reservedPrefixes: readonly string[],
+  owned: readonly boolean[] = [],
 ): boolean {
   const before = openDecisions(presented, resolveVerb, heldVerb, reservedPrefixes);
-  for (const line of span) {
+  for (const [index, line] of span.entries()) {
+    // A line this home appended itself (a --resolve-key answer) is MAIN's own
+    // act, not news for MAIN: fold it into the open set, but let only foreign
+    // lines decide ownership.
+    if (owned[index]) {
+      openDecisions([line], resolveVerb, heldVerb, reservedPrefixes, before);
+      continue;
+    }
     const verb = statusLineVerb(line);
     if (["needs-decision", "blocked", heldVerb].includes(verb)) return true;
     const resolved = verb === resolveVerb ? decisionKey(line) : null;
@@ -522,14 +564,21 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             }
             const statusLines = nonBlankLines(contents.toString("utf8"));
             const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
+            let spanLines: Array<{ line: string; start: number; end: number }> = [];
+            let ownedRanges: Array<[number, number]> = [];
+            if (spanRule) {
+              spanLines = linesWithOffsets(contents.subarray(spanOffset), spanOffset);
+              ownedRanges = homeOwnedRanges(state, task, statusPath);
+            }
             decisionOwned = spanRule
               ? spanIsDecisionOwned(
                 open,
                 nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
-                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
+                spanLines.map((entry) => entry.line),
                 resolveVerb,
                 heldVerb,
                 reservedPrefixes,
+                spanLines.map((entry) => ownedRanges.some(([a, b]) => a <= entry.start && entry.end <= b)),
               )
               : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
             staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
