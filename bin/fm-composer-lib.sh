@@ -1955,8 +1955,16 @@ EOF
 # The strings alone are not enough, because a diff, a note, or a test fixture
 # on the pane can quote all of them above a normal composer. A miss returns 1
 # and prints nothing.
+#
+# Each entry below is one recorded screen, matched by its own structure. A
+# shared "looks like a picker" heuristic is deliberately not used: the
+# footers below differ per harness, and a footer-only match would
+# reclassify ordinary screens that happen to end in the same words.
+#
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+#
+# Recorded 2026-10-20 on pi 1.3.0 (Linux): /model opens the model selector.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -1967,6 +1975,18 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  # The class is [^[:space:]] and not \S: a stock macOS awk and mawk both
+  # read \S as a literal S, so a \S pattern would never match the
+  # recorded row and the guard would be silently dead there.
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*→[ \t]+(✓[ \t]+)?[^[:space:]]/ { selected = 1 }
+    /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t\r]*$/ { footer = 1; next }
+    footer && $0 !~ /^([ \t\r]|\342[\224\225][\200-\277])*$/ { footer = 0 }
+    END { exit !(selected && footer) }
+  '; then
+    printf '%s' 'Pi model selector'
     return 0
   fi
   return 1

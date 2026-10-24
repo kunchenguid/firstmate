@@ -1626,6 +1626,137 @@ test_dialog_heading_and_footer_must_be_the_recorded_lines() {
   pass "a buried heading or a different last line is not the exit picker"
 }
 
+# The Pi model selector, as it rendered on pi 1.3.0 on 2026-10-20. The
+# rows, the provider hint, the search prompt and the footer are the recorded
+# screen; a real capture, not a reconstruction from the installed source.
+pi_model_picker_screen() {
+  printf '%s\n' \
+    'Only showing models from configured providers. Use /login to add providers.' \
+    '' \
+    '>' \
+    '' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '    gamma-model-three [localfake]' \
+    '' \
+    '  Model Name: alpha-model-one' \
+    '' \
+    '  Model catalogs refreshed.' \
+    '' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+}
+
+test_pi_model_selector_is_named_and_blocks_enter() {
+  local screen out rc sink
+  screen=$(pi_model_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded Pi model selector should match"
+  [ "$out" = 'Pi model selector' ] || fail "dialog name was '$out'"
+  # A picker must be named even when the composer classifier cannot see a
+  # cursor or a styled row, which is the case on a plain capture.
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$(cat "$sink")" = 'Pi model selector' ] \
+    || fail "classify should note the dialog, got '$(cat "$sink")'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  # The footer alone, without the selected row, is not this dialog: the
+  # strings can be quoted above a normal composer.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    'the fixture quotes: Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a quoted footer without the selected row must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  # The selected row without the recorded footer is not this dialog either.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Model catalogs refreshed.')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the rows without the recorded footer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  pass "the Pi model selector is named by its recorded rows and footer"
+}
+
+fm_test_pi_picker_state() {
+  fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN"
+}
+
+test_pi_model_selector_variants_and_quoted_content() {
+  local current border screen out rc sink enters
+  for current in '✓ ' ''; do
+    for border in '' '────────────────────────────────────────'; do
+      screen=$(printf '%s\n' '────────────────────────────────────────' \
+        "→ ${current}alpha-model-one [localfake]" \
+        '    beta-model-two [localfake]' \
+        '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+        "$border")
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+        || fail "Pi selector variant did not match: current='$current', border='$border'"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ "$(cat "$sink")" = 'Pi model selector' ] || fail "retry must report Pi selector"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = unknown ] && [ "$enters" -eq 1 ] \
+        || fail "Pi selector must stop retry: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+      screen=$(printf '%s\n' "$screen" '╭──────────────╮' '│ > next steer │' '╰──────────────╯')
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quoted Pi selector must not match"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ ! -s "$sink" ] || fail "quoted Pi selector must not be reported"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = pending ] && [ "$enters" -eq 3 ] \
+        || fail "quoted Pi selector must retain retries: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+    done
+  done
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "Pi selector marker and border variants block retries; quoted content does not"
+}
+
+test_dialog_matcher_is_portable_awk() {
+  # The matcher runs under whatever awk the host has. A stock macOS awk
+  # and mawk both read a \S as a literal S, so a \S pattern would never
+  # match the recorded row and the guard would be silently dead on
+  # those hosts while passing on a GNU-awk host.
+  #
+  # Every awk the host provides is exercised: the case must match under
+  # all of them, and a pattern the host's awk cannot read must not be
+  # what the matcher uses. This asserts the BEHAVIOUR under each awk,
+  # never the bytes of the matcher's source.
+  local screen out rc awk_bin
+  screen=$(pi_model_picker_screen)
+  for awk_bin in $(compgen -c awk 2>/dev/null | sort -u) \
+    $(compgen -c mawk 2>/dev/null | sort -u) \
+    $(compgen -c gawk 2>/dev/null | sort -u) \
+    $(compgen -c nawk 2>/dev/null | sort -u); do
+    command -v "$awk_bin" >/dev/null 2>&1 || continue
+    local dir
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX")
+    ln -sf "$(command -v "$awk_bin")" "$dir/awk"
+    out=$(PATH="$dir:$PATH" bash -c '
+      . "$1"
+      fm_composer_blocking_dialog "$2"
+    ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null); rc=$?
+    rm -rf "$dir"
+    [ "$rc" -eq 0 ] \
+      || fail "the recorded Pi model selector did not match under $awk_bin (rc $rc)"
+    [ "$out" = 'Pi model selector' ] \
+      || fail "under $awk_bin the dialog name was '$out'"
+  done
+  pass "the recorded Pi model selector matches under every awk on this host"
+}
+
 test_dialog_note_skips_the_match_when_no_sink_is_set() {
   local screen out rc before after
   screen=$(exit_picker_screen)
@@ -1680,5 +1811,9 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
+test_pi_model_selector_is_named_and_blocks_enter
+test_dialog_matcher_is_portable_awk
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+
+test_pi_model_selector_variants_and_quoted_content
