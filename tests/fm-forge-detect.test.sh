@@ -42,6 +42,34 @@ test_refs_for_push_refspec_proposes_gerrit() {
   pass "a refs/for/ push refspec proposes forge=gerrit and names the evidence"
 }
 
+test_gitlab_com_origin_proposes_gitlab() {
+  local clone out label remote
+  while IFS='|' read -r label remote; do
+    [ -n "$label" ] || continue
+    clone=$(new_clone "gitlab-$label")
+    git -C "$clone" remote add origin "$remote"
+    out=$("$DETECT" "$clone") || fail "detection failed on a gitlab.com clone ($label)"
+    case "$out" in
+      'forge=gitlab evidence='*'gitlab.com'*) ;;
+      *) fail "a gitlab.com $label did not propose gitlab with its evidence: $out" ;;
+    esac
+  done <<'ROWS'
+https-origin|https://gitlab.com/example-group/example-project.git
+ssh-origin|ssh://git@gitlab.com/example-group/example-project.git
+scp-like-origin|git@gitlab.com:example-group/example-project.git
+ROWS
+  pass "a gitlab.com origin proposes forge=gitlab and names the evidence"
+}
+
+test_self_hosted_gitlab_proposes_none() {
+  local clone out
+  clone=$(new_clone self-hosted)
+  git -C "$clone" remote add origin https://gitlab.example.com/group/project.git
+  out=$("$DETECT" "$clone") || fail "detection failed on a self-hosted GitLab clone"
+  [ "$out" = forge=none ] || fail "a self-hosted GitLab origin proposed a forge: $out"
+  pass "a self-hosted GitLab origin proposes forge=none, because any host can serve anything"
+}
+
 test_other_remotes_propose_none() {
   local clone out
   clone=$(new_clone github)
@@ -89,6 +117,8 @@ test_not_a_clone_is_an_error() {
 
 test_ssh_port_29418_proposes_gerrit
 test_refs_for_push_refspec_proposes_gerrit
+test_gitlab_com_origin_proposes_gitlab
+test_self_hosted_gitlab_proposes_none
 test_other_remotes_propose_none
 test_detection_writes_nothing
 test_not_a_clone_is_an_error

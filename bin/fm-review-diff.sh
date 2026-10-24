@@ -6,16 +6,17 @@
 # the default branch, and local-only projects against the local default branch.
 # A task whose meta records base_branch= (bin/fm-spawn.sh) compares against
 # origin/<base_branch> instead of the default branch.
-# When state/<id>.meta records pr= as a GitHub pull-request URL, a Forgejo
-# pull-request URL (addressed /pulls/<n> but served by the instance as the
-# same refs/pull/<n>/head ref), or a bare number for an open PR, the compare
-# side is ALWAYS a freshly fetched
-# refs/pull/<n>/head by default so review stays current after no-mistakes fix
-# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
+# When state/<id>.meta records pr= as a GitHub pull-request URL, a GitLab
+# merge request URL, a Forgejo pull-request URL (addressed /pulls/<n> but
+# served by the instance as the same refs/pull/<n>/head ref), or a bare
+# number for an open PR, the compare side is ALWAYS a freshly fetched
+# refs/pull/<n>/head (GitHub and Forgejo) or refs/merge-requests/<iid>/head
+# (GitLab) by default so review stays current after no-mistakes fix rounds
+# push to the PR. A recorded pr_head= is only a fallback when fetch fails
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.
-# A GitLab merge request and a Gerrit change expose no comparable ref and record
-# no pr_head, so a task recording one always takes that warning path;
+# A Gerrit change exposes no comparable ref and records no pr_head, so a task
+# recording one always takes that warning path;
 # docs/architecture.md owns that fallback. Without pr=, compare the task's
 # immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
 # created before that field existed), or the worktree's checked-out branch when
@@ -98,6 +99,10 @@ pr_number_from_target() {
   local target=$1 n
   case "$target" in
     '' ) return 1 ;;
+    *"/-/merge_requests/"*)
+      n=${target##*/-/merge_requests/}
+      n=${n%%[!0-9]*}
+      ;;
     *"/pull/"*)
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
@@ -115,14 +120,17 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-fetch_pull_head() {
-  local n=$1 resolved
+# One fetch for one compare tip: <remote-ref> is fetched into the private
+# <local-ref> and resolved to a commit. Callers pick the ref pair from the
+# recorded pr= shape; bin/fm-pr-lib.sh fm_pr_url_parse owns what makes each
+# URL shape canonical.
+fetch_review_head() {  # <remote-ref> <local-ref>
+  local remote_ref=$1 local_ref=$2 resolved
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
-    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  git -C "$WT" fetch --quiet origin "+$remote_ref:$local_ref" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "$local_ref^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
@@ -131,7 +139,15 @@ resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 n resolved
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
+    case "$pr_url" in
+      *"/-/merge_requests/"*)
+        resolved=$(fetch_review_head "refs/merge-requests/$n/head" "refs/fm-review/mr/$n/head") || resolved=
+        ;;
+      *)
+        resolved=$(fetch_review_head "refs/pull/$n/head" "refs/fm-review/pull/$n/head") || resolved=
+        ;;
+    esac
+    if [ -n "$resolved" ]; then
       printf '%s' "$resolved"
       return 0
     fi

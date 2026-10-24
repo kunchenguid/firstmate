@@ -215,11 +215,24 @@ exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # With FM_TEST_GLAB_JSON=1 a `mr view ... -F json` call instead answers with
+  # the two fields of the merge request's JSON view that arming reads, its draft
+  # state and its head; the default keeps the field output every older case pins.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+case " $* " in
+  *" -F json"*)
+    if [ "${FM_TEST_GLAB_JSON:-0}" = 1 ]; then
+      printf '{"work_in_progress":%s,"sha":"%s"}\n' \
+        "${FM_TEST_GLAB_MR_WIP:-false}" \
+        "${FM_TEST_GLAB_MR_SHA:-1111111111111111111111111111111111111111}"
+      exit 0
+    fi
+    ;;
+esac
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
@@ -692,6 +705,84 @@ test_draft_pull_request_is_not_armed() {
 # task in the mate's own home, which arms its own watch, so arming one here is
 # refused before anything is recorded - a poll on the mate would otherwise mark
 # the merge notified and queue the mate itself for teardown as landed work.
+test_gitlab_arm_records_head_and_refuses_draft() {
+  local dir head url rc out nojq bindir entry name
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+
+  # Arming reads one JSON view of the merge request: the head it reports is
+  # recorded as pr_head exactly as the GitHub arm records gh's headRefOid.
+  dir=$(make_case gitlab-arm-head)
+  write_task_meta "$dir"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_TEST_GLAB_JSON=1 FM_TEST_GLAB_MR_SHA=$head run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "arming a readable GitLab merge request refused"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" \
+    || fail "arming did not record the GitLab merge request URL"
+  grep -qxF "pr_head=$head" "$dir/home/state/task-a.meta" \
+    || fail "arming did not record the merge request head the forge reported"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "a readable merge request was not armed"
+
+  # A work_in_progress draft refuses exactly like the GitHub draft refusal.
+  dir=$(make_case gitlab-arm-draft)
+  write_task_meta "$dir"
+  cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+  set +e
+  FM_TEST_GLAB_JSON=1 FM_TEST_GLAB_MR_WIP=true run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a draft merge request"
+  grep -qi 'draft' "$dir/stderr" || fail "the merge request refusal did not name the draft state"
+  grep -qF "$url" "$dir/stderr" || fail "the merge request refusal did not name the merge request"
+  cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" \
+    || fail "a refused draft changed the task metadata"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "a refused draft armed a poll"
+
+  # An unreadable draft state, answered as field output instead of JSON, does
+  # not refuse and records no head, matching how the head read is optional.
+  dir=$(make_case gitlab-arm-unreadable)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "an unreadable merge request state blocked arming"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" \
+    || fail "an unreadable state was not recorded"
+  ! grep -q '^pr_head=' "$dir/home/state/task-a.meta" \
+    || fail "a non-JSON forge answer produced a recorded head"
+
+  # Without jq that view cannot be read, so the watch arms as it did before
+  # the view existed: no draft check, even on a draft, and no recorded head.
+  dir=$(make_case gitlab-arm-nojq)
+  write_task_meta "$dir"
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  set +e
+  out=$(FM_TEST_GLAB_JSON=1 FM_TEST_GLAB_MR_WIP=true FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$nojq" "$PR_CHECK" task-a "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "arming a GitLab watch refused with jq absent: $out"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" \
+    || fail "arming with jq absent did not record the GitLab merge request URL"
+  ! grep -q '^pr_head=' "$dir/home/state/task-a.meta" \
+    || fail "arming with jq absent recorded a head it could not read"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "arming with jq absent did not arm the poll"
+
+  pass "arming a GitLab merge request records its head and refuses a draft, and arms without either when jq is absent"
+}
+
 test_secondmate_record_refuses_a_pr_watch() {
   local dir rc
   dir=$(make_case secondmate-refuses-watch)
@@ -3630,6 +3721,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_gitlab_arm_records_head_and_refuses_draft
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration

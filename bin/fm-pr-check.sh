@@ -9,12 +9,14 @@
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
 # instance.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
-# state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
-# would wait for an event that cannot occur while nobody is asked to act.
-# Mark the pull request ready for review, then arm again; a lane that keeps a
-# draft on purpose declares a wait instead of reporting done. An unreadable
-# draft state does not refuse, matching how the head read below is optional.
+# A GitHub pull request or GitLab merge request the forge reports as a draft is
+# refused, naming the draft state and recording and arming nothing: a draft
+# cannot be merged, so a poll armed on it would wait for an event that cannot
+# occur while nobody is asked to act.
+# Mark the pull request or merge request ready for review, then arm again; a
+# lane that keeps a draft on purpose declares a wait instead of reporting done.
+# An unreadable draft state does not refuse, matching how the head read below is
+# optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
@@ -122,6 +124,11 @@ fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
+# GitHub reads isDraft from gh's own field selector; GitLab reads
+# work_in_progress out of the same one JSON view of the merge request that the
+# head below is taken from, so one forge read serves both. Both reads need jq
+# and are skipped without it, so a host with no jq arms with no draft check.
+GITLAB_JSON=
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
   if [ "$(fm_pr_json_draft_state "$DRAFT_JSON")" = true ]; then
@@ -129,29 +136,47 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     exit 1
   fi
 fi
+if [ "$PROVIDER" = gitlab ] && command -v jq >/dev/null 2>&1; then
+  GITLAB_JSON=$(GITLAB_HOST="$HOST" glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json 2>/dev/null || true)
+  if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+    && [ "$(fm_pr_json_draft_state "$GITLAB_JSON" work_in_progress)" = true ]; then
+    echo "error: $URL is a draft merge request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+    exit 1
+  fi
+fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, and
-# tea's single-PR view ignores field selection entirely, so neither a GitLab
-# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
-# Gerrit revision names one patch set, every amend or rebase is a new patch set,
-# and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
-# so a recorded revision would silently become the reviewed content. Both
-# consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh fetches a pull request head from the remote when none is
-# recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
-# same reason, and treats a recorded value that disagrees as stale rather than
-# authoritative.
+# head commit as a selectable field, and glab exposes it inside the merge
+# request's JSON, so a GitLab arm with jq on PATH reads that one view once for
+# the draft refusal above and the head here, and one without jq records no
+# pr_head. tea's single-PR view
+# ignores field selection entirely, so a Forgejo task records no pr_head here,
+# and neither does a Gerrit task: a Gerrit revision names one patch set, every
+# amend or rebase is a new patch set, and bin/fm-review-diff.sh has no Gerrit
+# path to resolve a current head with, so a recorded revision would silently
+# become the reviewed content. The consumers treat a recorded value as a
+# fallback, never authoritative:
+# bin/fm-teardown.sh reads a merge request head from the forge at teardown
+# rather than from metadata and falls back to its provider-agnostic content
+# check, and bin/fm-review-diff.sh fetches the pull-request or merge-request
+# head from the remote first, falls back to a recorded value only when that
+# fetch fails, and otherwise diffs the local branch, which is the current
+# content. bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at
+# merge time for the same reason, and treats a recorded value that disagrees as
+# stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+if [ "$PROVIDER" = gitlab ] && [ -n "$GITLAB_JSON" ]; then
+  if REMOTE_HEAD=$(printf '%s' "$GITLAB_JSON" | jq -r \
+      'if type == "object" and (.sha | type) == "string" then .sha else "" end' 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

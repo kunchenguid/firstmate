@@ -3826,7 +3826,8 @@ if [ "$KIND" = ship ]; then
   # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
   # and is never inferred here from a remote, host, or protocol. A brief that
   # disagrees with it would tell the worker to open a pull request a Gerrit
-  # server does not have, or to publish a change to a forge that is not Gerrit.
+  # server does not have, to publish a change to a forge that is not Gerrit, or
+  # to open a GitLab merge request through GitHub-only instructions.
   if [ "$BRIEF_FORGE" != "$STANDING_FORGE" ]; then
     if [ "$STANDING_FORGE" = none ]; then
       forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
