@@ -150,8 +150,12 @@ fi
 # authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+# gh resolves a full PR URL from any directory, so a task whose metadata names
+# no existing worktree (a record-only task) still records the forge's head; a
+# recorded worktree is used when it exists.
+if [ "$PROVIDER" = github ] && command -v gh >/dev/null 2>&1; then
+  GH_DIR=$WT; [ -n "$GH_DIR" ] && [ -d "$GH_DIR" ] || GH_DIR=/
+  if REMOTE_HEAD=$(cd "$GH_DIR" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
