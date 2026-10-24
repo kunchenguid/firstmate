@@ -1544,6 +1544,36 @@ test_identityless_ledger_never_defers() {
   pass "auto-arm: an identityless arming ledger never defers the gate (reused-pid loophole closed)"
 }
 
+test_unknown_legacy_identity_never_authorizes_replacement() {
+  local dir out status outcome
+  dir=$(make_primary_dir "$TMP_ROOT/v2-unknown-legacy-identity")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  for outcome in arming rewake; do
+    printf 'epoch=464 owner_pid=%s outcome=%s updated_at=1\nWed Oct 21 08:00:00 2026 bash legacy-owner\n' \
+      "$$" "$outcome" > "$dir/state/.claude-autoarm-epoch"
+    cp "$dir/state/.claude-autoarm-epoch" "$dir/before"
+    touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    expect_code 0 "$status" "a live unverifiable legacy identity must leave replacement to explicit recovery"
+    cmp -s "$dir/before" "$dir/state/.claude-autoarm-epoch" \
+      || fail "unknown legacy $outcome claim was replaced"
+    assert_absent "$dir/state/arm-ran" "unknown legacy $outcome claim authorized a new arm"
+  done
+  record_autoarm_owner "$dir" "$$"
+  printf 'Wed Oct 21 08:00:00 2026 bash legacy-owner\n' \
+    > "$dir/state/.claude-autoarm.lock/pid-identity"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_release_abandoned "$STATE" 1
+  ' _ "$dir"; then
+    fail "unknown legacy lock identity authorized abandonment recovery"
+  fi
+  assert_present "$dir/state/.claude-autoarm.lock/pid" "unknown legacy owner lock was removed"
+  rm -rf "$dir/state/.claude-autoarm.lock"
+  pass "unknown legacy identities preserve both generation claims and lock-holding owners"
+}
+
 # A superseded owner must not start or attach another watcher: when its claim
 # is superseded between arm attempts, the retry boundary goes silent instead
 # of invoking the arm again.
@@ -2028,6 +2058,7 @@ test_resumed_same_id_session_supersedes_the_orphan
 test_claim_without_numeric_session_lock_is_not_open
 test_recycled_bridge_claim_stays_open_on_session_id_match
 test_identityless_ledger_never_defers
+test_unknown_legacy_identity_never_authorizes_replacement
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly

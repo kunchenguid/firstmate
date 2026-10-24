@@ -32,7 +32,9 @@ test_concurrent_append_and_drain() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" &
+  # This case tests losslessness, not the presentation deadline. Forty lock
+  # contenders can exhaust the ordinary interactive wait on a loaded host.
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=300 "$DRAIN" > "$out1" &
   pids="$pids $!"
   for pid in $pids; do
     wait "$pid" || fail "concurrent append/drain subprocess failed"
@@ -1834,6 +1836,30 @@ test_main_reclaims_a_grant_whose_branch_owner_exited() {
   [ ! -s "$state/.wake-queue" ] || fail "reclaimed branch row remained queued"
 
   pass "main reclaims rows granted to an exited branch owner"
+}
+
+test_unknown_legacy_branch_owner_preserves_grant_and_queue() {
+  local dir state actor
+  dir=$(make_case unknown-legacy-branch-owner)
+  state="$dir/state"
+  append_wake "$state" signal task-a.status "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" legacy-owner || fail "grant activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish legacy-owner 1 || fail "grant publication failed"
+  awk 'NR == 3 { print "Wed Oct 21 08:00:00 2026 bash legacy-owner"; next } { print }' \
+    "$state/.branch-eligible-owner" > "$dir/legacy-owner"
+  cp "$dir/legacy-owner" "$state/.branch-eligible-owner"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  cp "$state/.branch-eligible-rows" "$dir/grant-before"
+  for actor in main branch; do
+    if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR="$actor" "$DRAIN" > "$dir/out" 2> "$dir/err"; then
+      fail "$actor drain accepted an unverifiable branch owner"
+    fi
+    grep -q 'owner identity is unverifiable' "$dir/err" || fail "drain hid legacy identity uncertainty"
+    cmp -s "$dir/queue-before" "$state/.wake-queue" || fail "$actor drain changed the queue"
+    cmp -s "$dir/grant-before" "$state/.branch-eligible-rows" || fail "$actor drain reclaimed the grant"
+    cmp -s "$dir/legacy-owner" "$state/.branch-eligible-owner" || fail "$actor drain rewrote legacy identity"
+  done
+  pass "unknown legacy branch ownership authorizes neither grant reclamation nor row consumption"
 }
 
 # A branch-actor drain or ack without a snapshot is a wiring bug, never
@@ -3654,6 +3680,7 @@ test_branch_grant_refuses_rows_already_claimed_by_main
 test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
+test_unknown_legacy_branch_owner_preserves_grant_and_queue
 test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst

@@ -29,6 +29,8 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - live watcher identity is unverifiable; preserving lock
+#                                                        - ownership cannot be proved
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
@@ -84,7 +86,10 @@
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
 # as any watcher close does; prints "watcher: stopped pid=<N>" or
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
-# the stop.
+# the stop or its live identity could not be verified.
+# Every mode refuses an unverifiable live watcher claim before signalling,
+# clearing its lock, or launching a replacement. The compatibility limit is
+# owned by docs/configuration.md "Machine-wide source ownership".
 #
 # An arm whose ground is removed under it exits instead of polling on: when its
 # own script file, the state directory, or an FM_HOME that existed at start no
@@ -560,6 +565,16 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
+lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+if fm_pid_alive "$lock_pid"; then
+  owner_result=0
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME" || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    echo "watcher: FAILED - live watcher identity is unverifiable; preserving lock" >&2
+    exit 1
+  fi
+fi
+
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
@@ -584,6 +599,9 @@ stop_home_watcher() {
       i=$((i + 1))
     done
     STOPPED_PID=$lock_pid
+  elif [ "$?" -eq 2 ]; then
+    echo "watcher: FAILED - live watcher identity is unverifiable; preserving lock" >&2
+    return 1
   elif ! clear_stale_recorded_watcher_lock; then
     echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
     return 1

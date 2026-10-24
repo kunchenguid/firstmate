@@ -70,14 +70,19 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
 }
 
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
-  local dir state out status lock
+  local dir state out status lock identity
   dir=$(make_supercase afk-start-stale-lock-reused-pid)
   state="$dir/state"
   lock="$state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
   printf '%s\n' "$$" > "$lock/pid"
-  printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
+  identity=$(fm_test_pid_identity "$$") || fail "could not identify the fixture daemon pid"
+  case "$identity" in
+    *cmdline-hex=*) identity="${identity}00" ;;
+    *) identity="$identity different-command" ;;
+  esac
+  printf '%s\n' "$identity" > "$lock/pid-identity"
 
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?

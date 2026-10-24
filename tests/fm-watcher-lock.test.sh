@@ -602,7 +602,9 @@ test_lock_stale_steal_single_winner_under_concurrency() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
+  # Stock macOS Bash can interrupt the FIFO open when a losing child exits.
+  # Keep waiting for the winner instead of joining it before releasing it.
+  until IFS= read -r winner < "$gate"; do :; done
   [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
     [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
@@ -764,8 +766,80 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+test_watch_unverifiable_live_owner_is_preserved() {
+  local dir state fakebin live kind representation mode owner rc
+  for kind in legacy malformed empty missing unavailable; do
+    for representation in directory symlink; do
+      dir=$(make_case "unverifiable-$kind-$representation")
+      state="$dir/state"
+      fakebin="$dir/fakebin"
+      if [ "$representation" = symlink ]; then
+        mkdir "$dir/owner"
+        ln -s ../owner "$state/.watch.lock"
+      else
+        mkdir "$state/.watch.lock"
+      fi
+      owner="$state/.watch.lock"
+      sleep 300 &
+      live=$!
+      printf '%s\n' "$live" > "$owner/pid"
+      printf '%s\n' "$dir" > "$owner/fm-home"
+      printf '%s\n' "$WATCH" > "$owner/watcher-path"
+      case "$kind" in
+        legacy) TZ=America/Argentina/Buenos_Aires LC_ALL=C COLUMNS=10000 ps -p "$live" -o lstart= -o command= > "$owner/pid-identity" ;;
+        malformed) printf 'unknown identity\n' > "$owner/pid-identity" ;;
+        empty) : > "$owner/pid-identity" ;;
+        missing) ;;
+        unavailable)
+          bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" > "$owner/pid-identity"
+          mkdir -p "$dir/proc/$live"
+          printf 'invalid stat record' > "$dir/proc/$live/stat"
+          printf 'disposable command' > "$dir/proc/$live/cmdline"
+          ;;
+      esac
+      touch -t 200001010000 "$state/.last-watcher-beat"
+      printf '1\t1\tcheck\tdisposable\tretained feedback\n' > "$state/.wake-queue"
+      cp -RL "$owner" "$dir/expected-owner"
+      cp "$state/.wake-queue" "$dir/expected-queue"
+      for mode in arm restart stop take-over handling-delivered; do
+        case "$mode" in
+          arm) set -- ;;
+          take-over) set -- --take-over "$$" ;;
+          handling-delivered) set -- --handling-delivered disposable-generation --watcher-pid "$live" ;;
+          *) set -- "--$mode" ;;
+        esac
+        rc=0
+        PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$dir/proc" \
+          FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" "$@" > "$dir/$mode.out" 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || fail "$mode accepted an unverifiable $kind owner"
+        grep -F 'identity is unverifiable' "$dir/$mode.out" >/dev/null \
+          || fail "$mode did not explain ownership uncertainty: $(cat "$dir/$mode.out")"
+        is_live_non_zombie "$live" || fail "$mode signalled the unverifiable holder"
+        diff -r "$dir/expected-owner" "$owner" || fail "$mode changed the live claim"
+        cmp "$dir/expected-queue" "$state/.wake-queue" || fail "$mode changed retained feedback"
+        [ ! -e "$state/.watcher-down" ] || fail "$mode reclaimed the unverifiable claim"
+        if [ "$representation" = symlink ]; then
+          [ -L "$owner" ] || fail "$mode replaced the owner symlink"
+        fi
+      done
+      rc=0
+      PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$dir/proc" \
+        FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=3 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/evict.out" 2>&1 || rc=$?
+      [ "$rc" -ne 0 ] || fail "stalled eviction accepted an unverifiable holder"
+      grep -F 'heartbeat is stale' "$dir/evict.out" >/dev/null \
+        || fail "stalled eviction did not reach the ownership guard: $(cat "$dir/evict.out")"
+      is_live_non_zombie "$live" || fail "stalled eviction signalled the unverifiable holder"
+      diff -r "$dir/expected-owner" "$owner" || fail "stalled eviction changed the claim"
+      kill "$live" 2>/dev/null || true
+      wait "$live" 2>/dev/null || true
+      pass "watcher ($kind, $representation): all arm actions preserve the unverifiable live claim"
+    done
+  done
+}
+
 test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
+  local dir state fakebin out live pid i identity
   dir=$(make_case restart-reused-pid)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -776,7 +850,12 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") || fail "could not identify the disposable holder"
+  case "$identity" in
+    *cmdline-hex=*) identity="${identity}00" ;;
+    *) identity="$identity different-command" ;;
+  esac
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
@@ -1474,6 +1553,86 @@ write_fake_proc_identity() {
   printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
 }
 
+test_ps_pid_identity_timezone_and_real_mismatches() {
+  local dir
+  dir=$(make_case pid-timezone)
+  python3 - "$LIB" "$dir" <<'PY' || fail "timezone-stable process identity regression"
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+lib, root = sys.argv[1:]
+env = dict(os.environ, FM_HOME=root, FM_STATE_OVERRIDE=root + '/state',
+           FM_PROC_ROOT_OVERRIDE=root + '/no-proc', LC_ALL='C', COLUMNS='10000')
+zones = ['America/Argentina/Buenos_Aires', 'Europe/Berlin']
+owned = []
+
+def ps(pid, field, zone):
+    return subprocess.check_output(['ps', '-p', str(pid), '-o', field + '='],
+                                   env=dict(env, TZ=zone), text=True).strip()
+
+def call(function, *args, zone=zones[0]):
+    return subprocess.run(['bash', '-c', '. "$1"; fn=$2; shift 2; "$fn" "$@"',
+                           '_', lib, function, *map(str, args)], env=dict(env, TZ=zone),
+                          capture_output=True, text=True)
+
+def identity(pid, zone=zones[0]):
+    result = call('fm_pid_identity', pid, zone=zone)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+try:
+    child = subprocess.Popen(['sleep', '60'], env=env)
+    owned.append(child)
+    if subprocess.run(['ps', '-p', str(child.pid), '-o', 'lstart='], env=env,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        # MSYS uses its compatible /proc instead of unsupported ps -o fields.
+        if sys.platform == 'darwin':
+            raise AssertionError('macOS ps lstart public interface unavailable')
+        print('skip - timezone ps fallback: ps -o lstart= unsupported; /proc coverage is separate')
+    else:
+        raw = [ps(child.pid, 'lstart', zone) for zone in zones]
+        assert raw[0] != raw[1], ('timezone counterfactual was vacuous', raw)
+        assert ps(child.pid, 'command', zones[0]) == ps(child.pid, 'command', zones[1])
+        first, second = [identity(child.pid, zone) for zone in zones]
+        assert first.startswith('ps-utc-v1='), first
+        assert first == second, (first, second)
+        assert call('fm_pid_identity_compare', first, second).returncode == 0
+        for unknown in [first[len('ps-utc-v1='):], '', 'unknown', 'ps-utc-v1=malformed']:
+            assert call('fm_pid_identity_compare', first, unknown).returncode == 2, unknown
+        # A later real start with the same command still mismatches.
+        time.sleep(1.1)
+        later = subprocess.Popen(['sleep', '60'], env=env)
+        owned.append(later)
+        assert ps(child.pid, 'command', zones[0]) == ps(later.pid, 'command', zones[0])
+        assert call('fm_pid_identity_compare', identity(later.pid), first).returncode == 1
+        # exec changes the actual command on one PID while keeping its start.
+        trigger = Path(root) / 'exec-trigger'
+        changing = subprocess.Popen(['bash', '-c',
+            'while [ ! -f "$1" ]; do sleep 0.05; done; exec sleep 61', '_', str(trigger)], env=env)
+        owned.append(changing)
+        before = identity(changing.pid)
+        start = ps(changing.pid, 'lstart', zones[0])
+        trigger.touch()
+        for _ in range(100):
+            if ps(changing.pid, 'command', zones[0]).split()[-2:] == ['sleep', '61']:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError('disposable command did not exec')
+        assert ps(changing.pid, 'lstart', zones[0]) == start
+        assert call('fm_pid_identity_compare', identity(changing.pid), before).returncode == 1
+finally:
+    for process in owned:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+PY
+  pass "ps identity is timezone-stable and refuses real start/command changes and legacy identities"
+}
+
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   local dir state proc_root pid identity_key before after_time_jump after_pid_reuse
   dir=$(make_case proc-pid-identity)
@@ -1502,6 +1661,20 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
     || fail "could not read reused fake /proc pid identity"
   [ "$after_pid_reuse" != "$before" ] || fail "/proc process identity missed changed starttime for reused pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity_compare "$2" "$3"
+    [ "$?" -eq 1 ]
+  ' _ "$LIB" "$after_pid_reuse" "$before" || fail "stable /proc start mismatch was not proven"
+  write_fake_proc_identity "$proc_root" "$pid" 987654
+  printf 'different-command\0' > "$proc_root/$pid/cmdline"
+  after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read changed /proc command"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity_compare "$2" "$3"
+    [ "$?" -eq 1 ]
+  ' _ "$LIB" "$after_pid_reuse" "$before" || fail "stable /proc command mismatch was not proven"
   pass "/proc process identity detects pid reuse"
 }
 
@@ -1572,6 +1745,7 @@ test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_pid_identity_is_terminal_width_invariant
+test_ps_pid_identity_timezone_and_real_mismatches
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
@@ -1592,6 +1766,7 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_watch_unverifiable_live_owner_is_preserved
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

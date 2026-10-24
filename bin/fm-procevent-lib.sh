@@ -727,8 +727,8 @@ fm_procevent_pid_state() {
     return 1
   fi
   if actual=$(fm_pid_identity "$pid" 2>/dev/null); then
-    [ "$actual" = "$expected" ] && return 0
-    return 1
+    fm_pid_identity_compare "$actual" "$expected"
+    return $?
   fi
   fm_pid_alive "$pid" || { fm_procevent_group_alive "$pid" && return 3; return 1; }
   return 2

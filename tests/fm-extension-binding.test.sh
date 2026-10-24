@@ -444,11 +444,13 @@ run_extension_section_lanes() {
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  # Concurrent end-to-end lanes need startup headroom over their serial cost.
+  # Deadline probes below still supply their own short, explicit windows.
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-120}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] || return 64
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
@@ -1118,6 +1120,19 @@ assert_not_contains "$classification" "wrong-built-in-owner" "a later same-name 
 assert_absent "$H_FLOW/state/procevent/flow-source.source" "terminal external source stayed registered"
 FM_HOME="$H_FLOW" "$PROCEVENT" retire flow-source --if-owner "$owner_one" >/dev/null
 pass "one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end"
+flow_tz_index=0
+for flow_tz in America/Argentina/Buenos_Aires Europe/Berlin; do
+  flow_tz_index=$((flow_tz_index + 1))
+  flow_tz_home="$HOMES/flow-timezone-$flow_tz_index"; new_home "$flow_tz_home"
+  bind_package "$flow_tz_home" "$P_FLOW" ext-flow >/dev/null
+  TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" register-extension ext-flow timezone-flow --config-ref good >/dev/null
+  TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" start timezone-flow > "$TMP_ROOT/timezone-flow-$flow_tz_index.out" \
+    || fail "Bash/JavaScript claim authorization failed under $flow_tz"
+  flow_tz_result=$(first_result "$flow_tz_home" timezone-flow) || fail "timezone flow produced no captured result"
+  flow_tz_classification=$(TZ="$flow_tz" FM_HOME="$flow_tz_home" "$PROCEVENT" classify "$flow_tz_result")
+  assert_contains "$flow_tz_classification" external-ready "timezone flow lost the exact captured extension owner"
+done
+pass "Bash/JavaScript capture authorization agrees under Buenos Aires and Berlin timezones"
 FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow crash-silent-source --config-ref crash-silent >/dev/null
 FM_HOME="$H_FLOW" "$PROCEVENT" start crash-silent-source > "$TMP_ROOT/crash-silent-start.out" 2>&1 &
 crash_silent_start_pid=$!
@@ -1937,7 +1952,7 @@ mkdir -p "$H_REMOTE_CONTROL/data" "$H_REMOTE" "$REMOTE_ROOT/bin"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 for remote_file in \
   fm-extension.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
-  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
+  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-task-inbox-lib.sh fm-backend.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
   fm-remote-job-worker.sh; do
   cp "$ROOT/bin/$remote_file" "$REMOTE_ROOT/bin/$remote_file"
 done

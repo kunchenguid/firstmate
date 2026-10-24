@@ -352,8 +352,8 @@ Pinning that signal to the lock holder's pid-identity recorded at claim time is 
 An orphan fails both signals: it no longer descends from the replacement's lock pid, and its recorded lock-holder identity is the dead session's.
 An entry from a build before these fields existed records neither and falls back to descent alone.
 
-Anything else lets the next Stop-owned firing take the next generation and arm.
-That covers a finished outcome, a dead or identity-mismatched owner, an owner orphaned by its session's exit, a stuck owner, an identityless entry, or no entry.
+A live claim with a recorded but unverifiable identity is not open, but it prevents the next Stop-owned firing from replacing its generation under the [process-identity compatibility contract](configuration.md#process-to-event-sources-stateprocevent).
+Otherwise the next firing can take the next generation for a finished outcome, a dead owner, a proven stable-identity mismatch, an owner orphaned by its session's exit, a stuck owner, an identityless entry, or no entry.
 Taking a newer generation is the reclaim, and a steady-state predecessor is never signalled or revoked.
 
 No mutex is held across arming or output.
@@ -387,7 +387,7 @@ Two bounded residuals are accepted intent, each costing at most one extra contin
 
 A legacy build's lock-holding claim (recognizable by its `autoarm` role file) still defers or reclaims under the legacy abandonment proof.
 A live identity-verified stuck legacy owner is retired via TERM before its lock is removed, and an unverified pid is never signalled.
-An upgrade mid-session can therefore neither double-arm nor deadlock, and a failed reclaim re-blocks rather than allowing a blind stop.
+A failed reclaim re-blocks rather than allowing a blind stop; the [process-identity compatibility contract](configuration.md#process-to-event-sources-stateprocevent) bounds recovery of older identity records.
 
 #### Failure progression and block budget
 
