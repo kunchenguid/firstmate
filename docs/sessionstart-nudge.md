@@ -182,6 +182,7 @@ So a truncated digest does neither of these:
 
 - They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 - They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
+- A marked secondmate home stays eligible in both wrappers, because `bin/fm-session-start.sh` runs the same home-scoped startup there as in any other home: it takes that home's own session lock, reconciles that home's own durable records from disk, and runs only sweeps scoped to that effective home, so none of them reads or mutates the primary home. A secondmate restart therefore never skips the one command that takes its lock or aligns its books from disk. Only the marker-derived `SECOND MATE STARTUP` heading and its own-startup wording differ from a primary's `SESSION START`, never the set of sweeps. The launch overlay `bin/fm-spawn.sh` generates states the same boundary.
 
 A fresh clone has no gitignored state directory yet.
 When the root otherwise qualifies as primary, the run wrapper creates the state directory before the unchanged scope check, so the first session takes the helm without a manual `mkdir state`.
@@ -432,6 +433,12 @@ It uses a TERM-resistant digest that exceeds its budget and proves that the dige
 - Names the incomplete stage and every stage it never reached.
 - Leaves no completion proof.
 - Exits 0.
+
+### Secondmate restart test
+
+`tests/fm-session-start.test.sh` also proves a marked secondmate home's restart cycle against its own disk state.
+Across a restart that leaves a dead lock owner behind, it reads that home's lock holder, its `.session-start-complete` pid and mtime, the drain of a wake queued while it was down, the replay of the pending backlog close the dead session left, and `fm-lock.sh status`.
+It also proves the primary home's `state/` and `data/` path inventory is unchanged by that startup.
 
 ### Native startup and Ahoy tests
 
