@@ -81,6 +81,21 @@ SH
   printf '%s\n' "$fb"
 }
 
+add_decimal_comma_awk() {
+  cat > "$1/awk" <<'SH'
+#!/usr/bin/env bash
+set -u
+out=$("${REAL_AWK_FOR_TEST:?}" "$@")
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+if [ "${LC_ALL:-}" != C ] && [[ "$out" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  out=${out/./,}
+fi
+printf '%s' "$out"
+SH
+  chmod +x "$1/awk"
+}
+
 # herdr_submit_shift: move every canned response <by> slots later, so a
 # fixture numbered from the literal send can take new calls in front of it.
 herdr_submit_shift() {  # <resp-dir> <by>
@@ -4375,9 +4390,11 @@ test_wait_for_working_samples_budget_endpoint_without_final_sleep() {
   pass "fm_backend_herdr_wait_for_working: spreads six samples across the full budget endpoint without a final trailing sleep"
 }
 
-test_send_text_submit_applies_herdr_minimum_confirm_budget() {
-  local dir log resp fb out sleep_log sleeps
-  dir="$TMP_ROOT/submit-min-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
+# assert_submit_min_confirm_budget <case> [decimal-comma]: a 0.4s caller budget is expanded to the
+# 0.6s herdr floor and spread as five 0.1200s sleeps, regardless of the caller's locale.
+assert_submit_min_confirm_budget() {
+  local dir log resp fb out sleep_log sleeps decimal_fixture=${2:-} real_awk
+  dir="$TMP_ROOT/$1"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
@@ -4387,13 +4404,24 @@ test_send_text_submit_applies_herdr_minimum_confirm_budget() {
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_POLLS=6 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
+  real_awk=$(command -v awk)
+  [ "$decimal_fixture" != decimal-comma ] || add_decimal_comma_awk "$fb"
+  out=$( PATH="$fb:$PATH" REAL_AWK_FOR_TEST="$real_awk" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_POLLS=6 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
     bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.4 0' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should catch a slow-but-valid transition inside the herdr minimum budget, got '$out'"
   sleeps=$(grep -c '^sleep:0.1200$' "$sleep_log")
   [ "$sleeps" -eq 5 ] || fail "a 0.4s caller budget should be expanded to five 0.1200s sleeps across the 0.6s herdr floor, got $sleeps; log: $(cat "$sleep_log")"
   [ "$(grep -c '^sleep:0.0800$' "$sleep_log")" -eq 0 ] || fail "send_text_submit used the caller's too-short 0.4s budget instead of the herdr floor: $(cat "$sleep_log")"
+}
+
+test_send_text_submit_applies_herdr_minimum_confirm_budget() {
+  assert_submit_min_confirm_budget submit-min-budget
   pass "fm_backend_herdr_send_text_submit: applies the herdr minimum confirmation budget before polling agent-state"
+}
+
+test_send_text_submit_confirm_budget_ignores_decimal_comma_locale() {
+  LC_ALL='' LANG=C assert_submit_min_confirm_budget submit-min-budget-de decimal-comma
+  pass "fm_backend_herdr_send_text_submit: the herdr minimum confirmation budget holds under a decimal-comma locale"
 }
 
 test_wait_for_working_returns_idle_when_never_busy_but_readable() {
@@ -6114,6 +6142,7 @@ test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep
 test_send_text_submit_applies_herdr_minimum_confirm_budget
+test_send_text_submit_confirm_budget_ignores_decimal_comma_locale
 test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
