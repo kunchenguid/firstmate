@@ -225,6 +225,45 @@ test_launch_exports_task_inbox() {
   pass "ship and secondmate launches export their absolute steering inbox as FM_TASK_INBOX"
 }
 
+# Execute the delivered launch: the scratch-root variable must reach the agent,
+# not just the spawn process, including compound commands and env -i launches.
+test_launch_exports_task_temp_root() {
+  local setting kind rec id sm out status seen want
+  for setting in absent enabled; do
+    for kind in ship scout secondmate raw; do
+      id="temp-$kind-$setting-a1"
+      rec=$(make_case "$id" codex "$id")
+      read_case "$rec"
+      [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
+      case "$kind" in
+        ship) out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off) ;;
+        scout) out=$(run_case_spawn "$id" "$PROJ_DIR" --scout) ;;
+        raw) out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 'true && codex') ;;
+        secondmate)
+          sm="$CASE_DIR/secondmate-home"
+          mkdir -p "$sm/bin" "$sm/data"
+          printf '# Firstmate\n' > "$sm/AGENTS.md"
+          printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+          printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+          printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
+          git -C "$sm" init -q -b main
+          out=$(run_case_spawn "$id" "$sm" --secondmate)
+          ;;
+      esac
+      status=$?
+      expect_code 0 "$status" "$kind temp-root spawn with allowlist=$setting should succeed: $out"
+      install_env_probe "$FAKEBIN_DIR" codex FM_TASK_TMP
+      seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
+        || fail "$kind: the emitted launch failed to run"
+      want=$(awk -F= '$1 == "tasktmp" {print substr($0, 9)}' "$HOME_DIR/state/$id.meta")
+      [ -d "$want" ] || fail "$kind: task temp root does not exist"
+      assert_equals "$want" "$seen" \
+        "$kind with allowlist=$setting must receive its task temp root as FM_TASK_TMP"
+    done
+  done
+  pass "every launch exports its task temp root, including compound commands and cleared environments"
+}
+
 # --- relaunch ---------------------------------------------------------------
 #
 # bin/fm-control.sh relaunch stops the agent and rebuilds the launch through
@@ -291,7 +330,7 @@ SH
 }
 
 test_relaunch_rebuilds_the_switch() {
-  local setting dir home proj wt id out status seen launch preamble
+  local setting dir home proj wt id out status seen launch preamble want
   for setting in absent enabled; do
     id="relaunch-$setting-a1"
     dir="$TMP_ROOT/relaunch-$setting"
@@ -344,6 +383,13 @@ $launch") \
       || fail "relaunch with allowlist=$setting: the replacement launch failed to run"
     assert_equals 1 "$seen" \
       "a relaunched agent with allowlist=$setting must start with the compact adviser disabled, exactly as a fresh spawn does"
+    install_env_probe "$dir/fakebin" codex FM_TASK_TMP
+    seen=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" TERM=xterm \
+      TMUX=synthetic-pane FM_TASK_TMP=wrong-root /bin/sh -c "$preamble
+$launch") || fail "relaunch with allowlist=$setting: temp-root probe failed"
+    want=$(awk -F= '$1 == "tasktmp" {print substr($0, 9)}' "$home/state/$id.meta")
+    [ -d "$want" ] || fail "relaunch: task temp root does not exist"
+    assert_equals "$want" "$seen" "relaunch must replace an ambient FM_TASK_TMP with this task's root"
   done
   pass "relaunch rebuilds the compact-adviser switch for the replacement agent in both allowlist postures"
 }
@@ -387,5 +433,6 @@ test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
 test_launch_exports_task_inbox
+test_launch_exports_task_temp_root
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
