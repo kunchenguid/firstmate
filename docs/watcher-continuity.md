@@ -42,7 +42,7 @@ Each adapter:
 - Preserves one child or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
-Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+Pi and omp treat an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -136,16 +136,16 @@ After an actionable Pi, omp, or OpenCode child close, the adapter:
 
 1. Waits for the predecessor process to close.
 2. Starts and verifies one singleton successor.
-3. Confirms the handling handoff before scheduling the follow-up: Pi confirms against the restoration's own recovery token, while omp and OpenCode confirm against the current successor.
+3. Confirms the handling handoff before scheduling the follow-up: Pi and omp confirm against the restoration's own recovery token, while OpenCode confirms against the current successor.
 4. Delivers the original wake.
 
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.
 
-If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
+If the handoff confirmation fails, the adapter retries it once: Pi and omp against that same token, OpenCode against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
-Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
-On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
+Pi and omp retire the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while OpenCode retires the current successor whenever the restoration's watcher pid is no longer alive.
+On Pi and omp a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
 The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
 docs/configuration.md owns the knob's default and accepted values.
