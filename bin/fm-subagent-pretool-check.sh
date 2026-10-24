@@ -133,16 +133,69 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Return 0 unless raw JSON payload $1 provably names no delegation-shaped tool,
+# so the common case allows before any jq fork. The normalized tool name keeps
+# only ASCII letters and digits, case-folded. In the raw text each of those is a
+# literal byte unless \u-escaped, which delegates, and every byte normalization
+# drops is a non-alphanumeric byte or one of the escapes \b \f \n \r \t.
+# So any stem in the normalized name appears in the raw payload with only such
+# gaps between its letters, and a payload with no such appearance cannot deny.
+# A control byte also delegates, because jq may re-render raw text it accepts
+# with inserted escapes, and so does a payload over 64 KiB, where one jq fork
+# costs less than this scan.
+raw_may_name_delegation() {  # <payload>
+  local LC_ALL=C stem re="" alt gap='([^A-Za-z0-9]|\\[bfnrt])*' i rc
+  [ "${#1}" -le 65536 ] || return 0
+  case "$1" in
+    *'\u'*|*[[:cntrl:]]*) return 0 ;;
+  esac
+  for stem in $DELEGATION_STEMS; do
+    alt=${stem:0:1}
+    for ((i = 1; i < ${#stem}; i++)); do
+      alt="$alt$gap${stem:i:1}"
+    done
+    re="${re:+$re|}$alt"
+  done
+  shopt -s nocasematch
+  [[ $1 =~ $re ]]; rc=$?
+  shopt -u nocasematch
+  return "$rc"
+}
+
 if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
+  raw_may_name_delegation "$PAYLOAD" || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  TOOL=$(jq -r '(.tool_name // .toolName // empty)' 2>/dev/null <<<"$PAYLOAD") || exit 0
 fi
 
 [ -n "$TOOL" ] || exit 0
 
-LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+# Set MATCHED to the delegation stem tool name $1 matches, if any, after
+# normalizing it byte-wise to ASCII letters and digits and folding ASCII case,
+# with no fork. Each byte is kept or dropped on its own, so a multibyte
+# character only ever loses bytes, never becomes a letter.
+MATCHED=""
+match_delegation_stem() {  # <tool-name>
+  local LC_ALL=C normalized allowed stem
+  normalized=${1//[^A-Za-z0-9]/}
+  shopt -s nocasematch
+  for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
+    if [[ $normalized == "$allowed" ]]; then
+      shopt -u nocasematch
+      return 0
+    fi
+  done
+  for stem in $DELEGATION_STEMS; do
+    if [[ $normalized == *"$stem"* ]]; then
+      shopt -u nocasematch
+      MATCHED=$stem
+      return 0
+    fi
+  done
+  shopt -u nocasematch
+}
 
 # An MCP tool belongs to an external integration, not to the harness's own
 # delegation surface, and its name is chosen by that server. Never classify one
@@ -152,16 +205,7 @@ case "$TOOL" in
   mcp__*) exit 0 ;;
 esac
 
-for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
-  [ "$NORMALIZED" != "$allowed" ] || exit 0
-done
-
-MATCHED=""
-for stem in $DELEGATION_STEMS; do
-  case "$NORMALIZED" in
-    *"$stem"*) MATCHED=$stem; break ;;
-  esac
-done
+match_delegation_stem "$TOOL"
 [ -n "$MATCHED" ] || exit 0
 
 # The single deliberate escape hatch. It is an environment variable rather than
