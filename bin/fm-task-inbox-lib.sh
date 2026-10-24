@@ -371,8 +371,13 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+# A codex composer that holds only mouse reports and an idle agent gets one
+# C-c (never a second: it can exit some harnesses), then a fresh read. One idle
+# check runs right before the key; the residual window is the time between that
+# read and the key. Only an empty read lets the doorbell type; anything else is
+# the ordinary skip.
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -380,6 +385,14 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+  if [ "$cstate" = pending ] && [ "$harness" = codex ] \
+     && fm_task_inbox_composer_is_mouse_noise "$backend" "$target" "$label"; then
+    fm_task_inbox_agent_idle "$backend" "$target" codex "$label" || return 1
+    fm_backend_send_key "$backend" "$target" C-c "$label" >/dev/null 2>&1 || return 2
+    sleep 0.3
+    cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+    [ "$cstate" = empty ] || return 1
+  fi
   case "$cstate" in
     pending)
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
@@ -412,6 +425,29 @@ fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
   cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
+}
+
+# Whether the agent is provably not mid-turn: native state is not busy and the
+# rendered footer shows no <harness> busy line. One fresh read each time.
+fm_task_inbox_agent_idle() {  # <backend> <target> <harness> [expected-label]
+  [ "$(fm_backend_busy_state "$1" "$2" 2>/dev/null)" != busy ] \
+    && ! fm_task_inbox_screen_busy "$1" "$2" "$3" "${4:-}"
+}
+
+# Whether the rendered footer shows <harness> mid-turn; C-c would interrupt it.
+fm_task_inbox_screen_busy() {  # <backend> <target> <harness> [expected-label]
+  local cap
+  fm_backend_source "$1" || return 0
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 0
+  printf '%s\n' "$cap" | fm_busy_lines_match "$3"
+}
+
+# Whether the composer holds only terminal mouse reports (codex adapter).
+fm_task_inbox_composer_is_mouse_noise() {  # <backend> <target> [expected-label]
+  local cap
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
+  fm_composer_codex_mouse_noise_only "$cap"
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

@@ -1086,7 +1086,7 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" "$TARGET_HARNESS" || ring_rc=$?
     ring_retry="the watcher will re-ring"
     if [ -n "$FIRE_AND_FORGET_ID" ] \
       && [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wait-no-turns" ]; then

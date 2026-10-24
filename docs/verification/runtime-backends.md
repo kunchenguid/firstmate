@@ -1071,6 +1071,15 @@ not ok - mid-turn absolute cwd rail read 'pending', want empty
 
 The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a full-pane capture of this version answers `unknown` because the status rail below the composer floor row is contiguous non-blank content the selector refuses to outrank, which is the strict posture and not this defect; and very narrow panes where the cwd rail starts in the left half of the row defer the same way.
 
+## Codex mouse-report noise adapter
+
+The named adapter is `fm_composer_codex_mouse_noise_only` in `bin/fm-composer-lib.sh`, used by `fm_task_inbox_ring` for a `codex` target only.
+It is pinned to the state recorded in issue #7296: codex-cli 0.162.1 under herdr 0.9.4 on macOS arm64, where an idle Codex composer held repeated SGR mouse wheel reports such as `[<65;192;52M`.
+In that state one `C-c` cleared the composer and the next doorbell reached the worker; `Escape` did not clear it.
+The clear was reproduced live on a real Codex pane in Herdr (codex-cli 0.163.0, herdr 0.9.5, macOS arm64), and all 3 scenarios passed: noise alone gets one `C-c` then the doorbell, mixed text or a busy agent gets no `C-c`, and a wrapped report is detected.
+The portable regressions in `tests/fm-composer-lib.test.sh` and `tests/fm-send-inbox.test.sh` use captured composer shapes: noise alone, including a report wrapped across composer rows, is cleared once and then rung, noise mixed with any other character is never cleared, noise that returns or an unreadable composer after the clear keeps the doorbell skipped with no second `C-c`, and a worker that turns busy before the key is not interrupted.
+A live check on a real Codex pane is owed again after any Codex or Herdr upgrade past codex-cli 0.163.0 and herdr 0.9.5, the live-checked versions; until it runs, the pattern is fixture-verified only for those later versions.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).

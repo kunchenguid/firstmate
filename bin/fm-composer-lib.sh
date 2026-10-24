@@ -1947,6 +1947,20 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# fm_composer_codex_mouse_noise_only: succeed when the selected composer holds
+# SGR mouse reports (`[<b;x;yM|m`, ESC optional as rendered) and nothing else.
+# Codex only: recorded on codex-cli 0.162.1 under herdr 0.9.4, where wheel
+# reports landed in an idle composer (issue 7296). Any other character, even
+# one, keeps the caller on the `pending` verdict.
+fm_composer_codex_mouse_noise_only() {  # <screen>
+  local held rest
+  held=$(fm_composer_extract_selected_content styled=0 "$1") || return 1
+  [ -n "$held" ] || return 1
+  rest=$(printf '%s' "$held" | LC_ALL=C tr -d '\033[:space:]' \
+    | LC_ALL=C sed -E 's/\[<[0-9]+;[0-9]+;[0-9]+[Mm]//g')
+  [ -z "$rest" ]
+}
+
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
 # Prints the name and returns 0 only for the recorded structure of one dialog:
 # the heading on its own line, then its selected row alone on a row, with the
