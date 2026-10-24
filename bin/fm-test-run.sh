@@ -70,19 +70,29 @@
 #                   script paths, which use the bounded automatic scheduler.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 1500s automatically, above the current
-#                   slowest CI hint with margin; exceeding it becomes a bounded
-#                   failure, not proof of a hang. --max-wall-ms is checked
-#                   after the run and so cannot catch a hang on its own.
-#                   External interruption cleanup is outside this runner's
-#                   guarantee; configured per-script bounds remain authoritative.
+#                   record it as exit 124. Every mode applies 3600s when the
+#                   flag is absent (see DEFAULT_PER_SCRIPT_TIMEOUT_SECS for why);
+#                   0 disables it. Exceeding it is a bounded failure, not proof
+#                   of a hang. A tripped bound also terminates every process
+#                   the script left behind in a session or process group of
+#                   its own (see "Fixture process sweep" below).
+#   --run-timeout-secs N
+#                   terminate the whole invocation - selection, scheduling,
+#                   every script, and finalization - once it has run N
+#                   seconds, sweep every process its scripts left behind, and
+#                   exit 124 with a message naming the scripts or phase it was
+#                   in. Every invocation applies 21600s when the flag is absent
+#                   (see DEFAULT_RUN_TIMEOUT_SECS for why); 0 disables it.
 #   --max-wall-ms N fail the run when its measured invocation wall clock exceeds
 #                   N milliseconds, including an empty selection. It is
 #                   evaluated after selection and suite execution and cannot
-#                   interrupt a running script; per-script hangs are
-#                   bounded by --per-script-timeout-secs. Pathological output
-#                   sinks that block finalization are explicitly out of scope.
+#                   interrupt a running script, so a run past it still
+#                   reports its complete results; the two timeout flags above
+#                   are what stop a hang. Pathological output sinks that block
+#                   finalization are explicitly out of scope.
+#                   An INT, TERM, or HUP that interrupts a bounded run is
+#                   forwarded to it and then sweeps every process its scripts
+#                   left behind, as a tripped bound does; a SIGKILL cannot.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -107,9 +117,12 @@
 # Exit status is non-zero if any selected script exits non-zero, a configured
 # --fail-on-gate-skip token appears, the measured duration exceeds
 # --max-wall-ms, timing-artifact finalization fails, or a concurrent worker
-# violates its isolation check. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate; each one
-# is logged with its reason and recorded in the timing artifact.
+# violates its isolation check. A script that trips --per-script-timeout-secs
+# fails the run like any other failing script and is named again on stderr
+# after the summary; a tripped --run-timeout-secs exits 124. Other gate skips
+# (first meaningful line matching ^skip:) remain successful and are counted as
+# skipped_gate; each one is logged with its reason and recorded in the timing
+# artifact.
 #
 # expected_gate_skip classes name why a family is allowed to skip: herdr (the
 # pinned real-Herdr lane), optional-binary (a backend whose binary is optional),
@@ -119,6 +132,20 @@
 # Every selected script runs isolated from the host's global and system Git
 # configuration, including one that sources no test helper of its own;
 # tests/git-config-helpers.sh owns that contract and its limits.
+#
+# Fixture process sweep: fm_run_timed (bin/fm-timeout-lib.sh) signals the
+# script's process group, which misses any descendant that moved into a session
+# or group of its own - a private tmux server and its panes, a setsid helper, a
+# vendor CLI's tool command. Each script therefore runs with a marker unique to
+# this run and script appended to FM_TEST_RUN_FIXTURE_MARKS, which those
+# descendants inherit wherever they move, and a tripped bound TERMs, then KILLs,
+# every process still carrying that marker. A descendant that scrubs its own
+# environment escapes the sweep. The sweep reads /proc where it exists and
+# `ps -E` otherwise. Only a tripped bound or an interrupted run sweeps: a script
+# that exits on its own owns its cleanup. A bound runs each script in a process
+# group of its own, out of reach of a terminal's Ctrl-C, so whenever either
+# bound is on the run executes under a supervising parent that forwards an INT,
+# TERM, or HUP to it, waits for it to stop, and then sweeps the whole run.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -166,6 +193,15 @@ RUN_STARTED_MS=$(now_ms)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# The supervising parent re-runs this script with these two set (see
+# run_under_supervisor). Read and unset them at once, so a nested
+# runner started by one of the scripts below never mistakes itself for the
+# bounded inner run.
+ORIG_ARGS=("$@")
+RUN_MARK=${FM_TEST_RUN_MARK:-}
+RUN_PHASE_FILE=${FM_TEST_RUN_PHASE_FILE:-}
+unset FM_TEST_RUN_MARK FM_TEST_RUN_PHASE_FILE
+
 MODE=
 LIST_ONLY=0
 LIST_SCHEDULED=0
@@ -185,18 +221,35 @@ JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
-PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# script is tests/fm-watch-triage.test.sh at about 1075s under CI load (the hint
-# table below records that loaded figure). 1500s keeps every measured script
-# under the bound with roughly 1.4x headroom over the slowest loaded measurement,
-# and it stays under the 30-minute normal CI tier so a wedged script fails here,
-# with its output, before the job cap
-# cancels the lane. It is a guard, not a speed control: a HUNG script becomes a
-# bounded failure instead of an unbounded suite, which is the shape that
-# silently outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=1500
+PER_SCRIPT_TIMEOUT_SECS=default
+RUN_TIMEOUT_SECS=default
+# Per-script bound applied in every mode when --per-script-timeout-secs is
+# absent, derived from measured healthy runtimes with margin rather than
+# picked. The slowest measured script on CI is tests/fm-supervision-host.test.sh:
+# it stayed under 1236s across eleven green main runs, but on one slow shared
+# runner it tripped the former 1500s bound at 1501188 ms while still running.
+# 3600s leaves roughly 2.9x headroom over the slowest healthy measurement and
+# 2.4x over that slow-runner trip point, so a genuinely slow suite finishes
+# while a hung one still becomes a bounded failure. The whole-run bound below
+# accommodates six such scripts. The 30-minute normal-tier CI job cap remains
+# the outer backstop for a shard that never finishes; the per-script bound ends
+# a single hung fixture with its process sweep whenever the per-script bound,
+# not that cap, is the binding limit. It is a guard, not a speed control: a HUNG
+# script becomes a bounded failure instead of an unbounded suite, which is the
+# shape that silently outruns a caller's invocation budget. A prompt-submitting
+# live guard run against a slow vendor is the case most likely to need a larger
+# explicit value.
+DEFAULT_PER_SCRIPT_TIMEOUT_SECS=3600
+# Whole-invocation bound applied when --run-timeout-secs is absent. The serial
+# and parallel hint tables below sum to about 167 minutes, and the scripts they
+# leave unhinted add about 20 more at the default weight, so a complete serial
+# --all under CI load is a little over three hours. 21600s (six hours) leaves
+# about 2x headroom over that, so only a run that stops making progress -
+# rather than a slow but healthy complete suite - reaches it.
+DEFAULT_RUN_TIMEOUT_SECS=21600
+# How long the whole-run bound waits after its TERM before KILLing what is
+# left, so the runner's own exit is not cut short by a busy host.
+RUN_TIMEOUT_GRACE_SECS=10
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -928,7 +981,7 @@ portable_serial_unhinted() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-unhinted.XXXXXX") || return 1
   portable_serial_weight_hints | awk 'NF { print $1 }' | LC_ALL=C sort -u >"$tmp/hinted"
   list_portable_serial | LC_ALL=C sort -u >"$tmp/serial"
-  comm -23 "$tmp/serial" "$tmp/hinted"
+  LC_ALL=C comm -23 "$tmp/serial" "$tmp/hinted"
   rm -rf "$tmp"
 }
 
@@ -1096,8 +1149,8 @@ run_coverage_guard() {
     return 1
   fi
   cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort -u >"$tmp/shards_union"
-  missing=$(comm -23 "$tmp/proven" "$tmp/shards_union" || true)
-  extra=$(comm -13 "$tmp/proven" "$tmp/shards_union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/proven" "$tmp/shards_union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/proven" "$tmp/shards_union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable shards must equal the proven-isolated set"
     [ -z "$missing" ] || { log "missing from shards:"; printf '%s\n' "$missing" >&2; }
@@ -1143,8 +1196,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/serial_shards_raw" >"$tmp/serial_shards"
-  missing=$(comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
-  extra=$(comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable serial shards must equal the portable serial lane"
     [ -z "$missing" ] || { log "missing from serial shards:"; printf '%s\n' "$missing" >&2; }
@@ -1156,7 +1209,7 @@ run_coverage_guard() {
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
     b=${pair#*:}
-    comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
+    LC_ALL=C comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
     if [ -s "$tmp/overlap" ]; then
       log "coverage guard: overlap between $a and $b:"
       cat "$tmp/overlap" >&2
@@ -1174,8 +1227,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/union_raw" >"$tmp/union"
-  missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
-  extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/all" "$tmp/union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
@@ -1212,7 +1265,7 @@ run_coverage_guard() {
     "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
     if ! cmp -s "$tmp/proven" "$tmp/proof_list"; then
       log "coverage guard: embedded proven-isolated set diverges from bin/fm-test-isolation-proof.sh --list"
-      comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
+      LC_ALL=C comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
       rm -rf "$tmp"
       return 1
     fi
@@ -2063,6 +2116,15 @@ while [ "$#" -gt 0 ]; do
       PER_SCRIPT_TIMEOUT_SECS=${1#--per-script-timeout-secs=}
       shift
       ;;
+    --run-timeout-secs)
+      [ "$#" -gt 1 ] || die "--run-timeout-secs requires a whole number of seconds"
+      RUN_TIMEOUT_SECS=$2
+      shift 2
+      ;;
+    --run-timeout-secs=*)
+      RUN_TIMEOUT_SECS=${1#--run-timeout-secs=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -2150,6 +2212,155 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$PER_SCRIPT_TIMEOUT_SECS" != default ] || PER_SCRIPT_TIMEOUT_SECS=$DEFAULT_PER_SCRIPT_TIMEOUT_SECS
+[ "$RUN_TIMEOUT_SECS" != default ] || RUN_TIMEOUT_SECS=$DEFAULT_RUN_TIMEOUT_SECS
+for bound_flag in per-script-timeout-secs:"$PER_SCRIPT_TIMEOUT_SECS" run-timeout-secs:"$RUN_TIMEOUT_SECS"; do
+  case "${bound_flag#*:}" in
+    ''|*[!0-9]*) die "--${bound_flag%%:*} requires a whole number of seconds (0 disables)" ;;
+  esac
+done
+# Strip leading zeros so the values are plain decimal for arithmetic and output.
+PER_SCRIPT_TIMEOUT_SECS=$((10#$PER_SCRIPT_TIMEOUT_SECS))
+RUN_TIMEOUT_SECS=$((10#$RUN_TIMEOUT_SECS))
+if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] || [ "$RUN_TIMEOUT_SECS" -gt 0 ]; then
+  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || die "timeout helper not found: bin/fm-timeout-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+fi
+
+# Print the pid of every process whose environment carries <needle>, from
+# /proc where the host has it and from `ps -E` (macOS) otherwise. The ps output
+# is matched in this shell, so no matcher process lists itself.
+fixture_mark_pids() {  # <needle>
+  local needle=$1 environ_file pid rest
+  if [ -r /proc/self/environ ]; then
+    grep -alsF -- "$needle" /proc/[0-9]*/environ 2>/dev/null | while IFS= read -r environ_file; do
+      pid=${environ_file#/proc/}
+      printf '%s\n' "${pid%/environ}"
+    done
+  else
+    ps -A -E -ww -o pid= -o command= 2>/dev/null | while read -r pid rest; do
+      case "$rest" in *"$needle"*) printf '%s\n' "$pid" ;; esac
+    done
+  fi
+}
+
+# Terminate every process carrying <needle> (see "Fixture process sweep" in the
+# header): TERM first so a fixture helper can exit cleanly, KILL from the third
+# pass on, re-scanning each pass for anything forked meanwhile. Prints how many
+# distinct processes it signalled.
+sweep_fixture_processes() {  # <needle>
+  local needle=$1 pass pids pid sig seen=' ' count=0
+  for pass in 1 2 3 4 5 6; do
+    pids=$(fixture_mark_pids "$needle")
+    [ -n "$pids" ] || break
+    sig=TERM
+    [ "$pass" -lt 3 ] || sig=KILL
+    for pid in $pids; do
+      [ "$pid" != "$$" ] || continue
+      kill -s "$sig" "$pid" 2>/dev/null || continue
+      case "$seen" in
+        *" $pid "*) ;;
+        *)
+          seen="$seen$pid "
+          count=$((count + 1))
+          ;;
+      esac
+    done
+    sleep 1
+  done
+  printf '%s\n' "$count"
+}
+
+# Append one progress record for the supervising parent's report: "phase <name>",
+# "fixture-begin <script>", "fixture-end <script>", or "run-tmp <dir>".
+note_run_phase() {
+  [ -n "$RUN_PHASE_FILE" ] || return 0
+  printf '%s\n' "$*" >>"$RUN_PHASE_FILE" 2>/dev/null || true
+}
+
+# Re-run this invocation as a child of this unbounded parent, under
+# fm_exec_timed when --run-timeout-secs is on, which TERMs the child's process
+# group at the deadline and KILLs it after the grace. The bound covers
+# selection, scheduling, every script, and finalization alike. The child runs
+# in the background so an INT, TERM, or HUP reaches this parent's trap at once;
+# the trap forwards it to the child. When the bound trips, the parent sweeps
+# every process the run's scripts left behind, names where the run was from the
+# child's progress records, and exits 124. When the run is interrupted, or its
+# child dies by a signal, the parent waits for the child, sweeps the same way,
+# and exits with the signal's status. A child that finishes on its own exits
+# with its own status.
+run_under_supervisor() {
+  local phase_file rc began elapsed where in_flight last_phase run_tmp swept child sig
+  RUN_MARK="fmtr-$$-$(now_ms)"
+  phase_file=$(mktemp "${TMPDIR:-/tmp}/fm-test-run-phase.XXXXXX") \
+    || die "could not create the whole-run progress file"
+  began=$(date +%s)
+  (
+    # A background child starts with INT and QUIT ignored; restore them so the
+    # run and its scripts answer a terminal's Ctrl-C as a foreground run does.
+    trap - INT QUIT
+    export FM_TEST_RUN_MARK="$RUN_MARK" FM_TEST_RUN_PHASE_FILE="$phase_file"
+    if [ "$RUN_TIMEOUT_SECS" -gt 0 ]; then
+      fm_exec_timed "$RUN_TIMEOUT_SECS" "$RUN_TIMEOUT_GRACE_SECS" \
+        bash "$ROOT/bin/fm-test-run.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
+    fi
+    exec bash "$ROOT/bin/fm-test-run.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
+  ) <&0 &
+  child=$!
+  SUPERVISED_CHILD=$child
+  INTERRUPTED_BY=
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064
+    trap "INTERRUPTED_BY=$sig; kill -s $sig \"\$SUPERVISED_CHILD\" 2>/dev/null || true" "$sig"
+  done
+  set +e
+  wait "$child"
+  rc=$?
+  while kill -0 "$child" 2>/dev/null; do
+    wait "$child"
+    rc=$?
+  done
+  set -e
+  trap - INT TERM HUP
+  elapsed=$(($(date +%s) - began))
+  if [ -n "$INTERRUPTED_BY" ]; then
+    rc=$((128 + $(kill -l "$INTERRUPTED_BY")))
+  elif [ "$RUN_TIMEOUT_SECS" -gt 0 ] && fm_timed_out "$rc" && [ "$elapsed" -ge "$RUN_TIMEOUT_SECS" ]; then
+    rc=124
+  elif [ "$rc" -le 128 ]; then
+    rm -f "$phase_file"
+    exit "$rc"
+  fi
+  in_flight=$(awk '
+    $1 == "fixture-begin" { open[$2] = 1; order[++n] = $2 }
+    $1 == "fixture-end" { delete open[$2] }
+    END { for (i = 1; i <= n; i++) if (order[i] in open) { printf "%s%s", sep, order[i]; sep = " "; delete open[order[i]] } }
+  ' "$phase_file")
+  last_phase=$(awk '$1 == "phase" { p = $2 } END { print p }' "$phase_file")
+  run_tmp=$(awk '$1 == "run-tmp" { d = $2 } END { print d }' "$phase_file")
+  rm -f "$phase_file"
+  [ -z "$run_tmp" ] || rm -rf "$run_tmp"
+  if [ -n "$in_flight" ]; then
+    where="while running $in_flight"
+  else
+    where="during the ${last_phase:-startup} phase"
+  fi
+  swept=$(sweep_fixture_processes ";$RUN_MARK/")
+  if [ "$rc" -ne 124 ]; then
+    log "FAIL: run interrupted by SIG$(kill -l "$rc") $where; swept $swept leftover fixture process(es)"
+    exit "$rc"
+  fi
+  log "FAIL: whole-run bound tripped: this run exceeded --run-timeout-secs ${RUN_TIMEOUT_SECS}s $where and was terminated; swept $swept leftover fixture process(es)"
+  exit 124
+}
+
+if [ -z "$RUN_MARK" ] && { [ "$RUN_TIMEOUT_SECS" -gt 0 ] || [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; }; then
+  run_under_supervisor
+fi
+[ -n "$RUN_MARK" ] || RUN_MARK="fmtr-$$-$(now_ms)"
+note_run_phase phase selection
+
 if [ "$LIST_FAMILIES" -eq 1 ]; then
   list_known_families
   exit 0
@@ -2192,10 +2403,6 @@ if [ -n "$MAX_WALL_MS" ]; then
   esac
   [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
 fi
-
-case "$PER_SCRIPT_TIMEOUT_SECS" in
-  ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
-esac
 
 # Refuse before any suite is selected or run. The inspection modes execute
 # nothing: --list-families, --list-concurrent-safe-families, --list-lanes,
@@ -2306,6 +2513,8 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   exit "$empty_rc"
 fi
 
+note_run_phase phase schedule
+
 # Verify selected scripts exist before starting.
 for s in "${SCRIPTS[@]}"; do
   [ -f "$s" ] || die "test script not found: $s"
@@ -2322,9 +2531,6 @@ done
 # and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
 if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
@@ -2405,13 +2611,8 @@ if [ "$JOBS" -gt 1 ]; then
   rm -f "$SCHEDULE_TMP"
 fi
 
-if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || die "per-script timeout helper not found: bin/fm-timeout-lib.sh"
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$ROOT/bin/fm-timeout-lib.sh"
-fi
-
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+note_run_phase run-tmp "$RUN_TMP"
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
@@ -2505,9 +2706,10 @@ record_script_result() {
 
 # Run <script>, capturing output to <out>. <stream> 1 also echoes it live.
 # <id> only has to be unique within this run. When PER_SCRIPT_TIMEOUT_SECS is
-# positive, a script that outruns it is terminated and reported as exit 124: a
-# hung script must become a bounded failure rather than an unbounded suite,
-# because an unbounded suite is what silently outruns its caller's budget.
+# positive, a script that outruns it is terminated, its leftover processes are
+# swept, and it is reported as exit 124: a hung script must become a bounded
+# failure rather than an unbounded suite, because an unbounded suite is what
+# silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
   # Declaring the variables local first keeps the helper's export scoped to this
@@ -2516,32 +2718,39 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
-  local rc
-  : "$id"
+  local rc mark swept
+  mark="$RUN_MARK/$id;"
+  note_run_phase fixture-begin "$script"
   set +e
-  if [ "$stream" -eq 1 ]; then
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-      # Expansion is intentionally deferred to the child bash passed to -c.
-      # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
-      rc=$?
-    else
+  (
+    # The marker lives only in this subshell's environment, so the sweep below
+    # never matches the runner or its own helpers.
+    FM_TEST_RUN_FIXTURE_MARKS="${FM_TEST_RUN_FIXTURE_MARKS:-;}$mark"
+    export FM_TEST_RUN_FIXTURE_MARKS
+    if [ "$stream" -eq 1 ]; then
+      if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+        # Expansion is intentionally deferred to the child bash passed to -c.
+        # shellcheck disable=SC2016
+        fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+          'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+        exit
+      fi
       bash "$script" 2>&1 | tee "$out"
-      rc=${PIPESTATUS[0]}
+      exit "${PIPESTATUS[0]}"
+    elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    else
+      bash "$script" >"$out" 2>&1
     fi
-  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
-    rc=$?
-  else
-    bash "$script" >"$out" 2>&1
-    rc=$?
-  fi
+  )
+  rc=$?
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
-    printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
-      "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
+    swept=$(sweep_fixture_processes ";$mark")
+    printf 'not ok - %s exceeded the per-script bound of %ss (--per-script-timeout-secs) and was terminated; swept %s leftover process(es) outside its process group\n' \
+      "$script" "$PER_SCRIPT_TIMEOUT_SECS" "$swept" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
   fi
+  note_run_phase fixture-end "$script"
   return "$rc"
 }
 
@@ -2574,6 +2783,7 @@ run_one_serial() {
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
 }
 
+note_run_phase phase fixtures
 if [ "$JOBS" -eq 1 ]; then
   for script in "${SCRIPTS[@]}"; do
     run_one_serial "$script"
@@ -2710,6 +2920,7 @@ else
   done
 fi
 
+note_run_phase phase finalize
 RUN_FINISHED_ISO=$(now_iso)
 RUN_FINISHED_MS=$(now_ms)
 RUN_DURATION=$((RUN_FINISHED_MS - RUN_STARTED_MS))
@@ -2736,6 +2947,14 @@ if [ -s "$RECORDS" ]; then
       "$rank" "$path" "$duration"
     rank=$((rank + 1))
   done
+fi
+
+# Name every bounded termination again after the summary, where a reader of a
+# long run's tail will see it; the in-stream line scrolled past long ago.
+if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ -s "$RECORDS" ]; then
+  while IFS=$'\t' read -r path _family _expected rc _rest; do
+    [ "$rc" != 124 ] || log "FAIL: per-script bound tripped: $path exceeded --per-script-timeout-secs ${PER_SCRIPT_TIMEOUT_SECS}s and was terminated"
+  done <"$RECORDS"
 fi
 
 if [ -n "$JSON_PATH" ]; then
