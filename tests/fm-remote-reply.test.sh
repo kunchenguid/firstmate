@@ -233,9 +233,15 @@ assert_grep 'done [corr=0123456789abcdef] [at=1700000000]: build verified' "$PAR
   "relay replaced the source event time with observation time"
 pass "ingest appends one validated line, fetches its document, and advances the cursor"
 
+registration_before=$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_identity "$2"' _ \
+  "$ROOT" "$PARENT/state/procevent/$SID.source")
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
+registration_after=$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_identity "$2"' _ \
+  "$ROOT" "$PARENT/state/procevent/$SID.source")
 assert_contains "$out" 'ingested: ios appended=0' "replayed result was not deduplicated"
 assert_contains "$out" 'already-handled: remote-reply-ios 1' "replayed generation was not acknowledged idempotently"
+[ "$registration_after" = "$registration_before" ] \
+  || fail "replaying an already handled capture superseded the live listener registration"
 [ "$(grep -cF 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "replayed ingest duplicated the parent status line"
 pass "replayed capture has one deduplicated append and one durable handling identity"
