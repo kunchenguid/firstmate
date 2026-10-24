@@ -351,6 +351,10 @@ test_classifier_primitives() {
   printf 'merged\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = merged ] || fail "legacy free-text status was lost"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
+  status_is_captain_relevant "publishing [key=publication-a]: branch=fm/a commit=abc awaiting PR URL" \
+    || fail "publishing: not recognized as captain-relevant"
+  status_is_terminal_verb "publishing [key=publication-a]: awaiting PR URL" \
+    && fail "publishing: wrongly classed as terminal"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   # Incident regression: free-text "merged" inside a nonterminal working: line must
@@ -403,6 +407,10 @@ EOF
   activity=$(status_open_activities "$state/activity.status")
   printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
     || fail "the current keyed working phase was not retained"
+  printf 'publishing [key=publication]: branch=fm/a commit=abc awaiting PR URL\n' > "$state/publication.status"
+  printf '%s' "$(status_open_activities "$state/publication.status")" \
+    | grep -F $'publication\tpublishing\tbranch=fm/a commit=abc awaiting PR URL' >/dev/null \
+    || fail "publishing: did not remain an open activity"
   printf '%s' "$activity" | grep -F $'phase7\t' >/dev/null \
     && fail "a keyed resolved event did not close the older working phase"
   printf '%s' "$activity" | grep -F $'phase6\t' >/dev/null \

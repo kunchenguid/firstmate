@@ -173,7 +173,7 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # 0 when <verb> is exactly one recognized status verb, with no leftover token.
 _fm_status_verb_recognized() {  # <verb>
   case "$1" in
-    working|needs-decision|blocked|done|failed|note|\
+    working|publishing|needs-decision|blocked|done|failed|note|\
     "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
     "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
     "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
@@ -290,7 +290,7 @@ status_is_terminal_verb() {
 
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
-# (working, resolved, captain-held) and paused never match from free-text prose;
+# (working, publishing, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 # Regex matching ignores any emission-time tag before the first colon - here and
@@ -312,7 +312,7 @@ status_is_captain_relevant() {
   status_prefix_unrecognized "$line" && return 0
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      publishing|done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
   _fm_status_unstamped "$line" unstamped
@@ -2115,7 +2115,7 @@ EOF
 }
 
 # Fold material routed-work phases in the same keyed event stream.
-# A working or declared-pause event opens or replaces one phase for its key.
+# A working, publishing, or declared-pause event opens or replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
@@ -2160,7 +2160,7 @@ _fm_status_open_activities_stream() {
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || continue
     case "$verb" in
-      working|"$pause")
+      working|publishing|"$pause")
         note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
