@@ -59,7 +59,9 @@
 # invocation (a leading "/", or a leading "$" to a codex target) must reach
 # the harness's own parser, and an explicit backend target names an endpoint,
 # not a task, so it stays typed even when local metadata happens to match it
-# (the same boundary that keeps it unmarked and outside --resolve-key). These
+# (the same boundary that keeps it unmarked and outside --resolve-key). A
+# --resolve-key answer never rides this plane, for the durability reason the
+# decision-closure contract below states. These
 # type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
@@ -164,11 +166,16 @@
 # a note the guard will accept, or the structural key would be lost to the
 # status-line cap, it refuses before sending and names the cause rather than
 # exiting 0 on a silent no-op. After a delivered close it also
-# re-folds and fails loudly if the named key is still open. On the inbox plane
-# the close happens at ENQUEUE time, because enqueue is durable delivery to
-# the task's record; the worker reading the answer late is covered by the
-# acknowledgement re-ring ladder. On the typed plane it still waits for the
-# confirmed submit. The close is a LOCAL append for every target kind -
+# re-folds and fails loudly if the named key is still open. An answer always
+# rides the inbox plane, even harness-native text that would otherwise be
+# typed, so an accepted --resolve-key send either leaves a durable record or
+# fails loudly and never exits 0 with the decision closed and no record. The
+# close happens at ENQUEUE time, because enqueue is durable delivery to the
+# task's record, and the worker reading the answer late is covered by the
+# acknowledgement re-ring ladder. A key that is not open refuses before
+# anything is sent. A zero pending count alone cannot tell an already-consumed
+# record from one never queued, so verify delivery by listing
+# state/<task>.inbox/ (and its handled/), never by the exit code. The close is a LOCAL append for every target kind -
 # crewmate, scout, local secondmate, and remote secondmate alike - because the
 # open-decision ledger fm-wake-drain folds lives in this home's own state dir
 # (a remote mate's escalations reach it through the parent-replies ingest);
@@ -876,7 +883,10 @@ else
   # invocation). A remote secondmate selector always rides the inbox: its
   # requests are marked, and a marked request reaches the harness as
   # marker-prefixed chat rather than a parser command anyway, so no remote
-  # text has a typed plane to lose. An explicit backend target stays typed
+  # text has a typed plane to lose. A --resolve-key answer always rides the
+  # inbox too: the send closes the decision itself, so its answer must exist as
+  # a durable record rather than as typed bytes a parser or held composer can
+  # swallow. An explicit backend target stays typed
   # even when it happens to match local metadata: it names an endpoint, not a
   # task, the same boundary that keeps it unmarked and outside --resolve-key.
   # Classification reads the pre-marker text so a marked secondmate request
@@ -885,7 +895,7 @@ else
   # command: the pre-existing marker-first wire bytes are retained in stage 1.
   INBOX_PLANE=0
   if [ -n "$TARGET_SELECTOR" ]; then
-    if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$TARGET_BACKEND" = remote ]; then
+    if [ -n "$FIRE_AND_FORGET_ID" ] || [ -n "$RESOLVE_KEYS" ] || [ "$TARGET_BACKEND" = remote ]; then
       INBOX_PLANE=1
     else
       case "$RESOLVE_ANSWER_TEXT" in
