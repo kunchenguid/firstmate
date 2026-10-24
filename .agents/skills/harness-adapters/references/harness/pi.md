@@ -30,10 +30,14 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/`, including a clean worktree and a freshly seeded secondmate home.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
-For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
+A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/` or `.agents/skills/`, including a clean worktree and a freshly seeded secondmate home.
+The decision persists per absolute path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
+A lookup takes the nearest recorded decision on the path or any ancestor, so a trusted ancestor already covers a new worktree and a recorded decline on an ancestor refuses the spawn.
+`../../../../../bin/fm-spawn.sh` pre-registers a crewmate or scout worktree through `../../../../../bin/fm-pi-trust.sh` before launch, which writes only that one absolute worktree path into the store the launch line names - the pinned root, or the default `~/.pi/agent` when an unpinned launch line names no root - and refuses the spawn when it cannot.
+Seeded secondmate launches keep the session-scoped `--approve` instead, so no persistent home-level entry is written for them.
+An interactive acceptance is still needed for any launch no registration covers, such as the primary session's own first run in a clone or a raw launch command that names its own trust root; accept it with Enter and verify the instructions begin processing.
+[Runtime verification](../../../../../docs/verification/runtime-backends.md#pi-worker-worktree-project-trust) owns the store format and regression evidence.
+For unattended seeded-secondmate launches, `../../../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
 
 ## Worker turn-end extension
 
