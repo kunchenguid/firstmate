@@ -30,8 +30,9 @@ The only live mates that do not restart are the ones whose home the update pass 
 The primary update is fast-forward only, while each secondmate uses the same guarded convergence path plus one narrow recovery for squash-merged local history.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
 It never forces, never creates a merge commit, and never stashes.
-A clean secondmate divergence advances with `reset --keep` only when a three-way tree proof shows its complete local result is already present at the target, which recognizes squash-merged contributions without discarding unique content.
-Every other dirty, diverged, offline, or wrong-branch target is skipped and reported, and a genuine divergence leaves a durable `state/.secondmate-update-reconcile/<id>.pending` record that future bootstrap and update passes surface until convergence clears it.
+A secondmate divergence without tracked-file changes advances with `reset --keep` only when a three-way tree proof shows its complete local result is already present at the target, which recognizes squash-merged contributions without discarding unique content.
+Every other target with tracked-file changes, diverged, offline, or on the wrong branch is skipped and reported, and a genuine divergence leaves a durable `state/.secondmate-update-reconcile/<id>.pending` record that future bootstrap and update passes surface until convergence clears it.
+Untracked-only paths pass the dirty guard, but Git refuses an advance that would overwrite one and the updater reports the refusal with Git's reason.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -95,8 +96,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
 ## Safety
 
 - **Guarded convergence only.**
-  A dirty, offline, non-default, or uniquely diverged target is skipped and reported, never forced or stashed.
-  Only a clean secondmate divergence whose complete local result is already present upstream may move without ancestry, and `reset --keep` still refuses conflicting working-tree changes.
+  A target with tracked-file changes, offline, non-default, or uniquely diverged is skipped and reported, never forced or stashed.
+  Untracked-only paths pass the dirty guard, but Git refuses an advance that would overwrite one and the updater reports the refusal with Git's reason.
+  Only a secondmate divergence without tracked-file changes whose complete local result is already present upstream may move without ancestry, and `reset --keep` still refuses conflicting working-tree changes.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
