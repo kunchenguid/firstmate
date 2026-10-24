@@ -202,6 +202,48 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
+# 0 when the status identity with $3 is newer than the overview-selected run
+# with $2; 2 means same-head identity ordering is unverified.
+fm_nm_run_is_newer_than_selected() {  # <branch> <selected-id> <reported-id> <candidate-ids> <selected-head> <reported-head> <runs-list>
+  local branch=$1 selected_id=$2 reported_id=$3 candidate_ids=$4 selected_head=$5 reported_head=$6 runs=$7 first_match candidate_match
+  if [ "${selected_head:0:7}" = "${reported_head:0:7}" ]; then
+    candidate_match=$(printf '%s\n' "$candidate_ids" | awk -v selected="$selected_id" -v reported="$reported_id" -F ', ' '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == selected) selected_seen = 1
+          if ($i == reported) reported_seen = 1
+        }
+      }
+      END { print (selected_seen && reported_seen) ? "yes" : "no" }')
+    if [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] \
+      && [ "$candidate_match" = yes ]; then
+      [[ "$reported_id" > "$selected_id" ]] && return 0
+      return 1
+    fi
+    first_match=$(printf '%s\n' "$candidate_ids" | awk -v selected="$selected_id" -v reported="$reported_id" -F ', ' '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == selected) { print "selected"; exit }
+          if ($i == reported) { print "reported"; exit }
+        }
+      }')
+    [ "$first_match" = selected ] && return 1
+    return 2
+  fi
+  [ -n "$selected_head" ] && [ -n "$reported_head" ] \
+    && [ "${selected_head:0:7}" != "${reported_head:0:7}" ] || return 1
+  first_match=$(printf '%s\n' "$runs" | awk -v branch="$branch" \
+    -v selected="${selected_head:0:7}" -v reported="${reported_head:0:7}" '
+    $2 == branch {
+      if (index($3, selected) == 1) { selected_count++; if (first == "") first = "selected" }
+      else if (index($3, reported) == 1) { reported_count++; if (first == "") first = "reported" }
+    }
+    END {
+      if (selected_count == 1 && reported_count == 1) print first
+    }')
+  [ "$first_match" = reported ]
+}
+
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of the state database fm_nm_state_db
