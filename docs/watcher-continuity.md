@@ -142,6 +142,13 @@ After an actionable Pi, omp, or OpenCode child close, the adapter:
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.
 
+The successor start and the wake delivery are separate steps on Pi.
+A successor start never waits behind a wake delivery that is still in flight, so a close that arrives while an earlier wake is still being delivered to the supervision branch re-arms immediately instead of leaving the fleet unwatched for the length of that delivery.
+Delivery to the branch stays serialized: one wake is delivered at a time, and the deliveries keep their order.
+The handling handoff is confirmed inside the successor start, while that successor is still the live arm, and the delivery reads the confirmed outcome.
+A successor that a later close already replaced is therefore never confirmed as a failed handoff, and a healthy newer successor is never reported to main as a restoration failure.
+A close that arrives while a successor start or a wake delivery is in flight keeps its bounded retry for the end of that operation, and the operation that held the guard settles it.
+
 If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
