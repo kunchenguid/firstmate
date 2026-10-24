@@ -217,6 +217,106 @@ test_claude_launch_brief_publishes_record_doorbell() {
   pass "a claude launch publishes the brief as an operational-inbox record and passes only the doorbell"
 }
 
+# A pin is only a request until the started session states the model it runs on.
+# These cases drive the assertion with the transcript the fake Claude session
+# writes, so the verdict is the one a real transcript produces: the model the API
+# reported for that session's own response.
+test_claude_model_pin_asserts_the_model_the_session_reports() {
+  local rec id out status launch stale_id fresh_id uuid_count
+  id=claude-model-match-z1
+  stale_id=11111111-1111-4111-8111-111111111111
+  fresh_id=22222222-2222-4222-8222-222222222222
+  rec=$(make_spawn_case claude-model-match claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/user-home/.claude/projects/stale"
+  printf '%s\n' \
+    "{\"type\":\"assistant\",\"sessionId\":\"$stale_id\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[]}}" \
+    > "$HOME_DIR/user-home/.claude/projects/stale/$stale_id.jsonl"
+  # uuidgen's collision check must reject the id a previous session already owns.
+  uuid_count="$HOME_DIR/user-home/.claude/.uuidgen-count"
+  cat > "$FAKEBIN_DIR/uuidgen" <<SH
+#!/usr/bin/env bash
+if [ ! -e '$uuid_count' ]; then
+  : > '$uuid_count'
+  printf '%s\\n' '$stale_id'
+else
+  printf '%s\\n' '$fresh_id'
+fi
+SH
+  chmod +x "$FAKEBIN_DIR/uuidgen"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "a matching Claude model pin should spawn successfully"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--session-id '$fresh_id'" \
+    "a pinned Claude launch must carry the collision-checked session id it asserts"
+  assert_not_contains "$launch" "--session-id '$stale_id'" \
+    "a pinned Claude launch must never reuse the stale session id"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+    "model pin asserted: pin 'claude-opus-5-5' actual 'claude-opus-5-5'" \
+    "the model the session reported must be recorded against the pin"
+  pass "Claude pin match: collision-checked session id and a recorded assertion"
+}
+
+test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn() {
+  local rec id out status target
+  id=claude-model-mismatch-z1
+  rec=$(make_spawn_case claude-model-mismatch claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_CLAUDE_MODEL=claude-opus-5 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "a reported model that differs from the pin must not fail a live spawn"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "the spawn still reports the worker it started"
+  target="model pin mismatch: pin 'claude-opus-5-5' but pinned Claude session"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" "$target" \
+    "the mismatch must be recorded in the task's status"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" "reports 'claude-opus-5'" \
+    "the record must name the model the session actually reported"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.status")" "blocked" \
+    "the assertion reports; it must not open a blocked decision on a live worker"
+  pass "Claude pin mismatch: recorded against the pin, spawn still succeeds"
+}
+
+test_claude_model_pin_is_unverified_when_the_session_reports_no_model() {
+  local rec id out status
+  id=claude-model-unverified-z1
+  rec=$(make_spawn_case claude-model-unverified claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_CLAUDE_NO_REPORT=1 FM_MODEL_PIN_POLLS=2 FM_MODEL_PIN_POLL_INTERVAL=0.01 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "a silent session must not fail the spawn"$'\n'"$out"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+    "model pin unverified: pin 'claude-opus-5-5'" \
+    "a session that states no model must be recorded as unverified, never as a match"
+  pass "Claude pin with no reported model: recorded as unverified"
+}
+
+test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note() {
+  local rec id out status launch
+  id=claude-model-unpinned-z1
+  rec=$(make_spawn_case claude-model-unpinned claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an unpinned claude spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--session-id" \
+    "an unpinned launch must keep claude's own session id"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.status" 2>/dev/null)" "model pin" \
+    "an unpinned launch must record no pin verdict it never had"
+  pass "Claude without a pin: launch and status unchanged"
+}
+
 # A secondmate's launch brief belongs to the secondmate home that pane runs in,
 # so its record must publish there rather than into the primary's state.
 test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
@@ -2717,6 +2817,10 @@ test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
+test_claude_model_pin_asserts_the_model_the_session_reports
+test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn
+test_claude_model_pin_is_unverified_when_the_session_reports_no_model
+test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
 test_non_cursor_launch_clears_inherited_cursor_markers
