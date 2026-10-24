@@ -44,10 +44,29 @@
 #     handoff instead of leaving the generation frozen at arming. Claude does
 #     not deliver the exit 2 of a hook it terminated at the configured timeout
 #     as a rewake (measured on Claude Code 2.1.278 and 2.1.281,
-#     docs/verification/supervision.md), so a park that outlives that timeout
-#     records the failure durably without waking an idle primary; nothing here
-#     shortens a quiet park, because no-change heartbeats are absorbed without
-#     closing the arm.
+#     docs/verification/supervision.md), and no-change heartbeats are absorbed
+#     without closing the arm, so an idle home's park would otherwise reach
+#     that timeout and go unsupervised with no wake.
+#   - Park boundary: the hook therefore ends its own plain park before the
+#     registered timeout. After 27000 seconds (below the tracked 28800-second
+#     registration, measured from this firing's start and shared by its retries)
+#     the owning firing TERMs the arm, waits at most five seconds or until
+#     28770 seconds elapsed, then KILLs and reaps an arm that remains alive.
+#     A superseded firing leaves its arm and watcher alone until the arm closes.
+#     A started arm forwards TERM to its watcher; an attached arm does not. While this
+#     generation still owns supervision, the hook additionally requests an
+#     identity-scoped stop of this cycle through
+#     bin/fm-watch-arm.sh --stop-if-watcher.
+#     When no actionable reason reached the hook output, it delivers a
+#     "check: cycle-renewal" line through the ordinary actionable path below:
+#     a handling successor covers the short renewal
+#     turn, and that turn's end arms a fresh bounded park. Successor
+#     confirmation cannot wait beyond 28770 seconds elapsed from the firing's
+#     start, leaving time to commit the rewake before the hook timeout even
+#     when confirmation fails.
+#     The HUP/TERM/INT translation stays as defense in depth for an
+#     interruption the boundary did not pre-empt. The supervision host keeps
+#     its own boundary (docs/supervision-host.md).
 #   - Handling successor: Pi, omp, and OpenCode start the next arm before they
 #     deliver an actionable wake, so the fleet stays covered while the model
 #     handles it. After an actionable close, including an attached peer cycle
@@ -83,9 +102,9 @@
 #     the harness delivers the collected stderr only on exit 2, so an owned
 #     terminal commit decides the exit. Markerless outcomes commit with the
 #     ledger write; the failure notice additionally requires its marker write.
-#     A refused generation exits 0 silently even after printing. A close that
-#     reports no actionable reason is benign when a live identity-matched
-#     watcher still has a fresh beacon.
+#     A refused generation exits 0 silently even after printing. Outside the
+#     park boundary, a close that reports no actionable reason is benign when
+#     a live identity-matched watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -133,6 +152,7 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
+HOOK_STARTED=$(date +%s)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -146,6 +166,7 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+PARK_SECONDS=27000
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -288,11 +309,11 @@ autoarm_record() {  # <outcome>
 }
 
 # Claude terminates the complete async-hook process tree when the configured
-# hook timeout expires. The arm is intentionally allowed to follow a healthy
-# watcher until its next wake, so that wait cannot be shortened without adding
-# artificial turns. Translate a host interruption through the ordinary durable
-# failure protocol instead: the winning generation records a terminal outcome,
-# creates the episode marker, and exits 2 so Claude delivers a recovery turn -
+# hook timeout expires. The arm follows a healthy watcher until its next wake
+# or the earlier park boundary (header). Translate an external interruption
+# through the ordinary durable failure protocol instead: the winning
+# generation records a terminal outcome, creates the episode marker, and exits
+# 2 so Claude delivers a recovery turn -
 # except after Claude's own timeout kill, whose exit 2 is dropped (header).
 # A superseded generation remains silent, and an episode whose attended
 # fail-open was already consumed must not restart automatic continuation.
@@ -339,8 +360,40 @@ trap 'handle_autoarm_signal INT' INT
 # Every non-actionable close is checked against the same identity-matched live
 # watcher and fresh-beacon predicate used by the turn-end guard before it is
 # retried or translated into an operator-visible failure.
+# The owning firing bounds its wait at the park boundary (header): it TERMs
+# its arm and conditionally stops its identity-matched watcher so the close
+# can be delivered before Claude's timeout.
 ARM_PID=
 CLOSED_ARM_PID=
+PARK_BOUNDARY=0
+BOUNDARY_WATCHER_PID=
+BOUNDARY_WATCHER_IDENTITY=
+park_elapsed() {
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_TEST_CLAUDE_AUTOARM_CLOCK:-}" ]; then
+    local elapsed
+    elapsed=$(cat "$FM_TEST_CLAUDE_AUTOARM_CLOCK" 2>/dev/null) || elapsed=0
+    case "$elapsed" in ''|*[!0-9]*) elapsed=0 ;; esac
+    printf '%s\n' "$elapsed"
+    return
+  fi
+  printf '%s\n' $(( $(date +%s) - HOOK_STARTED ))
+}
+RENEWAL_LINE='check: cycle-renewal - the Stop hook ended this watcher cycle at its park boundary before the hook timeout; drain, handle anything the drain presents, acknowledge, and end the turn; the next cycle arms on its own'
+# Reap our arm within the renewal budget; never let its wait consume Claude's
+# timeout. TERM ends the arm and the watcher it started, and may not complete
+# while the arm waits for that watcher. KILL cannot reach the watcher.
+stop_own_arm() {
+  local deadline=$(( $(date +%s) + 5 ))
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  while fm_pid_alive "$ARM_PID" && [ "$(date +%s)" -lt "$deadline" ] \
+    && [ "$(park_elapsed)" -lt 28770 ]; do
+    sleep 0.1
+  done
+  if fm_pid_alive "$ARM_PID"; then
+    kill -KILL "$ARM_PID" 2>/dev/null || true
+  fi
+  wait "$ARM_PID" 2>/dev/null || true
+}
 run_arm() {  # <output file, or empty for none>
   if [ -n "$1" ]; then
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
@@ -348,7 +401,33 @@ run_arm() {  # <output file, or empty for none>
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
-  wait "$ARM_PID" || true
+  while fm_pid_alive "$ARM_PID"; do
+    if [ "$(park_elapsed)" -ge "$PARK_SECONDS" ]; then
+      if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+        break
+      fi
+      PARK_BOUNDARY=1
+      if [ -n "$1" ]; then
+        BOUNDARY_WATCHER_PID=$(awk '/^watcher: (started|attached) pid=[0-9]+/ { split($3, p, "="); pid=p[2] } END { print pid }' "$1" 2>/dev/null)
+        if fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$BOUNDARY_WATCHER_PID" "$FM_HOME"; then
+          BOUNDARY_WATCHER_IDENTITY=$FM_WATCHER_MATCHED_IDENTITY
+        fi
+      fi
+      stop_own_arm
+      break
+    fi
+    sleep 1
+  done
+  if [ "$PARK_BOUNDARY" -eq 0 ]; then
+    wait "$ARM_PID" || true
+  fi
+  # Gate this explicit scoped stop on generation ownership; a superseded
+  # firing's watcher may now be the one a newer firing follows. Recheck in
+  # case ownership changed while the boundary waited for arm termination.
+  if [ "$PARK_BOUNDARY" -eq 1 ] && [ -n "$BOUNDARY_WATCHER_IDENTITY" ] \
+    && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    "$SCRIPT_DIR/fm-watch-arm.sh" --stop-if-watcher "$BOUNDARY_WATCHER_PID" "$BOUNDARY_WATCHER_IDENTITY" >/dev/null 2>&1 || true
+  fi
   CLOSED_ARM_PID=$ARM_PID
   ARM_PID=
 }
@@ -360,7 +439,8 @@ run_arm() {  # <output file, or empty for none>
 # successor receives the closed arm's pid as FM_WATCH_PREDECESSOR_ARM_PID; it
 # must outlive this hook's exit, so it is detached three ways: nohup, stdio
 # away from the hook's pipes, and its own process group. Its one status line
-# is awaited within the arm's own confirmation budget plus slack. Sets
+# is awaited within the arm's own confirmation budget plus slack, capped by
+# the remaining hook budget with a fixed commit margin. Sets
 # SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
 SUCCESSOR_FAILURE=
 start_handling_successor() {  # <closed-arm-pid>
@@ -384,7 +464,9 @@ start_handling_successor() {  # <closed-arm-pid>
       return 0
     fi
     grep -q '^watcher: FAILED' "$out" 2>/dev/null && break
-    [ "$(date +%s)" -ge "$deadline" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ] || [ "$(park_elapsed)" -ge 28770 ]; then
+      break
+    fi
     sleep 0.2
   done
   line=$(grep '^watcher: FAILED' "$out" 2>/dev/null | head -n 1 || true)
@@ -433,7 +515,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     exit 0
   fi
 
-  ACTIONABLE=0
+  ACTIONABLE=$PARK_BOUNDARY
   if [ -n "$OUT" ]; then
     grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
   fi
@@ -525,6 +607,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
     else
       [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+      if [ "$PARK_BOUNDARY" -eq 1 ] && { [ -z "$OUT" ] || ! grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null; }; then
+        printf '%s\n' "$RENEWAL_LINE"
+      fi
     fi
     if [ "$HOST_MODE" -eq 1 ] && [ -e "$STATE/.afk-contract" ] \
       && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
