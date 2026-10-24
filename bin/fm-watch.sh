@@ -1069,7 +1069,10 @@ EOF
     fi
     notify_key="secondmate-wake-loop-$task-$row_key"
     reason="check: secondmate wake-loop stalled: mate=$task row=$seq idle=${idle}s"
-    queued=$(fm_wake_queued_keys check)
+    if ! queued=$(fm_wake_queued_keys check); then
+      echo "watcher: queued-key read failed; secondmate $task wake-loop notification was not queued" >&2
+      return 1
+    fi
     if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
       fm_wake_append check "$notify_key" "$reason" || return 1
     fi
@@ -1153,8 +1156,9 @@ secondmate_liveness_tick() {
         ;;
     esac
     if [ -n "$reason" ]; then
-      queued=$(fm_wake_queued_keys check)
-      if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
+      if ! queued=$(fm_wake_queued_keys check); then
+        err="queued-key read failed; check wake was not queued: $reason"
+      elif printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
         || fm_wake_append check "$notify_key" "$reason"; then
         [ -n "$first_reason" ] || first_reason=$reason
       else

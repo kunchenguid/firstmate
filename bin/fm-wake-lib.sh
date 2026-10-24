@@ -12,6 +12,9 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # shellcheck source=bin/fm-path-lib.sh
 . "$FM_WAKE_LIB_DIR/fm-path-lib.sh"
+# Positive whole seconds the queue-lock callers that check the result of
+# fm_lock_acquire_wait_bounded wait before refusing; any other value makes them refuse.
+FM_WAKE_QUEUE_LOCK_WAIT="${FM_WAKE_QUEUE_LOCK_WAIT:-30}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -1397,7 +1400,8 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # Use it where a caller must refuse rather than block: wake presentation, and
 # the guarded remote link clear, whose whole contract is to return a
 # reconciliation refusal instead of wedging an unattended close.
-# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
+# Callers that cannot check a result keep fm_lock_acquire_wait, which waits
+# indefinitely and cannot fail.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid
   case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -2378,7 +2382,7 @@ fm_wake_queued_keys() {
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$FM_WAKE_QUEUE_LOCK_WAIT" || return $?
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }

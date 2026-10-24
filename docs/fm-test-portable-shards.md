@@ -111,6 +111,8 @@ Its hint-coverage and modeled-budget checks are described in [Portable serial CI
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
+Its `skipped_inputs` count covers unreadable lane files that were uploaded and passed to the aggregator.
+As described in [Portable serial CI shards](#portable-serial-ci-shards), a timed-out shard may upload no artifact, and such an absent lane is not counted in `skipped_inputs`.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Lint partitions and end-to-end latency

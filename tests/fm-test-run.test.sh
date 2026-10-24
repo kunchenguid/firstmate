@@ -1831,12 +1831,14 @@ JSON
 }
 JSON
   out=$("$RUNNER" --aggregate-json "$tmp/out.json" "$tmp/a.json" "$tmp/b.json")
-  assert_contains "$out" "FM_TEST_AGGREGATE lanes=2 total=3 failed=1" "aggregate summary line"
+  assert_contains "$out" "FM_TEST_AGGREGATE lanes=2 skipped_inputs=0 total=3 failed=1" "aggregate summary line"
   python3 -c '
 import json,sys
 doc=json.load(open(sys.argv[1]))
 assert doc["kind"]=="aggregate"
 assert doc["summary"]["lanes"]==2
+assert doc["summary"]["skipped_inputs"]==0
+assert doc["skipped_inputs"]==[]
 assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==1
 assert doc["summary"]["critical_path_duration_ms"]==2000
@@ -1844,6 +1846,41 @@ assert len(doc["scripts"])==3
 ' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate JSON shape wrong"; }
   rm -rf "$tmp"
   pass "aggregate-json merges lane timing artifacts"
+}
+
+test_aggregate_json_skips_unreadable_lane() {
+  local tmp rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson-bad.XXXXXX")
+  cat >"$tmp/good.json" <<'JSON'
+{
+  "run_id": "good",
+  "selection": "lane=portable-serial-1of4",
+  "started_at": "2026-07-22T00:00:00Z",
+  "finished_at": "2026-07-22T00:01:00Z",
+  "summary": {"total": 1, "failed": 0, "skipped_gate": 0, "duration_ms": 1000},
+  "scripts": [{"path": "tests/a.test.sh", "family": "pure-contract-unit", "duration_ms": 1000, "exit": 0, "gate_skip": false}]
+}
+JSON
+  # Simulates a lane artifact truncated when its own job was killed
+  # (OOM, hang timeout) mid-write, before the closing brace landed.
+  printf '{"run_id": "truncated", "summary": {"total": 1' >"$tmp/truncated.json"
+
+  rc=0
+  out=$("$RUNNER" --aggregate-json "$tmp/out.json" "$tmp/good.json" "$tmp/truncated.json" 2>"$tmp/err") || rc=$?
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate-json must not crash on an unreadable lane, got rc=$rc: $(cat "$tmp/err")"; }
+  assert_contains "$out" "FM_TEST_AGGREGATE lanes=1 skipped_inputs=1 total=1 failed=0" "aggregate summary line must disclose the unreadable lane"
+  assert_grep "::warning::fm-test-run.sh: skipping unreadable timing artifact" "$tmp/err" "no CI warning was printed for the unreadable lane"
+  python3 -c '
+import json,sys
+doc=json.load(open(sys.argv[1]))
+assert doc["summary"]["lanes"]==1
+assert doc["summary"]["skipped_inputs"]==1
+assert doc["skipped_inputs"]==[sys.argv[2]]
+assert len(doc["lanes"])==1
+assert doc["lanes"][0]["run_id"]=="good"
+' "$tmp/out.json" "$tmp/truncated.json" || { rm -rf "$tmp"; fail "aggregate JSON must disclose the unreadable lane"; }
+  rm -rf "$tmp"
+  pass "aggregate-json skips an unreadable lane instead of crashing the whole aggregate"
 }
 
 test_list_all_exact_suite_coverage
@@ -1887,3 +1924,4 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_aggregate_json_skips_unreadable_lane
