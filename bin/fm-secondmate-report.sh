@@ -58,6 +58,15 @@ fi
 case "$CORR" in
   corr=*) CORR=${CORR#corr=} ;;
 esac
+# One report answers ONE request. A line that carries a second correlation
+# token - a made-up 'corr2=' or a repeated 'corr=' - is not a supported
+# format: the matcher only knows 'corr=<16 hex>', so the extra token never
+# correlates and the request it names stays unanswered for ever. Refuse the
+# unsupported form here, where the mate reads the correction.
+if printf '%s' "$CORR" | grep -qE '(^|[^[:alnum:]_])corr[[:alnum:]_]*='; then
+  echo "error: this helper reports ONE request per line. Pass the single corr=<16 hex> token of the request you are answering, and send a separate report for the other request: a 'corr2=' token, or two 'corr=' tokens in one report, is not a supported format and never correlates." >&2
+  exit 1
+fi
 case "$CORR" in
   [a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9]) ;;
   *)
@@ -88,6 +97,13 @@ if [ ! -d "$(dirname "$DESTINATION")" ]; then
   exit 1
 fi
 
+# The note is written verbatim onto the parent channel, and this helper
+# already writes the request's own token, so a correlation token in the note
+# can only be a second one: a multi-request report, which never correlates.
+if printf '%s' "$*" | grep -qE '(^|[^[:alnum:]_])corr[[:alnum:]_]*='; then
+  echo "error: this helper reports ONE request per line, and its note must not carry a correlation token: this helper already writes the request's corr=<16 hex> token. A 'corr2=' token, or any second 'corr=' token, is not a supported format - send a separate report for the other request." >&2
+  exit 1
+fi
 token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
   DOC_PATH=$1
