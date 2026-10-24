@@ -27,6 +27,8 @@ Polytoken uses its [model-scoped selectable-reference contract](../harness/polyt
 Harness identity is independent of model provider.
 `harness=pi` with `model=xai/grok-*` is Pi using xAI, not standalone Grok Build, and does not require Grok CLI login.
 `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor routing a Grok model, not `harness=grok`.
+`harness=devin` launches only Devin's native SWE models, and the Devin reference owns which of those ids are included.
+A Claude model goes through harness `claude`, a GPT model through `codex`, and a Grok model through `grok`.
 
 No script resolves credential provenance for you.
 Establish it from the tool's discovery surface and `quota-axi auth --json` per-provider sources, and show the reasoning rather than inferring it from a name.
