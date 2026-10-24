@@ -1063,7 +1063,7 @@ unknown_alive_stale_case() {  # <evidence: status|worktree|none>
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "[$evidence] the first unknown-but-alive stale sight did not surface"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "[$evidence] the first unknown-but-alive alarm changed its wording"
+  grep -Fx "stale: $window (task=codexunknown)" "$out" >/dev/null || fail "[$evidence] the first unknown-but-alive alarm changed its wording"
   if [ "$evidence" = none ]; then
     [ ! -e "$state/.paused-resurfaced-$key" ] || fail "[none] an alarm without progress evidence recorded a repeat bound"
   else
@@ -1082,7 +1082,7 @@ unknown_alive_stale_case() {  # <evidence: status|worktree|none>
   pid=$!
   if [ "$evidence" = none ]; then
     wait_for_exit "$pid" 100 || fail "[none] an unknown-but-alive pane without progress evidence went quiet"
-    grep -Fx "stale: $window" "$out" >/dev/null \
+    grep -Fx "stale: $window (task=codexunknown)" "$out" >/dev/null \
       || fail "[none] an unknown-but-alive pane without progress evidence did not re-surface: $(cat "$out")"
     unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CURRENT_COMMAND FM_FAKE_TMUX_CAPTURE FM_PAUSE_RESURFACE_SECS
     return 0
@@ -1105,7 +1105,7 @@ unknown_alive_stale_case() {  # <evidence: status|worktree|none>
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "[$evidence] an expired unknown-but-alive bound did not re-surface"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "[$evidence] the expired unknown-but-alive bound changed wake wording: $(cat "$out")"
+  grep -Fx "stale: $window (task=codexunknown)" "$out" >/dev/null || fail "[$evidence] the expired unknown-but-alive bound changed wake wording: $(cat "$out")"
   unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CURRENT_COMMAND FM_PAUSE_RESURFACE_SECS
 }
 
@@ -5230,7 +5230,7 @@ test_quoted_exit_picker_stays_ordinary_stale() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a quoted picker did not take the ordinary stale path: $(cat "$out")"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "a quoted picker was not an ordinary stale: $(cat "$out")"
+  grep -Fx "stale: $window (task=quoted)" "$out" >/dev/null || fail "a quoted picker was not an ordinary stale: $(cat "$out")"
   grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a quoted picker was named as a dialog: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "picker text quoted above a composer stays an ordinary stale"
@@ -5278,7 +5278,7 @@ test_closed_exit_picker_drops_saved_dialog_name() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a closed picker did not take the ordinary stale path: $(cat "$out")"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "a closed picker was not an ordinary stale: $(cat "$out")"
+  grep -Fx "stale: $window (task=closer)" "$out" >/dev/null || fail "a closed picker was not an ordinary stale: $(cat "$out")"
   grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a closed picker was still named as a dialog: $(cat "$out")"
   [ ! -e "$state/.subsuper-dialog-closer" ] || fail "a closed picker left the saved dialog name"
   unset FM_FAKE_CREW_STATE
