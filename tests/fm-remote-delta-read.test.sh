@@ -92,7 +92,9 @@ printf 'counted change\n' >> "$DELTA_HOME/$DELTA_LOG_REL"
 wait "$READER_PID" || fail 'the shimmed growth run did not exit 0'
 assert_contains "$(<"$TMP_ROOT/growth2.out")" 'status=delta' 'the shimmed run lost the delta'
 [ "$(grep -cx perl "$EXEC_LOG" || true)" -ge 1 ] || fail 'growth did not run the bounded capture'
-[ "$(grep -cx shasum "$EXEC_LOG" || true)" -ge 2 ] || fail 'growth did not hash prefix and payload'
+# The reader supports either tool; shasum may live outside this fixture's
+# restricted system PATH (for example, Arch puts it in /usr/bin/core_perl).
+[ "$(grep -Ec '^(shasum|sha256sum)$' "$EXEC_LOG" || true)" -ge 2 ] || fail 'growth did not hash prefix and payload'
 pass 'the capture and hashing path runs exactly once a real change lands'
 
 # A shrunk file reports the truncation with the hash of what actually remains.
@@ -137,7 +139,8 @@ fraction=111111111
 [ ! -e "$FM_TEST_REWRITE_DONE" ] || fraction=222222222
 printf '11:100.%s:100.%s:123:456\n' "$fraction" "$fraction"
 SH
-REAL_SHASUM=$(PATH=/usr/bin:/bin command -v shasum)
+# Keep the available parent-PATH tool when its installation is not in /usr/bin.
+REAL_SHASUM=$(command -v shasum)
 cat > "$SUBSECOND_SHIM/shasum" <<SH
 #!/bin/sh
 "$REAL_SHASUM" "\$@" || exit \$?

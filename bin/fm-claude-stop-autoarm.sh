@@ -449,7 +449,10 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     # A host that died without a close may have left its cycle running with
     # no owner to deliver the close; retrying lets the next host stop what it
     # left and own a fresh cycle, which the healthy-watcher predicate cannot.
-    if [ "$HOST_RC" -gt 128 ] || [ -z "$OUT" ] || [ ! -s "$OUT" ]; then
+    # Empty output does not erase an explicit failure (for example a failed
+    # downtime hand-back beside a healthy successor that would park a retry).
+    if [ "$HOST_RC" -gt 128 ] \
+      || { [ "$HOST_RC" -eq 0 ] && { [ -z "$OUT" ] || [ ! -s "$OUT" ]; }; }; then
       [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
       [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
       OUT=

@@ -1078,6 +1078,9 @@ select_lane() {
 }
 
 run_coverage_guard() {
+  # comm and uniq must use the same byte order as the sorted inventories.
+  local LC_ALL=C
+  export LC_ALL
   local tmp missing extra a b shard unhinted serial_total serial_ms serial_max_ms=0
   local p1_ms p1_unhinted p2_ms p2_unhinted parallel_max_ms parallel_imbalance_ms
   local -a saved_scripts=()

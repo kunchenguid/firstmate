@@ -18,6 +18,7 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     pr_url is the first link accepted by fm_pf_pr_url_valid, else null.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
@@ -55,6 +56,10 @@
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
+#     pr.url prefers recorded pr=, else a canonical URL only when the latest
+#     status line is exactly `done: PR <url> [checks green]` (optional stamp).
+#     pr.source is meta, status_event, or absent; scouts never claim a PR URL.
+#     fm_pf_pr_url_valid owns status-link classification, not landing proof.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state. age_seconds is null when the emission time is unknown;
 #     fm-classify-lib.sh owns the optional emission-time field, and only the
@@ -231,6 +236,8 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -378,9 +385,20 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,age_seconds:$age}}'
 }
 
-first_pr_url_in_file() {  # <file>
+review_urls_in_file() {  # <file>
+  local url
   [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
+  while IFS= read -r url; do
+    fm_pf_pr_url_valid "$url" && printf '%s\n' "$url"
+  done < <(grep -Eo 'https://[^[:space:])"<>]+' "$1" 2>/dev/null)
+  return 0
+}
+
+preferred_pr_url_in_file() {  # <status-file>
+  local url
+  url=$(last_status_line "$1" | sed -nE 's|^done( \[at=[^]]*\])?: PR (https://[^[:space:])"]+)( checks green)?$|\2|p')
+  fm_pf_pr_url_valid "$url" || return 1
+  printf '%s\n' "$url"
 }
 
 backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
@@ -393,6 +411,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
+    --argjson review_urls "$(review_urls_in_file "$backlog" | jq -Rn '[inputs]')" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
@@ -509,7 +528,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
              done:metadata_word($rest; "done"),
              completion:completion($rest),
              links:links($rest),
-             pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
+             pr_url:((links($rest) | map(select(. as $url | $review_urls | index($url))) | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
              local_note:local_note($rest),
              raw:$line,
@@ -777,12 +796,15 @@ task_json_lines() {
     fi
     status_log="$SNAPSHOT_TASK_DIR/$id.status"
     report_path="$SNAPSHOT_TASK_DIR/$id.report"
-    pr=$(meta_value "$meta" pr)
+    pr=
     pr_source=meta
-    if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
-      pr=$pr_from_status
-      pr_source=status_event
+    if [ "$kind" != scout ]; then
+      pr=$(meta_value "$meta" pr)
+      if [ -z "$pr" ]; then
+        pr_from_status=$(preferred_pr_url_in_file "$status_log" || true)
+        pr=$pr_from_status
+        pr_source=status_event
+      fi
     fi
     if [ -z "$pr" ]; then
       pr_source=absent

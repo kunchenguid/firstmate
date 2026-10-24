@@ -1088,6 +1088,20 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_coverage_guard_in_non_c_locale() {
+  local collation out
+  collation=$(locale -a | grep -Ei '^en_US\.(utf8|utf-8)$' | head -1 || true)
+  if [ -z "$collation" ]; then
+    printf 'skip: en_US UTF-8 collation not installed\n'
+    return 0
+  fi
+  out=$(LC_ALL="$collation" "$RUNNER" --check-coverage 2>&1) \
+    || fail "coverage guard failed under $collation: $out"
+  assert_contains "$out" 'FM_TEST_COVERAGE ok' "non-C locale must retain complete coverage"
+  assert_not_contains "$out" 'not in sorted order' "inventory comparisons must use byte order"
+  pass "coverage guard compares byte-sorted inventories independently of caller collation"
+}
+
 # The two parallel lanes are only "duration-balanced" while every member has a
 # measured hint and the packing over those hints stays even. Both halves went
 # unchecked until one lane grew past its CI job cap and was cancelled on every
@@ -1871,6 +1885,7 @@ test_exclude_family
 test_list_scheduled_proven_isolated_uses_serial_weights
 test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_in_non_c_locale
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
