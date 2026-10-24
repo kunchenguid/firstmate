@@ -165,7 +165,7 @@ handle_push_transition() {  # <backend> <session> <record>
   case $? in
     0|1) surface_end=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; surface_ident=${rest%%$'\t'*} ;;
   esac
-  reason="stale: $window ($backend: agent $to${detail:+ ($detail)} - waiting on human, escalated immediately, not via wedge timer)"
+  reason="stale: $window ($backend: agent $to${detail:+ ($detail)} - waiting on human, escalated immediately, not via wedge timer)${task:+ task=$task}"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status" "$surface_end" "$surface_ident"
