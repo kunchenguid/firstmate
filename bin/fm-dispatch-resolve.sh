@@ -19,9 +19,7 @@
 #   config/crew-dispatch.json plus one fixed generic none option. The `until`
 #   contract is owned by docs/configuration.md "Crew dispatch profiles".
 #   The provider returns the matched rule, a probability per option, and a
-#   confidence. Code then applies the confidence floor (0.6 on the answer confidence, or a
-#   rule's declared `min_confidence` on that rule's probability, falling to the
-#   most probable other option that clears its own floor), the rule's declared
+#   confidence. Code applies the documented confidence and fallback policy, the rule's declared
 #   `approval` and `floor`, each profile's declared `provider` and `floor`, the
 #   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
 #   candidate binds to one row through quota_row in

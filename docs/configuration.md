@@ -1448,8 +1448,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The [dispatch intake contract](../AGENTS.md#4-harness-and-runtime-dispatch) owns rule selection and the concrete profile passed to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -1540,8 +1539,7 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 - An omitted model or effort means the selected harness uses its own default for that axis.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
-- Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-- If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+- Profile-array selection and no-match fallback follow the [dispatch intake contract](../AGENTS.md#4-harness-and-runtime-dispatch).
 - Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
@@ -1633,6 +1631,7 @@ After the answer, code applies all remaining checks and ranking:
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
 
 Before reading quota, the resolver attempts a bounded session refresh for each distinct Pi executable/provider pair in unexpired rules and the top-level default.
+Refresh requires a `provider/model` value; the provider is that model prefix, not the profile's quota-family `provider` field.
 It uses the profile's `pi` or `pi-signed` executable and the [worker account pin](#worker-account-pin-configclaude-account-configpi-account) when configured.
 A refused pin skips refresh; an undeclared provider skips that provider's refresh, without retrying under an ambient account.
 A missing executable or failed refresh does not stop resolution.
@@ -1659,7 +1658,8 @@ Only picks without a declared floor use the low-confidence path when answer conf
 The resolver selects the most probable option whose declared floor, if any, is met.
 Options without a declared floor, including the neutral option, need no minimum probability on this path.
 A tie between the highest-probability qualifying options returns `ambiguous`.
-Otherwise, the resolver applies approval and quota checks to the selected option and marks its result note low confidence.
+Otherwise, the resolver applies approval and quota checks to the selected option.
+After approval and rule-floor checks permit candidate ranking, the result note marks low confidence.
 
 **Candidate eligibility and evidence**
 
