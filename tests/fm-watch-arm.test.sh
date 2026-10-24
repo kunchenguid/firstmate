@@ -1275,6 +1275,73 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing() {
   pass "watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work"
 }
 
+# A watcher with Herdr panes spends most of each idle cycle in the push-event
+# wait, which blocks up to FM_POLL. A take-over that lands there must still own
+# a fresh cycle, not attach to a watcher whose stop is held until the wait ends.
+test_take_over_waits_out_a_watcher_held_in_a_substitution() {
+  local dir state fakebin armout owner i
+  dir=$(make_case take-over-held-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "session list") printf '{"sessions":[{"name":"sess","running":true,"default":false,"socket_path":"/nonexistent.sock"}]}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+esac
+exit 0
+SH
+  cat > "$dir/reader" <<SH
+#!/usr/bin/env bash
+printf '@subscribed\n'
+if mv "$dir/slow" "$dir/slow.claimed" 2>/dev/null; then
+  i=0
+  while [ ! -e "$dir/release" ] && [ "\$i" -lt 600 ]; do sleep 0.1; i=\$((i + 1)); done
+else
+  sleep "\$2"
+fi
+SH
+  chmod +x "$fakebin/herdr" "$dir/reader"
+  fm_write_meta "$state/tk1.meta" "window=sess:wG:pQ" "backend=herdr" "kind=ship"
+  export FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$dir/reader"
+  start_rearm_arm "$dir" "$state" "$fakebin" "$dir/owner.out" "$$"
+  owner=$ARM_PID
+  SEED_PID=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  touch "$dir/slow"
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/slow.claimed" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/slow.claimed" ] || fail "fixture: the watcher never entered the held event wait"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=15 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 400 ] && ! grep -q -e '^watcher: started pid=' -e '^watcher: attached' "$armout" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  touch "$dir/release"
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "--take-over did not own a fresh cycle after a late stop: $(cat "$armout")"
+  grep -q 'reason=taken-over	' "$state/.watch-cycle-exits.log" \
+    || fail "a late stop fell back to an attach: $(cat "$state/.watch-cycle-exits.log")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in
+    acked:*) ;;
+    *) fail "a late stop opened a downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  unset FM_BACKEND_HERDR_EVENTS_FORCE FM_BACKEND_HERDR_EVENT_READER
+  pass "watch-arm: --take-over owns a fresh cycle from a watcher held in the push-event wait"
+}
+
 # Pause just after handover releases its snapshot locks, then fail the old
 # watcher's secondmate tick write so it exits through cleanup before TERM lands.
 # The ledger and recovery wake are public output contracts, not source probes.
@@ -1868,5 +1935,6 @@ test_handling_delivered_accepts_already_acked_generation
 test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
+test_take_over_waits_out_a_watcher_held_in_a_substitution
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_opencode_arm_plugin_decides_with_the_shared_predicate

@@ -2873,8 +2873,8 @@ fm_active_check_stop() {
 # and the signal is consumed, so a stop request could leave this watcher
 # polling forever while its stopper waits (fixed upstream in bash 5.3). Bash
 # 3.2 holds HUP and TERM until a running command substitution's child exits, so
-# fm_backend_capture pane reads go through watcher_capture instead. INT keeps
-# its trap because bash ignores a direct SIGINT while a child runs.
+# pane reads and the push-event wait go through watcher_group_run instead. INT
+# keeps its trap because bash ignores a direct SIGINT while a child runs.
 watcher_stop_signals() {
   trap - HUP TERM
   trap 'exit 1' INT
@@ -2913,28 +2913,36 @@ run_check_capture() {
 
 FM_CAPTURE_OUTPUT=
 WATCHER_CAPTURE=
+WATCHER_GROUP_RC=
+FM_EVENT_WAIT_DIR=
 
 fm_capture_output_cleanup() {
   [ -z "$FM_CAPTURE_OUTPUT" ] || rm -f -- "$FM_CAPTURE_OUTPUT"
   FM_CAPTURE_OUTPUT=
 }
 
-# watcher_capture: fm_backend_capture into WATCHER_CAPTURE with its exit status.
-# The read runs as a waited background process group rather than inside $(...),
-# so a stop is not held for a blocked read (watcher_stop_signals). The group is
-# recorded like a check's, so watcher_cleanup stops a read still in flight.
-watcher_capture() {  # <backend> <target> <lines> [expected-label]
-  local rc pgid
-  fm_capture_output_cleanup
-  WATCHER_CAPTURE=
-  FM_CAPTURE_OUTPUT=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
+fm_event_wait_cleanup() {
+  [ -z "$FM_EVENT_WAIT_DIR" ] || rm -rf -- "$FM_EVENT_WAIT_DIR"
+  FM_EVENT_WAIT_DIR=
+}
+
+# watcher_group_run: run <cmd...> with stdout to <output-file> as a waited
+# background process group rather than inside $(...), so a stop is not held for
+# a blocked command (watcher_stop_signals). The group is recorded like a
+# check's, so watcher_cleanup stops one still in flight. Returns 0 with the
+# command's exit status in WATCHER_GROUP_RC, or 1 when the group could not be
+# run or stopped.
+watcher_group_run() {  # <output-file> <cmd...>
+  local out=$1 pgid
+  shift
+  WATCHER_GROUP_RC=
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   # The group's stderr is redirected before the fork: bash 3.2 on macOS can
   # print a harmless "child setpgid ... Operation not permitted" race from the
   # child before the command's own redirections apply.
   set -m
-  { fm_backend_capture "$@" < /dev/null > "$FM_CAPTURE_OUTPUT" & } 2>/dev/null
+  { "$@" < /dev/null > "$out" & } 2>/dev/null
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -2943,13 +2951,22 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
-    fm_capture_output_cleanup
     return 1
   fi
   wait "$FM_ACTIVE_CHECK_PID"
-  rc=$?
+  WATCHER_GROUP_RC=$?
   FM_ACTIVE_CHECK_PID=
-  fm_active_check_stop || { fm_capture_output_cleanup; return 1; }
+  fm_active_check_stop || return 1
+}
+
+# watcher_capture: fm_backend_capture into WATCHER_CAPTURE with its exit status.
+watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  local rc
+  fm_capture_output_cleanup
+  WATCHER_CAPTURE=
+  FM_CAPTURE_OUTPUT=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
+  watcher_group_run "$FM_CAPTURE_OUTPUT" fm_backend_capture "$@" || { fm_capture_output_cleanup; return 1; }
+  rc=$WATCHER_GROUP_RC
   WATCHER_CAPTURE=$(cat "$FM_CAPTURE_OUTPUT" 2>/dev/null || true)
   fm_capture_output_cleanup
   return "$rc"
@@ -3064,6 +3081,12 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+event_wait_transition() {  # <tmpdir> <backend> <session> <timeout> <state> <pane_window...>
+  local tmp=$1
+  shift
+  TMPDIR=$tmp FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$@"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -3118,8 +3141,19 @@ event_wait_or_sleep() {
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
-  rc=$?
+  rec=
+  rc=2
+  # The wait runs through watcher_group_run, not $(...): it blocks up to POLL,
+  # and a stop held that long loses the supervision host's take-over race. Its
+  # private TMPDIR holds the reader's FIFO, so a stop that kills the wait
+  # leaves nothing behind once watcher_cleanup removes the directory.
+  if FM_EVENT_WAIT_DIR=$(mktemp -d "$STATE/.fm-event-wait.XXXXXX") \
+    && watcher_group_run "$FM_EVENT_WAIT_DIR/record" event_wait_transition "$FM_EVENT_WAIT_DIR" \
+      "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"; then
+    rc=$WATCHER_GROUP_RC
+    rec=$(cat "$FM_EVENT_WAIT_DIR/record" 2>/dev/null || true)
+  fi
+  fm_event_wait_cleanup
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -3344,6 +3378,7 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_capture_output_cleanup
+  fm_event_wait_cleanup
   fm_custom_check_snapshot_cleanup
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
