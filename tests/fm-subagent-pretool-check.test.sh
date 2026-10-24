@@ -106,7 +106,7 @@ test_guard_allows_ordinary_and_observe_only_tools() {
   done
   # Observing or stopping work that already exists is not creating unaccounted
   # work, and blocking it would strand a runaway task with no way to end it.
-  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell; do
+  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell ListAgents; do
     expect_allow "observe-or-stop tool" "$tool"
   done
   pass "the guard leaves ordinary tools and observe-or-stop operations alone"
