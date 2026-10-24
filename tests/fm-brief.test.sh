@@ -233,6 +233,21 @@ brief_browser_sessions() {
   grep -o 'CHROME_DEVTOOLS_AXI_SESSION=[^ ]*' "$1" | sed 's/^CHROME_DEVTOOLS_AXI_SESSION=//' | sort -u
 }
 
+# Rule 3 is a generated worker contract, so pin its task-cleanup clauses.
+assert_task_cleanup_rule() {
+  local brief=$1 session=$2 label=$3 cli_rule=${4:-"Use gh-axi for GitHub operations"}
+  assert_grep "3. $cli_rule and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi <command>\`." "$brief" \
+    "$label must run chrome-devtools-axi under its named session"
+  assert_grep "Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start." "$brief" \
+    "$label must close only its own browser sessions"
+  assert_grep "After the fix or feature finishes, or if the task fails or times out, clean up only temporary browser profiles and caches, preview servers, task temporary directories, test browsers, and other large tool downloads that the task created or fetched and that were not present before it began; leave the captain's browsers and caches and shared package caches and tools that predate the task untouched." "$brief" \
+    "$label must clean up task-created resources and preserve pre-existing resources"
+  assert_grep "Never copy installed dependency or build-output directories (for example \`node_modules\`, \`.next\`, \`dist\`, or virtual environments) into Firstmate task evidence or data records; source and lockfiles are enough to rebuild." "$brief" \
+    "$label must keep installed dependencies and build output out of task records"
+  assert_grep "Stop only your named session, with \`CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop\`, and never stop the default or another chrome-devtools-axi session." "$brief" \
+    "$label must stop only its named session"
+}
+
 # --forge forgejo is the Forgejo value of the project's registered forge binding
 # (bin/fm-project-mode.sh --forge), passed at intake exactly like --mode. It
 # names tea instead of gh-axi in the ship brief's forge-CLI rule and in the
@@ -249,8 +264,7 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-default some-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "a ship brief with no --forge should still scaffold"
   brief="$home/data/brief-forge-default/brief.md"
-  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-default chrome-devtools-axi <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-default chrome-devtools-axi stop\`, and never stop the default or another chrome-devtools-axi session." "$brief" \
-    "a brief with no --forge must render the browser-session cleanup rule, named for its task, in Rule 3"
+  assert_task_cleanup_rule "$brief" "$tag-brief-forge-default" "a ship brief with no --forge"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
     "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
@@ -260,14 +274,12 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-scout some-proj --scout >/dev/null 2>&1 \
     || fail "a scout brief should still scaffold"
   brief="$home/data/brief-forge-scout/brief.md"
-  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-scout chrome-devtools-axi <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-scout chrome-devtools-axi stop\`, and never stop the default or another chrome-devtools-axi session." "$brief" \
-    "a scout brief must render the browser-session cleanup rule, named for its task, in Rule 3"
+  assert_task_cleanup_rule "$brief" "$tag-brief-forge-scout" "a scout brief"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a direct-PR ship brief"
   brief="$home/data/brief-forge-forgejo/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-forgejo chrome-devtools-axi <command>\`." "$brief" \
-    "--forge forgejo must render the tea Rule 3 line"
+  assert_task_cleanup_rule "$brief" "$tag-brief-forge-forgejo" "a Forgejo ship brief" "Use tea for Forgejo operations"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `tea`' "$brief" \
     "--forge forgejo's direct-PR DOD must tell the worker to open the PR with tea"

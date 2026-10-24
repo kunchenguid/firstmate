@@ -461,13 +461,14 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
-# Ship and scout briefs tell the worker to run chrome-devtools-axi under one
-# named session and stop only that session. Session names share one per-user
-# namespace across every home, and an unnamed session is the shared "default"
-# one firstmate itself uses, so the name joins this home's tag to the task id
-# and is never "default". chrome-devtools-axi accepts 1-64 characters from
-# [A-Za-z0-9._-]; a longer or out-of-charset name keeps a readable prefix plus a
-# hash of the full name, so distinct tasks stay distinct.
+# Ship and scout briefs include task-cleanup guidance and tell the worker to
+# run chrome-devtools-axi under one named session and stop only that session.
+# Session names share one per-user namespace across every home, and an unnamed
+# session is the shared "default" one firstmate itself uses, so names join this
+# home's tag to the task id and are never "default".
+# chrome-devtools-axi accepts 1-64 characters from [A-Za-z0-9._-]; longer or
+# out-of-charset names keep a readable prefix plus a hash of the full name, so
+# distinct tasks stay distinct.
 browser_session_name() {
   local name=$1 hash
   local LC_ALL=C
@@ -480,7 +481,11 @@ browser_session_name() {
   printf '%s-%s' "${name:0:55}" "$hash"
 }
 BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "$(fm_backend_hometag)-$ID") chrome-devtools-axi"
-BROWSER_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
+TASK_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. \
+Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. \
+After the fix or feature finishes, or if the task fails or times out, clean up only temporary browser profiles and caches, preview servers, task temporary directories, test browsers, and other large tool downloads that the task created or fetched and that were not present before it began; leave the captain's browsers and caches and shared package caches and tools that predate the task untouched. \
+Never copy installed dependency or build-output directories (for example \`node_modules\`, \`.next\`, \`dist\`, or virtual environments) into Firstmate task evidence or data records; source and lockfiles are enough to rebuild. \
+Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -740,7 +745,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $TASK_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -821,7 +826,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-3. $FORGE_RULE_LINE $BROWSER_CLEANUP_RULE
+3. $FORGE_RULE_LINE $TASK_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
