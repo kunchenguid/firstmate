@@ -54,6 +54,12 @@
 # hidden is worse than a card wrongly shown. Cleanup is therefore a normal
 # rebuild effect rather than a committed migration or direct state mutation.
 #
+# CARD TEXT LINKS. The template turns HTTP(S) addresses in Captain's Call
+# titles, about/decide rows, merge details, and option hints into safe new-tab
+# links by default, while keeping all payload text uninterpreted as HTML. Long
+# addresses wrap inside the card; option labels wrap too but remain plain text
+# because the label itself is the option-selection target.
+#
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
