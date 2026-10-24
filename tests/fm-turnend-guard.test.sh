@@ -647,6 +647,24 @@ test_hook_blocks_in_treehouse_leased_secondmate_home() {
   pass "fm-turnend-guard: blocks a blind turn end in a treehouse-leased LINKED secondmate home (marker force-include)"
 }
 
+# A pool slot that once served as a treehouse-leased secondmate home keeps its
+# gitignored marker when it is reused as a task worktree. The FM_TASK_ID mark
+# that bin/fm-spawn.sh gives ship and scout panes must keep the worker exempt,
+# while an unmarked session in the same slot stays guarded.
+test_hook_exempts_task_worker_in_recycled_secondmate_slot() {
+  local base dir out status
+  base="$TMP_ROOT/hook-recycled-slot-base"
+  dir="$TMP_ROOT/hook-recycled-slot-wt"
+  make_secondmate_linked_home_dir "$base" "$dir" >/dev/null
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an unmarked session in a marked slot must stay guarded, or the worker case below is vacuous"
+  out=$(FM_TASK_ID=recycled-task run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a marked task worker must stay exempt in a recycled secondmate slot"
+  [ -z "$out" ] || fail "guard produced output for a task worker in a recycled secondmate slot: $out"
+  pass "fm-turnend-guard: exempts a FM_TASK_ID task worker even when its slot carries a stale secondmate marker"
+}
+
 # Anti-spoof: a linked worktree with an INVALID (empty) marker must NOT be
 # force-included. Marker validation rejects it, so it falls through to the
 # linked-worktree exemption and stays exempt - a stray/empty marker file can
@@ -2335,6 +2353,7 @@ test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
 test_hook_blocks_in_treehouse_leased_secondmate_home
+test_hook_exempts_task_worker_in_recycled_secondmate_slot
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree

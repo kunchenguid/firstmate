@@ -60,6 +60,7 @@ The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently
 ### Primary scope
 
 The guard first calls the shared primary scope.
+A session carrying the `FM_TASK_ID` mark that `bin/fm-spawn.sh` gives ship and scout panes is never primary, even in a recycled pool slot that still carries a former secondmate home's marker.
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must meet both of these conditions:
 
@@ -68,7 +69,7 @@ The marker must meet both of these conditions:
 
 An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
-It also requires `AGENTS.md`, `bin/`, and the effective state directory.
+Primary scope also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 ### Supervision need
 

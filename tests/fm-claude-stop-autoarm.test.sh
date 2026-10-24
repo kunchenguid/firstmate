@@ -294,6 +294,28 @@ test_inert_in_child_worktree() {
   pass "auto-arm: inert in a linked child worktree even when in-flight"
 }
 
+# A pool slot that once served as a treehouse-leased secondmate home keeps its
+# gitignored .fm-secondmate-home marker when it is reused as a task worktree.
+# The marker alone force-includes the slot, so only the FM_TASK_ID mark that
+# bin/fm-spawn.sh gives ship and scout panes keeps the worker out of scope.
+test_inert_for_task_worker_in_recycled_secondmate_slot() {
+  local base dir out status
+  base="$TMP_ROOT/recycled-base"
+  dir="$TMP_ROOT/recycled-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  printf 'sm-recycled-1\n' > "$dir/.fm-secondmate-home"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an unmarked session in a marked slot must stay in scope, or the worker case below is vacuous"
+  rm -f "$dir/state/arm-ran" "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_TASK_ID=recycled-task run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a marked task worker must stay inert in a recycled secondmate slot"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed for a task worker in a recycled secondmate slot"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch for a task worker in a recycled secondmate slot"
+  pass "auto-arm: inert for a FM_TASK_ID task worker even when its slot carries a stale secondmate marker"
+}
+
 test_inert_without_session_lock() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/no-lock")
@@ -1987,6 +2009,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 }
 
 test_inert_in_child_worktree
+test_inert_for_task_worker_in_recycled_secondmate_slot
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
