@@ -1087,4 +1087,94 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- resolution record -------------------------------------------------------
+RECORD="$HOME_DIR/state/dispatch-resolve.jsonl"
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+mkdir -p "$(dirname "$TASK_BRIEF")"
+cp "$BRIEF" "$TASK_BRIEF"
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_4 0.9
+pushd "$HOME_DIR" >/dev/null || exit
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null || exit
+expect_code 0 "$code" "recorded clear resolution exits 0"
+assert_equals 1 "$(wc -l < "$RECORD" | tr -d ' ')" "a clear resolution appends exactly one line"
+record=$(cat "$RECORD")
+assert_equals 'pager-fix' "$(jq -r .task <<<"$record")" "record names the task id"
+assert_equals 'pager' "$(jq -r .project <<<"$record")" "record names the project"
+assert_equals 'clear' "$(jq -r .status <<<"$record")" "record holds the status"
+assert_equals 'rule_4' "$(jq -r .rule <<<"$record")" "record holds the matched rule"
+assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r .rule_when <<<"$record")" "record holds the rule when excerpt"
+assert_equals '0.9' "$(jq -r .confidence <<<"$record")" "record holds the confidence"
+assert_equals '0.96' "$(jq -r .probabilities.rule_4 <<<"$record")" "record holds the probabilities"
+assert_equals 'cursor cursor-grok-4.6-medium' "$(jq -r '.profile | "\(.harness) \(.model)"' <<<"$record")" "record holds the chosen profile"
+assert_not_contains "$record" 'off-by-one' "record holds no brief text"
+assert_not_contains "$record" "$KEY" "record holds no key"
+assert_not_contains "$record" 'SECRET-WHY-TEXT' "record holds no rule why text"
+
+cp "$RULES" "$RULES.bak"
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+rm -rf "$RECORD"
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
+pushd "$HOME_DIR" >/dev/null || exit
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null || exit
+record=$(cat "$RECORD")
+assert_equals 'rule_2' "$(jq -r .rule <<<"$record")" "a fallback record keeps the model's pick"
+assert_equals 'rule_4' "$(jq -r .fallback_rule <<<"$record")" "a fallback record names the rule that supplied the profile"
+assert_equals 'rule_4' "$(jq -r .profile_source <<<"$record")" "a fallback record names the rule whose profile was used"
+mv "$RULES.bak" "$RULES"
+
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_1 0.97
+pushd "$HOME_DIR" >/dev/null || exit
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null || exit
+record=$(cat "$RECORD")
+assert_equals 'rule_1' "$(jq -r .rule <<<"$record")" "a floor-below record keeps the model's pick"
+assert_equals 'default' "$(jq -r .profile_source <<<"$record")" "a floor-below record marks the default fall-through"
+
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_4 0.2
+pushd "$HOME_DIR" >/dev/null || exit
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null || exit
+record=$(cat "$RECORD")
+assert_equals 'ambiguous' "$(jq -r .status <<<"$record")" "a low-confidence record is ambiguous"
+assert_equals 'null' "$(jq -r .profile_source <<<"$record")" "a record without a profile has no profile source"
+
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_4 0.9
+pushd "$HOME_DIR" >/dev/null || exit
+FAKE_QUOTA_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null || exit
+record=$(cat "$RECORD")
+assert_equals 'error' "$(jq -r .status <<<"$record")" "a late error is recorded as error"
+assert_equals 'rule_4' "$(jq -r .rule <<<"$record")" "an error after a valid answer keeps the chosen rule"
+assert_equals '0.9' "$(jq -r .confidence <<<"$record")" "an error after a valid answer keeps the confidence"
+
+rm -rf "$RECORD" "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "off path exits 0"
+assert_absent "$RECORD" "the off path appends nothing"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --bogus
+assert_absent "$RECORD" "a usage error appends nothing"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expected_out=${out//latency_ms: [0-9]*/latency_ms: N}
+rm -f "$RECORD"; mkdir -p "$RECORD"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an unwritable record keeps the exit code"
+assert_equals "$expected_out" "${out//latency_ms: [0-9]*/latency_ms: N}" "an unwritable record keeps stdout"
+assert_equals "dispatch-resolve: could not write $RECORD" "$err" "an unwritable record warns once on stderr"
+rm -rf "$RECORD"
+pass "resolution record: one line without brief text, nothing when off, write failures change nothing"
+
 printf '# all fm-dispatch-resolve tests passed\n'
