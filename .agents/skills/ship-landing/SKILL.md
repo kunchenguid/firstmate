@@ -20,6 +20,7 @@ Tell the captain the PR's full `https://...` URL copied from the worker's ready 
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
+When a worker's `paused:` line declares a wait that only a person outside the fleet can clear on a GitHub PR, such as a maintainer's review or merge or approval of fork CI, give it a PR-wait park with `bin/fm-pr-park.sh park <id> <PR url>` rather than keeping its session alive; that script's header owns the watch, the relaunch on its wake, and `unpark`.
 
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
