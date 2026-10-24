@@ -42,6 +42,9 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) no-mistakes + pushed branch, recorded PR still open           -> REFUSE
+#        (and when the recorded PR state cannot be read                 -> REFUSE)
+#   (q7) no-mistakes + pushed branch, recorded PR merged               -> ALLOW
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -433,6 +436,24 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Fake gerrit-axi reporting change 12345 as merged.
+add_gerrit_change_merged() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$case_dir/fakebin/gerrit-axi"
+}
+
+# Record a merged GitHub PR whose URL is longer than a pending-close record
+# accepts, so teardown reaches the backlog close but cannot record it.
+append_unrecordable_merged_pr() {
+  local case_dir=$1
+  printf 'pr=https://github.com/example/repo/pull/1%s\n' "$(printf '%02100d' 0)" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" ""
+}
+
 # Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
 # git "file exists" lock error whenever the worktree's real index.lock is
 # present, and succeeds once it is gone. This drives the lock through
@@ -731,6 +752,7 @@ test_teardown_closes_the_backlog_item_itself() {
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   seed_backlog_in_flight "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
@@ -754,6 +776,7 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
   case_dir=$(make_case tasks-axi-close-gerrit)
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
+  add_gerrit_change_merged "$case_dir"
   seed_backlog_in_flight "$case_dir"
   # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
   # GitHub pull request, so this case keeps reproducing whatever the installed
@@ -785,6 +808,7 @@ SH
   case_dir=$(make_case tasks-axi-close-github-under-refusal)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   seed_backlog_in_flight "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
@@ -848,6 +872,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
 
@@ -918,6 +943,96 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+# Override GitHub lookups to report PR 7 in the supplied state (open or closed),
+# never merged. Args: case_dir state
+add_gh_pr_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\n' "pull_request:" "  number: 7" "  state: $state" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: gh unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# A pushed task branch is reachable from a remote, so the landed-work test alone
+# accepts it, yet its recorded PR may still be waiting on its merge. Cleanup
+# then closed the backlog item and removed the record fm-pr-merge.sh needs.
+# Args: case_dir
+setup_pushed_branch_with_recorded_pr() {
+  local case_dir=$1
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+}
+
+test_open_pr_refuses_cleanup() {
+  local case_dir rc head
+  case_dir=$(make_case open-pr)
+  setup_pushed_branch_with_recorded_pr "$case_dir"
+  add_gh_pr_state "$case_dir" open
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr: teardown should refuse while the recorded PR is open"
+  grep -F 'REFUSED' "$case_dir/stderr" | grep -F 'https://github.com/example/repo/pull/7' | grep -qF 'still open' \
+    || fail "open-pr: refusal did not name the open PR: $(cat "$case_dir/stderr")"
+  assert_refusal_retained_task_state "$case_dir" open-pr "$head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "open-pr: refusal changed the backlog item: $(backlog_row_state "$case_dir")"
+  pass "a task whose recorded PR is still open is not cleaned up, even with its branch pushed"
+
+  case_dir=$(make_case unread-pr)
+  setup_pushed_branch_with_recorded_pr "$case_dir"
+  add_gh_axi_error "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unread-pr: teardown should refuse when the recorded PR state is unreadable"
+  grep -F 'REFUSED' "$case_dir/stderr" | grep -F 'https://github.com/example/repo/pull/7' | grep -qF 'could not read the forge state' \
+    || fail "unread-pr: refusal did not name the unread PR state: $(cat "$case_dir/stderr")"
+  assert_refusal_retained_task_state "$case_dir" unread-pr "$head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "unread-pr: refusal changed the backlog item: $(backlog_row_state "$case_dir")"
+  pass "a task whose recorded PR state cannot be read is not cleaned up, even with its branch pushed"
+}
+
+test_merged_pr_with_pushed_branch_cleans_up() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-pushed)
+  setup_pushed_branch_with_recorded_pr "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pr-pushed: teardown should clean up once the recorded PR merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-pushed: teardown printed a REFUSED line"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "merged-pr-pushed: backlog item not closed: $(backlog_row_state "$case_dir")"
+  pass "a task whose recorded PR merged is cleaned up"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -2001,7 +2116,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  append_unrecordable_merged_pr "$case_dir"
   seed_backlog_in_flight "$case_dir"
   add_failing_truncate_perl "$case_dir"
 
@@ -2104,7 +2219,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   local case_dir rc before
   case_dir=$(make_case legacy-stamp-rollback)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  append_unrecordable_merged_pr "$case_dir"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -2157,7 +2272,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   local case_dir rc stamped
   case_dir=$(make_case legacy-stamp-retained)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  append_unrecordable_merged_pr "$case_dir"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -5626,6 +5741,8 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_open_pr_refuses_cleanup
+test_merged_pr_with_pushed_branch_cleans_up
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

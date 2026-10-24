@@ -2951,6 +2951,14 @@ test_dispatch_and_completion_are_structural() {
 
   meta="$home/state/$id.meta"
   printf 'pr=%s\n' "$pr" >> "$meta"
+  # Teardown waits until the forge reports the recorded PR merged or closed.
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "structural teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \

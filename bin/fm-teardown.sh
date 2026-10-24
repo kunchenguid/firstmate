@@ -67,6 +67,12 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# A pushed branch is reachable from a remote while its PR still waits on the
+# merge, so a non-local-only ship task whose recorded pr= the forge reports open
+# also refuses: cleanup would close its backlog item and remove the record
+# bin/fm-pr-merge.sh needs to land it. A merged or closed PR proceeds to the
+# checks above; an unreadable PR state also refuses, since it does not show the
+# PR closed.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -198,7 +204,7 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout report
+#   --force skips ordinary-task dirty, open-PR, and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
@@ -1738,6 +1744,28 @@ content_in_default() {
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
+}
+
+# Is the task's recorded pr= still open on its forge? Returns 0 only when the
+# forge positively reports it open and unmerged, 1 when it reports merged or
+# closed, and 2 when the state cannot be read.
+recorded_pr_is_open() {
+  local state
+  fm_pr_url_parse "$PR_URL" || return 2
+  case "$FM_PR_PROVIDER" in
+    github) fm_pr_github_read_record "${FM_PR_PATH%%/*}" "${FM_PR_PATH#*/}" "$FM_PR_NUMBER" || return 2 ;;
+    gitlab) fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 2 ;;
+    forgejo) fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 2 ;;
+    gerrit) fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 2 ;;
+    *) return 2 ;;
+  esac
+  [ "$FM_PR_RECORD_MERGED" != true ] || return 1
+  state=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+  case "$state" in
+    open|opened|new) return 0 ;;
+    closed|abandoned|merged) return 1 ;;
+  esac
+  return 2
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -3630,6 +3658,28 @@ if [ "$FORCE" != "--force" ] \
     echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with bin/fm-tasks-axi.sh public-followup waive, or use --force after explicit discard approval." >&2
     exit 1
   fi
+fi
+
+# A pushed task branch passes the landed-work test below while its PR still
+# waits on the merge, and this cleanup removes the record bin/fm-pr-merge.sh
+# needs to land it. Refuse unless the forge reports the recorded PR merged or
+# closed.
+if [ "$FORCE" != "--force" ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] \
+    && [ -n "$PR_URL" ] && [ "$CLEANUP_RECOVERY" != orca ]; then
+  recorded_pr_open_rc=0
+  recorded_pr_is_open || recorded_pr_open_rc=$?
+  case "$recorded_pr_open_rc" in
+    0)
+      echo "REFUSED: task $ID's PR $PR_URL is still open; cleanup waits until it merges or closes." >&2
+      echo "Land it with bin/fm-pr-merge.sh, or use --force after the captain explicitly approves cleaning up with the PR open." >&2
+      exit 1
+      ;;
+    2)
+      echo "REFUSED: could not read the forge state of task $ID's PR $PR_URL; cleanup waits until the forge reports it merged or closed." >&2
+      echo "Retry once the forge is reachable, or use --force after the captain explicitly approves cleaning up without that state." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Non-blocking: a delivered public loop is not a teardown refusal (guard-work
