@@ -1,7 +1,8 @@
 use strict;
 use warnings;
 use Cwd qw(getcwd);
-use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_RDONLY O_RDWR O_WRONLY);
+use Errno qw(EEXIST ESRCH);
+use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR O_WRONLY);
 use JSON::PP qw(encode_json);
 use POSIX qw(dup2);
 
@@ -115,6 +116,32 @@ sub open_new {
     or fail("cannot create $name");
   return $fh;
 }
+sub open_runner {
+  my ($name) = @_;
+  my $fh;
+  return $fh if sysopen($fh, $name, O_CREAT | O_EXCL | O_NOFOLLOW | O_RDWR, 0600);
+  fail("cannot create $name") unless $! == EEXIST;
+  sysopen(my $old, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or fail("cannot create $name");
+  my @st = stat($old);
+  fail("cannot create $name") unless @st && -f _ && $st[4] == $<
+    && ($st[2] & 07777) == 0600 && $st[3] == 1 && $st[7] <= 32;
+  my $read = sysread($old, my $record, 33);
+  fail("cannot create $name") unless defined($read);
+  # The caller owns the replacement claim and holds the source launch lock:
+  # claim acquisition already refused any prior owner not proven gone. An
+  # empty regular record is residue from a crash before the PID write.
+  if ($record ne '') {
+    fail("cannot create $name") unless $record =~ /\A([1-9][0-9]{0,9})\n\z/;
+    my $pid = $1;
+    # Only ESRCH proves death; permission errors and live/reused PIDs refuse.
+    fail("cannot create $name") if kill(0, $pid) || $! != ESRCH;
+  }
+  my @current = lstat($name);
+  fail("cannot create $name") unless @current && -f _ && !-l _
+    && $current[0] == $st[0] && $current[1] == $st[1];
+  unlink($name) or fail("cannot create $name");
+  return open_new($name);
+}
 sub write_all {
   my ($fh, $value) = @_;
   my $offset = 0;
@@ -180,8 +207,16 @@ chdir($inbox_dir) or fail("cannot enter inbox directory");
 safe_dir(".", 0700) or fail("unsafe inbox directory");
 chdir($registry_dir) or fail("cannot return to registry directory");
 getcwd() eq $registry or fail("registry directory changed");
-my $runner = open_new($runner_name);
-write_all($runner, "$runner_pid\n");
+my $runner = open_runner($runner_name);
+my @runner_stat = stat($runner);
+@runner_stat or fail("cannot stat runner record");
+write_all($runner, "$$\n");
+sub remove_runner {
+  my @current = lstat($runner_name);
+  return unless @current && -f _ && !-l _
+    && $current[0] == $runner_stat[0] && $current[1] == $runner_stat[1];
+  unlink($runner_name) or fail("cannot remove runner record");
+}
 close($runner) or fail("cannot close runner record");
 my $stage = open_new($output_name);
 my $launch_ready;
@@ -226,14 +261,14 @@ my $status = $?;
 if ($waited != $child || ($status & 127)) {
   close($stage);
   unlink($output_name);
-  unlink($runner_name);
+  remove_runner();
   print "failure\t$truncated\n";
   exit 0;
 }
 my $rc = $status >> 8;
 if ($rc != 0 && $written == 0) {
   unlink($output_name);
-  unlink($runner_name);
+  remove_runner();
   print "no-result\t$rc\t$truncated\n";
   exit 0;
 }
@@ -271,5 +306,5 @@ for my $operation ('result.terminal', 'result.silent') {
 close($stage) or fail("cannot close staged output");
 chdir($registry_dir) or fail("cannot return to registry directory");
 unlink($output_name) or fail("cannot remove staged output");
-unlink($runner_name) or fail("cannot remove runner record");
+remove_runner();
 print "captured\t$prefix.result\t$rc\t$truncated\t" . join("\t", @reservations) . "\n";
