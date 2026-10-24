@@ -343,6 +343,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/effort-cue.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },
