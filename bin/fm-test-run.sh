@@ -664,10 +664,18 @@ script_allows_concurrency() {
 }
 
 is_proven_isolated_script() {
-  local want=$1 line
-  while IFS= read -r line; do
-    [ "$line" = "$want" ] && return 0
-  done < <(list_proven_isolated)
+  local want=$1 isolated
+  [ -n "$want" ] || return 1
+  isolated="
+$(list_proven_isolated)
+"
+  case "$isolated" in
+    *"
+$want
+"*)
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -677,7 +685,10 @@ is_proven_isolated_script() {
 # and other unproven work stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
 list_portable_serial() {
-  local s base fam
+  local s base fam isolated
+  isolated="
+$(list_proven_isolated)
+"
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     base=$(basename "$s")
@@ -685,9 +696,13 @@ list_portable_serial() {
     if [ "$fam" = "real-herdr-gated" ]; then
       continue
     fi
-    if is_proven_isolated_script "$s"; then
-      continue
-    fi
+    case "$isolated" in
+      *"
+$s
+"*)
+        continue
+        ;;
+    esac
     printf '%s\n' "$s"
   done < <(all_repo_tests)
 }
@@ -952,13 +967,12 @@ portable_parallel_weight_for() {
 }
 
 portable_serial_weight_for() {
-  local want=$1 path ms
-  while read -r path ms; do
-    if [ "$path" = "$want" ]; then
-      printf '%s\n' "$ms"
-      return 0
-    fi
-  done < <(portable_serial_weight_hints)
+  local want=$1 ms
+  ms=$(portable_serial_weight_hints | awk -v want="$want" '$1 == want { print $2; exit }')
+  if [ -n "$ms" ]; then
+    printf '%s\n' "$ms"
+    return 0
+  fi
   printf '%s\n' "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS"
 }
 
@@ -989,10 +1003,10 @@ portable_serial_assignments() {
     loads[best]=$((best_load + ms))
     printf '%s\t%s\n' "$best" "$script"
   done < <(
-    while IFS= read -r script; do
-      [ -n "$script" ] || continue
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
-    done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
+    list_portable_serial | awk -v fallback="$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" '
+      NR == FNR { if (NF) { hint[$1] = $2 }; next }
+      NF { weight = ($1 in hint) ? hint[$1] : fallback; printf "%s\t%s\n", weight, $0 }
+    ' <(portable_serial_weight_hints) - | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
   )
 }
 
