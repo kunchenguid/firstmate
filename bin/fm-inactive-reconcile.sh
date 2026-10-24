@@ -33,8 +33,17 @@
 # delivered or nothing is owed, and non-zero when the parent channel could not
 # be written, so teardown refuses instead of discarding an undelivered outcome.
 # The cadence-gated scan below then evaluates at most once per
-# FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
-# that --startup performs the same scan immediately in the locked session
+# FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home.
+# A no-mistakes ship without a recorded PR is also visited every 60 seconds, on
+# its own marker, and no other child is. Such a ship can publish readiness
+# before becoming inactive, but only when the attributed run-step reports a
+# green PR still monitoring merge and its status log does not already end in a
+# terminal done or failed line.
+# Its canonical PR URL comes from that same state read. The existing terminal
+# receipt and wake/parent route deliver it once; the supervisor registers the
+# PR through bin/fm-pr-check.sh and applies the existing merge authority.
+# Other outcomes retain the configured inactivity threshold.
+# --startup performs the same scan immediately in the locked session
 # start's deferred worker. Each scan uses an aggregate
 # FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
@@ -47,9 +56,10 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# It considers only a direct ordinary crewmate whose newest meta, status, or
-# turn-ended mtime is older than that interval and whose last status is not
-# captain-held. In a secondmate home a child whose ledger already ends in a
+# Apart from the early no-mistakes readiness path, it considers only a direct
+# ordinary crewmate whose newest meta, status, or turn-ended mtime is older than
+# that interval and whose last status is not captain-held.
+# In a secondmate home a child whose ledger already ends in a
 # terminal done or failed line belongs to the ledger-first path above and is
 # skipped here, so one outcome is never reported twice. It then uses
 # fm-crew-state.sh as the sole current-state source.
@@ -93,6 +103,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
+EARLY_MARKER="$STATE/.inactive-outcome-early-reconcile"
+SCAN_EARLY_ONLY=0
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
@@ -278,33 +290,58 @@ last_activity_age() { # <meta> <status> <turn-ended>
   if [ "$now" -lt "$newest" ]; then printf '0\n'; else printf '%s\n' $((now - newest)); fi
 }
 
-scan_marker_age() {
-  local now m
-  [ -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || { printf '999999\n'; return; }
+scan_marker_age() { # [marker]
+  local marker=${1:-$SCAN_MARKER} now m
+  [ -e "$marker" ] && [ ! -L "$marker" ] || { printf '999999\n'; return; }
   now=$(reconcile_now)
-  m=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
+  m=$(file_mtime "$marker" 2>/dev/null || true)
   case "$m" in ''|*[!0-9]*) printf '999999\n'; return ;; esac
   if [ "$now" -lt "$m" ]; then printf '0\n'; else printf '%s\n' $((now - m)); fi
 }
 
+active_scan_marker() {
+  if [ "$SCAN_EARLY_ONLY" -eq 1 ]; then printf '%s\n' "$EARLY_MARKER"; else printf '%s\n' "$SCAN_MARKER"; fi
+}
+
 scan_marker_cursor() {
-  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
-  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local marker
+  marker=$(active_scan_marker)
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  grep '^cursor=' "$marker" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 write_scan_marker() { # <cursor>
-  local cursor=$1 marker_tmp
+  local cursor=$1 marker marker_tmp
+  marker=$(active_scan_marker)
   marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
   {
     printf 'epoch=%s\n' "$(reconcile_now)"
     printf 'cursor=%s\n' "$cursor"
   } > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
   chmod 600 "$marker_tmp" 2>/dev/null || true
-  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+  mv -f "$marker_tmp" "$marker" || { rm -f "$marker_tmp"; return 1; }
 }
 
 meta_field() {
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+nm_pr_unreported() {
+  local meta=$1
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(meta_field "$meta" kind)" = ship ] \
+    && [ "$(meta_field "$meta" mode)" = no-mistakes ] \
+    && [ -z "$(meta_field "$meta" pr)" ]
+}
+
+nm_ready_pr() {
+  local line=$1 prefix='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close): ' value
+  case "$line" in
+    "$prefix"*) value=${line#"$prefix"} ;;
+    *) return 1 ;;
+  esac
+  fm_pr_url_parse "${value%% *}" || return 1
+  printf '%s\n' "$FM_PR_URL"
 }
 
 meta_incarnation() { # <meta>
@@ -496,7 +533,7 @@ report_child() { # <id>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 early=0 ready_pr=''
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -510,12 +547,23 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     case "$?" in 0|2) return 0 ;; esac
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
-  [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
+  if [ "$age" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+    nm_pr_unreported "$meta" || return 0
+    early=1
+  fi
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
-  if [ -n "$self" ]; then
+  if nm_pr_unreported "$meta"; then
+    ready_pr=$(nm_ready_pr "$state_line") || ready_pr=''
+  fi
+  if [ -n "$ready_pr" ]; then
+    child_terminal_ledger_line "$status" >/dev/null
+    case "$?" in 0|2) ready_pr='' ;; esac
+  fi
+  [ "$early" -eq 0 ] || [ -n "$ready_pr" ] || return 0
+  if [ -n "$self" ] && [ -z "$ready_pr" ]; then
     child_terminal_ledger_line "$status" >/dev/null
     case "$?" in 0|2) return 0 ;; esac
   fi
@@ -525,6 +573,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta")
+  [ -z "$ready_pr" ] || pr=$ready_pr
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
   # keeps appending routine prose after one terminal outcome must not mint a
@@ -549,6 +598,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
+  [ -z "$ready_pr" ] || payload="PR checks green awaiting merge authority: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
@@ -577,6 +627,7 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
       through) [ -n "$cursor" ] && [[ "$id" > "$cursor" ]] && continue ;;
     esac
+    [ "$SCAN_EARLY_ONLY" -eq 0 ] || nm_pr_unreported "$meta" || continue
     first=0
     if [ "${SCAN_FIRST_VISIT_PENDING:-0}" -eq 1 ]; then
       first=1
@@ -600,7 +651,7 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
+  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0 meta
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if self=$(home_secondmate_id); then
@@ -610,8 +661,14 @@ scan() {
     marker_rc=$?
     self=''
   fi
-  if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
-    return 0
+  if [ "$startup" != 1 ]; then
+    if [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+      for meta in "$STATE"/*.meta; do
+        nm_pr_unreported "$meta" && SCAN_EARLY_ONLY=1 && break
+      done
+      [ "$SCAN_EARLY_ONLY" -eq 1 ] || return 0
+      [ "$(scan_marker_age "$EARLY_MARKER")" -ge 60 ] || return 0
+    fi
   fi
   cursor=$(scan_marker_cursor)
   valid_id "$cursor" || cursor=''

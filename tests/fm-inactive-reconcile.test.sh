@@ -34,7 +34,23 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "${1:-}" >> "$FM_FAKE_CREW_STATE_LOG"
+[ -z "${FM_FAKE_CREW_STATE_DELAY:-}" ] || sleep "$FM_FAKE_CREW_STATE_DELAY"
+if [ -n "${FM_FAKE_CREW_STATE_LINE:-}" ]; then
+  printf '%s\n' "$FM_FAKE_CREW_STATE_LINE"
+  exit 0
+fi
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+SH
+  cat > "$fake/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = axi ] || exit 1
+shift
+case "${1:-}" in
+  '') printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+  status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+  logs) printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+esac
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -108,7 +124,7 @@ run_reconcile() { # <home> [--startup]
   local home=$1 option=${2:-}
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_RECONCILE_SECS="${FM_TEST_RECONCILE_SECS:-60}" FM_INACTIVE_CREW_STATE_BIN="${FM_TEST_CREW_STATE_BIN:-$WORLD/fakebin/fm-crew-state.sh}" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
@@ -123,6 +139,7 @@ run_report() { # <home> <child>
 }
 
 wake_count() { # <home> <key prefix>
+  [ -f "$1/state/.wake-queue" ] || { printf '0\n'; return; }
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
 
@@ -1038,6 +1055,191 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+write_unreported_ship() {
+  local home=$1 yolo=${2:-off} id=${3:-child}
+  write_child "$home" "$id" 'paused: validation running until the next gate or CI-ready return'
+  git -C "$home/projects/$id" checkout -q -b "fm/$id"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=$home/projects/$id" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' "yolo=$yolo" 'spawn_gen=ready-test'
+  touch "$home/state/$id.status" "$home/state/$id.turn-ended"
+}
+
+GREEN_PR=https://github.com/o/r/pull/7
+
+pipeline_run() { # <home> <id> <pr>
+  cat <<EOF
+run:
+  id: "01READY"
+  branch: fm/$2
+  status: running
+  head: "$(git -C "$1/projects/$2" rev-parse HEAD)"
+  pr: "$3"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
+EOF
+}
+
+# The real current-state reader serves the scan; only the pipeline CLI is faked.
+run_green_pipeline() { # <home> <id> <ci-log> [startup]
+  FM_FAKE_AXI_STATUS=$(pipeline_run "$1" "$2" "$GREEN_PR") FM_FAKE_CI_LOGS=$3 \
+    FM_TEST_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" FM_TEST_RECONCILE_SECS=900 \
+    run_reconcile "$1" ${4:+"$4"}
+}
+
+CI_GREEN='all CI checks passed - still monitoring until merged or closed'
+CI_RUNNING='CI checks running, waiting for results...'
+
+expire_scan_markers() { # <home>
+  set_mtime "$(( $(date +%s) - 61 ))" "$1/state/.inactive-outcome-reconcile"
+  set_mtime "$(( $(date +%s) - 61 ))" "$1/state/.inactive-outcome-early-reconcile"
+}
+
+test_green_run_wakes_before_worker_report() {
+  local yolo record err seq generation
+  for yolo in off on; do
+    make_world "early-green-$yolo"
+    write_unreported_ship "$MAIN" "$yolo"
+    run_green_pipeline "$MAIN" child "$CI_RUNNING"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "a running check announced readiness"
+    expire_scan_markers "$MAIN"
+    run_green_pipeline "$MAIN" child "$CI_GREEN"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "green checks waited for inactivity or a worker report ($yolo)"
+    assert_grep "PR checks green awaiting merge authority: child=child state=done pr=$GREEN_PR" "$MAIN/state/.wake-queue" \
+      "the readiness wake omitted its PR or merge-authority handoff"
+    record=$(find "$MAIN/state/terminal-outcomes" -name '*.pending' -type f | head -1)
+    assert_grep "pr=$GREEN_PR" "$record" "the readiness receipt omitted the run's PR"
+    assert_grep 'paused:' "$MAIN/state/child.status" "readiness rewrote the worker's status"
+    assert_grep "yolo=$yolo" "$MAIN/state/child.meta" "readiness changed merge authority"
+    [ ! -s "$WORLD/forge.log" ] || fail "readiness contacted the forge"
+    expire_scan_markers "$MAIN"
+    run_green_pipeline "$MAIN" child "$CI_GREEN"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "unacknowledged readiness was queued twice"
+
+    err="$WORLD/ready-drain.err"
+    FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$WORLD/ready-drain.out" 2> "$err"
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+    [ -n "$seq" ] && [ -n "$generation" ] || fail "readiness lacked a durable acknowledgement"
+    FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
+    expire_scan_markers "$MAIN"
+    run_green_pipeline "$MAIN" child "$CI_GREEN"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "the same readiness requested merge authority twice"
+  done
+  pass "green no-mistakes runs wake once before worker reports under either merge posture"
+}
+
+test_early_readiness_requires_an_unreported_green_ship() {
+  local scenario line
+  for scenario in running failed parked unknown status-log no-url bad-url scout direct-PR secondmate registered captain-held; do
+    make_world "not-ready-$scenario"
+    write_unreported_ship "$MAIN"
+    line="state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close): $GREEN_PR · run: 01READY"
+    case "$scenario" in
+      running|failed|parked|unknown) line="state: $scenario · source: run-step · ci running" ;;
+      status-log) line=${line/run-step/status-log} ;;
+      no-url) line='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' ;;
+      bad-url) line=${line/https:\/\/github.com\/o\/r\/pull\/7/https:\/\/invalid.test\/7} ;;
+      scout|secondmate) printf 'kind=%s\n' "$scenario" >> "$MAIN/state/child.meta" ;;
+      direct-PR) printf 'mode=direct-PR\n' >> "$MAIN/state/child.meta" ;;
+      registered) printf 'pr=%s\n' "$GREEN_PR" >> "$MAIN/state/child.meta" ;;
+      captain-held) printf 'captain-held: approval pending\n' > "$MAIN/state/child.status" ;;
+    esac
+    FM_TEST_RECONCILE_SECS=900 FM_FAKE_CREW_STATE_LINE="$line" run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "$scenario produced early readiness"
+    [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$scenario retained a false readiness receipt"
+  done
+  pass "early readiness requires an attributed green run and a canonical unreported ship PR"
+}
+
+test_early_readiness_reaches_the_parent_once() {
+  make_world early-green-parent
+  bind_secondmate local
+  write_mate_meta
+  write_unreported_ship "$MATE"
+  run_green_pipeline "$MATE" child "$CI_GREEN"
+  assert_grep 'inactive terminal child=child' "$MAIN/state/mate.status" "early readiness omitted the child"
+  assert_grep "pr=$GREEN_PR" "$MAIN/state/mate.status" "early readiness did not reach the parent"
+  expire_scan_markers "$MATE"
+  run_green_pipeline "$MATE" child "$CI_GREEN"
+  [ "$(grep -Fc "pr=$GREEN_PR" "$MAIN/state/mate.status")" = 1 ] || fail "the parent received readiness twice"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "parent delivery did not retain its receipt"
+  pass "early no-mistakes readiness uses the existing parent delivery receipt"
+}
+
+test_worker_reported_readiness_is_not_repeated() {
+  local ready="done: PR $GREEN_PR checks green"
+  make_world reported-green-parent
+  bind_secondmate local
+  write_mate_meta
+  write_unreported_ship "$MATE"
+  printf '%s\n' "$ready" >> "$MATE/state/child.status"
+  run_green_pipeline "$MATE" child "$CI_GREEN"
+  [ "$(grep -Fc "$GREEN_PR" "$MAIN/state/mate.status")" = 1 ] || fail "a reported readiness reached the parent more than once"
+  expire_scan_markers "$MATE"
+  run_green_pipeline "$MATE" child "$CI_GREEN"
+  [ "$(grep -Fc "$GREEN_PR" "$MAIN/state/mate.status")" = 1 ] || fail "a repeat scan re-reported a delivered readiness"
+
+  make_world reported-green-main
+  write_unreported_ship "$MAIN"
+  printf '%s\n' "$ready" >> "$MAIN/state/child.status"
+  run_green_pipeline "$MAIN" child "$CI_GREEN"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "a worker-reported readiness woke the supervisor a second time"
+  pass "readiness the worker already reported is not delivered twice"
+}
+
+test_fast_cadence_visits_only_unreported_ships() {
+  local log f
+  make_world fast-cadence
+  write_unreported_ship "$MAIN" off waiting
+  write_child "$MAIN" settled 'working: still going'
+  for f in meta status turn-ended; do set_mtime "$(( $(date +%s) - 1000 ))" "$MAIN/state/settled.$f"; done
+  log="$WORLD/crew-state.log"
+  : > "$log"
+  FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_TEST_RECONCILE_SECS=900 run_reconcile "$MAIN" --startup
+  grep -Fxq settled "$log" || fail "the aged child was not evaluated on the configured cadence"
+  : > "$log"
+  expire_scan_markers "$MAIN"
+  FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_TEST_RECONCILE_SECS=900 run_reconcile "$MAIN"
+  grep -Fxq waiting "$log" || fail "the unreported ship was not re-read at the fast cadence"
+  ! grep -Fxq settled "$log" || fail "the fast cadence re-read a child outside the unreported ships"
+  : > "$log"
+  set_mtime "$(( $(date +%s) - 901 ))" "$MAIN/state/.inactive-outcome-reconcile"
+  FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_TEST_RECONCILE_SECS=900 run_reconcile "$MAIN"
+  grep -Fxq settled "$log" || fail "the configured cadence stopped re-evaluating aged children"
+  pass "the fast cadence reads only unreported no-mistakes ships"
+}
+
+test_fast_cadence_resumes_after_an_exhausted_budget() {
+  local log
+  make_world fast-cadence-budget
+  write_unreported_ship "$MAIN" off alpha
+  write_unreported_ship "$MAIN" off bravo
+  write_unreported_ship "$MAIN" off charlie
+  log="$WORLD/crew-state.log"
+  : > "$log"
+  export FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_FAKE_CREW_STATE_DELAY=2 \
+    FM_TEST_RECONCILE_SECS=900 FM_INACTIVE_RECONCILE_BUDGET_SECS=1
+  run_reconcile "$MAIN" --startup
+  for _ in 1 2 3; do
+    set_mtime "$(( $(date +%s) - 61 ))" "$MAIN/state/.inactive-outcome-early-reconcile"
+    run_reconcile "$MAIN"
+  done
+  unset FM_FAKE_CREW_STATE_LOG FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_DELAY FM_TEST_RECONCILE_SECS FM_INACTIVE_RECONCILE_BUDGET_SECS
+  grep -Fxq charlie "$log" || fail "a later unreported ship starved behind earlier ones on the fast cadence"
+  pass "the fast cadence resumes after an exhausted budget"
+}
+
+test_green_run_wakes_before_worker_report
+test_early_readiness_requires_an_unreported_green_ship
+test_early_readiness_reaches_the_parent_once
+test_worker_reported_readiness_is_not_repeated
+test_fast_cadence_visits_only_unreported_ships
+test_fast_cadence_resumes_after_an_exhausted_budget
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
