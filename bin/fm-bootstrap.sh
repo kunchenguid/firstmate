@@ -60,7 +60,7 @@
 #          `setup hooks` or a `curl | sh` installer. MISSING stays for absent
 #          tools only.
 #          treehouse is OUTDATED when its installed version lacks
-#          "treehouse get --lease" support.
+#          "treehouse get --lease" or "treehouse lease" support.
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -1518,8 +1518,12 @@ detect_local_tools() {
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
-    echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires --lease support; upgrade: $(upgrade_cmd treehouse))"
+    && command -v treehouse >/dev/null 2>&1; then
+    if ! treehouse_supports_lease; then
+      echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires --lease support; upgrade: $(upgrade_cmd treehouse))"
+    elif ! treehouse lease --help >/dev/null 2>&1; then
+      echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires treehouse lease support; upgrade: $(upgrade_cmd treehouse))"
+    fi
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "OUTDATED: no-mistakes (installed: $(tool_version no-mistakes); requires $NO_MISTAKES_MIN; upgrade: $(upgrade_cmd no-mistakes))"

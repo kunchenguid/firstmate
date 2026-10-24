@@ -754,6 +754,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 # the process lease real Treehouse keeps for an interactive acquire.
 install_pool_world_tmux() {  # <fakebin> <world-dir> <slot-root>
   local fakebin=$1 world=$2 slots=$3
+  # Give the lease fake the same pool identity as the terminal allocator.
+  POOL_DIR="$slots/1/project"
   mkdir -p "$world"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -809,6 +811,7 @@ case "$cmd" in
     if [ "$text" = "treehouse get Enter" ]; then
       w=$(window_name "$target")
       for slot in "$slots"/*/project; do
+        [ ! -e "$(dirname "$slot")/.test-treehouse-lease" ] || continue
         grep -qxF -- "$slot" "$world"/*.path 2>/dev/null && continue
         printf '%s\n' "$slot" > "$world/$w.path"
         break
@@ -822,8 +825,8 @@ SH
 }
 
 # A launch refused after it claimed its slot must leave the pool and the task
-# records exactly as it found them, so a retry of the same task and a later
-# second task each land on a slot of their own. The refusal here is a polytoken
+# records intact while retaining its durable lease, so a retry of the same
+# task and a later second task each land on another slot of their own. The refusal here is a polytoken
 # launch into a project that tracks its own .polytoken/hooks.json.
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task() {
   local rec id other out status slot_root world claim1 claim2
@@ -839,13 +842,15 @@ test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task() {
   git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm project-hooks
   git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
   slot_root="$CASE_DIR/slots"
-  mkdir -p "$slot_root/1" "$slot_root/2"
+  mkdir -p "$slot_root/1" "$slot_root/2" "$slot_root/3"
   git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
   git -C "$PROJECT_DIR" worktree add --quiet --detach "$slot_root/2/project" "$INITIAL_SHA"
-  printf '{"worktrees":[{"name":"1","path":"%s"},{"name":"2","path":"%s"}]}\n' \
-    "$slot_root/1/project" "$slot_root/2/project" > "$slot_root/treehouse-state.json"
-  claim1="$slot_root/1/.fm-slot-owner"
-  claim2="$slot_root/2/.fm-slot-owner"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$slot_root/3/project" "$INITIAL_SHA"
+  printf '{"worktrees":[{"name":"1","path":"%s"},{"name":"2","path":"%s"},{"name":"3","path":"%s"}]}\n' \
+    "$slot_root/1/project" "$slot_root/2/project" "$slot_root/3/project" > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+  claim1="$slot_root/2/.fm-slot-owner"
+  claim2="$slot_root/3/.fm-slot-owner"
   world="$CASE_DIR/tmux-world"
   install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
   cat > "$FAKEBIN_DIR/polytoken" <<'SH'
@@ -864,22 +869,25 @@ SH
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused launch published a task record"
   [ ! -e "$world/fm-$id.id" ] \
     || fail "the refused launch left its window open, still leasing $(cat "$world/fm-$id.path")"
-  [ ! -e "$claim1" ] && [ ! -e "$claim2" ] || fail "the refused launch left a slot claim behind"
+  [ ! -e "$slot_root/1/.fm-slot-owner" ] && [ ! -e "$claim1" ] && [ ! -e "$claim2" ] \
+    || fail "the refused launch left a slot claim behind"
   [ ! -e "/tmp/fm-$id" ] || fail "the refused launch left its task temp root behind"
+
+  assert_grep "$id" "$slot_root/1/.test-treehouse-lease" "the refusal released its durable lease"
 
   out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "the retry of the refused task should launch"$'\n'"$out"
-  assert_grep "worktree=$slot_root/1/project" "$HOME_DIR/state/$id.meta" \
-    "the retry did not land on the slot the refused launch returned"
+  assert_grep "worktree=$slot_root/2/project" "$HOME_DIR/state/$id.meta" \
+    "the retry did not skip the slot retained by the refused launch"
 
   out=$(run_spawn "$other" --harness codex --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "a second task spawned after the retry should launch"$'\n'"$out"
-  assert_grep "worktree=$slot_root/2/project" "$HOME_DIR/state/$other.meta" \
+  assert_grep "worktree=$slot_root/3/project" "$HOME_DIR/state/$other.meta" \
     "the second task was handed the retried task's slot"
-  grep -Fxq -- "task=$id" "$claim1" || fail "slot 1 is not claimed by the retried task: $(cat "$claim1" 2>/dev/null)"
-  grep -Fxq -- "task=$other" "$claim2" || fail "slot 2 is not claimed by the second task: $(cat "$claim2" 2>/dev/null)"
+  grep -Fxq -- "task=$id" "$claim1" || fail "slot 2 is not claimed by the retried task: $(cat "$claim1" 2>/dev/null)"
+  grep -Fxq -- "task=$other" "$claim2" || fail "slot 3 is not claimed by the second task: $(cat "$claim2" 2>/dev/null)"
   rm -rf "/tmp/fm-$id" "/tmp/fm-$other" "/tmp/fm-$id+"* "/tmp/fm-$other+"*
   pass "a launch refused after its slot claim leaves the pool for a retry and a second task"
 }
@@ -887,8 +895,8 @@ SH
 # A refused polytoken launch removes its per-id paths only under the per-id
 # spawn lock. Here a retry of the same id takes that lock while the abort is
 # still closing the window, so the abort must leave the task temp root the
-# retry may already be reusing, while still closing the window and returning
-# the slot.
+# retry may already be reusing, while closing the window and keeping the
+# refused slot durably leased.
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock() {
   local rec id out status slot_root world holder_pid
   id='pool-refused-contended-r1'
@@ -1174,6 +1182,146 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+# Literally: refuse a dirty pool copy, lose its terminal across a restart, then
+# retry in another copy while preserving every refused edit, index and HEAD.
+test_dirty_pool_retry_preserves_the_copy() {
+  local rec id out status before diff_before index_before dirty
+  id='pool-dirty-retry-r1'
+  rec=$(make_case dirty-retry "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  dirty=$POOL_DIR
+  mkdir -p "$CASE_DIR/slots/2"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/slots/2/project" "$INITIAL_SHA"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$CASE_DIR/world" "$CASE_DIR/slots"
+  printf 'staged work\n' > "$dirty/README.md"
+  git -C "$dirty" add README.md
+  printf 'unstaged work\n' >> "$dirty/README.md"
+  printf 'untracked work\n' > "$dirty/untracked.txt"
+  before=$(git -C "$dirty" rev-parse HEAD)
+  diff_before=$(git -C "$dirty" diff HEAD)
+  index_before=$(git -C "$dirty" ls-files --stage)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'dirty copy launched'
+  assert_contains "$out" 'is not clean' 'spawn did not refuse the dirty copy'
+  assert_contains "$out" 'treehouse return --force' 'refusal omitted the explicit release command'
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Dirty-copy refusal\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+  fi
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'refused spawn published metadata'
+  assert_grep "$id" "$CASE_DIR/slots/1/.test-treehouse-lease" 'refusal dropped the durable lease'
+  "$FAKEBIN_DIR/tmux" kill-window -t "firstmate:fm-$id"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "retry should use an unleased slot"$'\n'"$out"
+  assert_grep "worktree=$CASE_DIR/slots/2/project" "$HOME_DIR/state/$id.meta" 'retry reused the refused slot'
+  [ "$(git -C "$dirty" rev-parse HEAD)" = "$before" ] || fail 'retry moved refused HEAD'
+  [ "$(git -C "$dirty" diff HEAD)" = "$diff_before" ] || fail 'retry changed refused tracked edits'
+  [ "$(git -C "$dirty" ls-files --stage)" = "$index_before" ] || fail 'retry changed the refused index'
+  assert_grep 'untracked work' "$dirty/untracked.txt" 'retry lost the refused untracked file'
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Retry after terminal loss\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'Refused copy HEAD before=%s after=%s\n' "$before" "$(git -C "$dirty" rev-parse HEAD)"
+    printf 'Refused copy staged index before:\n%s\nafter:\n%s\n' "$index_before" "$(git -C "$dirty" ls-files --stage)"
+    printf 'Refused copy tracked edits before:\n%s\nafter:\n%s\n' "$diff_before" "$(git -C "$dirty" diff HEAD)"
+    printf 'Refused copy untracked file:\n'; cat "$dirty/untracked.txt"
+    printf 'Retry task record:\n'; cat "$HOME_DIR/state/$id.meta"
+  fi
+  pass 'a dirty-copy refusal retains its lease and every edit while retry uses another copy'
+}
+
+test_recorded_secondmate_slot_is_never_reused() {
+  local rec id out status second before mode=${1:-unleased}
+  id="pool-paused-secondmate-$mode-r1"
+  rec=$(make_case "paused-secondmate-$mode" "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  second="$CASE_DIR/secondmate-home"
+  mkdir -p "$second/state" "$second/data" "$CASE_DIR/slots/2" "$CASE_DIR/slots/3"
+  printf '%s\n' "- mate - secondmate (home: $second; scope: project; projects: project; added 2026-10-24)" \
+    > "$HOME_DIR/data/secondmates.md"
+  if [ "$mode" = default-tip ]; then
+    git -C "$PROJECT_DIR" fetch --quiet origin main
+    git -C "$POOL_DIR" checkout --quiet --detach origin/main
+  else
+    printf 'paused scout only copy\n' > "$POOL_DIR/paused-scout.txt"
+    git -C "$POOL_DIR" add paused-scout.txt
+    git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm paused-scout
+  fi
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'kind=scout\nworktree=%s\nproject=%s\n' "$POOL_DIR" "$PROJECT_DIR" \
+    > "$second/state/paused-scout.meta"
+  if [ "$mode" = leased ]; then
+    FM_FAKE_PANE_PATH="$POOL_DIR" "$FAKEBIN_DIR/treehouse" lease 1 --lease-holder original-holder >/dev/null
+  fi
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/slots/2/project" "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/slots/3/project" "$INITIAL_SHA"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$CASE_DIR/world" "$CASE_DIR/slots"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should protect the recorded secondmate copy ($mode)"$'\n'"$out"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Recorded secondmate copy (%s), initial spawn\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$mode" "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'Secondmate task record:\n'; cat "$second/state/paused-scout.meta"
+    printf 'Protected copy lease holder:\n'; cat "$CASE_DIR/slots/1/.test-treehouse-lease"
+    printf 'New task record:\n'; cat "$HOME_DIR/state/$id.meta"
+  fi
+  assert_grep "worktree=$CASE_DIR/slots/2/project" "$HOME_DIR/state/$id.meta" 'spawn reused the secondmate slot'
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "spawn reset the paused scout's detached commit"
+  if [ "$mode" != default-tip ]; then
+    assert_grep 'paused scout only copy' "$POOL_DIR/paused-scout.txt" "spawn discarded the paused scout's file"
+  fi
+  if [ "$mode" = leased ]; then
+    assert_grep 'original-holder' "$CASE_DIR/slots/1/.test-treehouse-lease" 'spawn changed the existing lease'
+  else
+    assert_grep 'paused-scout' "$CASE_DIR/slots/1/.test-treehouse-lease" 'spawn did not protect the recorded copy'
+  fi
+  "$FAKEBIN_DIR/tmux" kill-window -t "firstmate:fm-$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id-next"
+  out=$(run_spawn "$id-next" --scout)
+  status=$?
+  expect_code 0 "$status" "another spawn should skip recorded copies after restart"$'\n'"$out"
+  assert_grep "worktree=$CASE_DIR/slots/3/project" "$HOME_DIR/state/$id-next.meta" 'another spawn reused a recorded slot'
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail 'another spawn reset the recorded copy'
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Another spawn after terminal loss (%s)\n$ bin/fm-spawn.sh %s-next %s --scout\n%s\nexit=%s\n' "$mode" "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'Protected secondmate HEAD before=%s after=%s\n' "$before" "$(git -C "$POOL_DIR" rev-parse HEAD)"
+    printf 'Next task record:\n'; cat "$HOME_DIR/state/$id-next.meta"
+  fi
+  pass "spawn protects recorded copies across homes and restarts ($mode)"
+}
+
+# Lease errors and mismatched paths refuse before base refresh or metadata.
+test_pool_lease_failures_refuse_before_refresh() {
+  local rec id out status case_name
+  for case_name in old failed mismatch; do
+    id="pool-lease-$case_name-r1"
+    rec=$(make_case "lease-$case_name" "$id")
+    read_case_record "$rec"
+    lay_out_as_pool_slot
+    case "$case_name" in
+      old) out=$(FM_FAKE_TREEHOUSE_OLD=1 run_spawn "$id" --scout) ;;
+      failed) out=$(FM_FAKE_TREEHOUSE_LEASE_FAIL=1 run_spawn "$id" --scout) ;;
+      mismatch) out=$(FM_FAKE_TREEHOUSE_LEASE_PATH="$PROJECT_DIR" run_spawn "$id" --scout) ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "$case_name lease launched a worker"
+    assert_contains "$out" 'lease' "$case_name refusal omitted the lease reason"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name refusal published metadata"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "$case_name refusal refreshed the copy"
+    if [ "$case_name" = mismatch ]; then
+      assert_grep "$id" "$CASE_DIR/slots/1/.test-treehouse-lease" 'path mismatch released the lease'
+    fi
+  done
+  pass 'old Treehouse, lease failure and path mismatch refuse before refreshing the base'
+}
+
+test_pool_lease_failures_refuse_before_refresh
+test_dirty_pool_retry_preserves_the_copy
+test_recorded_secondmate_slot_is_never_reused unleased
+test_recorded_secondmate_slot_is_never_reused default-tip
+test_recorded_secondmate_slot_is_never_reused leased
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
