@@ -5,7 +5,8 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
-# outcomes (BRANCH OUTCOMES), then assert liveness.
+# outcomes (BRANCH OUTCOMES), then assert liveness. A "load: <skill>" line
+# follows each presented wake that fm_wake_skill_hint (bin/fm-wake-lib.sh) maps.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -569,6 +570,7 @@ EOF
   # captain ruled: a call can dissolve, or turn out to have been a question of
   # fact. Reconcile with what actually happened - never by closing on the
   # strength of this line.
+  fm_wake_skill_hint divergence || return 1
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
@@ -1059,7 +1061,15 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  printf '%s\n' "$RAW_ROWS" || exit "$?"
+  while IFS= read -r row; do
+    printf '%s\n' "$row" || exit "$?"
+    IFS=$(printf '\t') read -r _ _ kind key payload <<EOF
+$row
+EOF
+    fm_wake_skill_hint row "$kind" "$key" "$payload" || exit "$?"
+  done <<EOF
+$RAW_ROWS
+EOF
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
