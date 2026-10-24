@@ -75,7 +75,9 @@
 # the due action is `retry`: once the worker has no open decision of its own,
 # the watcher rings once more and spends the mark
 # whatever the result, so the record never rings a third time and never
-# escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
+# escalates. The one exception is the Orca backend, where any nonzero ring
+# status keeps the mark for later eligible polls, including restart retargets
+# (still never escalating). A waiting worker does not poll its inbox (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
@@ -354,40 +356,52 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# budget. Composer verdicts remain advisory.
+# Returns 0 rang, 1 deferred by composer or replacement-endpoint protection
+# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
+# the endpoint is positively dead or missing (nothing typed; recovery owns the
+# record). No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict can defer,
+# The recorded-target pre-check is narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# A retargeted Orca ring must instead reauthorize input against the replacement
+# screen; bin/backends/orca.sh's fm_backend_orca_check_replacement owns that gate.
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# a lost first Enter on the original endpoint gets one confirmed retry;
+# replacement protection may stop the send before that retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} cstate verdict key_rc
+  local FM_TASK_INBOX_RING_LINE=
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
-  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+  if ! FM_TASK_INBOX_RING_LINE=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
-        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
-        || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      fm_task_inbox_check_pending "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" "$cstate" "$label" || return 1
+      key_rc=0
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || key_rc=$?
+      if [ "$key_rc" -ne 0 ]; then
+        [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
+        return 2
+      fi
       sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      fm_task_inbox_composer_holds "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" "$label" || return 0
+      key_rc=0
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || key_rc=$?
+      if [ "$key_rc" -ne 0 ]; then
+        [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
+        return 2
+      fi
       return 0
       ;;
   esac
@@ -395,13 +409,22 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  # Only explicit deferral or send failure changes the ring status; composer
+  # verdicts (empty, pending, unknown, ...) remain advisory, never proof.
+  case "$verdict" in
+    inbox-deferred) return 1 ;;
+    send-failed) return 2 ;;
+  esac
   return 0
+}
+
+fm_task_inbox_check_pending() {
+  [ "$4" = pending ] || return 0
+  fm_task_inbox_composer_holds "$1" "$2" "$3" "${5:-}" \
+    && [ "$(fm_backend_busy_state "$1" "$2" 2>/dev/null)" != busy ]
 }
 
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.
@@ -443,7 +466,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
-# Owe a fire-and-forget record its one retry ring (see the header). A newer
+# Owe a fire-and-forget record its retry ring (see the header). A newer
 # mark replaces an older one: a ring names the whole inbox, not one record.
 fm_task_inbox_mark_retry() {  # <state-dir> <task-id> <record-path>
   local dir
@@ -451,7 +474,8 @@ fm_task_inbox_mark_retry() {  # <state-dir> <task-id> <record-path>
   { printf '%s\n' "${3##*/}" > "$dir/.retry-ring"; } 2>/dev/null
 }
 
-# Spend the retry mark after its ring, only while it still names that record:
+# Clear the retry mark when the caller spends it under the header's policy,
+# only while it still names that record:
 # a newer mark written meanwhile is owed its own retry and survives. Fails only
 # when the processed record's mark stays behind.
 fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
@@ -466,7 +490,7 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
 #                             or already escalated for the current oldest)
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
-#   retry <record-path>       a fire-and-forget record's one retry ring is due
+#   retry <record-path>       a fire-and-forget record's retry ring is due
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
@@ -474,7 +498,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
-    # The one retry ring exists only while config/wait-no-turns is present.
+    # The retry ring exists only while config/wait-no-turns is present.
     # Absent, a mark is left untouched and the inbox stays quiet, as before.
     if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
       base=$(cat "$dir/.retry-ring" 2>/dev/null || true)
