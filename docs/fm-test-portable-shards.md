@@ -21,9 +21,18 @@ A failed script's duration is excluded even when its lane uploaded an artifact.
 In particular, run 36664663190's serial 5 finished in 22m15s with an assertion failure, not a timeout; treating that as a healthy whole-lane sample would hide the failure.
 Collect successful per-script measurements for every member before calculating a split.
 
-`tests/fm-supervision-host.test.sh` uses 1192918 ms, the one completed successful sample from run [39642852135](https://github.com/kunchenguid/firstmate/actions/runs/39642852135), in place of the 789123 ms baseline value it carried from run 36669175457 after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179), and rather than its pre-fix maximum of 1065298 ms.
-That replacement is a single completed sample too: run 39765114423 cancelled this script alone in a serial shard at the 30-minute job cap, and upstream run 39618934309 hangs on it the same way, so a shard carrying it alone can still overrun.
-The 1192918 ms weight is therefore a fit to the 1200000 ms packing target, not a cure; the slowness behind it is an upstream defect this layout does not own, and further green runs must establish the variance either way.
+`tests/fm-supervision-host-a.test.sh` and `tests/fm-supervision-host-b.test.sh` replace `tests/fm-supervision-host.test.sh`.
+The old 1192918 ms hint was the one completed successful sample from run [39642852135](https://github.com/kunchenguid/firstmate/actions/runs/39642852135); a shard that packed that script alone still cancelled at the 30-minute job cap (run 39765114423) and hung the same way on upstream run 39618934309.
+Local walls do not match CI cost: after a hook-versus-engine split, CI job logs showed the engine half still running at about 1287-1367 s when the job cap cancelled it, while the hook half finished in about 415-490 s.
+The 82 test bodies are unchanged and split by CI cost instead.
+Per-test seconds come from `FM_TEST` lines in serial-1 job logs, collected as columns of `per_test_deltas.tsv` for jobs 120581386354 (all 82 tests), 120255718080, 120121351913, 120465368937, a PR serial-1 log, and 120583337224 (hung after 40 tests).
+Cancelled and hung jobs omit later tests; empty cells are filled from the other columns.
+Truncated pass-message prefixes match `pass` strings, with collisions resolved in the original combined-script invocation order.
+Each test's weight is its maximum observed seconds across those columns (2167 s in total).
+Longest-processing-time assignment into two bins, breaking equal-load ties toward the first bin and equal-cost ties toward original invocation order, yields 41 tests totaling 1084 s and 41 tests totaling 1083 s.
+Each half's hint is that bin's share of 1192918 ms: 596734 ms for `tests/fm-supervision-host-a.test.sh` (`round(1192918 * 1084 / 2167)`) and 596184 ms for `tests/fm-supervision-host-b.test.sh` (the remainder so the two hints sum to 1192918).
+Both stay under about 650000 ms and under the 1200000 ms packing budget.
+Until the next CI refresh replaces them with Ubuntu `duration_ms` values, treat those shares as packing weights rather than measured job wall times.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The 2026-10-07 polytoken adapter tests carry provisional local measurements instead - 21090 ms for `tests/fm-polytoken-harness.test.sh` and the 103 ms live-guard skip for `tests/fm-polytoken-signals-live-e2e.test.sh`, both measured on the adapter-verification macOS host - until the next CI refresh replaces them with Ubuntu measurements, because they postdate the 2026-09-30 baseline.
 The 2026-10-23 `tests/fm-approval-failover.test.sh` serial hint is a provisional local measurement of 5410 ms, the slowest of five local `bin/fm-test-run.sh` samples (4991-5410 ms), until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
