@@ -26,7 +26,10 @@
 # everything else is printed in one write when the host exits: the close as
 # the arm printed it (without that status line), then any "supervision-host:"
 # lines. A "supervision-host:" line is a wake in its own right (the park
-# boundary prints nothing else); "supervision-host stood down: ..." means this
+# boundary prints nothing else). An actionable host close remains deliverable
+# even if the engine turn's cleanup emptied the fleet and supervision is no
+# longer needed; the arm owner must not discard it on a post-cycle need check.
+# "supervision-host stood down: ..." means this
 # session or generation no longer owns supervision and the owner stands down
 # silently; an exit status above 128, or no output at all, means the host
 # itself died and the owner retries it. Any other close is judged exactly as
@@ -195,6 +198,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -845,6 +850,19 @@ health_record() {  # <engine-error 0|1> <reports>
   health_save
 }
 
+# The cleanup of a finished scout removes the records that show it finished,
+# so the turn captures them before the branch acts.
+finished_scouts() {  # <task>... -> the scouts among them whose last status is done
+  local task verb out=
+  for task in "$@"; do
+    grep -qx kind=scout "$STATE/$task.meta" 2>/dev/null || continue
+    status_line_verb "$(last_status_line "$STATE/$task.status")" verb
+    [ "$verb" = 'done' ] || continue
+    out="$out${out:+ }$task"
+  done
+  printf '%s' "$out"
+}
+
 # Handle one close on the engine, in the posture the record gives when the
 # turn starts (TURN_POSTURE). Returns 0 when the wake is handled (or held
 # nothing the branch may claim), 2 with ATTENDED_WHY set when the turn starts
@@ -914,8 +932,9 @@ handle_wake() {  # <reason-lines>
   turn="$GEN.$TURN_SEQ"
   LAST_TURN=$turn
   : > "$RECEIPTS"
-  printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\nposture=%s\n' \
-    "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" > "$TURN_FILE"
+  # shellcheck disable=SC2086 # tasks is a space-separated list of task ids.
+  printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\nposture=%s\nfinished_scouts=%s\n' \
+    "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" "$(finished_scouts $tasks)" > "$TURN_FILE"
   readback=
   if [ "$TURN_POSTURE" = away ]; then
     readback=$(mktemp "$STATE/.supervision-host-readback.XXXXXX") || readback=

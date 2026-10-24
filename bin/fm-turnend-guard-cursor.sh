@@ -390,8 +390,10 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished while parked - the fleet was torn down, or Relay
-# was opted out. Nothing left to supervise, so end the turn quietly.
-if ! fm_supervision_needed "$STATE" "$GRACE"; then
+# was opted out. Nothing left to supervise, so end the turn quietly. An
+# actionable host close still carries what the turn that emptied the fleet left
+# for main.
+if { [ "$HOST_MODE" -eq 0 ] || [ "$ACTIONABLE" -eq 0 ]; } && ! fm_supervision_needed "$STATE" "$GRACE"; then
   budget_reset_if_ours
   exit 0
 fi
