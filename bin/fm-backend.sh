@@ -447,6 +447,39 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   esac
 }
 
+# The repair path printed with the worktree-identity refusal below, so a record
+# that cannot name its copy is a repairable state rather than a dead end.
+# One path serves all three refused shapes, because each one ends in the same
+# place: the record has to carry exactly one worktree= line, whether that means
+# adding it, filling it in, or dropping all but the right one of several.
+# It names only evidence this system writes by itself: the project's own
+# worktree list, which maps the task's recorded branch back to its copy, and the
+# record snapshot bin/fm-control.sh preserves before a relaunch.
+# No command here restores the line: only the operator can say which copy a task
+# holds, and a one-shot rewrite would make a damaged record convenient to keep.
+# Restoring it stays safe when the pool slot has since been handed to another
+# task: bin/fm-teardown.sh reads that slot's own claim (bin/fm-wake-lib.sh's
+# fm_treehouse_slot_owner_marker) and then touches nothing under it, while a
+# slot carrying no claim carries no such proof and leaves the worktree listing
+# as the only evidence.
+fm_backend_worktree_identity_repair_hint() {  # <meta-file>
+  local meta=$1 prior project branch
+  prior="${meta%.meta}.control-relaunch.meta-prior"
+  project=$(fm_meta_get "$meta" project)
+  branch=$(fm_meta_get "$meta" branch)
+  echo "The record needs exactly one worktree= line naming the copy this task holds: add it, fill it in, or keep only the right one of several, then re-run."
+  if [ -n "$project" ]; then
+    # Quoted, so the printed command survives a project path with spaces and
+    # can be copied and run exactly as it reads.
+    echo "Find the copy checked out on this task's recorded branch${branch:+ $branch} with:"
+    echo "git -C $(printf '%q' "$project") worktree list"
+  fi
+  if [ -f "$prior" ] && [ ! -L "$prior" ]; then
+    echo "The record as it stood before the last relaunch still carries that line at $prior."
+  fi
+  echo "A pool slot handed on to another task since is still safe to name: cleanup reads that slot's own .fm-slot-owner claim and then leaves the slot untouched, while a slot with no claim is proved only by that worktree listing."
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server
@@ -466,6 +499,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   }
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+    fm_backend_worktree_identity_repair_hint "$meta" >&2
     return 1
   }
   project=$(fm_backend_meta_exact_value "$meta" project) || {
