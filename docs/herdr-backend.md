@@ -295,7 +295,9 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+Cleanup closes only the exact recorded task pane or, when that pane is already gone, the exact bound empty projected tab, and never calls `workspace close`.
+When Herdr leaves the exact projected tab empty after that pane disappears, locked session-start cleanup may close that exact empty tab, but never an ambiguous or non-empty tab.
+Closing the last empty tab also removes that workspace in current Herdr: the product deletes a workspace that no longer has any tab. Cleanup never calls `workspace close` itself and never closes a workspace that still has another tab.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -408,21 +410,22 @@ A candidate must meet all of these conditions:
 
 - The title must contain exactly one token occurrence across the named-session snapshot.
 - The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`.
-- A version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+- A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
-- The candidate must have exactly one tab and exactly one pane.
+- The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
+- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab. An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
 
 Firstmate then cleans up the candidate in this order:
 
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
 3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
-4. Positively confirm no registered agent.
-5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
-6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
-7. Call the existing exact-pane focus-preserving close helper.
-   It closes only that pane, never a workspace.
-8. Retire the matching journal only after the exact pane is positively confirmed gone.
+4. Positively confirm no registered agent when a pane remains.
+5. Read Herdr's process information for the exact named-session pane and apply the process proof below when a pane remains.
+6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane or empty-tab topology, exact endpoint relationship, absent agent when a pane exists, process proof when a pane exists, and non-target focus.
+7. Call the existing exact-pane focus-preserving close helper for a one-pane candidate, or the exact empty-tab focus-preserving close helper for an empty-tab candidate.
+   Neither helper grants cleanup authority to an ambiguous object.
+8. Retire the matching journal only after the exact pane or empty tab is positively confirmed gone.
 
 The process proof requires all of these:
 
@@ -470,7 +473,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
-  Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
+  Session start removes only the exact home-local, uniquely journal-correlated one-pane idle-shell or bound empty-tab shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
