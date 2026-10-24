@@ -1659,7 +1659,7 @@ spawn_close_fresh_endpoint() {
 # worktree this spawn recorded, first drops this task's slot claim, then has
 # that slot handed back with `treehouse return --force` (which ends the
 # subshell), and must settle back into its original idle shell. A slot the
-# base freshen refused as not clean is never force-returned: its lease and the
+# base freshen did not prove clean is never force-returned: its lease and the
 # pane stay, as on T3. Anything else keeps the pane, with the reason in
 # SPAWN_HERDR_RETURN_REASON.
 SPAWN_HERDR_RETURN_REASON=
@@ -1679,7 +1679,7 @@ spawn_herdr_return_get_slot() { # <session> <pane>
     return 1
   fi
   if [ "$SPAWN_WT_NOT_CLEAN" = 1 ]; then
-    SPAWN_HERDR_RETURN_REASON="$WT is not clean, so it stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS"
+    SPAWN_HERDR_RETURN_REASON="$WT is not proven clean, so it stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS"
     return 1
   fi
   spawn_release_slot_claim
@@ -4330,11 +4330,11 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktree is not clean
+freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktree is not proven clean
   local worktree=$1 base=${2:-} default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
+    return 2
   }
   if [ -n "$status" ]; then
     if describe_stale_submodule_pins "$worktree" "$status"; then

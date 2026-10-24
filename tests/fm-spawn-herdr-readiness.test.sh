@@ -509,6 +509,35 @@ test_after_get_abort_keeps_dirty_slot() {
   pass "a pre-launch abort keeps the lease and pane of a slot that is not clean"
 }
 
+# A slot whose status the base freshen could not read was never proven clean,
+# so the abort keeps its lease and the pane exactly as for a dirty slot.
+test_after_get_abort_keeps_unread_slot() {
+  local id out status pane real_git
+  id=herdr-unread-slot-z14
+  make_case unread-slot "$id"
+  printf '%s\n%s\n' "$PROJ_DIR" "$WT_DIR" > "$CWD_FILE"
+  real_git=$(command -v git)
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+if [ "\$*" = "-C $WT_DIR -c core.quotePath=false status --porcelain" ]; then
+  echo "fatal: unable to read index" >&2
+  exit 128
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+  out=$(FM_FAKE_HERDR_SUBSHELL=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a slot whose status could not be read"$'\n'"$out"
+  assert_contains "$out" "could not inspect pooled worktree '$WT_DIR'" "the spawn did not refuse on the unreadable status"$'\n'"$out"
+  pane=$(task_pane)
+  ! grep -q '^treehouse|return|' "$FAKE_STATE/log" || fail "a slot never proven clean was treehouse-returned"
+  [ ! -s "$FAKE_STATE/closed" ] || fail "the pane holding the unproven slot's lease was closed: $(cat "$FAKE_STATE/closed")"
+  assert_contains "$out" "leaving herdr pane default:$pane open" "the refusal did not name the kept pane"$'\n'"$out"
+  assert_contains "$out" "release it with 'treehouse return --force $WT_DIR' from $PROJ_DIR" "the refusal did not give the manual return step"$'\n'"$out"
+  pass "a pre-launch abort keeps the lease and pane of a slot whose status could not be read"
+}
+
 # A polytoken spawn on Herdr keeps its unconditional close through the
 # ordinary task kill, which ends the subshell and with it the slot's lease.
 test_polytoken_after_get_abort_closes_unconditionally() {
@@ -542,6 +571,7 @@ test_exhausted_pool_fails_fast
 test_after_get_abort_returns_slot_then_closes
 test_after_get_abort_with_agent_keeps_pane
 test_after_get_abort_keeps_dirty_slot
+test_after_get_abort_keeps_unread_slot
 test_polytoken_after_get_abort_closes_unconditionally
 test_no_echo_same_shell_resends_once
 test_echo_present_never_resends
