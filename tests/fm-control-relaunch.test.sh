@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -488,6 +490,35 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_recorded_pr_metadata_parseable() {
+  local trace dir id out rc
+  for trace in off on; do
+    id=rl-pr-$trace
+    dir=$(new_case "pr-meta-$trace" "$id")
+    add_ship_task "$dir" "$id" claude
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/37' \
+      'pr_head=0123456789abcdef0123456789abcdef01234567' >> "$dir/home/state/$id.meta"
+    fm_pr_metadata_identity_parse "$dir/home/state/$id.meta" \
+      || fail "the fixture PR metadata should parse before relaunch ($trace)"
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+
+    out=$(run_control "$dir" "$id" relaunch --note "continuing after PR"); rc=$?
+    expect_code 0 "$rc" "relaunch of a PR-recorded task should succeed ($trace)"$'\n'"$out"
+    [ -n "$(meta_field "$dir" "$id" control_relaunch_tx)" ] \
+      || fail "the relaunch should record its control transaction ($trace)"
+    if [ "$trace" = on ]; then
+      fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+        || fail "the trace-enabled relaunch should record its carrier"
+    fi
+    fm_pr_metadata_identity_parse "$dir/home/state/$id.meta" \
+      || fail "relaunch left PR metadata the merge poll cannot parse ($trace):"$'\n'"$(cat "$dir/home/state/$id.meta")"
+    [ "$FM_PR_META_URL" = https://github.com/example/repo/pull/37 ] \
+      || fail "relaunch changed the recorded PR ($trace): '$FM_PR_META_URL'"
+  done
+  pass "fm-control relaunch: a recorded pr= stays parseable for the merge poll, with trace context off or on"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2974,6 +3005,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_recorded_pr_metadata_parseable
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
