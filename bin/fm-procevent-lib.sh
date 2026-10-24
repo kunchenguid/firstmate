@@ -341,7 +341,7 @@ fm_procevent_source_lock_acquire() {
   root=$(fm_procevent_claim_root)
   (umask 077; mkdir -p "$root") || return 1
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+  fm_lock_acquire_wait_or_fail_on_create_error "$(fm_procevent_source_lock_path "$id")"
 }
 
 # fm_procevent_source_lock_try_acquire <source-id>
