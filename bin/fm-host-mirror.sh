@@ -85,7 +85,17 @@
 # and prints nothing.
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script's directory without forking `dirname` on the common
+# path: Claude always invokes hooks with the absolute
+# "$CLAUDE_PROJECT_DIR"/bin/... path, so a leading "/" lets a pure parameter
+# expansion stand in for it. A relative invocation (manual runs, tests) falls
+# back to the original dirname-based resolution unchanged.
+case "${BASH_SOURCE[0]}" in
+  /*) _SRC_DIR=${BASH_SOURCE[0]%/*}; [ -n "$_SRC_DIR" ] || _SRC_DIR=/ ;;
+  *) _SRC_DIR=$(dirname "${BASH_SOURCE[0]}") ;;
+esac
+SCRIPT_DIR="$(cd "$_SRC_DIR" && pwd)"
+unset _SRC_DIR
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -247,9 +257,17 @@ case "$1" in
         | "\(.[0])\n\(.[1])\n\(.[2])"
       end' 2>/dev/null) || exit 0
     [ -n "$PARSED" ] || exit 0
-    TAG=$(printf '%s\n' "$PARSED" | sed -n '1p')
-    ID=$(printf '%s\n' "$PARSED" | sed -n '2p')
-    TEXT=$(printf '%s\n' "$PARSED" | sed '1,2d')
+    # Builtin-only split: PARSED is "TAG\nID\nTEXT" where TEXT (the dialog
+    # text itself) may contain further embedded newlines, so this is not a
+    # plain 3-way split on "\n" - only the first two newlines are structural.
+    # Stripping up to the first newline twice, keeping everything after,
+    # reproduces `sed -n 1p` / `sed -n 2p` / `sed 1,2d` exactly without their
+    # three forks.
+    TAG=${PARSED%%$'\n'*}
+    _REST=${PARSED#*$'\n'}
+    ID=${_REST%%$'\n'*}
+    TEXT=${_REST#*$'\n'}
+    unset _REST
     writer_in_scope || exit 0
     append_entry "$TAG" "$TEXT" "$ID"
     exit 0
