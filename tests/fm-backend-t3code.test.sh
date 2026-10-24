@@ -2181,7 +2181,7 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
     "harness=$harness" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "backend=t3code" "t3_thread_id=$thread" "t3_project_id=proj-sm" "home=$home"
   FM_T3_HOME="$home" t3_world_set 'w.probePath = process.env.FM_T3_HOME'
-  # T3 detaches the provider asynchronously after the archive reads back, so a
+  # T3 detaches the provider asynchronously after the archive reads back; a
   # process rooted in the home can outlive the proven archive.
   (cd "$home/state" && exec sleep 300) &
   PROVIDER_PID=$!
@@ -2212,7 +2212,9 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   rc=$?
   expect_code 0 "$rc" "t3code secondmate teardown should succeed"$'\n'"$out"
-  ! kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the home must be ended before the home is removed"
+  kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a T3 backend has no endpoint pid, so a process rooted in the home must be spared, not killed"
+  assert_contains "$out" "$PROVIDER_PID" "the spared provider process is reported"
+  kill "$PROVIDER_PID" 2>/dev/null || true
   wait "$PROVIDER_PID" 2>/dev/null || true
   PROVIDER_PID=
   [ "$(t3_dispatch_types)" = "t3_thread_interrupt t3_thread_organize" ] \
@@ -2222,7 +2224,7 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
   assert_absent "$home" "teardown should remove the secondmate home"
   [ -z "$journal" ] || assert_absent "$journal" "secondmate cleanup must retire its tracked Codex overlay before removing the home"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
-  pass "fm-teardown.sh backend=t3code secondmate: interrupts and archives, then ends the home's lingering provider process before the home is removed; an unprovable scan keeps the home"
+  pass "fm-teardown.sh backend=t3code secondmate: interrupts and archives, then spares and reports the home's lingering provider process; an unprovable scan keeps the home"
 }
 
 test_teardown_refuses_when_t3_is_unreachable() {
@@ -2514,12 +2516,12 @@ TH
   kill "$provider" 2>/dev/null || true
   wait "$provider" 2>/dev/null || true
   expect_code 0 "$rc" "pooled t3code secondmate teardown should succeed"$'\n'"$out"
-  [ "$(cat "$CASE_DIR/return.log" 2>/dev/null)" = provider-gone ] \
-    || fail "the slot must be returned exactly once, after the provider process ended and without the T3 environment, got '$(cat "$CASE_DIR/return.log" 2>/dev/null)'"$'\n'"$out"
+  [ "$(cat "$CASE_DIR/return.log" 2>/dev/null)" = provider-alive ] \
+    || fail "the slot must be returned exactly once, without the T3 environment and without killing the unowned provider process, got '$(cat "$CASE_DIR/return.log" 2>/dev/null)'"$'\n'"$out"
   [ "$(t3_json_field "$home/.claude/settings.local.json" 'JSON.stringify(d)')" = '{"permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep"}}' ] \
     || fail "the home's own settings must survive while Firstmate's keys leave, got '$(cat "$home/.claude/settings.local.json")'"
   [ -e "$CONFIG/t3code-token" ] || fail "removing the home's credential link must leave the primary's credential"
-  pass "fm-teardown.sh backend=t3code pooled secondmate: the slot returns only after the provider ended, without the T3 environment the spawn wrote"
+  pass "fm-teardown.sh backend=t3code pooled secondmate: the slot returns without killing the unowned provider, without the T3 environment the spawn wrote"
 }
 
 # A T3 secondmate torn down as the child of another secondmate goes through
@@ -2555,13 +2557,14 @@ test_nested_t3_secondmate_home_reaped_before_removal() {
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   rc=$?
   expect_code 0 "$rc" "forced teardown of a T3 secondmate with a nested T3 secondmate should succeed"$'\n'"$out"
-  ! kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the nested secondmate's home must be ended before that home is removed"$'\n'"$out"
+  kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the nested secondmate's home must be spared, not killed"$'\n'"$out"
+  kill "$PROVIDER_PID" 2>/dev/null || true
   wait "$PROVIDER_PID" 2>/dev/null || true
   PROVIDER_PID=
   [ "$(t3_fake_calls t3_thread_organize | grep -c "$child_thread")" = 1 ] || fail "the nested secondmate's thread must be archived"
   assert_absent "$child_home" "teardown should remove the nested secondmate home"
   assert_absent "$home" "teardown should remove the secondmate home"
-  pass "fm-teardown.sh backend=t3code: a nested T3 secondmate's home is reaped before it is removed"
+  pass "fm-teardown.sh backend=t3code: a nested T3 secondmate's home is removed without killing its unowned process"
 }
 
 # The Claude PR-tool clause is scoped to servers older than the first build
