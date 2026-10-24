@@ -736,6 +736,47 @@ rex_teardown_meta() {  # <state-dir> <id> <kind> <home> <session-id> <window-id>
   } >"$state/$id.meta"
 }
 
+# A Rex second mate launches from a private copy of its charter carrying the
+# session-rename guard. Runs the real fm-spawn.sh against the fake rex; the
+# launch command is only recorded (fake/sent), never executed.
+test_secondmate_spawn_launches_from_the_guarded_charter_copy() {
+  local dir mate guard out rc fakebin sent script launch
+  guard='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
+  dir=$(new_case spawn-secondmate-guard)
+  mate="$dir/mate"
+  mkdir -p "$mate/bin" "$mate/data" "$dir/home/data" "$dir/home/projects" "$dir/home/config"
+  touch "$dir/home/state/.last-watcher-beat"
+  printf '# Firstmate\n' >"$mate/AGENTS.md"
+  printf 'sm-rex-1\n' >"$mate/.fm-secondmate-home"
+  printf 'charter line one\ncharter line two\n' >"$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' >"$mate/.gitignore"
+  git -C "$mate" init -q -b main
+  cp "$mate/data/charter.md" "$dir/charter.before"
+  fakebin=$(fm_fakebin "$dir/fakebin")
+  fm_fake_exit0 "$fakebin" treehouse codex
+  printf '%s\n' codex >"$dir/home/config/secondmate-harness"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$dir/home" HOME="$dir/user-home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_PROJECTS_OVERRIDE="$dir/home/projects" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+    FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$(command -v jq)")" \
+    "$ROOT/bin/fm-spawn.sh" sm-rex-1 "$mate" --secondmate --backend rex 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "rex secondmate spawn failed: $out"
+  cmp -s "$mate/data/charter.md" "$dir/charter.before" || fail "the second mate's charter was rewritten"
+  [ "$(cat "$dir/home/data/sm-rex-1/launch-charter.md")" = "$(cat "$dir/charter.before")"$'\n\n'"$guard" ] ||
+    fail "launch-charter.md is not the charter plus one guard line"
+  sent=$(cat "$dir/fake/sent" 2>/dev/null)
+  script=$(printf '%s\n' "$sent" | sed -n "s/^\. '\(.*\)'\$/\1/p" | tail -1)
+  [ -f "$script" ] || fail "the typed launch command did not source a launch script: $sent"
+  launch=$(cat "$script")
+  rm -rf -- "${script%/*}"
+  assert_contains "$launch" "$dir/home/data/sm-rex-1/launch-charter.md" "the launch command did not read launch-charter.md"
+  assert_not_contains "$launch" "$mate/data/charter.md" "the launch command read the unguarded charter"
+  pass "fm-spawn rex secondmate launches from the guarded charter copy and leaves the charter unchanged"
+}
+
 test_teardown_retires_the_secondmate_session() {
   local dir mate out sid wid bid crew_sid crew_wid crew_bid rc
   dir=$(new_case teardown-secondmate)
@@ -897,6 +938,7 @@ test_send_literal_and_keys
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
 test_kill_refuses_without_proof
+test_secondmate_spawn_launches_from_the_guarded_charter_copy
 test_teardown_retires_the_secondmate_session
 test_absence_recheck
 test_control_absence_verdict_reads_rex_meta

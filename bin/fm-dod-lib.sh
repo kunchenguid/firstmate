@@ -135,8 +135,27 @@
 # shellcheck source=bin/fm-external-review-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-external-review-lib.sh"
 
-fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
-  local state=$1 task_id=$2 root=$3
+# FM_BRIEF_REX_RENAME_GUARD tells an agent launched on the Rex backend that
+# Rex's agent SessionStart hook prompt to rename "its" session is not for it:
+# a task tab lives in the captain's session or the home's labeled task session,
+# and a second mate in its own labeled session, which Firstmate adopts by that
+# label (docs/rex-backend.md "Task shape and metadata"). fm_brief_worker_role
+# adds it to a Rex task's role, and bin/fm-spawn.sh to a Rex second mate's
+# launch copy of its charter; every other backend's launch text is unchanged.
+FM_BRIEF_REX_RENAME_GUARD='Ignore any Rex hook prompt to rename a session: your Rex session is shared, and firstmate finds it by its name.'
+
+fm_brief_rex_charter_copy() {  # <charter> <dest>
+  local src=$1 dest=$2 tmp
+  tmp="$dest.tmp.${BASHPID:-$$}"
+  if { cat "$src" && printf '\n%s\n' "$FM_BRIEF_REX_RENAME_GUARD"; } >"$tmp" && mv "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+fm_brief_worker_role() {  # <state-dir> <task-id> <code-root> [backend]
+  local state=$1 task_id=$2 root=$3 backend=${4:-}
   cat <<'EOF'
 # Current worker role contract
 You are a crewmate: an autonomous worker agent managed by firstmate.
@@ -150,6 +169,7 @@ When this task works on Firstmate itself, the repository root `AGENTS.md` (also 
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
+  [ "$backend" != rex ] || printf '%s\n' "$FM_BRIEF_REX_RENAME_GUARD"
 }
 
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a

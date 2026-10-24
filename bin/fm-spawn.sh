@@ -3733,7 +3733,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" "$BACKEND" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -3747,6 +3747,16 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if ! mv "$BRIEF_TMP" "$BRIEF"; then
     rm -f -- "$BRIEF_TMP"
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
+  fi
+elif [ "$KIND" = secondmate ] && [ "$BACKEND" = rex ]; then
+  # A Rex second mate launches from a private copy of its charter carrying the
+  # Rex session-rename guard (FM_BRIEF_REX_RENAME_GUARD); the charter itself is
+  # never rewritten, and other backends launch from the charter unchanged.
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-charter.md"
+  if ! { mkdir -p "$DATA/$ID" && fm_brief_rex_charter_copy "$SOURCE_BRIEF" "$BRIEF"; }; then
+    echo "error: could not render the Rex launch copy of $SOURCE_BRIEF" >&2
     exit 1
   fi
 fi
