@@ -193,7 +193,9 @@
 # the hard bound FM_WATCHER_STALL_BOUND (default 3x that grace) is instead
 # evicted with TERM after its recorded identity is re-verified, and this arm
 # starts in its place, printing "watcher: replaced stalled pid <N> (...)". A
-# holder that survives TERM keeps the refusal and the nonzero exit.
+# holder that survives the five-second TERM grace is re-verified as the same
+# stalled lock holder before KILL; an unproved or surviving holder keeps the
+# refusal and the nonzero exit.
 # Once per poll the watcher also checks that its home (when it existed at
 # start), its state directory, and its own bin directory still exist; when one
 # is gone it logs "watcher: exiting - <what> no longer exists: <path>" to stderr
@@ -2908,12 +2910,27 @@ fi
 # WATCHER_STALL_BOUND. The pid is signalled only while it still proves the
 # lock's own recorded identity (fm_watcher_lock_matches_pid: this home, this
 # script, and the starttime+cmdline proof the lock carries), so a recycled pid
-# is never touched; TERM only, never KILL, and never a name or pattern match.
-# Succeeds only once the holder has exited within the bounded wait.
+# is never touched. After a five-second TERM grace, recheck the lock, original
+# identity, and stalled beacon before KILL: Bash can inherit ignored TERM and
+# cannot reset it with `trap - TERM`. Never use a name or pattern match.
+# Succeeds only once the holder has exited within the bounded waits.
 evict_stalled_holder() {
-  local pid=$1 i=0
+  local pid=$1 i=0 identity
   fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
+  identity=$FM_WATCHER_MATCHED_IDENTITY
   kill -TERM "$pid" 2>/dev/null || return 1
+  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fm_pid_alive "$pid" || return 0
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null)" = "$pid" ] || return 1
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
+  [ "$FM_WATCHER_MATCHED_IDENTITY" = "$identity" ] || return 1
+  [ "$(fm_path_age "$BEAT")" -ge "$WATCHER_STALL_BOUND" ] || return 1
+  # TERM-ignoring stalled holders require escalation after the grace and identity checks.
+  kill -KILL "$pid" || return 1
+  i=0
   while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
     sleep 0.1
     i=$((i + 1))

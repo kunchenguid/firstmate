@@ -339,7 +339,7 @@ status_is_paused() {  # <status-line>
 status_is_captain_held() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  status_line_verb "$line" verb
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
@@ -2436,6 +2436,7 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
   local line verb key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local -a evs=()
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -2474,19 +2475,17 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
       continue
     fi
     status_is_captain_relevant "$line" || continue
-    verb=$(status_line_verb "$line")
+    status_line_verb "$line" verb
     case "$verb" in
       needs-decision|blocked)
         key=$(_fm_decision_key "$line") || {
-          [ -n "$events" ] && events="${events} ; "
-          events="${events}${line}"
+          evs+=("$line")
           [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
         }
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
-          [ -n "$events" ] && events="${events} ; "
-          events="${events}reconciliation-required: ${line}"
+          evs+=("reconciliation-required: ${line}")
           [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
@@ -2502,8 +2501,7 @@ $origins
 EOF
 )
         [ -n "$live_line" ] && [ "$line_number" -eq "$live_line" ] || continue
-        [ -n "$events" ] && events="${events} ; "
-        events="${events}${line}"
+        evs+=("$line")
         if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
           _fm_is_pending_reply_escalation "$key" "$(status_line_note "$line")"; }; then
           _fm_span_needs_decision=1
@@ -2511,14 +2509,14 @@ EOF
         rc=0
         ;;
       *)
-        [ -n "$events" ] && events="${events} ; "
-        events="${events}${line}"
+        evs+=("$line")
         rc=0
         ;;
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
   [ "$failed" -eq 0 ] || return 2
+  if [ "${#evs[@]}" -gt 0 ]; then printf -v events '%s ; ' "${evs[@]}"; events=${events% ; }; fi
   if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
   if [ -n "$output_var" ]; then
     printf -v "$output_var" '%s' "$result"

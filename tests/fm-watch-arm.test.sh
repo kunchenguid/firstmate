@@ -242,6 +242,42 @@ test_attached_arm_reports_the_delivered_wake_after_drain() {
   pass "watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly"
 }
 
+test_pending_reply_scan_does_not_starve_ordinary_wake() {
+  local dir state fakebin out armout i
+  dir=$(make_case pending-scan-starvation)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  awk 'BEGIN { for (i = 1; i <= 20000; i++) printf "umer: ordinary status line %d, unremarkable progress text to make the file realistic\n", i }' > "$state/umer.status"
+  bash -c '
+    . "$1"; . "$2"
+    state=$3; status=$4; home=$5
+    for i in 1 2 3 4 5 6 7 8; do
+      corr=$(fm_pending_reply_create "$home" "$state" umer "request $i") || exit 1
+      rec=$(fm_pending_reply_path "$state" "$corr")
+      fm_pending_reply_set "$rec" parent_status "$status" || exit 1
+      fm_pending_reply_set "$rec" escalated_epoch 1 || exit 1
+      fm_pending_reply_write_delivery_confirmation "$state" "$corr" attempted 1 || exit 1
+    done
+  ' _ "$ROOT/bin/fm-marker-lib.sh" "$ROOT/bin/fm-pending-reply-lib.sh" "$state" "$state/umer.status" "$dir/home" \
+    || fail "could not create undelivered escalated pending replies"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  i=0
+  while is_live_non_zombie "$SEED_PID" && [ "$i" -lt 600 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$SEED_PID" && fail "ordinary wake was not surfaced within 60s while pending-reply scans ran"
+  wait_for_exit "$SEED_PID" 20 >/dev/null 2>&1 || true
+  grep -q '^signal:' "$out" || fail "seed watcher exited without surfacing the ordinary wake: $(cat "$out")"
+  wait_for_exit "$ARM_PID" 200 >/dev/null 2>&1
+  pass "watch-arm: undelivered escalated pending replies do not starve an ordinary wake"
+}
+
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   local dir state fakebin out armout status
   dir=$(make_case attached-no-delivery)
@@ -389,6 +425,110 @@ test_attached_arm_hands_a_stalled_holder_to_its_replacement() {
   wait "$holder" 2>/dev/null || true
   pass "watch-arm: an attached arm hands a holder stalled past the bound to its owner's replacement"
 }
+
+test_rearm_evicts_a_stalled_holder_that_inherited_ignored_term() (
+  local dir state fakebin holder identity armout armpid status i
+  dir=$(make_case stalled-holder-ignores-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkfifo "$dir/hold"
+  # Reproduce the incident's ignored TERM through inheritance. A noninteractive
+  # Bash cannot undo that inherited disposition with `trap - TERM`.
+  bash -c 'trap "" TERM; exec bash -c '\''
+    trap - TERM
+    : > "$1"
+    read -r -t 120 line <> "$2"
+  '\'' _ "$1" "$2"' _ "$dir/ready" "$dir/hold" &
+  holder=$!
+  trap 'if [ -n "$holder" ]; then kill -KILL "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; fi' EXIT
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/ready" ] || fail "TERM-ignoring holder did not start"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || fail "could not identify the TERM-ignoring holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_GUARD_GRACE=5 \
+    FM_WATCHER_STALL_BOUND=12 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" "$REARM_EXIT_POLLS"
+  status=$?
+  is_live_non_zombie "$holder" && fail "stalled TERM-ignoring holder survived re-arm: $(cat "$armout")"
+  expect_code 0 "$status" "re-arm must replace a stalled TERM-ignoring holder"
+  grep -qF "watcher: replaced stalled pid $holder " "$armout" \
+    || fail "re-arm did not report the TERM-ignoring holder's replacement: $(cat "$armout")"
+  grep -Eq '^(signal|stale|check):' "$armout" \
+    || fail "replacement delivered no ordinary wake: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "replacement failed: $(cat "$armout")"
+  wait "$holder" 2>/dev/null || true
+  holder=
+  pass "watch-arm: re-arm evicts a stalled Bash holder with inherited ignored TERM"
+)
+
+test_rearm_does_not_kill_a_holder_that_changed_during_term_grace() (
+  local mode=$1 dir state fakebin holder identity armout armpid status i
+  dir=$(make_case "stalled-holder-changed-$mode")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkfifo "$dir/hold"
+  # React to TERM but remain alive, changing one escalation precondition.
+  bash -c '
+    case "$3" in
+      identity) trap '\''printf "changed identity\n" > "$4/.watch.lock/pid-identity"'\'' TERM ;;
+      lock) trap '\''printf "99999999\n" > "$4/.watch.lock/pid"'\'' TERM ;;
+      beacon) trap '\''touch "$4/.last-watcher-beat"'\'' TERM ;;
+    esac
+    : > "$1"
+    for i in 1 2; do read -r -t 60 line <> "$2" || :; done
+  ' _ "$dir/ready" "$dir/hold" "$mode" "$state" &
+  holder=$!
+  trap 'if [ -n "$holder" ]; then kill -KILL "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; fi' EXIT
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/ready" ] || fail "changing holder did not start"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || fail "could not identify changing holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_GUARD_GRACE=5 \
+    FM_WATCHER_STALL_BOUND=12 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" "$REARM_EXIT_POLLS"
+  status=$?
+  is_live_non_zombie "$holder" || fail "re-arm killed holder after $mode changed during TERM grace"
+  case "$mode" in
+    identity) [ "$(cat "$state/.watch.lock/pid-identity")" = 'changed identity' ] || fail "holder did not change identity" ;;
+    lock) [ "$(cat "$state/.watch.lock/pid")" = 99999999 ] || fail "holder did not change lock" ;;
+    beacon) [ "$state/.last-watcher-beat" -nt "$dir/ready" ] || fail "holder did not refresh beacon" ;;
+  esac
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "changed holder should refuse re-arm (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED' "$armout" || fail "changed holder refusal was not surfaced"
+  pass "watch-arm: no KILL after $mode changes during TERM grace"
+)
 
 test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   local dir home state fakebin result armout drainout status watcher_pid sequence generation decision_recovery_arm decision_successor
@@ -1716,6 +1856,7 @@ EOF
 
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_pending_reply_scan_does_not_starve_ordinary_wake
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
@@ -1724,6 +1865,10 @@ test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
+test_rearm_evicts_a_stalled_holder_that_inherited_ignored_term || exit 1
+test_rearm_does_not_kill_a_holder_that_changed_during_term_grace identity || exit 1
+test_rearm_does_not_kill_a_holder_that_changed_during_term_grace lock || exit 1
+test_rearm_does_not_kill_a_holder_that_changed_during_term_grace beacon || exit 1
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced
 test_marker_publish_failure_retains_recovery_evidence

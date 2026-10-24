@@ -2200,6 +2200,31 @@ SH
   pass "a keyed decision signal reads only the newly appended span, not the whole log"
 }
 
+# The span fold must raise the same alert for a mixed appended span as before its
+# per-line verb reads were made fork-free: an unrecognised prefix stays visible and
+# an open keyed decision still wakes the crew, with the queued payload unchanged.
+test_mixed_appended_span_keeps_its_alert_payload() {
+  local dir state fakebin out drain_out status_file sig pid
+  dir=$(make_case mixed-span-payload); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: setup\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'holding: waiting on the vendor\nneeds-decision [key=fresh-q]: pick A or B\nworking: still tidying\n' >> "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "watcher absorbed a mixed appended span"; }
+  unset FM_FAKE_CREW_STATE
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mixed span failed"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$drain_out" >/dev/null \
+    || fail "the mixed span did not raise a needs-decision alert: $(cat "$drain_out")"
+  grep -F 'holding: waiting on the vendor' "$drain_out" >/dev/null \
+    || fail "the unrecognised prefix line was dropped from the alert: $(cat "$drain_out")"
+  pass "a mixed appended span keeps its needs-decision alert and unrecognised prefix line"
+}
+
 # The captain-reported completion shape of the same masking, end to end.
 test_release_completion_survives_a_later_routine_append() {
   local dir state fakebin out drain_out status_file sig pid
@@ -7785,6 +7810,7 @@ test_ordinary_blocked_signal_payload_remains_branch_eligible
 test_routine_signal_payload_not_marked_needs_decision
 test_actionable_signal_survives_a_later_routine_append
 test_keyed_decision_signal_reads_only_the_new_span
+test_mixed_appended_span_keeps_its_alert_payload
 test_release_completion_survives_a_later_routine_append
 test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state

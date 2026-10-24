@@ -226,7 +226,7 @@ That refusal has a ceiling.
 Once the live holder's beacon is stale past `FM_WATCHER_STALL_BOUND` (default three times the grace), the re-arm takes these steps:
 
 1. It re-verifies the holder against the lock's recorded identity.
-2. It retires the holder with TERM.
+2. It retires the holder with TERM, escalating only if the same stalled holder remains.
 3. It starts in the holder's place.
 
 A watcher wedged mid-cycle can therefore no longer refuse every replacement indefinitely.

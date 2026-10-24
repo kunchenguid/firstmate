@@ -188,8 +188,12 @@ fm_pending_reply_new_id() {
   printf '%s' "$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)"
 }
 
-fm_pending_reply_corr_token() {  # <corr_id>
-  printf 'corr=%s' "$1"
+fm_pending_reply_corr_token() {  # <corr_id> [out-var]
+  if [ "$#" -ge 2 ]; then
+    printf -v "$2" 'corr=%s' "$1"
+  else
+    printf 'corr=%s' "$1"
+  fi
 }
 
 # Extract the first corr=<16hex> token from free text, or empty.
@@ -201,8 +205,9 @@ fm_pending_reply_extract_corr() {  # <text>
 # 0 if <text> carries the exact correlation token for <corr_id>, as a whole
 # word: xcorr=<id> or corr=<id>ff is a different token, not this one.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 re
-  re="(^|[^[:alnum:]_])$(fm_pending_reply_corr_token "$corr")([^[:alnum:]_]|\$)"
+  local text=$1 corr=$2 token re
+  fm_pending_reply_corr_token "$corr" token
+  re="(^|[^[:alnum:]_])${token}([^[:alnum:]_]|\$)"
   [[ $text =~ $re ]]
 }
 
