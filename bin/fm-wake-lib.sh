@@ -212,6 +212,92 @@ fm_watcher_healthy() {
   return 0
 }
 
+fm_watcher_cross_namespace_healthy() { # <state> <watch-path> <grace-seconds> <home>
+  [ "$#" -eq 4 ] && [ "$_FM_UNAME" = Linux ] || return 1
+  python3 - "$@" 2>/dev/null <<'PY'
+import os
+from pathlib import Path
+import select
+import sys
+import time
+
+FIELDS = ('pid', 'pid-identity', 'pid-namespace', 'boot-id', 'fm-home', 'watcher-path')
+
+
+def snapshot(state):
+    lock = (state / '.watch.lock').resolve(strict=True)
+    st = lock.stat()
+    if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        raise ValueError('untrusted lock')
+    values = tuple((lock / name).read_text().strip() for name in FIELDS)
+    return (str(lock), st.st_dev, st.st_ino, values)
+
+
+def process_matches(proc, values):
+    pid, identity, namespace, boot, home, watch = values
+    if os.readlink(proc / 'ns/pid') != namespace:
+        return False
+    status = (proc / 'status').read_text().splitlines()
+    nspid = next(x.split()[1:] for x in status if x.startswith('NSpid:'))
+    if not nspid or nspid[-1] != pid:
+        return False
+    stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+    if stat[0] in ('Z', 'X'):
+        return False
+    cmd = (proc / 'cmdline').read_bytes()
+    if identity != 'linux-starttime=' + stat[19] + ' cmdline-hex=' + cmd.hex():
+        return False
+    env = (proc / 'environ').read_bytes().split(b'\0')
+    return ('FM_HOME=' + home).encode() in env
+
+
+def observe(state, watch, grace, home):
+    before = snapshot(state)
+    values = before[-1]
+    pid, identity, namespace, boot, recorded_home, recorded_watch = values
+    if not pid.isdigit() or int(pid) <= 0 or not identity:
+        return False
+    if recorded_home != home or recorded_watch != watch:
+        return False
+    if boot != Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+        return False
+    # Same-namespace and legacy records remain the existing predicate's job.
+    if namespace == os.readlink('/proc/self/ns/pid'):
+        return False
+    matches = []
+    deadline = time.monotonic() + 2
+    for proc in Path('/proc').glob('[0-9]*'):
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            if process_matches(proc, values):
+                matches.append(proc)
+        except (OSError, ValueError, IndexError, StopIteration):
+            continue
+    if len(matches) != 1:
+        return False
+    proc = matches[0]
+    fd = os.pidfd_open(int(proc.name))
+    try:
+        poll = select.poll()
+        poll.register(fd, select.POLLIN)
+        if poll.poll(0) or not process_matches(proc, values):
+            return False
+        age = time.time() - (state / '.last-watcher-beat').stat().st_mtime
+        return (0 <= age < grace and snapshot(state) == before and not poll.poll(0))
+    finally:
+        os.close(fd)
+
+
+try:
+    state, watch, grace, home = sys.argv[1:]
+    ok = observe(Path(state), watch, int(grace), home)
+except (OSError, ValueError, IndexError, StopIteration, AttributeError):
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+}
+
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
 # identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
@@ -478,6 +564,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/pid-namespace" \
+    "$lockdir/boot-id" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
