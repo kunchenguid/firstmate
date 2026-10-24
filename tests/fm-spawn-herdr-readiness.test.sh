@@ -488,6 +488,27 @@ test_after_get_abort_with_agent_keeps_pane() {
   pass "a pre-launch abort never closes a pane with an agent process under it"
 }
 
+# A leased slot the base freshen refused as not clean is never force-returned:
+# the abort keeps its lease and the pane, and names the manual return step.
+test_after_get_abort_keeps_dirty_slot() {
+  local id out status pane
+  id=herdr-dirty-slot-z13
+  make_case dirty-slot "$id"
+  printf '%s\n%s\n' "$PROJ_DIR" "$WT_DIR" > "$CWD_FILE"
+  printf 'uncommitted\n' > "$WT_DIR/uncommitted-work.txt"
+  out=$(FM_FAKE_HERDR_SUBSHELL=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a slot that is not clean"$'\n'"$out"
+  assert_contains "$out" "refusing to discard uncommitted work" "the spawn did not refuse on the dirty slot"$'\n'"$out"
+  pane=$(task_pane)
+  ! grep -q '^treehouse|return|' "$FAKE_STATE/log" || fail "a slot holding uncommitted work was treehouse-returned"
+  [ ! -s "$FAKE_STATE/closed" ] || fail "the pane holding the dirty slot's lease was closed: $(cat "$FAKE_STATE/closed")"
+  [ -e "$WT_DIR/uncommitted-work.txt" ] || fail "the uncommitted work in the slot was removed"
+  assert_contains "$out" "leaving herdr pane default:$pane open" "the refusal did not name the kept pane"$'\n'"$out"
+  assert_contains "$out" "release it with 'treehouse return --force $WT_DIR' from $PROJ_DIR" "the refusal did not give the manual return step"$'\n'"$out"
+  pass "a pre-launch abort keeps the lease and pane of a slot that is not clean"
+}
+
 # A polytoken spawn on Herdr keeps its unconditional close through the
 # ordinary task kill, which ends the subshell and with it the slot's lease.
 test_polytoken_after_get_abort_closes_unconditionally() {
@@ -520,6 +541,7 @@ test_run_waits_for_readiness
 test_exhausted_pool_fails_fast
 test_after_get_abort_returns_slot_then_closes
 test_after_get_abort_with_agent_keeps_pane
+test_after_get_abort_keeps_dirty_slot
 test_polytoken_after_get_abort_closes_unconditionally
 test_no_echo_same_shell_resends_once
 test_echo_present_never_resends

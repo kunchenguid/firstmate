@@ -1658,9 +1658,12 @@ spawn_close_fresh_endpoint() {
 # holding exactly the chain this spawn's own `treehouse get` left, in the
 # worktree this spawn recorded, first drops this task's slot claim, then has
 # that slot handed back with `treehouse return --force` (which ends the
-# subshell), and must settle back into its original idle shell. Anything else
-# keeps the pane, with the reason in SPAWN_HERDR_RETURN_REASON.
+# subshell), and must settle back into its original idle shell. A slot the
+# base freshen refused as not clean is never force-returned: its lease and the
+# pane stay, as on T3. Anything else keeps the pane, with the reason in
+# SPAWN_HERDR_RETURN_REASON.
 SPAWN_HERDR_RETURN_REASON=
+SPAWN_WT_NOT_CLEAN=0
 spawn_herdr_return_get_slot() { # <session> <pane>
   local session=$1 pane=$2 seen polls
   SPAWN_HERDR_RETURN_REASON=
@@ -1673,6 +1676,10 @@ spawn_herdr_return_get_slot() { # <session> <pane>
   seen=$(spawn_current_path "$WT_TARGET" || true)
   if [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ]; then
     SPAWN_HERDR_RETURN_REASON="its treehouse get subshell is in '${seen:-unknown}', not this spawn's worktree $WT"
+    return 1
+  fi
+  if [ "$SPAWN_WT_NOT_CLEAN" = 1 ]; then
+    SPAWN_HERDR_RETURN_REASON="$WT is not clean, so it stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS"
     return 1
   fi
   spawn_release_slot_claim
@@ -5770,7 +5777,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
+    [ "$?" -ne 2 ] || SPAWN_WT_NOT_CLEAN=1
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
