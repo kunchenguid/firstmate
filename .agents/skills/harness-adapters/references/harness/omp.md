@@ -19,7 +19,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Model discovery | `omp models [--json]` lists built-in and auto-discovered providers only; extension-registered providers such as `claude-bridge` never appear, so those models pass through the spawn unvalidated with a stderr notice. `omp usage` shows provider windows; `quota-axi` covers the `claude` provider when the bridge is in use. |
 | Marker | None of omp's own (verified: `PI_CODING_AGENT` absent from the binary, no `PI_CODING_AGENT_DIR` or `OMP_PROFILE` in the default profile). `FM_OMP_HARNESS=omp` is Firstmate's launch marker; ancestry matches the exact process name `omp`. |
 | Composer | Pinned to `composer.shape: borderless` by the overlay, a bare `❯` (U+276F) row the shared classifier already reads; busy text is `Working…` (U+2026), the only spelling the omp busy regex accepts (the three-dot form its headless `-p` mode writes never reaches a supervised pane), with the status row's braille spinner plus elapsed cell as the second signal. |
-| Autonomy | `--auto-approve` owns approval (omp forces `tools.approvalMode: yolo` for the session under it); the overlay pins `plan.defaultOnStartup: false`, `prewalk.enabled: false`, `retry.usageReservePolicy: auto`. |
+| Autonomy | `--auto-approve` owns approval (omp forces `tools.approvalMode: yolo` for the session under it), except that the overlay's `bash.patterns` deny rules still refuse a PR merge, `sudo`, or a push to a `main`/`master` default branch (verified 18.11.0); the overlay pins `plan.defaultOnStartup: false`, `prewalk.enabled: false`, `retry.usageReservePolicy: auto`. |
 | Trust | No project-trust gate at all; a fresh profile shows a provider-login wizard instead, suppressed by `OMP_SKIP_SETUP=1`. |
 | Resume | `-c/--continue` and `-r/--resume` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 
@@ -36,8 +36,10 @@ The optional claude-bridge extension runs a nested executable literally named `c
 
 ## Worker posture overlay
 
-The captain's own `~/.omp/agent/config.yml` is never written; the tracked `.omp/fm-worker-overlay.yml` is passed with `--config` for the one session and pins only the settings whose captain-level values would park an unattended worker on a prompt, change its pinned model, or make its composer unreadable.
+The captain's own `~/.omp/agent/config.yml` is never written; the tracked `.omp/fm-worker-overlay.yml` is passed with `--config` for the one session, pins only the settings whose captain-level values would park an unattended worker on a prompt, change its pinned model, or make its composer unreadable, and carries the worker's hard refusals.
 `../../../bin/fm-spawn.sh`'s header owns the exact list and the reason for each pin.
+The refusals are command-text rules on omp's bash tool only: omp's eval tool, a script, `bash -c`, a wrapper such as `env`, `git -c k=v push`, `git --no-pager push`, or `git push --all`/`--mirror` sidesteps them, a push chained with a command ending in `main` or `master` (`git push origin fm/x && gh pr create --base main`) is refused whole so the worker runs the push as its own command, a `gh` call that merely mentions `pr merge` or a `gh api` PUT whose path contains `/merge` is refused likewise so the worker rewords or splits it, they bind only omp sessions launched with the overlay (workers and secondmates; `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` are not matched), and the overlay's comments own the exact rules and limits.
+`../../../tests/fm-omp-worker-deny-live-e2e.test.sh` is the default-on live guard that replays the spawn's launch flags against the installed omp.
 
 ## Extension loading
 

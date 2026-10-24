@@ -271,9 +271,21 @@
 #   directory with --cwd, and passes the tracked worker posture overlay
 #   .omp/fm-worker-overlay.yml through --config. That overlay pins composer
 #   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
-#   policy for the one session only (--auto-approve alone owns approval); the
-#   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
-#   never written.
+#   policy for the one session only, and carries `bash.patterns` deny rules
+#   that still refuse a PR merge, sudo, or a push to a main/master default
+#   branch under --auto-approve (which otherwise owns approval). Those rules
+#   read the bash tool's command text only: omp's eval tool, a script,
+#   `bash -c`, a wrapper such as `env`, `git -c k=v push`, `git --no-pager push`,
+#   or `git push --all`/`--mirror` sidesteps them, a push chained with a command
+#   ending in main or master (`git push origin fm/x && gh pr create --base main`)
+#   is refused whole so the worker runs the push as its own command, a gh call
+#   that merely mentions `pr merge` or an api PUT whose path contains /merge is
+#   refused likewise so the worker rewords or splits it, and they
+#   bind every omp session launched with the overlay (workers and secondmates;
+#   bin/fm-pr-merge.sh and bin/fm-merge-local.sh are not matched); the overlay's
+#   comments own the exact rules. The captain's
+#   own ~/.omp/agent/config.yml (model roles, providers, theme) is never
+#   written.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp

@@ -3201,6 +3201,30 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
 
+### Worker refusals
+
+Verified 2026-10-15 on omp 18.11.0 (Linux x64): `bash.patterns` `deny` rules in the `--config` overlay refuse the matching bash-tool call under `--auto-approve`, whose yolo mode still enforces an explicit deny.
+A rule matches the whole command or a segment split on `&&`, `||`, `;`, `|`, `&`, a newline, and subshells, each of which the guard exercises with `git push origin main`; the push rules name the ref exactly, so the guard also pushes task branches `maintenance-x` and `mastery-y`, the refspec `fm/omp-deny-task:main-fix`, and the task branch to an empty gate remote named `no-mistakes` (`git push no-mistakes fm/omp-deny-task`); `env sudo true`, `SUDO=1 sudo true`, and `bash -c "sudo true"` were not refused, and neither was a command that only quotes a pattern, such as `echo "gh pr merge"`.
+Also not refused: `git --no-pager push origin HEAD:main` (it moved origin's `main`), `git -c k=v push`, and `git push --all`, which pushes the shared local `main`; these are accepted limits because the rules read the command text as typed.
+A push chained with a command whose last argument is `main` or `master`, such as `git push -u origin fm/omp-deny-task && gh pr create --base main` or `git push origin fm/omp-deny-task && git fetch origin main`, is refused with `Blocked by bash pattern: git push* main`, because the whole-command match sees the trailing ref; the worker recovers by running the push as its own command.
+A `gh` call that only mentions the phrase, such as `gh pr comment 7 --body "run pr merge after CI"` or `gh issue create --title "pr merge flow"`, and a `gh api` PUT whose path contains `/merge`, such as one to `.../contents/merge-notes.md`, are refused too, because those rules match anywhere in the command text; the worker recovers by rewording or splitting the command.
+The overlay's `bash.patterns` replaces the captain's own for the session: in an isolated omp home whose `config.yml` held `bash.patterns` `[{match: "echo captain-deny*", approval: deny}]`, a scripted local model under `omp -p --config <overlay> --auto-approve` ran `echo captain-deny x` with the worker overlay and was blocked on `sudo -n true` by `sudo *`, while a plain overlay with no `bash` key blocked `echo captain-deny x` by `echo captain-deny*`; nothing is claimed about other `bash.*` keys.
+The default-on guard replays the launch flags `bin/fm-spawn.sh` builds against the installed omp with a scripted local model, so it spends no tokens:
+
+```sh
+bash tests/fm-omp-worker-deny-live-e2e.test.sh
+```
+
+```text
+ok - omp omp/18.11.0 refuses PR merge, sudo, and default-branch pushes for a firstmate worker under --auto-approve
+ok - omp omp/18.11.0 still runs the worker task-branch push and other gh commands
+# all fm-omp-worker-deny-live-e2e tests passed
+```
+
+The overlay is passed on every Firstmate-launched omp session, so omp secondmates carry the same rules; `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` do not match them.
+Against the overlay without the rules, the same guard failed on its first case, `gh pr merge 7 --squash`, which reached its program.
+On 2026-10-15 a real `openai-codex/gpt-6-astra` worker under the captain's own config and the final exact-ref overlay, asked to run each command, got `Tool "bash" is blocked by tool policy` for `gh pr merge` and `gh-axi pr merge` (`gh*pr merge*`), `sudo true` (`sudo *`), and `git push origin HEAD:main` (`git push*:main`), while `git push -u origin fm/live-proof` created the branch on origin, origin's `main` stayed put, and `gh pr view 7` ran.
+
 ## Busy inbox escalation
 
 Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091a7a799` with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
