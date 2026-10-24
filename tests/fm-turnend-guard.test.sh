@@ -174,6 +174,32 @@ test_predicate_relay_shim_is_not_a_custom_check() {
   pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
 }
 
+# A checks-only need is the idle-home case fm-guard.sh keeps quiet on a cold
+# beacon; any task, source, or relay poll beside the check must clear the flag,
+# and the turn-end predicates stay unhealthy either way.
+test_predicate_checks_only_flag() {
+  local state="$TMP_ROOT/pred-checks-only/state"
+  mkdir -p "$state/procevent"
+  register_custom_check "$state" contributions
+  fm_supervision_unhealthy "$state" 300 || fail "a checks-only home with no beacon must stay unhealthy for the turn-end guard"
+  [ "$FM_SUP_CHECKS_ONLY" = true ] || fail "a home needing only a registered check must set FM_SUP_CHECKS_ONLY"
+  fm_write_meta "$state/task.meta" "window=firstmate:fm-task" "kind=ship"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS_ONLY" = false ] || fail "a task in flight must clear FM_SUP_CHECKS_ONLY"
+  rm -f "$state/task.meta"
+  : > "$state/procevent/s.source"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS_ONLY" = false ] || fail "a process-event source must clear FM_SUP_CHECKS_ONLY"
+  rm -f "$state/procevent/s.source"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS_ONLY" = false ] || fail "an X-mode relay poll must clear FM_SUP_CHECKS_ONLY"
+  rm -f "$state/x-watch.check.sh"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS_ONLY" = true ] || fail "removing the other needs must restore FM_SUP_CHECKS_ONLY"
+  pass "fm_supervision_status: FM_SUP_CHECKS_ONLY marks a need carried only by registered checks"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -2388,6 +2414,7 @@ test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
+test_predicate_checks_only_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
