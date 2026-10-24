@@ -2764,9 +2764,13 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   local dir state url teardown_args notice
   url=https://github.com/o/r/pull/1
 
+  # Invoked indirectly through fm_merge_outcome_auto_teardown in this regression.
+  # shellcheck disable=SC2329
   fm_merge_outcome_current_state() {
     printf '%s\n' "${FM_TEST_AUTO_CURRENT_STATE:-state: done · source: status-log}"
   }
+  # Invoked indirectly through fm_merge_outcome_auto_teardown in this regression.
+  # shellcheck disable=SC2329
   fm_merge_outcome_run_teardown() {
     local home=$1 state=$2 id=$3
     printf '%s\n' "$*" >> "$FM_TEST_AUTO_TEARDOWN_LOG"
