@@ -2974,6 +2974,8 @@ SH
   set -e
   [ "$rc" -eq 0 ] \
     || fail "self-merge: the merge entrypoint failed: $(cat "$dir/merge.err")"
+  assert_grep "check: merge landed: task-a $url; lane automatically cleaned up" "$dir/merge.out" \
+    "self-merge: the initiating caller did not receive the cleanup result"
   assert_grep "check: merge landed: task-a $url" "$state/.wake-queue" \
     "self-merge: the durable merge notice lost the canonical merge identity"
   last=$(grep -F "merged-task-a-$url" "$state/.wake-queue" | tail -n 1)

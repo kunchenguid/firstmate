@@ -1842,8 +1842,14 @@ fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
   "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
   0)
-    fm_merge_outcome_cleanup_and_publish "$FM_HOME" "$STATE" "$ID" "$URL" \
-      || printf 'actionable: merged %s and ran its automatic cleanup, but could not record the cleanup outcome for supervision\n' "$URL" >&2
+    cleanup_rc=0
+    fm_merge_outcome_cleanup_and_publish "$FM_HOME" "$STATE" "$ID" "$URL" || cleanup_rc=$?
+    if [ "$FM_MERGE_OUTCOME_CLEANUP" != skipped ]; then
+      printf '%s\n' "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")"
+    fi
+    if [ "$cleanup_rc" -ne 0 ]; then
+      printf 'actionable: merged %s but could not record the cleanup outcome for supervision\n' "$URL" >&2
+    fi
     ;;
   3)
     printf 'actionable: merged %s but could not report it upward: this home has no readable secondmate identity or parent binding (.fm-secondmate-home, .fm-secondmate-parent)\n' \
