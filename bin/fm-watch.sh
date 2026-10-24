@@ -80,7 +80,7 @@
 #                          ci-monitoring, absent or unreadable run, or a home
 #                          without that flag, escalates unchanged.
 #                          Each long-cadence recheck (declared pause, deferred
-#                          wait, or deferred write) ends with " task=<id>" after
+#                          wait, deferred write, or validating run) ends with " task=<id>" after
 #                          its parenthetical, so the supervisor reports on the
 #                          task rather than the pane. A stale that would
 #                          otherwise carry no parenthetical (first sight, away
@@ -1776,7 +1776,7 @@ wedge_defer_validating() {  # <window> <since-file> <triage-label> <idle-age> <t
   vage=$(age_of "$vsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.validating-resurfaced-$key" "$vage" \
-    "stale: $win (idle ${age}s, no-mistakes run $run validating ($step) for ${vage}s, rechecked on a long cadence not a wedge; confirm the run is still progressing)"
+    "stale: $win (idle ${age}s, no-mistakes run $run validating ($step) for ${vage}s, rechecked on a long cadence not a wedge; confirm the run is still progressing) task=$task"
   triage_log "absorbed $label (no-mistakes run $run validating ($step), idle ${age}s): $win"
 }
 
