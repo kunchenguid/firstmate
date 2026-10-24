@@ -179,7 +179,8 @@
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
 # no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
-# destination, normal-case deduplication, and at-least-once recovery.
+# destination, normal-case deduplication, at-least-once recovery, and the
+# automatic cleanup a finished direct report receives.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
 set -eu
@@ -1830,7 +1831,10 @@ outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
   "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
-  0) ;;
+  0)
+    fm_merge_outcome_cleanup_and_publish "$FM_HOME" "$STATE" "$ID" "$URL" \
+      || printf 'actionable: merged %s and ran its automatic cleanup, but could not record the cleanup outcome for supervision\n' "$URL" >&2
+    ;;
   3)
     printf 'actionable: merged %s but could not report it upward: this home has no readable secondmate identity or parent binding (.fm-secondmate-home, .fm-secondmate-parent)\n' \
       "$URL" >&2

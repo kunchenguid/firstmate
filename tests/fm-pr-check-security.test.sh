@@ -9,6 +9,8 @@ set -u
 . "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-merge-outcome-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -254,9 +256,15 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
+if [ "${1:-}" = axi ] && [ "$#" -eq 1 ]; then
+  overview_head=$(git -C "${FM_TEST_NM_WORKTREE:-.}" rev-parse HEAD 2>/dev/null) || exit 1
+  printf 'repo: %s\ncount: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n  RUNFIXTURE,fm/task,completed,%s,\n' \
+    "${FM_TEST_NM_WORKTREE:-.}" "$overview_head"
+  exit 0
+fi
 [ "${1:-} ${2:-}" = "axi status" ] || exit 2
 [ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
-head=$(git rev-parse HEAD 2>/dev/null) || exit 1
+head=$(git -C "${FM_TEST_NM_WORKTREE:-.}" rev-parse HEAD 2>/dev/null) || exit 1
 pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
 printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
   "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
@@ -2559,6 +2567,308 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   pass "a merge detected by the poll is reported upward from a secondmate home exactly once"
 }
 
+test_watcher_surfaces_guarded_auto_teardown_refusal() {
+  local dir state url rc output crew_state
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case watcher-auto-teardown-refused)
+  state="$dir/home/state"
+  git -C "$dir/wt" checkout -q -b fm/task
+  write_poll_meta "$state" task-a "$url" \
+    'kind=ship' 'mode=no-mistakes' 'branch=fm/task' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' "project=$dir/wt"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  crew_state=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_TEST_NM_WORKTREE="$dir/wt" \
+    PATH="$dir/fakebin:$BASE_PATH" "$ROOT/bin/fm-crew-state.sh" task-a)
+  case "$crew_state" in 'state: done ·'*) ;; *) fail "finished fixture did not read as done: $crew_state" ;; esac
+
+  set +e
+  FM_TEST_NM_WORKTREE="$dir/wt" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher did not finish the guarded cleanup attempt: $(cat "$dir/watch.err")"
+  output=$(cat "$dir/watch.out")
+  case "$output" in
+    *'automatic cleanup refused: REFUSED: '*) ;;
+    *) fail "watcher did not surface the guarded teardown refusal reason: $output" ;;
+  esac
+  [ -f "$state/task-a.meta" ] || fail "a guarded cleanup refusal removed task metadata"
+  assert_grep "check: merge landed: task-a $url" "$state/.wake-queue" \
+    "the durable cleanup outcome lost the canonical merge identity"
+  assert_grep 'automatic cleanup refused: REFUSED:' "$state/.wake-queue" \
+    "the refusal reason was not preserved in the durable merge notice"
+  pass "the watcher attempts guarded cleanup only after a finished merge and surfaces its refusal reason"
+}
+
+test_merged_notice_auto_teardown_is_done_only_and_guarded() {
+  local dir state url teardown_args notice
+  url=https://github.com/o/r/pull/1
+
+  fm_merge_outcome_current_state() {
+    printf '%s\n' "${FM_TEST_AUTO_CURRENT_STATE:-state: done · source: status-log}"
+  }
+  fm_merge_outcome_run_teardown() {
+    local home=$1 state=$2 id=$3
+    printf '%s\n' "$*" >> "$FM_TEST_AUTO_TEARDOWN_LOG"
+    case "${FM_TEST_AUTO_TEARDOWN_RESULT:-success}" in
+      success|slot-lost)
+        rm -f "$state/$id.meta" "$state/$id.status"
+        [ "${FM_TEST_AUTO_TEARDOWN_RESULT:-success}" != slot-lost ] || return 4
+        return 0
+        ;;
+      refused)
+        printf '%s\n' 'REFUSED: landed-work safety check declined' >&2
+        return 1
+        ;;
+      refusing)
+        printf '%s\n' "error: task task-a's record has no spawn_gen that identifies one exact incarnation; refusing automatic teardown - relaunch the task" >&2
+        return 1
+        ;;
+    esac
+  }
+
+  dir=$(make_case merged-auto-teardown-success)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" STATE="$state" \
+    . "$ROOT/bin/fm-wake-lib.sh"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = cleaned ] \
+    || fail "a finished direct ship lane did not auto-teardown"
+  [ "$(cat "$dir/teardown.log")" = "$dir/home $state task-a" ] \
+    || fail "auto-teardown did not use the guarded task-only cleanup command"
+  [ ! -e "$state/task-a.status" ] && [ ! -e "$state/task-a.meta" ] \
+    || fail "successful auto-teardown recreated retired task state"
+  [ -z "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" ] \
+    || fail "a routine cleanup reported a spurious detail: $FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+  case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
+    *'lane automatically cleaned up'*) ;;
+    *) fail "successful auto-teardown was omitted from the merge notification" ;;
+  esac
+
+  dir=$(make_case merged-auto-teardown-slot-lost)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_TEARDOWN_RESULT=slot-lost \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = cleaned ] \
+    || fail "a cleanup that lost its returned pool slot was not reported as cleaned"
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'lane automatically cleaned up; cleanup completed, but the returned worktree pool slot needs repair'*) ;;
+    *) fail "the pool-slot repair outcome was not added to the merge notification: $notice" ;;
+  esac
+
+  dir=$(make_case merged-auto-teardown-inflight)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_CURRENT_STATE='state: working · source: run-step' \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+    || fail "an in-flight lane did not keep the ordinary merge-notice behavior"
+  [ ! -s "$dir/teardown.log" ] || fail "an in-flight lane reached teardown"
+
+  dir=$(make_case merged-auto-teardown-refused)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_TEARDOWN_RESULT=refused \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = refused ] \
+    || fail "a refused guarded cleanup was not reported as refused"
+  case "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" in
+    *'landed-work safety check declined'*) ;;
+    *) fail "the cleanup refusal reason was lost: $FM_MERGE_OUTCOME_CLEANUP_DETAIL" ;;
+  esac
+  teardown_args=$(cat "$dir/teardown.log")
+  [ "$teardown_args" = "$dir/home $state task-a" ] \
+    || fail "auto-teardown passed an unexpected flag, possibly force: $teardown_args"
+  [ -f "$state/task-a.meta" ] || fail "a refused cleanup removed task metadata"
+  case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
+    *'automatic cleanup refused: REFUSED: landed-work safety check declined'*) ;;
+    *) fail "the cleanup refusal reason was not added to the surfaced notice" ;;
+  esac
+
+  dir=$(make_case merged-auto-teardown-refusing-record)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    FM_TEST_AUTO_TEARDOWN_RESULT=refusing \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = refused ] \
+    || fail "a no-change teardown refusal was not reported as refused"
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'; automatic cleanup refused: error: task task-a'*) ;;
+    *) fail "a refusal worded 'refusing' was reported as an incomplete cleanup: $notice" ;;
+  esac
+  [ -f "$state/task-a.meta" ] || fail "a no-change teardown refusal removed the task record"
+
+  dir=$(make_case merged-auto-teardown-no-deliverable)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+    || fail "a done lane without its recorded PR was cleaned up"
+  [ ! -s "$dir/teardown.log" ] || fail "a lane without its recorded deliverable reached teardown"
+
+  dir=$(make_case merged-auto-teardown-secondmate-home)
+  state="$dir/home/state"
+  seed_secondmate_home "$dir"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+    || fail "a lane in a secondmate home was auto-torn down"
+  [ ! -s "$dir/teardown.log" ] || fail "a secondmate home's lane reached teardown"
+
+  dir=$(make_case merged-auto-teardown-already-recorded)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=true
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
+    fm_merge_outcome_cleanup_and_publish "$dir/home" "$state" task-a "$url"
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  [ -e "$state/task-a.meta" ] \
+    || fail "a merge whose outcome another owner already recorded was cleaned up a second time"
+  [ ! -s "$dir/teardown.log" ] \
+    || fail "a merge whose outcome another owner already recorded ran a second teardown"
+
+  unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown
+  pass "merged notices auto-clean only finished direct reports with recorded deliverables, leave no retired task state, and surface guarded refusals without force"
+}
+
+test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
+  local dir state url rc last head
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case self-merge-auto-teardown)
+  state="$dir/home/state"
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git -C "$dir/wt" checkout -q -b fm/task
+  git -C "$dir/wt" remote add origin "$dir/origin.git"
+  git -C "$dir/wt" push -q origin fm/task:refs/heads/main
+  git -C "$dir/wt" fetch -q origin
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/tmux"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'branch=fm/task' \
+    'spawn_gen=teardown-test-task-a' \
+    "pr_head=$head" \
+    "project=$dir/wt" \
+    "pr=$url"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  seed_canonical_poll "$dir" task-a "$url"
+  touch "$state/.last-watcher-beat"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED FM_TEST_NM_WORKTREE="$dir/wt" \
+    run_merge_entry "$dir" task-a "$url" >"$dir/merge.out" 2>"$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "self-merge: the merge entrypoint failed: $(cat "$dir/merge.err")"
+  assert_grep "check: merge landed: task-a $url" "$state/.wake-queue" \
+    "self-merge: the durable merge notice lost the canonical merge identity"
+  last=$(grep -F "merged-task-a-$url" "$state/.wake-queue" | tail -n 1)
+  case "$last" in
+    *'; lane automatically cleaned up'*) ;;
+    *) fail "self-merge: a merge of a finished direct report was not cleaned up: $last | $(cat "$dir/merge.err")" ;;
+  esac
+  [ ! -e "$state/task-a.meta" ] \
+    || fail "self-merge: the cleanup published success but the task record survived"
+  pass "a merge this home performs itself runs the guarded cleanup of a finished direct report and publishes its outcome durably"
+}
+
+test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report() {
+  local dir state url before after
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case cleanup-keeps-merge-identity)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only' \
+    "pr=$url"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  printf 'check\n' > "$state/task-a.check.sh"
+  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 1 \
+    || fail "cleanup-keeps-merge-identity: could not write the merge-notification marker"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "cleanup-keeps-merge-identity: cleanup failed: $(cat "$dir/teardown.err")"
+  [ ! -e "$state/task-a.meta" ] \
+    || fail "cleanup-keeps-merge-identity: the cleanup left the task record behind"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
+    || fail "cleanup-keeps-merge-identity: the cleanup destroyed the merge identity its own notices dedupe against"
+
+  before=$(grep -c -F "merged-task-a-$url" "$state/.wake-queue" 2>/dev/null || true)
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  fm_merge_outcome_report "$dir/home" "$state" task-a "$url" poll external \
+    || fail "cleanup-keeps-merge-identity: a duplicate report after the cleanup failed"
+  [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ] \
+    || fail "cleanup-keeps-merge-identity: a report after the cleanup was not recognised as already published"
+  after=$(grep -c -F "merged-task-a-$url" "$state/.wake-queue" 2>/dev/null || true)
+  [ "$after" = "$before" ] \
+    || fail "cleanup-keeps-merge-identity: a duplicate report after the cleanup published a plainer second merge notice"
+  pass "a cleanup keeps the merge identity durable, so a late duplicate report cannot overwrite the cleanup notice"
+}
+
 test_different_merged_pr_for_same_task_is_not_absorbed() {
   local dir state rc
   dir=$(make_case different-merged-pr-not-absorbed)
@@ -3621,6 +3931,10 @@ test_authority_persists_before_control_unlock
 test_teardown_cannot_race_authority_consumption
 test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
+test_watcher_surfaces_guarded_auto_teardown_refusal
+test_merged_notice_auto_teardown_is_done_only_and_guarded
+test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
+test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
