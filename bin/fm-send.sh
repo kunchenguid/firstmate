@@ -795,10 +795,13 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
-  if [ -z "${MESSAGE//[[:space:]]/}" ]; then
+  case "$MESSAGE" in
+  *[![:space:]]*) ;;
+  *)
     echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
-  fi
+    ;;
+  esac
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in

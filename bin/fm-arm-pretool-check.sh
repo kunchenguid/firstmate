@@ -149,12 +149,7 @@ fi
 # delegates to the classifier - the single owner of every decision. Any deeper
 # decode-required obfuscation stays the classifier's and the post-arm liveness
 # guards' responsibility.
-PREFILTER=$CMD
-PREFILTER=${PREFILTER//\\/}
-PREFILTER=${PREFILTER//\"/}
-PREFILTER=${PREFILTER//\'/}
-PREFILTER=${PREFILTER//$'\n'/}
-PREFILTER=${PREFILTER//$'\r'/}
+PREFILTER=$(printf '%s' "$CMD" | tr -d '\\"\047\n\r')
 case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
