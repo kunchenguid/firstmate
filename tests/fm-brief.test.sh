@@ -221,11 +221,12 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-# The browser-session name a brief renders for a home: that home's backend tag
-# (bin/fm-backend-hometag-lib.sh) joined to the task id.
-brief_home_tag() {
+# A home's browser-session prefix: fm- and that home's backend tag
+# (bin/fm-backend-hometag-lib.sh). Firstmate's own session is the bare prefix,
+# and a brief renders the prefix joined to the task id.
+brief_session_prefix() {
   local FM_HOME=$1 FM_ROOT=$ROOT
-  (. "$ROOT/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag)
+  (. "$ROOT/bin/fm-backend-hometag-lib.sh"; printf 'fm-%s' "$(fm_backend_hometag)")
 }
 
 # Rendered chrome-devtools-axi session names in a generated brief, one per line.
@@ -256,15 +257,15 @@ assert_task_cleanup_rule() {
 # with no --forge renders the unchanged gh-axi wording. The forge is a ship
 # input only, and the closed set refuses anything else.
 test_forge_selection_renders_correct_cli() {
-  local home brief out rc tag
+  local home brief out rc prefix
   home="$TMP_ROOT/forge-home"
   mkdir -p "$home/data"
-  tag=$(brief_home_tag "$home")
+  prefix=$(brief_session_prefix "$home")
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-default some-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "a ship brief with no --forge should still scaffold"
   brief="$home/data/brief-forge-default/brief.md"
-  assert_task_cleanup_rule "$brief" "$tag-brief-forge-default" "a ship brief with no --forge"
+  assert_task_cleanup_rule "$brief" "$prefix-brief-forge-default" "a ship brief with no --forge"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
     "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
@@ -274,14 +275,14 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-scout some-proj --scout >/dev/null 2>&1 \
     || fail "a scout brief should still scaffold"
   brief="$home/data/brief-forge-scout/brief.md"
-  assert_task_cleanup_rule "$brief" "$tag-brief-forge-scout" "a scout brief"
+  assert_task_cleanup_rule "$brief" "$prefix-brief-forge-scout" "a scout brief"
   assert_grep "2. Stay inside this worktree; outside it, write only the report, the status file below, and the task temporary directory Rule 3 lets you create and remove." "$brief" \
     "a scout brief's write scope must allow the task temporary directory Rule 3 removes"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a direct-PR ship brief"
   brief="$home/data/brief-forge-forgejo/brief.md"
-  assert_task_cleanup_rule "$brief" "$tag-brief-forge-forgejo" "a Forgejo ship brief" "Use tea for Forgejo operations"
+  assert_task_cleanup_rule "$brief" "$prefix-brief-forge-forgejo" "a Forgejo ship brief" "Use tea for Forgejo operations"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `tea`' "$brief" \
     "--forge forgejo's direct-PR DOD must tell the worker to open the PR with tea"
@@ -301,7 +302,7 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-nm some-proj --mode no-mistakes --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a no-mistakes ship brief"
   brief="$home/data/brief-forge-nm/brief.md"
-  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$tag-brief-forge-nm chrome-devtools-axi <command>\`." "$brief" \
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$prefix-brief-forge-nm chrome-devtools-axi <command>\`." "$brief" \
     "a no-mistakes --forge forgejo brief must render the tea Rule 3 line"
   grep -qx "Delivery contract: mode=no-mistakes forge=forgejo" "$brief" \
     || fail "a no-mistakes --forge forgejo brief must mark the delivery contract line"
@@ -336,12 +337,12 @@ ROWS
 # limit, and is never the shared default session, so a worker stopping its own
 # session cannot close another home's or firstmate's browser.
 test_browser_session_is_home_and_task_scoped() {
-  local primary secondmate tag long brief name names a b
+  local primary secondmate prefix long brief name names a b
   primary="$TMP_ROOT/browser-primary"
   secondmate="$TMP_ROOT/browser-secondmate"
   mkdir -p "$primary/data" "$secondmate/data"
   printf 'sm-browser\n' > "$secondmate/.fm-secondmate-home"
-  tag=$(brief_home_tag "$primary")
+  prefix=$(brief_session_prefix "$primary")
   long=$(printf '%060d' 0 | tr 0 x)
 
   FM_HOME="$primary" "$ROOT/bin/fm-brief.sh" fix-login some-proj --mode direct-PR >/dev/null 2>&1 \
@@ -365,6 +366,7 @@ test_browser_session_is_home_and_task_scoped() {
       || fail "$brief must name exactly one browser session in its run and stop commands (got: $name)"
     printf '%s\n' "$name" | grep -Eqx '[A-Za-z0-9._-]{1,64}' \
       || fail "$brief session name must be 1-64 characters from [A-Za-z0-9._-] (got: $name)"
+    [ "$name" != "$prefix" ] || fail "$brief must not render firstmate's own browser session (got: $name)"
     names="$names$name"$'\n'
   done
   [ "$(printf '%s' "$names" | sort -u | wc -l | tr -d ' ')" = 5 ] \
@@ -372,16 +374,16 @@ test_browser_session_is_home_and_task_scoped() {
 
   a=$(brief_browser_sessions "$primary/data/fix-login/brief.md")
   b=$(brief_browser_sessions "$secondmate/data/fix-login/brief.md")
-  [ "$a" = "$tag-fix-login" ] || fail "a primary-home session must be the home tag joined to the task id (got: $a)"
-  [ "$b" = "$(brief_home_tag "$secondmate")-fix-login" ] && [ "$a" != "$b" ] \
+  [ "$a" = "$prefix-fix-login" ] || fail "a primary-home session must be fm-, the home tag, and the task id (got: $a)"
+  [ "$b" = "$(brief_session_prefix "$secondmate")-fix-login" ] && [ "$a" != "$b" ] \
     || fail "the same task id in two homes must get two browser sessions (primary $a, secondmate $b)"
-  [ "$(brief_browser_sessions "$primary/data/default/brief.md")" = "$tag-default" ] \
+  [ "$(brief_browser_sessions "$primary/data/default/brief.md")" = "$prefix-default" ] \
     || fail "a task named default must not render the shared default session"
 
   a=$(brief_browser_sessions "$primary/data/$long-one/brief.md")
   b=$(brief_browser_sessions "$primary/data/$long-two/brief.md")
   case "$a" in
-    "$(printf '%s' "$tag-$long" | cut -c1-55)"-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    "$(printf '%s' "$prefix-$long" | cut -c1-55)"-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *) fail "an overlong session name must keep a readable prefix and end in a short hash (got: $a)" ;;
   esac
   [ "${#a}" -eq 64 ] && [ "$a" != "$b" ] \

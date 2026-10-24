@@ -464,8 +464,8 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 # Ship and scout briefs include task-cleanup guidance and tell the worker to
 # run chrome-devtools-axi under one named session and stop only that session.
 # Session names share one per-user namespace across every home, and an unnamed
-# session is the shared "default" one firstmate itself uses, so names join this
-# home's tag to the task id and are never "default".
+# session is the shared "default" one, so names join fm-, this home's tag, and
+# the task id; they are never "default" and never firstmate's own fm-<hometag>.
 # chrome-devtools-axi accepts 1-64 characters from [A-Za-z0-9._-]; longer or
 # out-of-charset names keep a readable prefix plus a hash of the full name, so
 # distinct tasks stay distinct.
@@ -480,7 +480,7 @@ browser_session_name() {
   name=${name//[!A-Za-z0-9._-]/-}
   printf '%s-%s' "${name:0:55}" "$hash"
 }
-BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "$(fm_backend_hometag)-$ID") chrome-devtools-axi"
+BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "fm-$(fm_backend_hometag)-$ID") chrome-devtools-axi"
 TASK_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. \
 Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. \
 Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session. \
