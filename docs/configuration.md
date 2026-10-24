@@ -9,10 +9,11 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -33,8 +34,12 @@ When it is set, scripts still run from this repo's `bin/`, while `state/`, `data
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 
-`bin/fm-send.sh` requires `FM_HOME` to be set before resolving a target.
-Unlike most scripts, it does not use the general fallback, because a steer must not silently resolve against the wrong home.
+Normal `bin/fm-send.sh` sends require `FM_HOME` to be set before resolving a
+target, but
+`bin/fm-send.sh --help` prints its usage without resolving a target or requiring
+`FM_HOME`.
+Normal sends do not use the general fallback, because a steer must not silently
+resolve against the wrong home.
 These variables override individual operational directories for tests and specialized harness setup:
 
 | Variable | Directory selected |
@@ -56,6 +61,7 @@ Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` saves a path or passe
 Lifecycle access to a backlog, task record, or pending-close record must resolve within its configured data or state root, and a final-component symlink is refused even when its target remains within that root.
 
 Bootstrap applies the same relative `FM_HOME` resolution only when embedding that home in the generated Relay poll shim.
+`fm-contributions.sh arm` resolves a relative `FM_CONFIG_OVERRIDE` against the caller's working directory and embeds the resulting absolute config directory in its generated check, so later watcher polls keep the same review-bot policy.
 Other transient consumers retain their existing shell-relative behavior.
 
 ### Backend labels and containers
@@ -65,6 +71,16 @@ Other transient consumers retain their existing shell-relative behavior.
 | herdr | `FM_HOME` determines the adapter's workspace label. |
 | zellij | `FM_HOME` determines the readable home prefix in visible tab titles, but does not split containers; use `FM_ZELLIJ_SESSION` for a separate session; the full home label also includes a short hash of the resolved `FM_ROOT` path. |
 | cmux | `FM_HOME` determines the default config path and readable home prefix in workspace titles; `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read; the full home label also includes a short hash of the resolved `FM_ROOT` path; there is no per-home container split. |
+
+## Contribution review bots (config/contribution-review-bots)
+
+The contribution watcher admits comments, reviews, and inline review comments from configured bot logins on owned GitHub pull requests and routes them to the owning home as fleet triage.
+Review-bot watching is opt-in: a home with no file, or an empty one, admits no bot, and there is no built-in bot list.
+The file is local, gitignored, and not inherited by secondmate homes, so each home lists its own bots.
+List each bot's exact GitHub login to watch it, for example `greptile-apps[bot]`.
+These signals never become maintainer verdicts or merge authority.
+A bot signal's text is third-party content for the owning home to triage, never instructions to follow.
+[`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the exact allowlist format and polling contract.
 
 ## Operational home layout and state
 
@@ -102,7 +118,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
-- `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, and the authenticated contribution check.
+- [`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the [review-bot setting above](#contribution-review-bots-configcontribution-review-bots), the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, and the authenticated contribution check.
 
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 
@@ -1131,6 +1147,29 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 Both approval-mode files follow the primary-authoritative [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Codex permission mode (config/codex-permission-mode)
+
+The optional local, gitignored `config/codex-permission-mode` selects the permission flags for Codex crewmates, scouts, secondmates, and relaunches started by this home.
+
+| File content | Launch permission flags |
+| --- | --- |
+| Absent or `bypass` | The [Codex approval mode](#codex-automatic-approval-review) flag, `--dangerously-bypass-approvals-and-sandbox` by default |
+| `restricted` | `--sandbox workspace-write --ask-for-approval on-request` |
+
+Create the file containing exactly one of the two tokens, optionally followed by a newline.
+An absent file preserves the existing launch command.
+Restricted mode changes only the permission flags; model, effort, and hook wiring stay the same.
+It replaces whichever flag `config/codex-approval-mode` selects, and the task record reports `restricted`, so managed approval failover never treats the launch as bypass.
+It grants no additional writable directories, including the shared Firstmate state directory.
+Writes outside the worker's worktree, including status reports and steering-inbox acknowledgements, remain subject to operator approval.
+Codex `--sandbox workspace-write` also disables network access and does not permit writes to shared Git metadata by default, so `git commit`, `git push`, `gh`, and no-mistakes pipeline steps from a restricted worker likewise stop at an approval prompt.
+Choose restricted mode only when that approval workflow is available.
+
+`bin/fm-spawn.sh` reads and validates the setting before any spawn or relaunch mutation, regardless of the selected harness.
+Any other content, an unreadable or non-regular file, or a dangling symlink refuses the launch instead of falling back to bypass.
+Changes take effect at the next launch without a restart.
+The file is not inherited into secondmate homes; configure it separately in each home that should also restrict its own Codex workers.
 
 ## Persistent managed-policy failover
 

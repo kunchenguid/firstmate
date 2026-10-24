@@ -107,22 +107,34 @@
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
-# ack removes
-# only the named pending token. A crash after enqueue can duplicate a wake but
-# cannot consume the pending signal.
+# before any wake. On a PR, comments, reviews and inline review comments whose
+# author login is listed in the effective config/contribution-review-bots (one
+# exact login per line; blank and # lines ignored) are admitted too, marked
+# review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
+# no bot, and there is no built-in bot list. A review-bot finding
+# is fleet triage for the owning home, never a maintainer verdict or merge
+# authority, and its body is third-party content, never instructions.
+# seen is the union of every token ever observed, so an acknowledged signal
+# stays acknowledged even while an allowlist change hides its author; it grows
+# with the PR's event and edit history and is bounded only by the record cap.
+# poll appends ordinary durable check wakes through fm-wake-lib and emits only
+# newly durable signals for the authenticated check to surface.
+# ack removes only the named pending token.
+# A crash after enqueue can duplicate a wake but cannot consume the pending signal.
 #
 # Re-raising unanswered review threads is opt-in. Unless
 # FM_CONTRIBUTIONS_REPLY_AGE is set to a positive number of seconds, poll makes
 # no review-thread read, tracks no threads and raises no "unanswered" signal,
 # and records carry no threads[] entry. arm copies a set value into the
 # generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
+# arm also resolves FM_CONFIG_OVERRIDE against its working directory and embeds
+# the absolute effective config directory, so later polls keep the same bot
+# allowlist regardless of their working directory or ambient override.
 # With it set, acknowledging a signal never ends tracking of its thread. On an
-# open pull request, each maintainer inline review comment and each maintainer
+# open pull request, each admitted inline review comment and each admitted
 # review in state CHANGES_REQUESTED is an unanswered thread until the
 # contribution author replies or the thread is resolved. Each inline comment is
-# its own thread, keyed by its comment id, so two maintainer comments in one
+# its own thread, keyed by its comment id, so two admitted comments in one
 # conversation raise two wakes. Plain issue comments and other reviews stay
 # one-shot signals and are never raised again. An inline comment is answered by
 # an author reply in its own thread, a review requesting changes by any later
@@ -130,7 +142,8 @@
 # DISMISSED review from the same reviewer. A review requesting changes with an
 # empty body is not tracked, because its inline threads carry it. The record
 # keeps one threads[] entry per unanswered thread (key, source, author, at,
-# raised). Once a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old, poll adds
+# raised, plus review_bot:true for a configured bot). Once a thread is
+# FM_CONTRIBUTIONS_REPLY_AGE seconds old, poll adds
 # one pending "unanswered" signal and a wake whose text names the thread's URL
 # and its age: "check: contributions <task> <key> unanswered <url> <age>". The
 # same thread is raised again after every further reply age, whatever the
@@ -154,6 +167,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+case "$CONFIG" in /*) ;; *) CONFIG="$(pwd -P)/$CONFIG" ;; esac
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -185,6 +200,10 @@ case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
 BUDGET_CAP=$((CHECK_TIMEOUT - 3))
+review_bots() { # config/contribution-review-bots -> JSON array of logins
+  [ -f "$CONFIG/contribution-review-bots" ] || { printf '[]\n'; return 0; }
+  jq -Rn '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0 and (startswith("#") | not))]' "$CONFIG/contribution-review-bots"
+}
 [ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
 [ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
@@ -429,7 +448,8 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" \
+      --argjson track "$TRACK_THREADS" --argjson bots "$(review_bots)" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
@@ -450,11 +470,13 @@ observe() { # canonical GitHub URL -> normalized JSON
               status:(if .state == "pending" then "in_progress" else "completed" end),
               conclusion:(if .state == "pending" then null else .state end)} ]),
           events:((($issue_comments | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline_comments | map(. + {_signal:"review-comment"})))
-            | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+            | map(select(.user.login != $c.user.login
+                and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login | IN($bots[]))))
               | (.created_at // .submitted_at // "") as $at | (.in_reply_to_id // .id) as $root | . as $e
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
                  author:.user.login,body:(.body // "" | .[:500])}
+                 + (if (.user.login | IN($bots[])) then {review_bot:true} else {} end)
                  + (if $track then {at:$at,
                    # A resolved inline thread counts as answered.
                    unanswered:(if ._signal == "review-comment" then
@@ -627,7 +649,7 @@ poll() {
           | ($due | map(.key)) as $due_keys
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
-            seen:($events | map(.token)),
+            seen:((($old.seen // []) + ($events | map(.token))) | unique),
             pending:((($old.pending // []) + $arrived
                 | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
               + [$due[] | reraise_event(.; $epoch; $now)] | unique_by(.token))}
@@ -662,7 +684,8 @@ arm() {
   shim=('#!/usr/bin/env bash'
     "export FM_HOME=$(printf '%q' "$FM_HOME")"
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")"
-    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
+    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")"
+    "export FM_CONFIG_OVERRIDE=$(printf '%q' "$CONFIG")")
   if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
   fi

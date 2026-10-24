@@ -1325,6 +1325,55 @@ test_ci_monitoring_green_before_log_tail_stays_green() {
   pass "a green marker before the ci log tail still surfaces done"
 }
 
+NO_CI_SENTENCE="repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed"
+
+test_ci_monitoring_no_ci_declared_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-noci)
+  make_repo_on_branch "$d/wt" fm/feat-cinoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinoci.meta" "window=fm:fm-feat-cinoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinoci)"
+  FM_FAKE_CI_LOGS="$NO_CI_SENTENCE"
+  local out; out=$(run_crew_state "$d" feat-cinoci)
+  assert_contains "$out" "state: working" "a no_ci repository -> working"
+  assert_contains "$out" "repository declares no CI" "the detail names the no_ci condition"
+  assert_not_contains "$out" "validating (running)" "a parked no_ci run is not validating"
+  assert_not_contains "$out" "checks green" "a no_ci repository is not checks green"
+  pass "a no_ci ci-monitor marker reads as unverified, not validating"
+}
+
+test_ci_no_ci_status_log_override_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-noci-status-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinocisl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinocisl.meta" "window=fm:fm-feat-cinocisl" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocisl.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocisl)"
+  FM_FAKE_CI_LOGS="$NO_CI_SENTENCE"
+  local out; out=$(run_crew_state "$d" feat-cinocisl)
+  assert_contains "$out" "state: working" "crew-reported green on a no_ci repository -> working"
+  assert_not_contains "$out" "source: status-log" "no_ci must not reach the status-log override"
+  pass "status-log override refuses a no_ci repository"
+}
+
+test_ci_no_ci_then_red_marker_is_not_ready() {
+  reset_fakes
+  local d; d=$(new_case ci-noci-red)
+  make_repo_on_branch "$d/wt" fm/feat-cinocired
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinocired.meta" "window=fm:fm-feat-cinocired" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocired.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocired)"
+  FM_FAKE_CI_LOGS=$(printf '%s\nCI checks failed: build\n' "$NO_CI_SENTENCE")
+  local out; out=$(run_crew_state "$d" feat-cinocired)
+  assert_contains "$out" "state: working" "a red marker after the no_ci sentence -> working"
+  assert_not_contains "$out" "state: done" "a red marker after the no_ci sentence is not done"
+  assert_not_contains "$out" "repository declares no CI" "the last marker wins over the no_ci sentence"
+  pass "a red marker after the no_ci sentence reads not ready"
+}
+
 test_ci_monitoring_no_checks_yet_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks-yet)
@@ -5818,6 +5867,9 @@ test_ci_monitoring_no_checks_stays_working
 test_ci_no_checks_status_log_override_stays_working
 test_ci_monitoring_green_then_rearm_stays_green
 test_ci_monitoring_green_before_log_tail_stays_green
+test_ci_monitoring_no_ci_declared_stays_working
+test_ci_no_ci_status_log_override_stays_working
+test_ci_no_ci_then_red_marker_is_not_ready
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
