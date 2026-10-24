@@ -94,12 +94,12 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [captains_call-json]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} calls=${6:-[]} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson more "$more" --argjson warning_more "$warning_more" --argjson calls "$calls" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -266,6 +266,231 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text() {
+  local home report out
+  home=$(make_home links)
+  report="$home/data/scout-1/report.md"
+  mkdir -p "${report%/*}"
+  printf '# Findings\n' > "$report"
+  out=$(render_board "$home" "$(jq -n --arg report "$report" --arg missing "$home/data/gone/report.md" '[
+    {"id":"t1","repo":"sample","name":"<b>scout-1</b>","state":"working","kind":"scout",
+     "doing":("see https://gitlab.example.com/g/p/-/merge_requests/7, report " + $report + " and " + $missing)}
+  ]')" '[
+    {"id":"c1","repo":"sample","title":"Dashboard (http://127.0.0.1:4387/session/abc).","reason":"","dispatchable":false}
+  ]')
+  printf '%s' "$out" | jq -e --arg report "$report" '
+    (.underway[0]
+      | .title == "<b>scout-1</b>"
+        and (.sub | startswith("see https://gitlab.example.com/g/p/-/merge_requests/7, report " + $report + " and "))
+        and (.links | length) == 2
+        and (.links[0] == {text: "https://gitlab.example.com/g/p/-/merge_requests/7",
+          href: "https://gitlab.example.com/g/p/-/merge_requests/7", target: "_blank", rel: "noopener"})
+        and (.links[1] | .text == $report and (.href | test("^bearings-board-reports/[0-9a-f]{16}[.]html$"))
+          and .target == "_blank"))
+    and (.charted[0].links == [{text: "http://127.0.0.1:4387/session/abc",
+      href: "http://127.0.0.1:4387/session/abc", target: "_blank", rel: "noopener"}])
+  ' >/dev/null || fail "board text did not link its URLs and previewed report while keeping markup as text: $out"
+  [ -f "$home/.lavish/$(printf '%s' "$out" | jq -r '.underway[0].links[1].href')" ] \
+    || fail "the report link points at a preview page the build did not write: $out"
+  pass "board text links URLs and existing reports in new tabs, a missing report stays text, and markup stays text"
+}
+
+test_a_report_preview_keeps_balanced_parentheses_in_link_targets() {
+  local home report out page
+  home=$(make_home preview-parens)
+  report="$home/data/scout-3/report.md"
+  mkdir -p "${report%/*}"
+  cat > "$report" <<'MD'
+See [Foo](https://en.wikipedia.org/wiki/Foo_(bar)) and https://en.wikipedia.org/wiki/Baz_(qux).
+(Also https://example.com/plain.)
+MD
+  render_board "$home" "$(jq -n --arg report "$report" '[
+    {"id":"t3","repo":"sample","name":"scout-3","state":"working","kind":"scout","doing":("report " + $report)}
+  ]')" '[]' > /dev/null
+  page=$(find "$home/.lavish/bearings-board-reports" -name '*.html' | head -1)
+  [ -n "$page" ] || fail "the build wrote no report preview page"
+  out=$(node "$ROOT/tests/assets/report-preview-harness.mjs" "$page") \
+    || fail "the report preview page could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .blocks[0].text == "See Foo and https://en.wikipedia.org/wiki/Baz_(qux). (Also https://example.com/plain.)"
+    and ([.blocks[0].children[] | {text, href}] == [
+      {text: "Foo", href: "https://en.wikipedia.org/wiki/Foo_(bar)"},
+      {text: "https://en.wikipedia.org/wiki/Baz_(qux)", href: "https://en.wikipedia.org/wiki/Baz_(qux)"},
+      {text: "https://example.com/plain", href: "https://example.com/plain"}])
+  ' >/dev/null || fail "a report preview cut a link target at a balanced parenthesis: $out"
+  pass "a report preview keeps balanced parentheses in markdown and bare link targets and drops trailing punctuation"
+}
+
+test_decision_option_labels_link_their_urls() {
+  local home out
+  home=$(make_home option-links)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-option-links","type":"decision","repo":"sample","title":"Pick a runbook",
+     "about":"","decide":"Which?","allow_freeform":false,
+     "options":[
+       {"value":"a","label":"Follow https://docs.example.com/runbook"},
+       {"value":"b","label":"<b>Skip</b>"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .options[0:2] == [
+      {text: "Follow https://docs.example.com/runbook", links: [{text: "https://docs.example.com/runbook",
+        href: "https://docs.example.com/runbook", target: "_blank", rel: "noopener"}]},
+      {text: "<b>Skip</b>", links: []}]
+  ' >/dev/null || fail "a decision option label did not link its URL while keeping markup as text: $out"
+  pass "decision option labels link their URLs in new tabs and keep markup as text"
+}
+
+test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text() {
+  local home report out page
+  home=$(make_home preview)
+  report="$home/data/scout-2/report.md"
+  mkdir -p "${report%/*}"
+  cat > "$report" <<'MD'
+# Scout report
+
+Found **two** issues, see [the MR](https://gitlab.example.com/g/p/-/merge_requests/9) and `fm-x.sh`.
+
+- first <script>alert(1)</script>
+- second
+  - nested
+
+| file | line |
+| --- | --- |
+| a.sh | 3 |
+
+```
+</script><b>code</b>
+```
+MD
+  render_board "$home" "$(jq -n --arg report "$report" '[
+    {"id":"t2","repo":"sample","name":"scout-2","state":"working","kind":"scout","doing":("report " + $report)}
+  ]')" '[]' > /dev/null
+  page=$(find "$home/.lavish/bearings-board-reports" -name '*.html' | head -1)
+  [ -n "$page" ] || fail "the build wrote no report preview page"
+  out=$(node "$ROOT/tests/assets/report-preview-harness.mjs" "$page") \
+    || fail "the report preview page could not be rendered"
+  printf '%s' "$out" | jq -e --arg report "$report" '
+    .path == $report and .title == "report.md - report preview"
+    and ([.blocks[] | .tag] == ["h1", "p", "ul", "div", "pre"])
+    and .blocks[0].text == "Scout report"
+    and (.blocks[1] | .text == "Found two issues, see the MR and fm-x.sh."
+      and ([.children[] | .tag] == ["strong", "a", "code"])
+      and .children[1].href == "https://gitlab.example.com/g/p/-/merge_requests/9")
+    and (.blocks[2] | [.children[] | .tag] == ["li", "li"]
+      and .children[0].text == "first <script>alert(1)</script>"
+      and .children[1].children[0].tag == "ul"
+      and .children[1].children[0].children[0].text == "nested")
+    and (.blocks[3].children[0] | .tag == "table" and (.text | contains("a.sh")))
+    and .blocks[4].text == "</script><b>code</b>"
+  ' >/dev/null || fail "the report preview did not render the markdown as structured text: $out"
+  pass "a report preview renders headings, inline marks, links, nested lists, tables, and code, with markup kept as text"
+}
+
+test_every_call_card_offers_free_text_whatever_allow_freeform_says() {
+  local home out
+  home=$(make_home freeform)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-off","type":"decision","repo":"sample","title":"Freeform off","decide":"Which?",
+     "allow_freeform":false,"options":[{"value":"a","label":"A"}]},
+    {"key":"sample-hint","type":"decision","repo":"sample","title":"Hint only","decide":"Which?",
+     "freeform_hint":"name the vehicle","options":[{"value":"a","label":"A"}]},
+    {"key":"merge.sample-task","type":"merge","repo":"sample","title":"Merge it","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and ([.cards[] | .freeform] == [
+      [{name: "note", placeholder: "or answer in your own words…"}],
+      [{name: "note", placeholder: "name the vehicle"}],
+      [{name: "note", placeholder: "or answer in your own words…"}]])
+  ' >/dev/null || fail "a Captain's Call card rendered without its free-text answer field: $out"
+  pass "every Captain's Call card offers free text, with freeform_hint as its placeholder"
+}
+
+test_a_credential_card_warns_against_pasting_a_secret_unless_hinted() {
+  local home out
+  home=$(make_home credential)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-login","type":"credential","repo":"sample","title":"Registry login","decide":"Log in?",
+     "options":[{"value":"done","label":"Logged in"}]},
+    {"key":"sample-token","type":"credential","repo":"sample","title":"Deploy token","decide":"Rotate?",
+     "freeform_hint":"say where you stored it","options":[{"value":"done","label":"Rotated"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and ([.cards[] | .freeform] == [
+      [{name: "note", placeholder: "say what you did - never paste a password, token, or key here"}],
+      [{name: "note", placeholder: "say where you stored it"}]])
+  ' >/dev/null || fail "a credential card did not warn against pasting a secret: $out"
+  pass "a credential card warns against pasting a secret, and freeform_hint still wins"
+}
+
+test_a_call_card_context_box_shows_its_dossier_fields_as_text() {
+  local home report out
+  home=$(make_home dossier)
+  report="$home/data/scout-4/report.md"
+  mkdir -p "${report%/*}"
+  printf '# Findings\n' > "$report"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg report "$report" --arg missing "$home/data/gone/report.md" '[
+    {"key":"sample-dossier","type":"decision","repo":"sample","title":"CMS sync","about":"short line",
+     "decide":"How to sync?","options":[{"value":"a","label":"A"}],
+     "background":"<b>Main</b> is ahead, see https://gitlab.example.com/g/p/-/merge_requests/1",
+     "stakes":"The next release reintroduces the finding.","opened":"2026-08-23",
+     "links":[
+       {"kind":"mr","label":"lambda !316","url":"https://gitlab.example.com/g/l/-/merge_requests/316","state":"open"},
+       {"kind":"report","label":"sync report","path":$report},
+       {"kind":"report","label":"old report","path":$missing}],
+     "history":[{"date":"2026-08-20","text":"Hotfix landed"},{"date":"2026-08-24","text":"Conflict found"}]}
+  ]')")
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and (.cards[0]
+      | .dossier
+        and .rows == ["about", "decide"]
+        and .context.age == "open 3 days"
+        and ([.context.sections[] | .name] == ["background", "stakes", "links", "history"])
+        and .context.sections[0].text == "Background<b>Main</b> is ahead, see https://gitlab.example.com/g/p/-/merge_requests/1"
+        and .context.sections[1].text == "If this waitsThe next release reintroduces the finding."
+        and .context.sections[3].text == "History20 AugHotfix landed24 AugConflict found"
+        and (.context.links | length) == 3
+        and .context.links[0] == {kind: "MR", label: "lambda !316",
+          href: "https://gitlab.example.com/g/l/-/merge_requests/316", state: "open"}
+        and (.context.links[1] | .kind == "report" and .label == "sync report"
+          and (.href | test("^bearings-board-reports/[0-9a-f]{16}[.]html$")))
+        and .context.links[2] == {kind: "report", label: "old report", href: null, state: null})
+  ' >/dev/null || fail "the Context box did not show the card dossier as text: $out"
+  [ -f "$home/.lavish/$(printf '%s' "$out" | jq -r '.cards[0].context.links[1].href')" ] \
+    || fail "a context report link points at a preview page the build did not write: $out"
+  pass "a card's Context box shows background, stakes, typed links with state and previews, history, and its age"
+}
+
+test_a_call_card_without_dossier_fields_falls_back_or_collapses() {
+  local home out
+  home=$(make_home dossier-fallback)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-about","type":"decision","repo":"sample","title":"About only","about":"Lambda already synced",
+     "decide":"Sync CMS?","options":[{"value":"a","label":"A"}]},
+    {"key":"merge.sample-task","type":"merge","repo":"sample","title":"Merge it","risk":"low",
+     "detail":"validation green","pr_url":"https://github.com/example/sample/pull/1",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"sample-bare","type":"decision","repo":"sample","title":"Bare","decide":"Go?",
+     "options":[{"value":"a","label":"A"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and (.cards[0] | .dossier and .rows == ["decide"]
+      and .context.sections == [{name: "background", text: "BackgroundLambda already synced"}])
+    and (.cards[1] | .dossier and .rows == []
+      and ([.context.sections[] | .name] == ["background", "links"])
+      and .context.sections[0].text == "Backgroundvalidation green"
+      and .context.links == [{kind: "PR", label: "https://github.com/example/sample/pull/1",
+        href: "https://github.com/example/sample/pull/1", state: null}])
+    and (.cards[2] | (.dossier | not) and .context == null and .rows == ["decide"])
+  ' >/dev/null || fail "a card without dossier fields did not fall back to its about, detail, and PR, or collapse: $out"
+  pass "a card without dossier fields shows its about, or merge detail and PR, in the Context box, and collapses with none"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -275,3 +500,11 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text
+test_decision_option_labels_link_their_urls
+test_a_report_preview_keeps_balanced_parentheses_in_link_targets
+test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text
+test_every_call_card_offers_free_text_whatever_allow_freeform_says
+test_a_credential_card_warns_against_pasting_a_secret_unless_hinted
+test_a_call_card_context_box_shows_its_dossier_fields_as_text
+test_a_call_card_without_dossier_fields_falls_back_or_collapses
