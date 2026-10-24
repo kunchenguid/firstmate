@@ -71,7 +71,8 @@ install_scripts() {
   mkdir -p "$dir/bin" "$dir/docs"
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
-           fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
+           fm-cd-pretool-check.sh fm-subagent-pretool-check.sh \
+           fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
@@ -240,11 +241,11 @@ test_pretool_guards_deduplicate_and_render_cursor_deny() {
   local dir payload out status decision
   dir=$(make_primary_dir "$TMP_ROOT/host-pretool")
   payload='{"tool_name":"Shell","tool_input":{"command":"bin/fm-watch-arm.sh &"},"cursor_version":"2026.08.11-e8db854"}'
-  out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" 2>&1); status=$?
+  out=$(printf '%s' "$payload" | env -u PI_CODING_AGENT bash "$dir/bin/fm-arm-pretool-check.sh" 2>&1); status=$?
   expect_code 0 "$status" "the Claude-settings duplicate must allow under Cursor"
   [ -z "$out" ] || fail "duplicate pretool entry produced output: $out"
 
-  out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" --cursor 2>/dev/null); status=$?
+  out=$(printf '%s' "$payload" | env -u PI_CODING_AGENT bash "$dir/bin/fm-arm-pretool-check.sh" --cursor 2>/dev/null); status=$?
   expect_code 0 "$status" "Cursor reads the decision object, so the deny path exits 0"
   decision=$(printf '%s' "$out" | jq -r '.permission // empty' 2>/dev/null)
   [ "$decision" = deny ] || fail "expected a Cursor deny object on stdout, got: $out"
@@ -257,12 +258,72 @@ test_cd_guard_renders_cursor_deny() {
   local dir payload out decision
   dir=$(make_primary_dir "$TMP_ROOT/host-cd")
   payload='{"tool_name":"Shell","tool_input":{"command":"cd projects/example"},"cursor_version":"2026.08.11-e8db854"}'
-  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" --cursor 2>/dev/null)
+  out=$(printf '%s' "$payload" | env -u PI_CODING_AGENT FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" --cursor 2>/dev/null)
   decision=$(printf '%s' "$out" | jq -r '.permission // empty' 2>/dev/null)
   [ "$decision" = deny ] || fail "expected a Cursor deny object from the cd guard, got: $out"
-  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" 2>&1)
+  out=$(printf '%s' "$payload" | env -u PI_CODING_AGENT FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" 2>&1)
   [ -z "$out" ] || fail "the cd guard's Claude-settings duplicate produced output under Cursor: $out"
   pass "fm-cd-pretool-check: Cursor duplicate allows, --cursor denies in Cursor's own shape"
+}
+
+# Pi with the Cursor provider (pi-cursor-sdk) runs every tracked pretool entry
+# through the Cursor SDK, which keeps only the trailing JSON object on stdout and
+# blocks the tool when there is none, as when a login profile prints a banner
+# before a silent allow. bin/fm-hook-host-lib.sh owns the contract.
+PI_CURSOR_ENTRIES='fm-arm-pretool-check.sh:--cursor fm-cd-pretool-check.sh:--cursor fm-arm-pretool-check.sh:--claude fm-cd-pretool-check.sh:--claude fm-subagent-pretool-check.sh:--claude'
+
+run_pretool_entry() {  # <dir> <script:flag> <payload> [env assignment...]
+  local dir=$1 entry=$2 payload=$3
+  shift 3
+  printf '%s' "$payload" | env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$dir" "$@" bash "$dir/bin/${entry%%:*}" "${entry#*:}" 2>/dev/null
+}
+
+test_pretool_guards_reply_json_under_pi_cursor_sdk() {
+  local dir entry out status tool payload
+  dir=$(make_primary_dir "$TMP_ROOT/pi-cursor-pretool")
+  for tool in Shell Read Grep; do
+    payload=$(printf '{"tool_name":"%s","tool_input":{"command":"echo ok","path":"README.md"},"hook_event_name":"preToolUse","cursor_version":"1.0.0"}' "$tool")
+    for entry in $PI_CURSOR_ENTRIES; do
+      out=$(run_pretool_entry "$dir" "$entry" "$payload" PI_CODING_AGENT=true); status=$?
+      expect_code 0 "$status" "$entry must allow $tool under a Pi-hosted Cursor SDK"
+      [ "$out" = '{}' ] || fail "$entry must reply with a neutral {} for $tool under a Pi-hosted Cursor SDK, got: [$out]"
+    done
+  done
+
+  payload='{"tool_name":"Shell","tool_input":{"command":"cd projects/example"},"hook_event_name":"preToolUse","cursor_version":"1.0.0"}'
+  out=$(run_pretool_entry "$dir" fm-cd-pretool-check.sh:--cursor "$payload" PI_CODING_AGENT=true); status=$?
+  expect_code 0 "$status" "the Cursor deny exits 0 under a Pi host too"
+  printf '%s' "$out" | jq -se 'length == 1 and .[0].permission == "deny"' >/dev/null 2>&1 \
+    || fail "a Cursor deny under a Pi host must be the only object on stdout, got: [$out]"
+  payload='{"tool_name":"Shell","tool_input":{"command":"bin/fm-watch-arm.sh &"},"hook_event_name":"preToolUse","cursor_version":"1.0.0"}'
+  out=$(run_pretool_entry "$dir" fm-arm-pretool-check.sh:--cursor "$payload" PI_CODING_AGENT=true); status=$?
+  expect_code 0 "$status" "the watcher-arm Cursor deny exits 0 under a Pi host too"
+  printf '%s' "$out" | jq -se 'length == 1 and .[0].permission == "deny"' >/dev/null 2>&1 \
+    || fail "a watcher-arm Cursor deny under a Pi host must be the only object on stdout, got: [$out]"
+  payload='{"tool_name":"Task","tool_input":{},"hook_event_name":"preToolUse","cursor_version":"1.0.0"}'
+  out=$(run_pretool_entry "$dir" fm-subagent-pretool-check.sh:--claude "$payload" PI_CODING_AGENT=true); status=$?
+  expect_code 2 "$status" "a delegation tool stays denied under a Pi-hosted Cursor SDK"
+  [ -z "$out" ] || fail "an exit-2 deny must not gain a neutral reply, got: [$out]"
+  pass "pretool guards: a Pi-hosted Cursor SDK gets {} on allow and an unchanged deny"
+}
+
+test_pretool_guards_stay_silent_outside_a_pi_cursor_sdk() {
+  local dir entry out cursor_payload claude_payload
+  dir=$(make_primary_dir "$TMP_ROOT/pi-cursor-native")
+  cursor_payload='{"tool_name":"Shell","tool_input":{"command":"echo ok"},"hook_event_name":"preToolUse","cursor_version":"2026.08.11-e8db854"}'
+  claude_payload='{"tool_name":"Bash","tool_input":{"command":"echo ok"},"hook_event_name":"PreToolUse"}'
+  for entry in $PI_CURSOR_ENTRIES; do
+    out=$(run_pretool_entry "$dir" "$entry" "$cursor_payload")
+    [ -z "$out" ] || fail "$entry must stay silent on a native Cursor allow, got: [$out]"
+    out=$(run_pretool_entry "$dir" "$entry" "$cursor_payload" PI_CODING_AGENT=true CURSOR_AGENT=1)
+    [ -z "$out" ] || fail "$entry must stay silent for native Cursor with an inherited Pi marker (CURSOR_AGENT), got: [$out]"
+    out=$(run_pretool_entry "$dir" "$entry" "$cursor_payload" PI_CODING_AGENT=true CURSOR_INVOKED_AS=cursor-agent)
+    [ -z "$out" ] || fail "$entry must stay silent for native Cursor with an inherited Pi marker (CURSOR_INVOKED_AS), got: [$out]"
+    out=$(run_pretool_entry "$dir" "$entry" "$claude_payload" PI_CODING_AGENT=true)
+    [ -z "$out" ] || fail "$entry must stay silent on a Claude allow with an inherited Pi marker, got: [$out]"
+  done
+  pass "pretool guards: native Cursor and Claude allows stay silent with or without a Pi marker"
 }
 
 # --- PARK --------------------------------------------------------------------
@@ -801,6 +862,8 @@ test_autoarm_stands_down_on_cursor_payload
 test_sessionstart_run_stands_down_on_cursor_payload
 test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
+test_pretool_guards_reply_json_under_pi_cursor_sdk
+test_pretool_guards_stay_silent_outside_a_pi_cursor_sdk
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
 test_park_never_exits_two
