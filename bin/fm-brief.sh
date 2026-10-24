@@ -170,6 +170,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -445,6 +447,26 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+# Ship and scout briefs tell the worker to run chrome-devtools-axi under one
+# named session and stop only that session. Session names share one per-user
+# namespace across every home, and an unnamed session is the shared "default"
+# one firstmate itself uses, so the name joins this home's tag to the task id
+# and is never "default". chrome-devtools-axi accepts 1-64 characters from
+# [A-Za-z0-9._-]; a longer or out-of-charset name keeps a readable prefix plus a
+# hash of the full name, so distinct tasks stay distinct.
+browser_session_name() {
+  local name=$1 hash
+  local LC_ALL=C
+  case "$name" in
+    *[!A-Za-z0-9._-]*) ;;
+    *) [ "${#name}" -gt 64 ] || { printf '%s' "$name"; return 0; } ;;
+  esac
+  hash=$(printf '%s' "$name" | cksum | awk '{printf "%08x", $1}')
+  name=${name//[!A-Za-z0-9._-]/-}
+  printf '%s-%s' "${name:0:55}" "$hash"
+}
+BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "$(fm_backend_hometag)-$ID") chrome-devtools-axi"
+BROWSER_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends or fails or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -704,7 +726,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $BROWSER_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -781,7 +803,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-3. $FORGE_RULE_LINE
+3. $FORGE_RULE_LINE $BROWSER_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

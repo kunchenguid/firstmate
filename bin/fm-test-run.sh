@@ -1496,9 +1496,14 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;
-    bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
+    bin/fm-backend.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-backend-hometag-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' "__script__:fm-brief.test.sh"
       ;;
     bin/fm-agent-process-lib.sh)
       # The shared harness-process classifier feeds both the tmux and Herdr
