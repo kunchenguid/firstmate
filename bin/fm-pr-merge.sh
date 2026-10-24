@@ -731,12 +731,20 @@ FIELDS
   # per context, so every page is read until an empty one and the head is
   # green only when each non-empty page is; the first page that is not
   # success, or that cannot be read, decides the refusal.
+  #
+  # tea api exits 0 on an HTTP-level failure, so every page must itself be a
+  # combined status: an object carrying the statuses field, null or an array
+  # (the empty page is served with statuses null). An error object such as
+  # {"message":...} lacks that field and is unreadable rather than the empty
+  # page that would end pagination with an earlier page's success standing.
   ci_state=none
   while :; do
     if ! status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
         "/repos/{owner}/{repo}/commits/$live_head/status?limit=50&page=$page" 2>/dev/null) \
       || ! fields=$(printf '%s' "$status_json" | jq -r '
-          if type == "object" and ((.statuses // []) | type) == "array" then
+          if type == "object" and has("statuses")
+            and (.statuses == null or (.statuses | type) == "array")
+          then
             "count=" + ((.statuses // []) | length | tostring),
             "state=" + ((.state // "") | tostring)
           else
