@@ -11,7 +11,11 @@
 # same refs/pull/<n>/head ref), or a bare number for an open PR, the compare
 # side is ALWAYS a freshly fetched
 # refs/pull/<n>/head by default so review stays current after no-mistakes fix
-# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
+# rounds push to the PR. An Azure DevOps pull-request URL (addressed
+# /pullrequest/<n>) has no such head ref: Azure DevOps serves only
+# refs/pull/<n>/merge, its merge preview of an active pull request, whose second
+# parent is the pull request's source commit, so that parent is the compare
+# side. A recorded pr_head= is only a fallback when fetch fails
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A GitLab merge request and a Gerrit change expose no comparable ref and record
@@ -106,6 +110,10 @@ pr_number_from_target() {
       n=${target##*/pulls/}
       n=${n%%[!0-9]*}
       ;;
+    *"/pullrequest/"*)  # Azure DevOps addresses pulls as /pullrequest/<n>.
+      n=${target##*/pullrequest/}
+      n=${n%%[!0-9]*}
+      ;;
     [0-9]*)
       n=${target%%[!0-9]*}
       ;;
@@ -115,14 +123,19 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-fetch_pull_head() {
-  local n=$1 resolved
+fetch_pull_head() {  # <n> <pr-url>
+  local n=$1 ref=head tip resolved
+  case "${2:-}" in
+    *"/pullrequest/"*) ref=merge ;;
+  esac
+  tip="refs/fm-review/pull/$n/$ref^{commit}"
+  [ "$ref" = head ] || tip="refs/fm-review/pull/$n/$ref^2^{commit}"
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
   git -C "$WT" fetch --quiet origin \
-    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+    "+refs/pull/$n/$ref:refs/fm-review/pull/$n/$ref" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "$tip" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
@@ -131,7 +144,7 @@ resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 n resolved
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
+    if resolved=$(fetch_pull_head "$n" "$pr_url"); then
       printf '%s' "$resolved"
       return 0
     fi

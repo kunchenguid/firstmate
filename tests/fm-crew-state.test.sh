@@ -204,6 +204,20 @@ fi
 printf '{"state":"%s","merged":%s,"head":{"sha":"abc"}}\n' \
   "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}"
 SH
+  # az answers an Azure DevOps pull request read for team/repo in project Team
+  # Project with the configured status and completion commit; a read failure
+  # exits non-zero with nothing on stdout, as the real az does.
+  cat > "$fb/az" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-} ${2:-} ${3:-}" = "repos pr show" ] || exit 1
+[ -z "${FM_FAKE_AZ_READ_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_AZ_READ_LOG"
+[ "${FM_FAKE_AZ_READ_FAIL:-0}" = 0 ] || exit 1
+merge=null
+[ -z "${FM_FAKE_AZ_MERGE:-}" ] || merge="{\"commitId\":\"$FM_FAKE_AZ_MERGE\"}"
+printf '{"pullRequestId":12,"status":"%s","repository":{"name":"repo","project":{"name":"Team Project"}},"lastMergeCommit":%s}\n' \
+  "${FM_FAKE_AZ_STATUS:-completed}" "$merge"
+SH
   cat > "$fb/gerrit-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -301,7 +315,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/tea" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/tea" "$fb/az" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -377,6 +391,10 @@ reset_fakes() {
   FM_FAKE_TEA_MERGED=true
   FM_FAKE_TEA_READ_FAIL=0
   FM_FAKE_TEA_READ_LOG=
+  FM_FAKE_AZ_STATUS=completed
+  FM_FAKE_AZ_MERGE=5656565656565656565656565656565656565656
+  FM_FAKE_AZ_READ_FAIL=0
+  FM_FAKE_AZ_READ_LOG=
   FM_FAKE_GERRIT_STATUS=MERGED
   FM_FAKE_GERRIT_CHANGE=
   FM_FAKE_GERRIT_URL_JSON=
@@ -391,6 +409,7 @@ reset_fakes() {
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_READ_LOG
+  export FM_FAKE_AZ_STATUS FM_FAKE_AZ_MERGE FM_FAKE_AZ_READ_FAIL FM_FAKE_AZ_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
   export FM_FAKE_GERRIT_READ_FAIL FM_FAKE_GERRIT_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
@@ -1727,6 +1746,40 @@ test_terminal_passed_with_forgejo_pull_reports_its_state() {
       "Forgejo read uses the host's tea login and the parsed project path"
   done
   pass "terminal passed run reads Forgejo pull request state through tea api"
+}
+
+# Azure DevOps reports an open pull request as active and a closed one as
+# abandoned, and only a completed record naming the commit its completion made
+# is merged; a completion without one is unreadable, never merged.
+test_terminal_passed_with_azure_devops_pull_reports_its_state() {
+  reset_fakes
+  local d read_log out spec status merge fail expected name
+  local url='https://dev.azure.com/team/Team%20Project/_git/repo/pullrequest/12'
+  for spec in "open|active||0|run passed: PR open" \
+    "merged|completed|5656565656565656565656565656565656565656|0|run passed: PR merged" \
+    "closed|abandoned||0|run passed: PR closed" \
+    "no-merge-commit|completed||0|run passed: PR state unknown (unreadable)" \
+    "unreadable|completed|5656565656565656565656565656565656565656|1|run passed: PR state unknown (unreadable)"; do
+    IFS='|' read -r name status merge fail expected <<<"$spec"
+    d=$(new_case "passed-azure-devops-$name")
+    make_repo_on_branch "$d/wt" "fm/feat-dado$name"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-dado$name.meta" "window=fm:fm-feat-dado$name" \
+      "worktree=$d/wt" "kind=ship" "pr=$url"
+    read_log="$d/az-read.log"
+    : > "$read_log"
+    FM_FAKE_AZ_READ_LOG=$read_log
+    FM_FAKE_AZ_STATUS=$status
+    FM_FAKE_AZ_MERGE=$merge
+    FM_FAKE_AZ_READ_FAIL=$fail
+    FM_FAKE_AXI_STATUS="$(run_passed_with_pr "fm/feat-dado$name" "$url")"
+    out=$(run_crew_state "$d" "feat-dado$name")
+    assert_contains "$out" "$expected" "Azure DevOps pull request reading $name is reported"
+    [ "$name" = merged ] || assert_not_contains "$out" "PR merged" "Azure DevOps $name pull request must not be reported merged"
+    assert_grep 'repos pr show --id 12 --organization https://dev.azure.com/team --detect false' "$read_log" \
+      "Azure DevOps read uses the URL's organization and pull request id"
+  done
+  pass "terminal passed run reads Azure DevOps pull request state through az"
 }
 
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
@@ -5887,6 +5940,7 @@ test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_forgejo_pull_reports_its_state
+test_terminal_passed_with_azure_devops_pull_reports_its_state
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged

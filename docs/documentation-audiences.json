@@ -388,6 +388,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/azure-devops-integration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/gerrit-change-watch.md",
       "audience": "maintainer-verification"
     },

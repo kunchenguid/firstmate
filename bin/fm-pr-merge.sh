@@ -8,9 +8,10 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded; a Forgejo
 # pull request is addressed through tea by the derived owner and repository
-# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
-# change is refused outright: that adapter is read-only, and the refusal at the
-# parse below owns why.
+# plus a "tea login" resolved fresh from the parsed host on every run; an Azure
+# DevOps pull request is addressed through az by the organization URL and id
+# derived from the URL. A Gerrit change is refused outright: that adapter is
+# read-only, and the refusal at the parse below owns why.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -137,7 +138,33 @@
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
 #
-# Before either forge merge, the task's existing per-task control lock
+# An Azure DevOps pull request is completed only after a live read, bound to
+# the URL's project and repository because a pull request id is unique per
+# organization rather than per repository, confirms it is active, not a draft,
+# and merges cleanly, and its branch policies read through `az repos pr policy
+# list` pass at the current source commit: every build and status policy,
+# required or optional, is approved (a build approved for another source
+# commit or expired is not), and every other blocking policy, reviewer
+# approvals included, is approved. azure_devops_verify_mergeable owns those
+# rules, and every failing condition is reported. An attended --allow-red
+# waives one optional build or status policy by name; a required one is
+# enforced by Azure DevOps itself and is never waived or bypassed here, and
+# --allow-missing does not apply. The merge strategy is the caller's method,
+# else the pull request's own, else the only one the repository's merge
+# strategy policy allows; azure_devops_resolve_strategy refuses rather than
+# choose among several. `az repos pr update` cannot bind a completion to a
+# verified head, so the completion is a direct PATCH through `az rest` naming
+# the verified head as lastMergeSourceCommit, which Azure DevOps refuses once
+# the source has moved, with policy bypass and source-branch deletion off and
+# no auto-complete, and only a follow-up read showing the pull
+# request completed from that head counts as landed. Azure DevOps finishes an
+# accepted completion asynchronously, so a request still completing after a
+# bounded wait is reported without failing the run, like GitLab's, and leaves
+# its poll armed. Only a merge method may be passed as an extra argument.
+# Reading and completing need az, with its azure-devops extension and an az
+# login that can reach the organization (az rest uses it), and jq.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
@@ -222,14 +249,19 @@ PR_NUMBER=$FM_PR_NUMBER
 # gh and gh-axi address github.com unless told otherwise, so a GitHub Enterprise
 # host is exported once here and every forge call this run makes addresses the
 # host the parsed identity names, including the gh merge command that carries
-# only owner and repository. A gitlab, gerrit, or forgejo run keeps its own
-# per-call host handling.
+# only owner and repository. A gitlab, gerrit, forgejo, or azure-devops run
+# keeps its own per-call host handling.
 if [ "$PROVIDER" = github ]; then
   fm_pr_github_host_export "$PR_HOST"
 fi
 # glab resolves the instance from the project URL passed to -R, so the host is
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
+# az addresses an Azure DevOps pull request by its organization URL and id,
+# which fm_pr_url_parse derived from the URL (fm_pr_azure_devops_parts).
+AZURE_DEVOPS_ORG_URL=$FM_PR_AZURE_DEVOPS_ORG_URL
+# The well-known application id az rest requests an Azure DevOps token for.
+AZURE_DEVOPS_RESOURCE_ID=499b84ac-1321-427f-aa17-267ca6975798
 # Firstmate never submits a Gerrit change, even though gerrit-axi can, so the
 # refusal is stated rather than left as a silently absent provider branch.
 # Submitting a Gerrit change means first recording a Code-Review+2, which is a
@@ -288,8 +320,10 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
-# --allow-red names one check run to waive, which only GitHub's per-check
-# reading can match. GitLab and Forgejo each collapse their checks into a
+# --allow-red names one check to waive, which only a per-check reading can
+# match: GitHub's check rollup, or Azure DevOps' build and status policy
+# evaluations, where it waives only an optional one (azure_devops_verify_mergeable).
+# GitLab and Forgejo each collapse their checks into a
 # single head verdict - a head pipeline status and a combined commit status -
 # so there is no per-check name to waive there; GitLab's only waiver is the
 # whole-pipeline absence --allow-no-pipeline covers. Refuse the combination
@@ -322,6 +356,10 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       ;;
     forgejo)
       echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+    azure-devops)
+      echo "error: --allow-missing does not apply to Azure DevOps, which reports every branch policy that applies to the pull request as an evaluation, so a required check that has not reported is a blocking policy Azure DevOps itself enforces at completion" >&2
       exit 2
       ;;
   esac
@@ -549,10 +587,22 @@ if [ "$PROVIDER" = forgejo ]; then
   }
 fi
 
+AZURE_DEVOPS_MISSING=
+if [ "$PROVIDER" = azure-devops ]; then
+  command -v az >/dev/null 2>&1 || AZURE_DEVOPS_MISSING="az"
+  if ! command -v jq >/dev/null 2>&1; then
+    AZURE_DEVOPS_MISSING="${AZURE_DEVOPS_MISSING:+$AZURE_DEVOPS_MISSING and }jq"
+  fi
+  if [ -n "$AZURE_DEVOPS_MISSING" ]; then
+    echo "error: completing an Azure DevOps pull request requires $AZURE_DEVOPS_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
+
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ] || [ "$PROVIDER" = azure-devops ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -806,11 +856,13 @@ FIELDS
 
 # The caller's own extra arguments may only name a merge method, in the same
 # forms caller_merge_method reads. There is no translation from a gh/glab-style
-# flag such as --auto, --admin, or --delete-branch into a Forgejo API field
-# yet (reject_protected_forge_args above already forbids those exact spellings
-# outright), so anything else is refused rather than silently dropped.
-forgejo_reject_unsupported_args() {
-  local arg pending=false
+# flag such as --auto, --admin, or --delete-branch into a Forgejo or Azure
+# DevOps API field yet (reject_protected_forge_args above already forbids those
+# exact spellings outright), so anything else is refused rather than silently
+# dropped.
+reject_args_beyond_merge_method() {  # <forge name> [extra args...]
+  local forge=$1 arg pending=false
+  shift
   for arg in "$@"; do
     if [ "$pending" = true ]; then
       pending=false
@@ -821,7 +873,7 @@ forgejo_reject_unsupported_args() {
       --method) pending=true ;;
       --method=*) ;;
       *)
-        echo "error: extra merge arguments are not yet supported for Forgejo merges" >&2
+        echo "error: extra merge arguments are not yet supported for $forge merges" >&2
         return 1
         ;;
     esac
@@ -847,6 +899,325 @@ forgejo_default_merge_style() {
       return 1
       ;;
   esac
+}
+
+# The branch-policy verdicts azure_devops_verify_mergeable acts on, one line
+# each, read from `az repos pr policy list` with the verified head as $head and
+# any --allow-red name as $waive. Azure DevOps' branch policies are its checks:
+# Build (build validation) and Status (external status) policies are the
+# automated checks no-mistakes watches, and like every check on GitHub each one
+# must be approved, required or optional, unless --allow-red names an optional
+# one; a required one cannot be waived here because Azure DevOps itself
+# enforces it at completion. An optional build that runs only when someone
+# queues it by hand and has not been queued has not reported, the way a GitHub
+# check that never ran is absent from its rollup, so it is not judged. A build approved for a source commit other than
+# the head, or whose result expired, is not green at the head. Every other
+# blocking policy, such as a reviewer, comment, or work item requirement, must
+# be approved, and an optional one is advisory. The blocking "Require a merge
+# strategy" policy reads rejected until a completion names a strategy, so its
+# status is never judged; its allowed strategies are printed instead, as
+# allowed=<comma list>, or allowed=* when no such policy applies.
+# shellcheck disable=SC2016 # $head and $waive are jq variables bound by --arg.
+AZURE_DEVOPS_POLICY_JQ='
+  def type_id: ((.configuration.type.id // "") | tostring | ascii_downcase);
+  def policy_name:
+    (.configuration.settings // {}) as $s
+    | (($s.displayName // "") | select(type == "string" and . != ""))
+      // (((.context // {}).buildDefinitionName // "") | select(type == "string" and . != ""))
+      // (($s.defaultDisplayName // "") | select(type == "string" and . != ""))
+      // (($s.statusName // "") | select(type == "string" and . != ""))
+      // ((.configuration.type.displayName // "policy") | tostring)
+    | gsub("[\r\n]"; " ");
+  def strategies:
+    (.configuration.settings // {}) as $s
+    | if ([$s.allowNoFastForward, $s.allowSquash, $s.allowRebase, $s.allowRebaseMerge] | any(. != null)) then
+        [ (if $s.allowNoFastForward == true then "noFastForward" else empty end),
+          (if $s.allowSquash == true then "squash" else empty end),
+          (if $s.allowRebase == true then "rebase" else empty end),
+          (if $s.allowRebaseMerge == true then "rebaseMerge" else empty end) ]
+      elif $s.useSquashMerge == true then ["squash"]
+      elif $s.useSquashMerge == false then ["noFastForward"]
+      else [] end;
+  if type != "array" then error("policy evaluations are not a list") else . end
+  | [ .[] | select(type == "object")
+      | select(.configuration.isEnabled != false and .configuration.isDeleted != true) ] as $evals
+  | [ $evals[] | select(type_id == "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab" and .configuration.isBlocking == true) ] as $merge_policies
+  | ( if ($merge_policies | length) == 0 then "allowed=*"
+      else "allowed=" + (reduce ($merge_policies[] | strategies) as $set
+          (null; if . == null then $set else [ .[] | select(. as $m | any($set[]; . == $m)) ] end) | join(","))
+      end ),
+    ( $evals[]
+      | select(type_id != "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab")
+      | (.status // "unreadable" | tostring) as $status
+      | (.configuration.isBlocking == true) as $blocking
+      | policy_name as $name
+      | (.context // {}) as $ctx
+      | select($status != "notApplicable")
+      | if type_id == "0609b952-1397-4640-95ec-e00a01b2c241" or type_id == "cbdc66da-9728-4af8-aada-9a5a32e4a226" then
+          if $status == "approved" then
+            if ($ctx.lastMergeSourceCommitId | type) == "string" and $ctx.lastMergeSourceCommitId != $head then
+              "refuse=build \"\($name)\" passed at \($ctx.lastMergeSourceCommitId), not at the current head \($head)"
+            elif $ctx.isExpired == true or $ctx.buildIsNotCurrent == true then
+              "refuse=build \"\($name)\" passed, but its result has expired or is not current"
+            else empty end
+          elif ($blocking | not) and $status == "queued"
+            and ((.configuration.settings // {}).manualQueueOnly == true) then
+            empty
+          elif ($blocking | not) and $waive != "" and $name == $waive then
+            "waived=\($name)"
+          elif $blocking and $waive != "" and $name == $waive then
+            "refuse=required check \"\($name)\" is \($status), not approved, and --allow-red cannot waive it because Azure DevOps enforces a required policy at completion"
+          elif $blocking then
+            "refuse=required check \"\($name)\" is \($status), not approved"
+          else
+            "refuse=optional check \"\($name)\" is \($status), not approved"
+          end
+        elif $blocking and $status != "approved" then
+          "refuse=required policy \"\($name)\" is \($status), not approved"
+        else empty end )
+'
+
+# Pre-merge conditions for an Azure DevOps pull request, read live at merge
+# time: the pull request reads back as this project's and repository's, is
+# active, not a draft, and merges cleanly (mergeStatus succeeded), and its
+# branch policies pass AZURE_DEVOPS_POLICY_JQ at the source head. The pull
+# request is read again after the policies, and a head or state that moved in
+# between refuses, because the policies may describe a different revision.
+# Every failing condition is reported, not just the first. Sets
+# FM_PR_MERGE_HEAD, AZURE_DEVOPS_PROJECT_ID, AZURE_DEVOPS_REPO_ID,
+# AZURE_DEVOPS_PR_STRATEGY (the strategy the pull request's own completion
+# options name), and AZURE_DEVOPS_ALLOWED on success.
+AZURE_DEVOPS_PROJECT_ID=
+AZURE_DEVOPS_REPO_ID=
+AZURE_DEVOPS_PR_STRATEGY=
+AZURE_DEVOPS_ALLOWED=
+AZURE_DEVOPS_STRATEGY=
+azure_devops_pr_fields() {  # <pull-request-json>
+  printf '%s' "$1" | jq -r '
+    def text: if type == "string" or type == "boolean" or type == "number" then tostring else "" end;
+    if type == "object" then
+      "state=" + ((.status // "") | text),
+      "draft=" + (.isDraft | text),
+      "merge_status=" + ((.mergeStatus // "") | text),
+      "head=" + ((.lastMergeSourceCommit.commitId // "") | text),
+      "project_id=" + ((.repository.project.id // "") | text),
+      "repo_id=" + ((.repository.id // "") | text),
+      "strategy=" + ((.completionOptions // {}) | (.mergeStrategy // (if .squashMerge == true then "squash" else "" end)) | text)
+    else
+      error("pull request payload is not an object")
+    end' 2>/dev/null
+}
+
+azure_devops_verify_mergeable() {
+  local pr_json recheck_json policies_json fields line read_rc=0
+  local total=0 named=0 refusals='' waived='' allowed=''
+  local state='' draft='' merge_status='' live_head='' project_id='' repo_id='' strategy=''
+  local recheck_state='' recheck_head=''
+
+  pr_json=$(fm_pr_azure_devops_read_pr "$PR_HOST" "$PR_PATH" "$PR_NUMBER") || read_rc=$?
+  if [ "$read_rc" -eq 2 ]; then
+    echo "error: refusing to merge $URL: Azure DevOps reads pull request $PR_NUMBER back as another repository's" >&2
+    return 1
+  fi
+  if [ "$read_rc" -ne 0 ] || ! fields=$(azure_devops_pr_fields "$pr_json"); then
+    echo "error: could not read the Azure DevOps pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      draft=*) draft=${line#draft=} ;;
+      merge_status=*) merge_status=${line#merge_status=} ;;
+      head=*) live_head=${line#head=} ;;
+      project_id=*) project_id=${line#project_id=} ;;
+      repo_id=*) repo_id=${line#repo_id=} ;;
+      strategy=*) strategy=${line#strategy=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ]; then
+    echo "error: could not read the Azure DevOps pull request state before merging" >&2
+    return 1
+  fi
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Azure DevOps pull request source commit before merging; Azure DevOps may still be computing its merge" >&2
+    return 1
+  fi
+  if [[ ! "$project_id" =~ ^[0-9A-Fa-f-]{36}$ ]] || [[ ! "$repo_id" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+    echo "error: could not read the Azure DevOps project and repository ids before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  if ! policies_json=$(az repos pr policy list --id "$PR_NUMBER" \
+      --organization "$AZURE_DEVOPS_ORG_URL" --detect false --only-show-errors \
+      --output json 2>/dev/null) \
+    || ! fields=$(printf '%s' "$policies_json" | jq -r \
+      --arg head "$live_head" --arg waive "${ALLOW_RED[0]:-}" "$AZURE_DEVOPS_POLICY_JQ" 2>/dev/null) \
+    || ! printf '%s\n' "$fields" | grep -q '^allowed='; then
+    echo "error: could not read the Azure DevOps branch policies before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      allowed=*) allowed=${line#allowed=} ;;
+      waived=*) waived="${waived:+$waived, }${line#waived=}" ;;
+      refuse=*) refusals="$refusals  - ${line#refuse=}
+" ;;
+    esac
+  done <<FIELDS
+$fields
+FIELDS
+
+  read_rc=0
+  recheck_json=$(fm_pr_azure_devops_read_pr "$PR_HOST" "$PR_PATH" "$PR_NUMBER") || read_rc=$?
+  if [ "$read_rc" -ne 0 ] || ! fields=$(azure_devops_pr_fields "$recheck_json"); then
+    echo "error: could not re-read the Azure DevOps pull request state before merging" >&2
+    return 1
+  fi
+  recheck_state=$(printf '%s\n' "$fields" | sed -n 's/^state=//p')
+  recheck_head=$(printf '%s\n' "$fields" | sed -n 's/^head=//p')
+  if [ "$recheck_state" != "$state" ] || [ "$recheck_head" != "$live_head" ]; then
+    refusals="$refusals  - the pull request changed while its policies were read (head $live_head became ${recheck_head:-unreadable}); retry against its current state
+"
+  fi
+
+  [ "$state" = active ] \
+    || refusals="$refusals  - status is \"${state:-unreadable}\", not active
+"
+  case "$draft" in
+    false) ;;
+    true) refusals="$refusals  - the pull request is a draft
+" ;;
+    *) refusals="$refusals  - the draft state is unreadable
+" ;;
+  esac
+  [ "$merge_status" = succeeded ] \
+    || refusals="$refusals  - mergeStatus is \"${merge_status:-unreadable}\", not succeeded
+"
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  if [ -n "$waived" ]; then
+    printf 'verified: %s is active and mergeable, with every branch policy passing at head %s except optional check %s, waived by --allow-red\n' \
+      "$URL" "$live_head" "$waived" >&2
+  else
+    printf 'verified: %s is active and mergeable, with every branch policy passing at head %s\n' \
+      "$URL" "$live_head" >&2
+  fi
+  FM_PR_MERGE_HEAD=$live_head
+  AZURE_DEVOPS_PROJECT_ID=$project_id
+  AZURE_DEVOPS_REPO_ID=$repo_id
+  AZURE_DEVOPS_PR_STRATEGY=$strategy
+  AZURE_DEVOPS_ALLOWED=$allowed
+}
+
+# The merge strategy an Azure DevOps completion names: the caller's own method
+# (--merge is Azure DevOps' noFastForward), else the one the pull request's
+# completion options already name, else the only strategy the repository's
+# blocking merge-strategy policy allows. With no such policy and no choice,
+# none is named and Azure DevOps applies its own default. A strategy the policy
+# does not allow, or a policy that allows several when nothing chose one, is
+# refused rather than replaced by one chosen here. Sets AZURE_DEVOPS_STRATEGY.
+azure_devops_resolve_strategy() {  # <caller method>
+  local caller=$1 chosen=''
+  AZURE_DEVOPS_STRATEGY=
+  case "$caller" in
+    '') ;;
+    squash) chosen=squash ;;
+    merge|noFastForward) chosen=noFastForward ;;
+    rebase) chosen=rebase ;;
+    rebaseMerge|rebase-merge) chosen=rebaseMerge ;;
+    *)
+      echo "error: refusing to merge $URL: unknown Azure DevOps merge strategy '$caller'; use --squash, --merge, --rebase, or --method rebaseMerge" >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$chosen" ]; then
+    case "$AZURE_DEVOPS_PR_STRATEGY" in
+      squash|noFastForward|rebase|rebaseMerge) chosen=$AZURE_DEVOPS_PR_STRATEGY ;;
+    esac
+  fi
+  if [ -z "$chosen" ] && [ "$AZURE_DEVOPS_ALLOWED" != '*' ]; then
+    case "$AZURE_DEVOPS_ALLOWED" in
+      '')
+        echo "error: refusing to merge $URL: the repository's merge strategy policy allows no strategy this script recognizes" >&2
+        return 1
+        ;;
+      *,*)
+        echo "error: refusing to merge $URL: the repository allows several merge strategies (${AZURE_DEVOPS_ALLOWED//,/, }) and neither the caller nor the pull request names one; name one with --squash, --merge, --rebase, or --method rebaseMerge" >&2
+        return 1
+        ;;
+      *) chosen=$AZURE_DEVOPS_ALLOWED ;;
+    esac
+  fi
+  if [ -n "$chosen" ] && [ "$AZURE_DEVOPS_ALLOWED" != '*' ]; then
+    case ",$AZURE_DEVOPS_ALLOWED," in
+      *",$chosen,"*) ;;
+      *)
+        echo "error: refusing to merge $URL: merge strategy $chosen is not one the repository's merge strategy policy allows (${AZURE_DEVOPS_ALLOWED//,/, })" >&2
+        return 1
+        ;;
+    esac
+  fi
+  AZURE_DEVOPS_STRATEGY=$chosen
+}
+
+# Whether an accepted Azure DevOps completion has landed: 0 when the pull
+# request reads back completed, with the commit its completion made, from the
+# verified head; 1 for a definite non-landing (abandoned, a completion from
+# another source commit, or a merge Azure DevOps reports as failed), with
+# AZURE_DEVOPS_CONFIRM_DETAIL naming it; 2 while it is unreadable or Azure
+# DevOps is still completing it.
+AZURE_DEVOPS_CONFIRM_DETAIL=
+azure_devops_confirm_merged() {
+  local json fields state merge_status source merge
+  AZURE_DEVOPS_CONFIRM_DETAIL=
+  json=$(fm_pr_azure_devops_read_pr "$PR_HOST" "$PR_PATH" "$PR_NUMBER") || return 2
+  fields=$(printf '%s' "$json" | jq -r '
+    def text: if type == "string" then . else "" end;
+    "state=" + ((.status // "") | text),
+    "merge_status=" + ((.mergeStatus // "") | text),
+    "source=" + ((.lastMergeSourceCommit.commitId // "") | text),
+    "merge=" + ((.lastMergeCommit.commitId // "") | text)' 2>/dev/null) || return 2
+  state=$(printf '%s\n' "$fields" | sed -n 's/^state=//p')
+  merge_status=$(printf '%s\n' "$fields" | sed -n 's/^merge_status=//p')
+  source=$(printf '%s\n' "$fields" | sed -n 's/^source=//p')
+  merge=$(printf '%s\n' "$fields" | sed -n 's/^merge=//p')
+  case "$state" in
+    completed)
+      fm_pr_head_valid "$merge" || return 2
+      if [ "$source" != "$FM_PR_MERGE_HEAD" ]; then
+        AZURE_DEVOPS_CONFIRM_DETAIL="it completed from source commit ${source:-unreadable}, not the verified head $FM_PR_MERGE_HEAD"
+        return 1
+      fi
+      return 0
+      ;;
+    abandoned)
+      AZURE_DEVOPS_CONFIRM_DETAIL="it reads back abandoned"
+      return 1
+      ;;
+    active)
+      case "$merge_status" in
+        conflicts|failure|rejectedByPolicy)
+          AZURE_DEVOPS_CONFIRM_DETAIL="it is still active with mergeStatus $merge_status"
+          return 1
+          ;;
+      esac
+      return 2
+      ;;
+  esac
+  return 2
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -1781,7 +2152,7 @@ case "$PROVIDER" in
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   forgejo)
-    forgejo_reject_unsupported_args "$@" || exit 1
+    reject_args_beyond_merge_method Forgejo "$@" || exit 1
     forgejo_method=$(caller_merge_method "$@")
     [ -n "$forgejo_method" ] || forgejo_method=$(forgejo_default_merge_style) || exit 1
     forgejo_verify_mergeable || exit 1
@@ -1826,6 +2197,90 @@ case "$PROVIDER" in
     fm_afk_contract_lock_release || true
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
+    ;;
+  azure-devops)
+    reject_args_beyond_merge_method "Azure DevOps" "$@" || exit 1
+    azure_devops_verify_mergeable || exit 1
+    azure_devops_resolve_strategy "$(caller_merge_method "$@")" || exit 1
+    # The away record is locked first, so this last presence and authority
+    # read and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    # az repos pr update --status completed re-reads the pull request and sends
+    # whatever source commit it sees then, so it cannot bind the completion to
+    # the head verified above. The completion is instead a direct PATCH of the
+    # repository-scoped pull request route naming that head as
+    # lastMergeSourceCommit, which Azure DevOps refuses with TF401192 when the
+    # source has moved (docs/azure-devops-integration.md). It goes through
+    # az rest with the Azure DevOps resource id, because az devops invoke
+    # resolves the pullRequests resource to an organization-level route that
+    # does not accept PATCH. Policy bypass and source-branch deletion are always
+    # off, and no auto-complete is ever set: completion is requested once, after
+    # every policy above already passed.
+    azure_devops_body=$(mktemp "${TMPDIR:-/tmp}/fm-azure-devops-complete.XXXXXX") || exit 1
+    if ! jq -n --arg head "$FM_PR_MERGE_HEAD" --arg strategy "$AZURE_DEVOPS_STRATEGY" '
+        {status: "completed",
+         lastMergeSourceCommit: {commitId: $head},
+         completionOptions: ({bypassPolicy: false, deleteSourceBranch: false}
+           + (if $strategy == "" then {} else {mergeStrategy: $strategy} end))}' \
+        > "$azure_devops_body"; then
+      rm -f "$azure_devops_body"
+      exit 1
+    fi
+    merge_status=0
+    merge_output=$(az rest --method patch \
+      --url "$AZURE_DEVOPS_ORG_URL/$AZURE_DEVOPS_PROJECT_ID/_apis/git/repositories/$AZURE_DEVOPS_REPO_ID/pullrequests/$PR_NUMBER?api-version=7.1" \
+      --resource "$AZURE_DEVOPS_RESOURCE_ID" --headers 'Content-Type=application/json' \
+      --body "@$azure_devops_body" --only-show-errors --output json 2>&1) || merge_status=$?
+    rm -f "$azure_devops_body"
+    if [ "$merge_status" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      while IFS= read -r line; do
+        printf 'error: > %s\n' "$line" >&2
+      done <<OUTPUT
+$merge_output
+OUTPUT
+      echo "error: Azure DevOps refused to complete $URL; nothing was merged by this run" >&2
+      exit "$merge_status"
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    # Azure DevOps finishes an accepted completion asynchronously, normally
+    # within seconds, so the landing is read back a bounded number of times.
+    # The delay is capped at 0-10 seconds per attempt.
+    azure_devops_confirm_delay=${FM_PR_AZURE_DEVOPS_CONFIRM_DELAY:-3}
+    case "$azure_devops_confirm_delay" in
+      [0-9] | 10) ;;
+      *) azure_devops_confirm_delay=3 ;;
+    esac
+    azure_devops_confirm_attempt=1
+    while :; do
+      azure_devops_confirm_rc=0
+      azure_devops_confirm_merged || azure_devops_confirm_rc=$?
+      [ "$azure_devops_confirm_rc" -eq 2 ] && [ "$azure_devops_confirm_attempt" -lt 10 ] || break
+      sleep "$azure_devops_confirm_delay"
+      azure_devops_confirm_attempt=$((azure_devops_confirm_attempt + 1))
+    done
+    case "$azure_devops_confirm_rc" in
+      0)
+        printf 'verified: %s is completed from head %s\n' "$URL" "$FM_PR_MERGE_HEAD"
+        ;;
+      1)
+        echo "error: Azure DevOps accepted the completion request for $URL, but it did not land: $AZURE_DEVOPS_CONFIRM_DETAIL" >&2
+        exit 1
+        ;;
+      *)
+        printf 'actionable: Azure DevOps accepted the completion request for %s but has not confirmed it landed yet; the merge poll remains armed and reports the merge\n' \
+          "$URL" >&2
+        exit 0
+        ;;
+    esac
     ;;
   *)
     echo "error: invalid PR merge request" >&2

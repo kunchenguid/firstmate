@@ -288,14 +288,59 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
+a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, azure-devops, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, azure-devops, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
+azure-devops on local-only|--mode local-only --forge azure-devops|cannot ship mode=local-only
 ROWS
 
   pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
+}
+
+# --forge azure-devops names the Azure CLI's az repos pr in Rule 3, the
+# direct-PR Definition of done's open-a-PR line, and the draft read-back, marks
+# the delivery contract, and tells a direct-PR worker to report the web URL,
+# because az prints an API URL in its own url field.
+test_forge_azure_devops_renders_az_repos_pr() {
+  local home brief
+  home="$TMP_ROOT/forge-ado-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-ado some-proj --mode direct-PR --forge azure-devops >/dev/null 2>&1 \
+    || fail "--forge azure-devops should scaffold a direct-PR ship brief"
+  brief="$home/data/brief-forge-ado/brief.md"
+  assert_grep "3. Use the Azure CLI's az repos pr commands for Azure DevOps pull request operations and chrome-devtools-axi for browser operations." "$brief" \
+    "--forge azure-devops must render the az repos pr Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `az repos pr create`' "$brief" \
+    "--forge azure-devops's direct-PR DOD must tell the worker to open the PR with az repos pr create"
+  grep -qx "Delivery contract: mode=direct-PR forge=azure-devops" "$brief" \
+    || fail "--forge azure-devops must mark the delivery contract line for the spawn's registry check"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'confirm it is not a draft (`az repos pr show --id <id> --organization <org> --query isDraft` must print `false`' "$brief" \
+    "--forge azure-devops's DOD must read the draft state back with az"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'publish it with `az repos pr update --id <id> --organization <org> --draft false`' "$brief" \
+    "--forge azure-devops's DOD must clear a draft with az"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'report `repository.webUrl` from `az repos pr show --id <id> --organization <org>` followed by `/pullrequest/<id>`' "$brief" \
+    "--forge azure-devops's direct-PR DOD must say which URL to report"
+  assert_no_grep 'gh-axi pr' "$brief" \
+    "--forge azure-devops's DOD must not send the worker to gh-axi"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-ado-nm some-proj --mode no-mistakes --forge azure-devops >/dev/null 2>&1 \
+    || fail "--forge azure-devops should scaffold a no-mistakes ship brief"
+  brief="$home/data/brief-forge-ado-nm/brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes forge=azure-devops" "$brief" \
+    || fail "a no-mistakes --forge azure-devops brief must mark the delivery contract line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'confirm it is not a draft (`az repos pr show --id <id> --organization <org> --query isDraft` must print `false`' "$brief" \
+    "a no-mistakes --forge azure-devops DOD must read the draft state back with az"
+  assert_no_grep 'gh-axi pr' "$brief" \
+    "a no-mistakes --forge azure-devops DOD must not send the worker to gh-axi"
+  pass "fm-brief.sh: --forge azure-devops names az repos pr in Rule 3, the direct-PR DOD, and the draft read-back, and marks the delivery contract"
 }
 
 # --forge external renders the external review rail from bin/fm-dod-lib.sh: a
@@ -1672,6 +1717,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
+test_forge_azure_devops_renders_az_repos_pr
 test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

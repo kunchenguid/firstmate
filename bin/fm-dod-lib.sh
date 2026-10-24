@@ -49,16 +49,19 @@
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
-# forge=external block appends " forge=forgejo" or " forge=external". The "Ship branch: <branch>"
+# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo,
+# forge=azure-devops, or forge=external block appends " forge=forgejo",
+# " forge=azure-devops", or " forge=external". The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
-# forge is none|gerrit|forgejo|external and defaults to none;
+# forge is none|gerrit|forgejo|azure-devops|external and defaults to none;
 # bin/fm-project-mode.sh's header owns what the registry binding means, and this
 # file owns what each forge changes for a WORKER (docs/gerrit-forge-integration.md
 # is the gerrit design and docs/external-review-forge.md the external one). In
-# the Definition of done, forgejo changes only the CLI a direct-PR worker opens
-# its pull request with: tea instead of gh-axi. A forge composes with
+# the Definition of done, forgejo and azure-devops change only the CLI a worker
+# opens and reads back its pull request with: tea, or az repos pr, instead of
+# gh-axi, and on azure-devops a direct-PR worker is told how to report the web
+# URL, because az prints an API URL in its own url field. A forge composes with
 # the two modes that publish and is refused on local-only, which publishes
 # nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
@@ -161,9 +164,9 @@ EOF
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
-    none|gerrit|forgejo|external) ;;
+    none|gerrit|forgejo|azure-devops|external) ;;
     *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or external)" >&2
+      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, azure-devops, or external)" >&2
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
@@ -450,7 +453,7 @@ EOF
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter pr_url_rule=
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -465,6 +468,13 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     contract_forge=' forge=forgejo'
     forge_cli=tea
     draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+  fi
+  if [ "$forge" = azure-devops ]; then
+    contract_forge=' forge=azure-devops'
+    forge_cli='az repos pr create'
+    draft_check="(\`az repos pr show --id <id> --organization <org> --query isDraft\` must print \`false\`, where <id> is the pull request id from your PR URL and <org> is its organization URL, \`https://dev.azure.com/<org>\` or \`https://<org>.visualstudio.com\`); if it is a draft, publish it with \`az repos pr update --id <id> --organization <org> --draft false\`."
+    pr_url_rule="az prints an API URL in its own \`url\` field, which is not the PR URL: report \`repository.webUrl\` from \`az repos pr show --id <id> --organization <org>\` followed by \`/pullrequest/<id>\`.
+"
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
@@ -560,7 +570,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
+${pr_url_rule}Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -632,7 +642,7 @@ fm_dod_note_reports_ci_ready() {  # <note>
 # not the bare letters PR inside words such as PROD or PROPERTIES.
 fm_dod_note_has_pr_reference() {  # <note>
   printf '%s' "$1" \
-    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
+    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)|/pullrequest/[0-9]+([^[:alnum:]]|$)'
 }
 
 # 0 when a done: note reports a change published to a Gerrit review server

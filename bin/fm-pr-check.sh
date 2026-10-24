@@ -6,13 +6,17 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance and a GitHub Enterprise pull request on a host this home names in
+# A GitHub pull request URL, a GitLab merge request URL, a Gerrit change URL, a
+# Forgejo pull request URL, and an Azure DevOps Services pull request URL are
+# all accepted, including a merge request or change on a self-hosted instance
+# and a GitHub Enterprise pull request on a host this home names in
 # config/github-hosts.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
+# A GitHub or Azure DevOps pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
+# An Azure DevOps URL whose pull request id reads back as another repository's
+# pull request is refused the same way, because its poll would watch that
+# other pull request.
 # Mark the pull request ready for review, then arm again; a lane that keeps a
 # draft on purpose declares a wait instead of reporting done. An unreadable
 # draft state does not refuse, matching how the head read below is optional.
@@ -55,7 +59,8 @@ NUMBER=$FM_PR_NUMBER
 # gh and gh-axi address github.com unless told otherwise, so a GitHub Enterprise
 # host is exported once here and every forge read this run makes, including the
 # bin/fm-dod-lib.sh children, addresses the host the recorded identity names.
-# A gitlab, gerrit, or forgejo run keeps its own per-call host handling.
+# A gitlab, gerrit, forgejo, or azure-devops run keeps its own per-call host
+# handling.
 if [ "$PROVIDER" = github ]; then
   fm_pr_github_host_export "$HOST"
 fi
@@ -128,14 +133,44 @@ if [ "$PROVIDER" = forgejo ]; then
   }
 fi
 
-# The draft state is read before anything is recorded or armed. Only a positive
-# draft reading refuses, because an unreadable one must not block arming.
-if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
-  if [ "$(fm_pr_json_draft_state "$DRAFT_JSON")" = true ]; then
-    echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+# Refuse to arm an Azure DevOps watch with no az, no azure-devops extension, or
+# no jq, for the same reason as the cases above: every az repos command needs
+# the extension, and the poll reads the pull request's JSON with jq.
+if [ "$PROVIDER" = azure-devops ]; then
+  if ! command -v az >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching an Azure DevOps pull request requires az and jq on PATH" >&2
     exit 1
   fi
+  az extension show --name azure-devops --output none >/dev/null 2>&1 || {
+    echo "error: watching an Azure DevOps pull request requires the az azure-devops extension (az extension add --name azure-devops)" >&2
+    exit 1
+  }
+fi
+
+# The draft state is read before anything is recorded or armed. Only a positive
+# draft reading refuses, because an unreadable one must not block arming.
+DRAFT_STATE=
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
+  DRAFT_STATE=$(fm_pr_json_draft_state "$DRAFT_JSON")
+fi
+# An Azure DevOps read that positively names another repository refuses even in
+# the merge-time recording, because neither the poll nor the merge would then
+# act on the pull request the URL shows; an unreadable one arms as above.
+if [ "$PROVIDER" = azure-devops ]; then
+  AZURE_DEVOPS_RC=0
+  DRAFT_JSON=$(fm_pr_azure_devops_read_pr "$HOST" "$PROJECT_PATH" "$NUMBER") || AZURE_DEVOPS_RC=$?
+  if [ "$AZURE_DEVOPS_RC" -eq 2 ]; then
+    echo "error: $URL does not name a pull request in that project and repository: Azure DevOps reads pull request $NUMBER back as another repository's" >&2
+    exit 1
+  fi
+  if [ "$AZURE_DEVOPS_RC" -eq 0 ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+    DRAFT_STATE=$(fm_pr_json_draft_state "$DRAFT_JSON")
+  fi
+fi
+if [ "$DRAFT_STATE" = true ]; then
+  echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+  exit 1
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -144,7 +179,9 @@ fi
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, and
 # tea's single-PR view ignores field selection entirely, so neither a GitLab
-# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
+# nor a Forgejo task records a pr_head here; Azure DevOps reports a source
+# commit only after it recomputes the pull request's merge, which lags a push,
+# so an Azure DevOps task records none either; and neither does a Gerrit task: a
 # Gerrit revision names one patch set, every amend or rebase is a new patch set,
 # and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
 # so a recorded revision would silently become the reviewed content. Both
@@ -153,9 +190,9 @@ fi
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
-# same reason, and treats a recorded value that disagrees as stale rather than
-# authoritative.
+# bin/fm-pr-merge.sh reads a GitLab, Forgejo, or Azure DevOps head live at merge
+# time for the same reason, and treats a recorded value that disagrees as stale
+# rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then

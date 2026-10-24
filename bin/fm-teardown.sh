@@ -1668,7 +1668,11 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
+# tea (fm_pr_forgejo_read_record), a recorded Azure DevOps URL through az
+# (fm_pr_azure_devops_read_record), whose head is the source commit the pull
+# request completed from, so a squash completion whose branch commits never
+# reach the target branch still proves the work landed, and everything else
+# through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
@@ -1680,8 +1684,13 @@ pr_is_merged() {
     target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+  if fm_pr_url_parse "$target" \
+    && { [ "$FM_PR_PROVIDER" = forgejo ] || [ "$FM_PR_PROVIDER" = azure-devops ]; }; then
+    if [ "$FM_PR_PROVIDER" = forgejo ]; then
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    else
+      fm_pr_azure_devops_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    fi
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
