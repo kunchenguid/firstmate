@@ -43,6 +43,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
+| `fm-rex-palette.sh`      | Opt-in: install or remove Firstmate's Rex command-palette block in this machine's Rex `init.lua`, only on the captain's word |
+| `fm-rex-popup.sh`        | Plan each Rex palette command and run its popups; the acting popups only file captain inbox notes |
+| `backends/rex-palette.lua` | The Rex palette commands, loaded by the block `fm-rex-palette.sh` installs     |
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |

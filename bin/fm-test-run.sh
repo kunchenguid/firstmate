@@ -420,7 +420,8 @@ family_for_basename() {
     fm-backend-paseo.test.sh|fm-backend-paseo-smoke.test.sh)
       printf '%s\n' paseo
       ;;
-    fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh|fm-backend-rex-eventwait-smoke.test.sh)
+    fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh|fm-backend-rex-eventwait-smoke.test.sh|\
+    fm-rex-palette.test.sh|fm-rex-palette-smoke.test.sh)
       printf '%s\n' rex
       ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
@@ -1485,7 +1486,7 @@ families_for_changed_path() {
       printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/rex*|tests/rex-test-safety.sh)
+    bin/backends/rex*|bin/fm-rex-palette.sh|bin/fm-rex-popup.sh|tests/rex-test-safety.sh)
       printf '%s\n' rex
       printf '%s\n' backend-dispatch
       ;;

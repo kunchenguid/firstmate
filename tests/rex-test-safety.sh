@@ -90,7 +90,12 @@ done
 refuse() { printf '%s\n' "$*" >>"$trip"; echo "fm-rex-test guard: refused $*" >&2; exit 97; }
 scoped() { [ -n "$sid" ] && grep -qxF -- "$sid" "$allowed" || refuse "$@"; }
 case "$cmd" in
-  version|whoami|ls|capture) ;;
+  version|whoami|ls|capture|keymap|actions) ;;
+  config)
+    # The private server's own throwaway config (rex_test_prepare's empty
+    # rex-config.lua): checking a file and reloading it change no session.
+    case "$sub" in check|reload) ;; *) refuse "$@" ;; esac ;;
+  session) [ "$sub" = inspect ] || refuse "$@" ;;
   api)
     case " $* " in
       *" server.status "*|*" session.view "*) ;;
