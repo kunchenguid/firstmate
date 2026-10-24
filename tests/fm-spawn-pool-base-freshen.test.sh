@@ -1410,6 +1410,9 @@ test_dirty_pool_retry_preserves_the_copy() {
   [ "$status" -ne 0 ] || fail 'dirty copy launched'
   assert_contains "$out" 'is not clean' 'spawn did not refuse the dirty copy'
   assert_contains "$out" 'treehouse return --force' 'refusal omitted the explicit release command'
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Dirty-copy refusal\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+  fi
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'refused spawn published metadata'
   assert_grep "$id" "$CASE_DIR/slots/1/.test-treehouse-lease" 'refusal dropped the durable lease'
   "$FAKEBIN_DIR/tmux" kill-window -t "firstmate:fm-$id"
@@ -1421,6 +1424,14 @@ test_dirty_pool_retry_preserves_the_copy() {
   [ "$(git -C "$dirty" diff HEAD)" = "$diff_before" ] || fail 'retry changed refused tracked edits'
   [ "$(git -C "$dirty" ls-files --stage)" = "$index_before" ] || fail 'retry changed the refused index'
   assert_grep 'untracked work' "$dirty/untracked.txt" 'retry lost the refused untracked file'
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# Retry after terminal loss\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'Refused copy HEAD before=%s after=%s\n' "$before" "$(git -C "$dirty" rev-parse HEAD)"
+    printf 'Refused copy staged index before:\n%s\nafter:\n%s\n' "$index_before" "$(git -C "$dirty" ls-files --stage)"
+    printf 'Refused copy tracked edits before:\n%s\nafter:\n%s\n' "$diff_before" "$(git -C "$dirty" diff HEAD)"
+    printf 'Refused copy untracked file:\n'; cat "$dirty/untracked.txt"
+    printf 'Retry task record:\n'; cat "$HOME_DIR/state/$id.meta"
+  fi
   pass 'a dirty-copy refusal retains its lease and every edit while retry uses another copy'
 }
 

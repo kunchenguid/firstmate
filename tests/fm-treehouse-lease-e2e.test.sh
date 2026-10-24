@@ -79,7 +79,18 @@ EXIT_WT=$(sed -n '1p' "$FM_TREEHOUSE_TEST_RECORD")
 EXIT_HEAD=$(sed -n '2p' "$FM_TREEHOUSE_TEST_RECORD")
 assert_contains "$(cat "$TMP_ROOT/exit.log")" 'Not returning' 'shell exit did not preserve lease takeover'
 [ "$(git -C "$EXIT_WT" rev-parse HEAD)" = "$EXIT_HEAD" ] || fail 'shell exit reset the leased copy'
+if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+  printf '# Ordinary shell exit\n'; cat "$TMP_ROOT/exit.log"
+  printf 'Exited worker copy=%s HEAD=%s\n' "$EXIT_WT" "$EXIT_HEAD"
+  printf '$ treehouse status --json\n'
+  (cd "$PROJECT" && "$TREEHOUSE" status --json) || fail 'status failed'
+  printf '$ treehouse return --force %s\n' "$WT"
+fi
 (cd "$PROJECT" && "$TREEHOUSE" return --force "$WT") || fail 'explicit return failed'
 [ "$(git -C "$WT" rev-parse HEAD)" != "$BEFORE" ] || fail 'explicit return did not release and reset its copy'
 [ "$(git -C "$EXIT_WT" rev-parse HEAD)" = "$EXIT_HEAD" ] || fail 'return touched a different leased copy'
+if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+  printf 'Explicitly returned copy HEAD before=%s after=%s\n' "$BEFORE" "$(git -C "$WT" rev-parse HEAD)"
+  printf 'Other leased copy HEAD before=%s after=%s\n' "$EXIT_HEAD" "$(git -C "$EXIT_WT" rev-parse HEAD)"
+fi
 pass 'lease takeover survives shell exit and only explicit return resets its copy'

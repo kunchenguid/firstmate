@@ -133,9 +133,14 @@
 #   meta's backend_detect= line.
 #   Herdr leases its slot durably (treehouse get --lease) and moves the pane's
 #   top-level shell into it, because a restart restores that shell's cwd.
-#   Each managed slot is durably leased to its task before base refresh and
-#   remains leased after every refusal until explicit return. Spawn refuses
-#   Treehouse builds without `treehouse lease --help` support.
+#   Each newly acquired managed slot is durably leased to its task before base
+#   refresh. The lease survives worker exit, restart, and every later refusal,
+#   even when no task record was published; a retry must acquire another copy.
+#   A refusal never returns or resets the leased copy. After inspection and an
+#   explicit decision to discard it, the operator can run the printed recovery
+#   command: (cd <project> && treehouse return --force <copy>).
+#   Normal task cleanup remains subject to fm-teardown.sh's safety checks.
+#   Spawn refuses Treehouse builds without `treehouse lease --help` support.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
@@ -1858,7 +1863,8 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A fresh polytoken spawn that fails and leaves no record retains its lease. Before its launch is delivered, the endpoint it opened holds nothing but
+  # A fresh polytoken spawn that fails and leaves no record retains its lease.
+  # Before its launch is delivered, the endpoint it opened holds nothing but
   # the shell running `treehouse get`; closing it removes the endpoint, while
   # any durable lease remains in place to protect the refused copy. The
   # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
@@ -5950,10 +5956,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
   fi
 
-  # Replace the interactive get's process reservation with a durable lease
-  # before any base refresh. It survives worker exit, restart and every refusal;
-  # teardown alone returns the copy after proving its work landed. The separate
-  # slot-owner claim remains teardown's proof of task identity.
+  # Establish durable protection before any base refresh can discard work.
+  # The separate slot-owner claim remains teardown's proof of task identity.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_TREEHOUSE_LEASE_PATH=$WT
     if ! leased_path=$(cd "$PROJ_ABS" && treehouse lease "$(basename "$(dirname "$WT")")" --lease-holder "$ID"); then

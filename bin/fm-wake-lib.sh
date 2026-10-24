@@ -1935,13 +1935,10 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
 # reserves a slot under a label until `treehouse return --if-lease-holder`
 # releases it, and Firstmate uses that acquisition for secondmate homes
-# (bin/fm-home-seed.sh) and Herdr crewmate spawns. The other crewmate spawns
-# acquire through the interactive pane-driven `treehouse get`, then replace its
-# live process reservation with `treehouse lease` before refreshing the copy.
-# That durable reservation keeps the copy out of acquisition after worker exit
-# or a refused launch; this separate claim remains teardown's proof of task
-# identity, written under the project lock and released when teardown returns
-# the copy.
+# (bin/fm-home-seed.sh). bin/fm-spawn.sh's header owns crewmate acquisition and
+# durable-lease protection. This separate claim remains teardown's proof of
+# task identity, written under the project lock and released when teardown
+# returns the copy.
 #
 # The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
 # checkout rather than a file inside it - so claiming a slot can never dirty the
