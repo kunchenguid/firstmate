@@ -1196,7 +1196,8 @@ test_portable_serial_packing_budget_boundary() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   # Preserve the real inventory and packing policy without executing suites.
-  # Only the fixture's measured timing input changes at the boundary.
+  # Give every inventory member a fixture hint so an unmeasured real script
+  # cannot take the default weight and join the at-budget shard.
   while IFS= read -r script; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
   done < <("$RUNNER" --list --all)
@@ -1208,11 +1209,30 @@ test_portable_serial_packing_budget_boundary() {
 from pathlib import Path
 import re, sys
 runner = Path(sys.argv[1])
-runner.write_text(re.sub(
-    r"(?m)^tests/fm-watch-triage\.test\.sh [0-9]+$",
-    f"tests/fm-watch-triage.test.sh {sys.argv[2]}",
-    runner.read_text(),
-))
+weight = sys.argv[2]
+text = runner.read_text()
+scripts = sorted(
+    f"tests/{path.name}" for path in (runner.parent.parent / "tests").glob("*.test.sh")
+)
+if "tests/fm-watch-triage.test.sh" not in scripts:
+    sys.exit("fixture inventory lost tests/fm-watch-triage.test.sh")
+# Longest real serial member stays at the budget boundary; every other script
+# gets 1ms so longest-processing-time packing cannot fill that shard.
+lines = [
+    f"{script} {weight if script == 'tests/fm-watch-triage.test.sh' else '1'}"
+    for script in scripts
+]
+table = "\n".join(lines)
+new, n = re.subn(
+    r"(portable_serial_weight_hints\(\) \{\n  cat <<'EOF'\n).*?(\nEOF\n)",
+    lambda match: match.group(1) + table + match.group(2),
+    text,
+    count=1,
+    flags=re.S,
+)
+if n != 1:
+    sys.exit("serial hint table not found")
+runner.write_text(new)
 PY
     out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
     if [ "$weight" -eq 1200000 ]; then
