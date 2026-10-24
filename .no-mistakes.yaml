@@ -9,6 +9,13 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# The gate refuses any agent that cannot honor disable_project_settings above.
+# Only claude and codex implement that neutralization, so pin claude here rather
+# than leaving this repo on the host's shared default, which serves every other
+# repository. Like the other gate-control fields, this is read from the DEFAULT
+# BRANCH copy of this file, so pinning it on a feature branch has no effect.
+agent: claude
+
 # Trusted documentation placement policy for the Document step.
 # The audience inventory and coding guideline own the detail; keep this as a
 # pointer so gate instructions cannot become a second prose policy.
