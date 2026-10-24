@@ -1280,6 +1280,106 @@ EOF
   pass ".pi primary extension: a nested load keeps the live session's turn-end marker"
 }
 
+# --- foreign session-lock owner, default (non-Claude) mode -------------------
+# A secondary session that is not the lock owner cannot arm or repair the
+# watcher, so the foreign-owner exemption applies in every mode. The owner is a
+# harness-named bash (a symlink called codex) that is neither this test's
+# ancestor nor the guard's, so the lock helper reads it as another live session.
+# The Claude identity variables are scrubbed so a suite run from inside a Claude
+# session cannot turn the fixture into a same-session match.
+
+foreign_owner_fixture() {  # <dir> -> a primary dir with unsupervised work and a harness-named owner binary
+  local dir=$1
+  make_primary_dir "$dir" >/dev/null
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/fake-harness"
+  ln -s "$(command -v bash)" "$dir/fake-harness/codex"
+}
+
+run_hook_default_scrubbed() {  # <dir> <stop_active> -> guard output on stdout+stderr
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # The inner script expands in the child shell, not here.
+  FM_HOME="$home" GUARD="$dir/bin/fm-turnend-guard.sh" STOP_ACTIVE="$stop_active" \
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID "$dir/fake-harness/codex" -c '
+      printf "{\"stop_hook_active\":%s,\"session_id\":\"sess-secondary\"}" "$STOP_ACTIVE" | bash "$GUARD" 2>&1
+      exit "${PIPESTATUS[1]}"
+    '
+}
+
+test_hook_default_mode_allows_foreign_live_owner() {
+  local dir out status owner
+  dir="$TMP_ROOT/hook-default-foreign-owner"
+  foreign_owner_fixture "$dir"
+  "$dir/fake-harness/codex" -c 'while :; do sleep 1; done' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  local tries=0
+  until [ "$(ps -o comm= -p "$owner" 2>/dev/null | sed 's|.*/||')" = codex ] || [ "$tries" -ge 100 ]; do
+    sleep 0.05; tries=$((tries + 1))
+  done
+  out=$(run_hook_default_scrubbed "$dir" false); status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a non-Claude session that is not the lock owner must end its turn safely"
+  assert_contains "$out" "SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" "the foreign-owner exit must carry the ownership diagnostic"
+  assert_contains "$out" "lock owner pid $owner" "the diagnostic must name the owning pid"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "a foreign-owned session must not be told to repair supervision"
+  pass "fm-turnend-guard default mode: a live foreign lock owner gets the ownership diagnostic and exit 0"
+}
+
+test_hook_default_mode_blocks_unsupervised_lock_owner() {
+  local dir out
+  dir="$TMP_ROOT/hook-default-self-owner"
+  foreign_owner_fixture "$dir"
+  out=$(
+    # shellcheck disable=SC2016 # The inner script expands in the child shell, not here.
+    FM_HOME="$(cd "$dir" && pwd)" GUARD="$dir/bin/fm-turnend-guard.sh" STATE="$dir/state" \
+      env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID "$dir/fake-harness/codex" -c '
+        printf "%s\n" "$$" > "$STATE/.lock"
+        printf "{\"stop_hook_active\":false,\"session_id\":\"sess-owner\"}" | bash "$GUARD" 2>&1
+        printf "guard_rc=%s\n" "$?"
+      '
+  )
+  assert_contains "$out" "guard_rc=2" "the session that owns the lock must still be blocked when unsupervised"
+  assert_contains "$out" "TURN WOULD END BLIND" "the owning session must get the repair banner"
+  assert_not_contains "$out" "OWNED BY ANOTHER LIVE SESSION" "the owner must not take the foreign-owner exit"
+  pass "fm-turnend-guard default mode: the lock owner itself is still blocked when unsupervised"
+}
+
+test_hook_default_mode_blocks_without_lock_record() {
+  local dir out status
+  dir="$TMP_ROOT/hook-default-no-lock"
+  foreign_owner_fixture "$dir"
+  out=$(run_hook_default_scrubbed "$dir" false); status=$?
+  expect_code 2 "$status" "absent ownership evidence must retain the ordinary block"
+  assert_contains "$out" "TURN WOULD END BLIND" "absent ownership must show the repair banner"
+  assert_not_contains "$out" "OWNED BY ANOTHER LIVE SESSION" "absent ownership is not foreign-owner evidence"
+  pass "fm-turnend-guard default mode: no lock record keeps the ordinary block"
+}
+
+test_hook_default_mode_blocks_stale_lock_record() {
+  local dir out status
+  dir="$TMP_ROOT/hook-default-stale-lock"
+  foreign_owner_fixture "$dir"
+  nonexistent_pid > "$dir/state/.lock"
+  out=$(run_hook_default_scrubbed "$dir" false); status=$?
+  expect_code 2 "$status" "a dead lock pid must retain the ordinary block"
+  assert_contains "$out" "TURN WOULD END BLIND" "a stale lock must show the repair banner"
+  assert_not_contains "$out" "OWNED BY ANOTHER LIVE SESSION" "a dead pid is not foreign-owner evidence"
+  pass "fm-turnend-guard default mode: a stale lock pid keeps the ordinary block"
+}
+
+test_hook_default_mode_keeps_one_followup_limit() {
+  local dir out status
+  dir="$TMP_ROOT/hook-default-followup-limit"
+  foreign_owner_fixture "$dir"
+  out=$(run_hook_default_scrubbed "$dir" true); status=$?
+  expect_code 0 "$status" "a stop that already follows a block must be allowed"
+  [ -z "$out" ] || fail "the one-follow-up limit must stay silent, got: $out"
+  pass "fm-turnend-guard default mode: stop_hook_active still bounds the guard to one follow-up"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -2339,6 +2439,11 @@ test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
+test_hook_default_mode_allows_foreign_live_owner
+test_hook_default_mode_blocks_unsupervised_lock_owner
+test_hook_default_mode_blocks_without_lock_record
+test_hook_default_mode_blocks_stale_lock_record
+test_hook_default_mode_keeps_one_followup_limit
 test_hook_silent_without_stdin
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
