@@ -259,6 +259,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/sos-dispatch-loop/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -319,6 +323,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -335,15 +343,7 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/captain-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/documentation-audiences.md",
-      "audience": "maintainer-architecture"
-    },
-    {
-      "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -369,6 +369,14 @@
     {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/extension-bindings.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/fleet-ledger.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
@@ -399,10 +407,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/fleet-ledger.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },
@@ -431,12 +435,12 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/secondmate-parent-channel.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/secondmate-parent-channel.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/sessionstart-nudge.md",
@@ -444,6 +448,10 @@
     },
     {
       "path": "docs/subagent-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/supervision-host.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -481,10 +489,6 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
-    },
-    {
-      "path": "docs/supervision-host.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/tmux-backend.md",
