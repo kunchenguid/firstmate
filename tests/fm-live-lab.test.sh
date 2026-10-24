@@ -630,8 +630,13 @@ cat > "$WORKSRC/bin/fm-brief.sh" <<'SH'
 mkdir -p "$FM_HOME/data/$1"
 printf '{TASK}\n{FIRSTMATE_SPEC}\n' > "$FM_HOME/data/$1/brief.md"
 SH
+# The task-priority add-on refuses an add without --priority, as it does on a
+# real install; the lab worker's add must carry one or spawn never runs.
 cat > "$WORKSRC/bin/fm-tasks-axi.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = add ]; then
+  case " $* " in *" --priority "*) ;; *) echo "task priority is required" >&2; exit 2 ;; esac
+fi
 exit 0
 SH
 cat > "$WORKSRC/bin/fm-spawn.sh" <<'SH'
