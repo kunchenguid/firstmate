@@ -7,7 +7,9 @@
 # proven against the real installation. This guard drives Pi's own trust
 # manager - the module its TUI calls before it renders "Trust project folder?" -
 # against a disposable agent root, and asserts the decision flips from untrusted
-# to trusted exactly because bin/fm-pi-trust.sh wrote the entry.
+# to trusted exactly because bin/fm-pi-trust.sh wrote the entry. It also drives
+# the ancestor and defaultProjectTrust rules the script copies, including the
+# precedence of a saved decision over the policy.
 #
 # Token-free and TTY-free: no model prompt is submitted and no dialog is
 # answered. Disposable HOME and PI_CODING_AGENT_DIR only; it never reads or
@@ -53,17 +55,18 @@ WT_REAL=$(cd -P -- "$WT" && pwd -P)
 AGENT="$LAB/agent"
 mkdir -p "$AGENT" "$LAB/home"
 
-# probe_trust <agent-dir> [seed-json]: ask Pi's own resolver about the lab
-# worktree under one disposable agent root. An optional seed object is written
-# as that root's trust store first, so each case proves how the INSTALLED
-# package resolves the entries the script's own copy of the rule claims. Prints
-# one JSON object; exits non-zero if the installed package no longer exposes the
-# module this guard reads, so a layout change fails loudly naming the version
-# instead of silently proving nothing.
+# probe_trust <agent-dir> [seed-json] [default-trust]: ask Pi's own resolver
+# about the lab worktree under one disposable agent root. An optional seed object
+# is written as that root's trust store first and an optional policy as that
+# root's defaultProjectTrust, so each case proves how the INSTALLED package
+# resolves the entries the script's own copy of the rule claims. Prints one JSON
+# object; exits non-zero if the installed package no longer exposes the module
+# this guard reads, so a layout change fails loudly naming the version instead of
+# silently proving nothing.
 probe_trust() {
-  local agent=$1 seed=${2:-}
+  local agent=$1 seed=${2:-} policy=${3:-}
   PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$agent" HOME="$LAB/home" \
-    PI_TRUST_SEED="$seed" \
+    PI_TRUST_SEED="$seed" PI_TRUST_POLICY="$policy" \
     node --input-type=module - "$WT_REAL" "$PI_VERSION" <<'NODE'
 import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -86,15 +89,22 @@ if (seed) {
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "trust.json"), `${JSON.stringify(JSON.parse(seed), null, 2)}\n`);
 }
+const policy = process.env.PI_TRUST_POLICY || null;
+if (policy) {
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), `${JSON.stringify({ defaultProjectTrust: policy }, null, 2)}\n`);
+}
 const store = new trustManager.ProjectTrustStore(agentDir);
 const resolved = await projectTrust.resolveProjectTrusted({
   cwd,
   trustStore: store,
   projectTrustContext: { hasUI: false },
+  ...(policy ? { defaultProjectTrust: policy } : {}),
 });
 process.stdout.write(
   JSON.stringify({
     agentDir,
+    defaultProjectTrust: policy,
     trustGating: trustManager.hasTrustRequiringProjectResources(cwd),
     decision: store.get(cwd),
     resolved,
@@ -147,10 +157,10 @@ pass "pi $PKG_VERSION: the worktree fm-pi-trust.sh registered resolves trusted w
 # false, and skips a nearer null entry. Those are only safe because the INSTALLED
 # package resolves the same entries the same way, so each shape is driven through
 # Pi's resolver on a fresh agent root.
-probe_case() {  # <slug> <seed-json> <want-decision> <want-resolved> <description>
-  local slug=$1 seed=$2 want_decision=$3 want_resolved=$4 description=$5 agent out
+probe_case() {  # <slug> <seed-json> <policy> <want-decision> <want-resolved> <description>
+  local slug=$1 seed=$2 policy=$3 want_decision=$4 want_resolved=$5 description=$6 agent out
   agent="$LAB/agent-$slug"
-  if ! out=$(probe_trust "$agent" "$seed"); then
+  if ! out=$(probe_trust "$agent" "$seed" "$policy"); then
     fail "the installed Pi package could not be probed for the $slug case: $out"
   fi
   printf '# %s: %s\n' "$slug" "$out"
@@ -167,11 +177,22 @@ probe_case() {  # <slug> <seed-json> <want-decision> <want-resolved> <descriptio
   pass "pi $PKG_VERSION: $description"
 }
 
-probe_case ancestor-true "{\"$LAB_REAL\":true}" true true \
+probe_case ancestor-true "{\"$LAB_REAL\":true}" '' true true \
   "a trusted ancestor with no exact key resolves the worktree trusted"
-probe_case ancestor-false "{\"$LAB_REAL\":false}" false false \
+probe_case ancestor-false "{\"$LAB_REAL\":false}" '' false false \
   "an inherited 'Do not trust' resolves untrusted with no dialog"
-probe_case null-skips "{\"$WT_REAL\":null,\"$LAB_REAL\":true}" true true \
+probe_case null-skips "{\"$WT_REAL\":null,\"$LAB_REAL\":true}" '' true true \
   "a nearer null entry is skipped and the trusted ancestor resolves"
 
-echo "# all fm-pi-trust-live-e2e checks passed (5)"
+# --- 5. The policy rule the script copies is Pi's own ----------------------
+# bin/fm-pi-trust.sh consults a saved decision first and defaultProjectTrust only
+# when none exists. Those two facts are driven through the INSTALLED resolver:
+# 'never' with no saved entry declines, and a saved true still wins over 'never'.
+probe_case policy-never '' never null false \
+  "defaultProjectTrust never leaves an unregistered worktree untrusted"
+probe_case policy-never-saved-true "{\"$WT_REAL\":true}" never true true \
+  "a saved trust decision outranks defaultProjectTrust never"
+probe_case policy-always '' always null true \
+  "defaultProjectTrust always trusts the worktree with no saved entry"
+
+echo "# all fm-pi-trust-live-e2e checks passed (8)"

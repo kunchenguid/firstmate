@@ -14,7 +14,9 @@
 #                      reads.
 #   <worktree>         the isolated task worktree this spawn launches into
 #   <project>          the primary checkout that worktree belongs to
-# Prints one line naming what it registered; refuses loudly on anything else.
+# Prints one line naming what it registered, or, when the operator's own policy
+# needs no write, a diagnostic on stderr instead; refuses loudly on anything
+# else.
 #
 # WHY THIS EXISTS. Pi gates a directory it has never been told about behind
 # "Trust project folder?" whenever that directory (or an ancestor) holds a
@@ -44,9 +46,12 @@
 # on the launch line and bin/fm-spawn.sh passes that root as --agent-dir; an
 # unpinned pi/pi-signed launch line explicitly unsets PI_CODING_AGENT_DIR, so
 # that worker deterministically reads Pi's default `<home>/.pi/agent`, which is
-# this script's default. An operator who needs a different agent root or account
-# selects one with config/pi-account rather than by exporting the variable. The
-# invoking process's environment is not one of the inputs.
+# this script's default. The one exception is a raw launch command that itself
+# names an agent root: its own assignment applies after the unset, so that
+# worker reads the named root and the entry written here is not the one it
+# consults. An operator who needs a different agent root or account selects one
+# with config/pi-account rather than by exporting the variable. The invoking
+# process's environment is not one of the inputs.
 #
 # A lookup resolves the nearest recorded decision on the worktree path itself or
 # any ancestor, matching Pi's own `findNearestTrustEntry` walk, which skips
@@ -61,6 +66,20 @@
 # store is touched: no other entry is added, removed, or rewritten, and the
 # parent directory, the project checkout, the home directory, and `/` are never
 # registered - only the one absolute path this spawn actually uses.
+#
+# THE OPERATOR'S POLICY IS NEVER OVERRIDDEN. Pi consults a saved trust.json
+# decision for the directory before it reads defaultProjectTrust from the agent
+# root's settings.json, so this script applies the same order and reads that
+# settings file only when no nearest decision exists. It then follows all three
+# outcomes for the selected root - the pinned root under a pin, else the default
+# root: `"never"` writes NOTHING and reports that the operator configured Pi
+# never to auto-trust project folders, so this spawn does not pre-register trust
+# and the worker will need a human confirmation; an absent setting or `"ask"`
+# writes this worktree's true entry, which is what replaces the interactive
+# confirmation; `"always"` writes nothing because Pi trusts on its own, and the
+# report says the policy already trusts the directory instead of claiming this
+# script wrote it. An unreadable or malformed settings.json is refused loudly
+# naming that root, never read as `"never"`.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY and mirrors bin/fm-agy-trust.sh and
 # bin/fm-claude-trust.sh: <worktree> must be a LINKED git worktree - its own git
@@ -205,11 +224,12 @@ fi
 # The vendor's own lock cannot be taken here without risking a live session's
 # write, so the residual race is narrowed rather than closed and this claims no
 # more than that.
-if ! RESULT=$(node - "$STORE" "$WT_REAL" <<'NODE'
+if ! RESULT=$(node - "$STORE" "$WT_REAL" "$AGENT_DIR_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, target] = process.argv.slice(2);
+const [store, target, agentDir] = process.argv.slice(2);
+const settingsPath = path.join(agentDir, "settings.json");
 const readStore = () => {
   try {
     return fs.readFileSync(store);
@@ -232,6 +252,38 @@ const nearestDecision = (data, dir) => {
     if (parent === current) return null;
     current = parent;
   }
+};
+// Pi resolves a saved decision first and reads defaultProjectTrust from the
+// selected root settings.json only when the nearest entry is undecided. Its
+// switch treats "always" and "never" specially and lets anything else - the
+// absent setting and "ask" included - fall through to the prompt.
+let policy;
+const defaultPolicy = () => {
+  if (policy !== undefined) return policy;
+  let raw;
+  try {
+    raw = fs.readFileSync(settingsPath, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      policy = "ask";
+      return policy;
+    }
+    throw new Error(`${settingsPath} could not be read (${err.code}), so defaultProjectTrust is unknown`);
+  }
+  let settings = {};
+  if (raw.trim() !== "") {
+    try {
+      settings = JSON.parse(raw);
+    } catch {
+      throw new Error(`${settingsPath} is not valid JSON, so defaultProjectTrust is unknown`);
+    }
+    if (settings === null || typeof settings !== "object" || Array.isArray(settings)) {
+      throw new Error(`${settingsPath} is not a JSON object, so defaultProjectTrust is unknown`);
+    }
+  }
+  const value = settings.defaultProjectTrust;
+  policy = value === "always" ? "always" : value === "never" ? "never" : "ask";
+  return policy;
 };
 const attempt = () => {
   const original = readStore();
@@ -257,6 +309,8 @@ const attempt = () => {
   // entry. Refuse rather than reverse it: Pi applies it to this path without
   // prompting, so the spawn would run untrusted instead of parking.
   if (found !== null) return `declined:${found.path}`;
+  const directive = defaultPolicy();
+  if (directive !== "ask") return `policy:${directive}`;
   root[target] = true;
   const sorted = {};
   for (const key of Object.keys(root).sort()) sorted[key] = root[key];
@@ -290,6 +344,14 @@ try {
       console.error(`error: ${store} records "Do not trust" for ${denied}, which Pi applies to ${target}; refusing to reverse a decision the operator already made. Change or remove the ${denied} entry in ${store} to allow this spawn`);
       process.exit(1);
     }
+    if (result === "policy:never") {
+      console.error(`fm-pi-trust: ${settingsPath} sets defaultProjectTrust to "never", so this spawn does not pre-register trust for ${target}; the worker will need a human confirmation`);
+      process.exit(0);
+    }
+    if (result === "policy:always") {
+      console.error(`fm-pi-trust: ${settingsPath} sets defaultProjectTrust to "always", so Pi already trusts ${target} and nothing was written`);
+      process.exit(0);
+    }
     if (result === "moved" && i >= 1) {
       console.error(`error: ${store} was modified while trust was being recorded; refusing to overwrite it`);
       process.exit(1);
@@ -306,8 +368,7 @@ NODE
   refuse "could not record trust for '$WT_REAL' in '$STORE'"
 fi
 
-if [ "$RESULT" = present ]; then
-  echo "already trusted: $WT_REAL"
-else
-  echo "trusted: $WT_REAL"
-fi
+case "$RESULT" in
+present) echo "already trusted: $WT_REAL" ;;
+recorded) echo "trusted: $WT_REAL" ;;
+esac
