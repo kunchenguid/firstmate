@@ -84,6 +84,20 @@ case "${1:-}" in
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+          case "$payload" in
+            *' claude '*)
+              session=$(printf '%s\n' "$payload" | sed -n "s/.*--session-id '\([^']*\)'.*/\1/p")
+              pin=$(printf '%s\n' "$payload" | sed -n "s/.*--model '\([^']*\)'.*/\1/p")
+              if [ -n "$session" ] && [ -n "$pin" ]; then
+                config_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+                actual=${FM_FAKE_CLAUDE_MODEL:-$pin}
+                mkdir -p "$config_dir/projects/fm-test"
+                jq -cn --arg session "$session" --arg model "$actual" \
+                  '{type:"assistant",sessionId:$session,message:{role:"assistant",model:$model,content:[]}}' \
+                  > "$config_dir/projects/fm-test/$session.jsonl"
+              fi
+              ;;
+          esac
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -2560,7 +2574,18 @@ case "${1:-} ${2:-}" in
     case "$payload" in
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         printf '%s\n' "$payload" > "$D/launched-command"
-        : > "$D/herdr-agent-live" ;;
+        : > "$D/herdr-agent-live"
+        # A relaunch that resumed a Pi session writes its own turn onto that
+        # session's record. FM_FAKE_TURN_MODEL models the model that turn ran on,
+        # so a case can drive the launcher's pin assertion with a turn instead of
+        # the history the session inherited.
+        if [ -n "${FM_FAKE_TURN_MODEL:-}" ]; then
+          resumed=$(printf '%s\n' "$payload" | sed -n "s/.*--session '\([^']*\)'.*/\1/p")
+          if [ -n "$resumed" ] && [ -f "$resumed" ]; then
+            printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","content":[]}}\n' \
+              "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" >> "$resumed"
+          fi
+        fi ;;
     esac
     exit 0 ;;
   'workspace list')
@@ -2688,6 +2713,102 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
     rc=0
   done
   pass "fm-spawn --relaunch: resumes the bound Pi session only for a Pi registration"
+}
+
+# A resumed Pi session's inherited history is not a verdict about the replacement
+# that resumed it: re-pinning a session that ran another model is legitimate, and
+# pi applies `--model` on top of the stored session (measured 2026-10-31 on pi
+# 1.4.0, docs/verification/runtime-backends.md). So the assertion reads the turn
+# the resumed session itself produced, and the relaunch keeps both the pin and the
+# session identity the Herdr status authority is bound to.
+test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced() {
+  local dir out rc=0 session_file id=resume-model-assert status
+  herdr_case_or_skip "resume-model-assert" "$id" || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  session_file="$dir/fake/pi-bound-session.jsonl"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+    "$session_file" > "$dir/fake/herdr-agent-registration"
+  # The history ran a different model than the pin. Only the resumed turn decides.
+  printf '%s\n' \
+    '{"type":"session","id":"pi-bound-session"}' \
+    '{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","content":[]}}' \
+    > "$session_file"
+
+  out=$(FM_FAKE_TURN_MODEL=anthropic/claude-opus-5-5 FM_MODEL_PIN_POLLS=10 FM_MODEL_PIN_POLL_INTERVAL=0.05 \
+    run_spawn "$dir" "$id" --relaunch --harness pi --model anthropic/claude-opus-5-5) || rc=$?
+  expect_code 0 "$rc" "a pinned Pi resume must relaunch even when its history ran another model"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--session '$session_file'" \
+    "the pinned relaunch must keep the Herdr-bound session identity"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--model 'anthropic/claude-opus-5-5'" \
+    "the pin must stay on the launch line"
+  status=$(cat "$dir/home/state/$id.status")
+  assert_contains "$status" \
+    "model pin asserted: pin 'anthropic/claude-opus-5-5' actual 'anthropic/claude-opus-5-5'" \
+    "the resumed turn's own model must be recorded against the pin"
+  assert_not_contains "$status" "blocked" \
+    "a legitimate re-pin must not open a blocked decision"
+  pass "fm-spawn --relaunch: a pinned Pi resume keeps its session and asserts the turn it produced"
+}
+
+test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin() {
+  local dir out rc=0 session_file id=resume-model-mismatch status
+  herdr_case_or_skip "resume-model-mismatch" "$id" || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  session_file="$dir/fake/pi-bound-session.jsonl"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+    "$session_file" > "$dir/fake/herdr-agent-registration"
+  printf '%s\n' '{"type":"session","id":"pi-bound-session"}' > "$session_file"
+
+  # The resumed session came up on a different model than the pin.
+  out=$(FM_FAKE_TURN_MODEL=anthropic/claude-opus-5 FM_MODEL_PIN_POLLS=10 FM_MODEL_PIN_POLL_INTERVAL=0.05 \
+    run_spawn "$dir" "$id" --relaunch --harness pi --model anthropic/claude-opus-5-5) || rc=$?
+  expect_code 0 "$rc" "a diverged resumed turn is reported, not turned into a launch failure"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--session '$session_file'" \
+    "the relaunch is already delivered; it must not be withdrawn after the fact"
+  status=$(cat "$dir/home/state/$id.status")
+  assert_contains "$status" \
+    "model pin mismatch: pin 'anthropic/claude-opus-5-5' but the resumed pi session reports 'anthropic/claude-opus-5'" \
+    "the record must name both the pin and the model the resumed turn reported"
+  assert_not_contains "$status" "blocked" \
+    "a live worker's model report must not open a blocked decision that could replace it"
+  pass "fm-spawn --relaunch: a diverged pinned Pi resume is recorded against the pin"
+}
+
+test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn() {
+  local dir out rc=0 session_file id=resume-model-silent status
+  herdr_case_or_skip "resume-model-silent" "$id" || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  session_file="$dir/fake/pi-bound-session.jsonl"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+    "$session_file" > "$dir/fake/herdr-agent-registration"
+  printf '%s\n' \
+    '{"type":"session","id":"pi-bound-session"}' \
+    '{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5","content":[]}}' \
+    > "$session_file"
+
+  # The resumed agent produced no turn before the bounded probe expired, so the
+  # inherited record must not be read as this launch's model.
+  out=$(FM_MODEL_PIN_POLLS=2 FM_MODEL_PIN_POLL_INTERVAL=0.01 \
+    run_spawn "$dir" "$id" --relaunch --harness pi --model anthropic/claude-opus-5-5) || rc=$?
+  expect_code 0 "$rc" "a silent resumed session must not fail the relaunch"$'\n'"$out"
+  status=$(cat "$dir/home/state/$id.status")
+  assert_contains "$status" "model pin unverified: pin 'anthropic/claude-opus-5-5'" \
+    "a session that states no new model must be recorded as unverified"
+  assert_not_contains "$status" "model pin mismatch" \
+    "inherited history must never be reported as this launch's model"
+  pass "fm-spawn --relaunch: a silent pinned Pi resume is recorded as unverified"
 }
 
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
@@ -3090,6 +3211,9 @@ test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
+test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced
+test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin
+test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session

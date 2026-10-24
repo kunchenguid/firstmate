@@ -13,6 +13,9 @@ Effort precedence is a per-task captain instruction, then applicable dispatch pr
 Never replace either higher-precedence value.
 Use the fallback only when neither specifies effort.
 
+A pinned launch is asserted after delivery: `bin/fm-spawn.sh` reads the model the started session reports and writes `note: model pin asserted|mismatch|unverified` into the task status.
+`model=` in a task record is the pin that was requested; treat a `mismatch` note as the pin not holding on a live worker, and an `unverified` note as no evidence either way rather than a pass.
+
 Use `low` for well-understood work with an explicit bounded path and `xhigh` for ambiguous investigation or design.
 Choose intermediate levels as complexity, uncertainty, blast radius, or open-ended reasoning rises.
 If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather than silently omitting the intent.
