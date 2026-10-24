@@ -1,0 +1,828 @@
+#!/usr/bin/env bash
+# fm-flow-snapshot.sh - read-only per-agent pipeline snapshot.
+#
+# Output contract: one JSON object on stdout with schema `fm-flow-snapshot.v1`.
+# This header owns that wire format, the flags, the environment knobs, and the
+# exit codes.
+#
+# The command is read-only: it takes no session lock, drains no wakes, arms no
+# watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
+# run by hand.
+#
+# It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of fleet
+# state, and adds the named pipeline step each agent is on and its GitHub check
+# rollup.
+#
+# Top-level fields:
+#   schema: stable schema id, `fm-flow-snapshot.v1`.
+#   generated: UTC observation time, derived from generated_epoch.
+#   generated_epoch: that same instant in epoch seconds, the document's only
+#     clock.
+#   fm_home: resolved operational home.
+#   agents[]: one record per drawn agent, pipeline agents first.
+#     id, branch, project, worktree, window: the task's identity and where it
+#       runs, every one of them read from the fleet document.
+#     kind: the fleet document's task kind. mode: its dispatch mode.
+#     pipeline: whether this agent carries a no-mistakes run.
+#     state: {ok,value,source,detail,reason} - the fleet document's own
+#       current_state, carried by a `pipeline:false` agent. It is null for a
+#       `pipeline:true` agent, whose journey is its steps instead.
+#     endpoint_alive: true, or "unknown" when liveness was never established.
+#       A provably dead endpoint is omitted rather than drawn, so false does
+#       not appear here.
+#     worker: {harness,model,effort}. A field the record does not state, or
+#       states as the `default` the harness resolved, is null.
+#     pr: {url,number}, both null when no pull request is recorded.
+#     collection: {ok,reason} - whether this agent's pipeline read succeeded.
+#       ok false means this agent's step list could not be established, so
+#       steps and active_steps are empty; run may still carry the id and status
+#       the overview attributed, when it was the per-run read that failed.
+#     run: {present,id,status,error,head} - the no-mistakes run attributed to
+#       this task's branch. status is the run LIST's own word - one of pending,
+#       running, completed, failed or cancelled - not the per-run detail's wider
+#       vocabulary, which also admits `fixing` and `ci`, so a fix round and a ci
+#       wait both read as `running` here and steps/active_steps are where the
+#       phase shows. error is the run's OWN recorded error and is empty unless
+#       the read succeeded; a failed read's own first line is in
+#       collection.reason instead.
+#     steps[]: {step,status,findings,duration_ms}, the run's own steps behind
+#       the synthetic `building` step described under the limits below.
+#     active_steps[]: {step,status,active_for,active_ms,last_activity,
+#       agent_pid,round}, one per step still running. active_for is the tool's
+#       humanised elapsed and active_ms is that value in milliseconds.
+#     ci: {collection:{ok,reason}, checks[], total, passed, failed, pending,
+#       skipped, head, pr_state}. Each check is
+#       {kind,workflow,name,started,status,conclusion,verdict}, where verdict
+#       is one of passed, failed, pending or skipped and the four counts are
+#       its tally. head is the commit those checks describe, and pr_state the
+#       pull request's own OPEN, MERGED or CLOSED.
+#   omitted[]: {id,kind,window,reason}, one per task whose recorded window no
+#     longer exists. A record that could not be built is skipped with no entry
+#     here, so agents[] plus omitted[] is not guaranteed to account for every
+#     task in the fleet document.
+#
+# A numeric cell the running build did not declare is null, never zero: zero is
+# a measured value here.
+#
+# An agent is a task with a worker behind it, whatever its kind, and membership
+# is decided by the fleet document's `endpoint.exists`, because a
+# `state/<id>.meta` outlives the window it names. Only a recorded endpoint that
+# PROVABLY no longer resolves is dropped, to `omitted`; null is liveness never
+# established - which is every REMOTE worker - and is drawn with
+# `endpoint_alive: "unknown"`, the reading bin/fm-fleet-view.sh renders.
+#
+# Kind decides only what an agent CARRIES: a `pipeline:true` agent carries a
+# no-mistakes run, its steps and its checks, and a `pipeline:false` agent - a
+# scout, a second mate - carries the fleet document's own `current_state`
+# instead. Pipeline agents are emitted first, so the wire order is the draw
+# order.
+#
+# Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
+# owner of which run belongs to a branch, so a worker cannot forge that answer.
+#
+# Limits, stated because a blank cell should never read as a measured zero:
+#
+#   - Checks are read for GitHub pull requests only; a GitLab merge request or
+#     a Gerrit change reports as not read.
+#   - The building phase starts at the task record's modification time, which is
+#     approximate, and reports completed with no duration once a run exists,
+#     because no machine record states when the run began.
+#   - A run whose pipeline executed outside the task's own copy of the
+#     repository, such as a scratch clone raising a PR elsewhere, does not
+#     resolve here, and that row reports its run as unestablished.
+#   - When two live no-mistakes runs share one branch, bin/fm-nm-run-lib.sh
+#     reports that neither has exclusive authority rather than picking one, and
+#     this command carries that answer through as a failed collection with the
+#     library's own reason, because choosing between them is not a read-only
+#     view's decision.
+#   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
+#     published, read at ITS observation time rather than at draw time.
+#   - The reads are per agent and strictly serial: a pipeline agent costs up to
+#     two bounded `no-mistakes axi status` reads, one more inside
+#     bin/fm-nm-run-lib.sh when the run list is capped, and one bounded
+#     `gh pr view`. Each timeout below bounds ONE such read, so the whole-fleet
+#     form has no total bound and its cost grows with the drawn fleet: `--task`
+#     is the targeted refresh and `--no-ci` drops the GitHub read.
+#
+# Usage:
+#   fm-flow-snapshot.sh [--no-ci] [--task <id>]
+#
+#   --no-ci       skip every GitHub read this command can reach, so the whole
+#                 snapshot is local; it also sets FM_CREW_STATE_NO_FORGE for the
+#                 fleet read, whose crew-state reader would otherwise make a
+#                 bounded forge call of its own
+#   --task <id>   restrict the snapshot to one task, for a targeted refresh
+#
+# Environment knobs:
+#   FM_FLOW_SNAPSHOT_NM_TIMEOUT     seconds bounding one `no-mistakes axi
+#                                   status` read (default 10)
+#   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
+#                                   20)
+#   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds, and
+#                                   the ONLY clock input: the ISO stamp is
+#                                   derived from it, so one knob sets one
+#                                   instant
+#
+# Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
+# 2 usage error. A per-agent collection failure is NOT an error: it is reported
+# in that agent's `collection` object and the snapshot still succeeds, because
+# one wedged worker must not blank the whole view.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
+GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
+# Whole seconds or the default, the guard every sibling collector applies: a
+# non-numeric value reaches `timeout` as its duration argument, where it fails
+# the call rather than the parse.
+case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+case "$GH_TIMEOUT" in ''|*[!0-9]*) GH_TIMEOUT=20 ;; esac
+
+WANT_CI=1
+ONLY_TASK=
+
+# The header IS the help, walked to the first line that is not a comment, so no
+# line range can fall out of step with it and stop the help mid-sentence.
+usage() {
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-ci) WANT_CI=0 ;;
+    --task)
+      shift
+      [ $# -gt 0 ] || { echo "fm-flow-snapshot: --task needs an id" >&2; exit 2; }
+      ONLY_TASK=$1
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; exit 1; }
+
+# shellcheck source=bin/fm-backend.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backend.sh"
+# The ONE owner of the pull request link grammar: a link is read through
+# fm_pr_url_parse rather than by stripping its trailing number, because the
+# number alone does not say WHICH repository it belongs to.
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# The ONE owner of no-mistakes run attribution, and of bounding a call to it.
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
+
+# One instant, one source: the epoch knob is validated BEFORE the ISO stamp is
+# derived from it, so the two can never describe different moments.
+iso_of_epoch() {  # <epoch-seconds>
+  if [ "$(uname)" = Darwin ]; then
+    date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
+  else
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
+NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
+case "$NOW_EPOCH" in ''|*[!0-9]*) NOW_EPOCH=$(date -u +%s) ;; esac
+NOW_ISO=$(iso_of_epoch "$NOW_EPOCH")
+
+# Portable mtime in epoch seconds, the repository's own idiom for it.
+path_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# `no-mistakes axi status` emits TOON on stdout and its version banner on
+# stderr, so stdout needs no pre-filtering. A block is a header line naming its
+# columns followed by one comma-separated row per entry.
+#
+# ONE prelude serves both block parsers below, which index by the COLUMN NAMES
+# that header declares rather than by position, because the tool has already
+# inserted a column mid-block between versions and a positional read would
+# relabel every column after it. The split is quote-aware because a quoted cell
+# may itself contain commas.
+TOON_AWK_PRELUDE='
+    function read_header(line,   body, names, i, m) {
+      # Cleared first, so a column an earlier block declared cannot survive into
+      # a block whose header does not name it.
+      for (i in col) delete col[i]
+      body = line
+      sub(/^[^{]*\{/, "", body)
+      sub(/\}:[[:space:]]*$/, "", body)
+      m = split(body, names, ",")
+      for (i = 1; i <= m; i++) {
+        gsub(/^[ \t]+/, "", names[i]); gsub(/[ \t]+$/, "", names[i])
+        col[names[i]] = i
+      }
+      return m
+    }
+    # Splits on commas outside quotes and sets the global n: this emitter
+    # escapes a quote inside a quoted cell, so toggling on every quote would
+    # close the field early and shift every later column.
+    function split_row(line,   i, c, cur, q, esc) {
+      n = 0; cur = ""; q = 0; esc = 0
+      for (i in f) delete f[i]
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (esc) { cur = cur c; esc = 0; continue }
+        if (q && c == "\\") { esc = 1; continue }
+        if (c == "\"") { q = !q; continue }
+        if (c == "," && !q) { f[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      f[++n] = cur
+      return n
+    }
+    # An undeclared column reads as empty rather than as whichever value sits
+    # at that position, and control bytes are escaped because a JSON string
+    # cannot carry one and last_activity holds the tail of an agent log line.
+    function field(name,   v) {
+      if (!col[name] || col[name] > n) return ""
+      v = f[col[name]]
+      gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
+      gsub(/\t/, "\\t", v); gsub(/\r/, "\\r", v); gsub(/\n/, "\\n", v)
+      gsub(/[\001-\010\013\014\016-\037]/, "", v)
+      return v
+    }
+    # A row is decided by INDENTATION rather than by its first character,
+    # because this emitter quotes some leading cells and a miss would also
+    # close the block, discarding every row after it.
+    function is_row(line) {
+      if (line !~ /^    [^ ]/) return 0
+      if (line ~ /^    [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]\{/) return 0
+      return 1
+    }
+    function has_cols(names,   parts, i, m) {
+      m = split(names, parts, " ")
+      for (i = 1; i <= m; i++) if (!col[parts[i]] || col[parts[i]] > n) return 0
+      return 1
+    }
+    # A numeric cell the header did not declare, or that will not parse, is
+    # null: zero is a MEASURED value here, so it would report a measurement
+    # that was never made.
+    function num(name,   v) {
+      v = field(name)
+      return (v ~ /^-?[0-9]+$/) ? v : "null"
+    }
+'
+
+steps_json() {  # <axi-status-output>
+  printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
+    /^  steps\[[0-9]+\]\{/ { read_header($0); in_steps = 1; next }
+    in_steps {
+      if (!is_row($0)) { in_steps = 0; next }
+      line = $0
+      sub(/^    /, "", line)
+      split_row(line)
+      if (!has_cols("step status")) next
+      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"findings\":%s,\"duration_ms\":%s}",
+        (emitted++ ? "," : ""), field("step"), field("status"),
+        num("findings"), num("duration_ms")
+    }
+  ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
+}
+
+active_steps_json() {  # <axi-status-output>
+  printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
+    # A RUNNING step publishes no duration, only the humanised `active_for`, so
+    # it is parsed back to milliseconds here and validated END TO END first: a
+    # unit this parser does not know yields null, not an understated time.
+    function active_ms(v,   total, tok, num, unit, rest) {
+      if (v !~ /^([0-9]+(\.[0-9]+)?(ms|[dhms]))+$/) return "null"
+      rest = v; total = 0
+      while (match(rest, /[0-9]+(\.[0-9]+)?(ms|[dhms])/)) {
+        tok = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (tok ~ /ms$/) { num = substr(tok, 1, length(tok) - 2) + 0; unit = "ms" }
+        else { num = substr(tok, 1, length(tok) - 1) + 0; unit = substr(tok, length(tok)) }
+        if (unit == "ms") total += num
+        else if (unit == "s") total += num * 1000
+        else if (unit == "m") total += num * 60000
+        else if (unit == "h") total += num * 3600000
+        else if (unit == "d") total += num * 86400000
+      }
+      return sprintf("%d", total)
+    }
+    /^  active_steps\[[0-9]+\]\{/ { read_header($0); in_a = 1; next }
+    in_a {
+      if (!is_row($0)) { in_a = 0; next }
+      line = $0
+      sub(/^    /, "", line)
+      split_row(line)
+      if (!has_cols("step status active_for")) next
+      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"active_for\":\"%s\",\"active_ms\":%s,\"last_activity\":\"%s\",\"agent_pid\":\"%s\",\"round\":\"%s\"}",
+        (emitted++ ? "," : ""), field("step"), field("status"), field("active_for"),
+        active_ms(field("active_for")), field("last_activity"), field("agent_pid"),
+        field("round")
+    }
+  ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
+}
+
+CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"head":"","pr_state":""}'
+ci_unread() {  # <reason>
+  printf '%s' "$CI_EMPTY" | jq --arg r "$1" '.collection.reason = $r'
+}
+
+ci_json() {  # <pr-url>
+  local url=$1 raw norm head pr_state
+  # A link the one parser refuses is NOT EVALUATED: reading a trailing number
+  # off an unrecognised string is how a view reports another repository's PR.
+  if ! fm_pr_url_parse "$url"; then
+    ci_unread "not a pull request link this view can read"
+    return
+  fi
+  if [ "$FM_PR_PROVIDER" != github ]; then
+    ci_unread "checks are read for GitHub pull requests only"
+    return
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    ci_unread "gh not found"
+    return
+  fi
+  # --repo makes the answer the TASK's repository, because gh otherwise resolves
+  # it from the working directory, which is the firstmate root for every task
+  # this view draws. headRefOid and state ride the same call as the checks, so a
+  # green tally cannot be read as evidence that anything is still open.
+  raw=$(fm_nm_bounded "$FM_ROOT" "$GH_TIMEOUT" \
+    gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" \
+    --json statusCheckRollup,headRefOid,state 2>/dev/null) || raw=
+  if [ -z "$raw" ]; then
+    ci_unread "gh read failed or timed out"
+    return
+  fi
+  # The counts have ONE job: agree with what `gh pr checks <n>` prints for the
+  # same PR, and three rules get there. Checks are keyed on kind, workflow and
+  # name together, because name alone is not unique and a commit status carries
+  # no workflow, so `kind` stays on the wire to tell two such entries apart.
+  # `status` is read before `conclusion`, or a re-running check counts as both
+  # passed and pending on a conclusion left over from its previous attempt.
+  # SKIPPED and NEUTRAL are their own class, never folded into passing, which is
+  # where `gh pr checks` and bin/fm-pr-merge.sh both put them.
+  #
+  # A StatusContext, a commit status rather than a check run, carries `state`
+  # and `context` instead, so it is normalised rather than dropped into the
+  # pending bucket for want of a `status` field.
+  norm=$(printf '%s' "$raw" | jq -c '
+    def normalize:
+      if (.__typename // "") == "StatusContext" then
+        { kind: "status",
+          workflow: "", name: (.context // ""), started: (.createdAt // ""),
+          status: (if (.state // "") == "PENDING" or (.state // "") == "EXPECTED"
+                   then "IN_PROGRESS" else "COMPLETED" end),
+          conclusion: (.state // "") }
+      else
+        { kind: "check",
+          workflow: (.workflowName // ""), name: (.name // ""),
+          started: (.startedAt // ""),
+          status: (.status // ""), conclusion: (.conclusion // "") }
+      end;
+    (.statusCheckRollup // [])
+    | map(normalize)
+    | to_entries
+    | map(.value + {seq: .key})
+    | group_by([.kind, .workflow, .name])
+    | map(max_by([(.status != "COMPLETED"), .started, .seq]))
+    | sort_by(.seq)
+    | map(del(.seq))
+    | map(. + {verdict:
+        (if .status != "COMPLETED" then "pending"
+         elif .conclusion == "SKIPPED" or .conclusion == "NEUTRAL" then "skipped"
+         elif .conclusion == "SUCCESS" then "passed"
+         else "failed" end)})') || norm=
+  if [ -z "$norm" ]; then
+    ci_unread "check rollup could not be read"
+    return
+  fi
+  head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
+  # Empty when GitHub did not report it, read as a state that could not be read
+  # rather than as an open PR.
+  pr_state=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || pr_state=
+  printf '%s' "$norm" | jq --arg head "$head" --arg pr_state "$pr_state" '{
+      collection: {ok: true, reason: ""},
+      checks: .,
+      total: length,
+      passed: (map(select(.verdict == "passed")) | length),
+      failed: (map(select(.verdict == "failed")) | length),
+      pending: (map(select(.verdict == "pending")) | length),
+      skipped: (map(select(.verdict == "skipped")) | length),
+      head: $head,
+      pr_state: $pr_state
+    }'
+}
+
+# The failed read's own words: its first line of stdout, else the first line of
+# stderr that is not the version banner. The streams are never merged, because
+# that banner rides every call and would reach the TOON the step parsers read.
+axi_error() {  # <stdout> <stderr-file>
+  local line
+  line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
+  if [ -z "$line" ] && [ -s "$2" ]; then
+    # A literal escape byte, not \x1b: that is a GNU sed extension, and the BSD
+    # sed this file already branches for would match the characters "x1b".
+    line=$(sed $'s/\033\\[[0-9;]*m//g' "$2" 2>/dev/null |
+      grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
+      head -1)
+  fi
+  printf '%s' "$line" | cut -c1-160
+}
+
+# The fields every agent carries whether or not it has a pipeline, resolved once
+# so the two builders below cannot drift apart in how they read the fleet
+# document. Sets FM_ROW_* globals because several are needed as jq arguments.
+row_common() {  # <task-json>
+  local task=$1
+  FM_ROW_ID=$(printf '%s' "$task" | jq -r '.id')
+  FM_ROW_KIND=$(printf '%s' "$task" | jq -r '.kind // ""')
+  FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
+  # The repository-wide default prefix, applied only for a record written before
+  # the branch was recorded at all.
+  FM_ROW_BRANCH=$(printf '%s' "$task" | jq -r '.branch // ""')
+  [ -n "$FM_ROW_BRANCH" ] || FM_ROW_BRANCH="fm/$FM_ROW_ID"
+  FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
+  FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
+  FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
+  # true, false, or "unknown" when liveness was never established. A remote
+  # worker is always the third: bin/fm-fleet-snapshot.sh does not probe one.
+  FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -c '
+    if .endpoint.exists == null then "unknown" else (.endpoint.exists == true) end')
+  # bin/fm-fleet-snapshot.sh fills this for ANY task, from the record or from
+  # the first link in its status log, so a scout that quoted a pull request
+  # carries one too, numbered by the same parser everywhere.
+  FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
+  FM_ROW_PR_NUMBER=null
+  if [ -n "$FM_ROW_PR_URL" ] && fm_pr_url_parse "$FM_ROW_PR_URL"; then
+    FM_ROW_PR_NUMBER=$FM_PR_NUMBER
+  fi
+  FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
+  # Which model and effort the WORKER itself runs on, from the fields
+  # bin/fm-spawn.sh wrote at dispatch; `default` means the harness picked, which
+  # is not the name of a model, so it is emitted as absent rather than as the
+  # word. These two are the only facts the fleet document does not publish.
+  FM_ROW_HARNESS=$(printf '%s' "$task" | jq -r '.harness // ""')
+  FM_ROW_MODEL=$(fm_meta_get "$FM_ROW_META" model)
+  [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
+  FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
+  [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
+}
+
+# The crew's current state as bin/fm-fleet-snapshot.sh published it, rather than
+# a second parse of bin/fm-crew-state.sh that could disagree with the fleet
+# document inside a single frame. Resolved by the one builder that carries it,
+# because a pipeline agent states `state:null` and never consults it.
+row_state() {  # <task-json>
+  printf '%s' "$1" | jq -c '
+    if (.current_state | type) == "object" and ((.current_state.state // "") != "")
+    then {ok: true, value: .current_state.state, source: (.current_state.source // ""),
+          detail: (.current_state.detail // ""), reason: ""}
+    else {ok: false, value: "", source: "", detail: "",
+          reason: "the fleet snapshot published no current state for this task"}
+    end'
+}
+
+agent_json() {  # <task-json>
+  local task=$1 id kind mode project worktree window branch endpoint_alive pr_url
+  local rundir overview overview_rc sel axi rc steps actives ci meta
+  local run_id run_status run_head run_error
+
+  row_common "$task"
+  id=$FM_ROW_ID
+  kind=$FM_ROW_KIND
+  mode=$FM_ROW_MODE
+  project=$FM_ROW_PROJECT
+  worktree=$FM_ROW_WORKTREE
+  window=$FM_ROW_WINDOW
+  endpoint_alive=$FM_ROW_ENDPOINT_ALIVE
+  pr_url=$FM_ROW_PR_URL
+  meta=$FM_ROW_META
+  # Read, never derived: a project can register its own branch prefix, so
+  # deriving fm/<id> here would key run attribution on a branch no run was ever
+  # created for and report a busy task as having no pipeline run at all.
+  branch=$FM_ROW_BRANCH
+
+  steps='[]'
+  actives='[]'
+  run_id=''
+  run_status=''
+  run_head=''
+  run_error=''
+  local collect_ok=true collect_reason=''
+
+  # `no-mistakes axi status` resolves its repository from the WORKING DIRECTORY,
+  # so the read is done in the task's own copy and the subshell inside
+  # fm_nm_bounded keeps that change from carrying into the next task. There is
+  # no second acceptance path: the project root answers for another repository.
+  rundir=$worktree
+  if [ -z "$rundir" ] || [ ! -d "$rundir" ]; then
+    collect_ok=false
+    collect_reason='no copy of the repository left to read the run from'
+  elif ! command -v no-mistakes >/dev/null 2>&1; then
+    collect_ok=false
+    collect_reason='no-mistakes not found'
+  else
+    # The bounded form keeps the exit status, which the fail-open fm_nm_run
+    # discards: without it a read that TIMED OUT is indistinguishable from a
+    # pipeline with no runs, and the row would report a failed read's contents.
+    overview=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status 2>/dev/null)
+    overview_rc=$?
+    if [ $overview_rc -ne 0 ]; then
+      collect_ok=false
+      if [ "$overview_rc" = 124 ]; then
+        collect_reason="the run list timed out after ${NM_TIMEOUT}s"
+      else
+        collect_reason="the run list could not be read (exit $overview_rc)"
+      fi
+      sel=
+    else
+      sel=$(fm_nm_select_run "$branch" "$overview" "$rundir" "$NM_TIMEOUT")
+    fi
+    case $sel in
+      "") ;;
+      selected\|*)
+        run_id=$(printf '%s' "$sel" | cut -d'|' -f2)
+        run_status=$(printf '%s' "$sel" | cut -d'|' -f3)
+        ;;
+      absent)
+        collect_reason='no pipeline run for this branch' ;;
+      unavailable)
+        collect_ok=false
+        collect_reason='no-mistakes listed no runs to read' ;;
+      *)
+        # unknown|<reason>: the library's own words kept verbatim, because which
+        # way the run list was unreadable is what the captain can act on.
+        collect_ok=false
+        collect_reason=${sel#unknown|} ;;
+    esac
+  fi
+
+  if [ -n "$run_id" ]; then
+    # Allocated rather than constructed, as the agents buffer is: a predictable
+    # name lets `2>` follow a symlink planted there and truncate what it
+    # resolves to.
+    local axi_err
+    axi_err=$(mktemp "${TMPDIR:-/tmp}/fm-flow-axi-err.XXXXXX") || axi_err=
+    if [ -z "$axi_err" ]; then
+      collect_ok=false
+      collect_reason='could not allocate a buffer for the run read'
+      run_id=''
+      run_status=''
+    fi
+  fi
+  if [ -n "$run_id" ]; then
+    axi=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status --run "$run_id" 2>"$axi_err")
+    rc=$?
+    if [ $rc -ne 0 ] || [ -z "$axi" ]; then
+      # Exit 0 with an empty stdout is its own outcome, reported as such rather
+      # than as a silent success.
+      local why
+      if [ "$rc" = 124 ]; then
+        why="axi status timed out after ${NM_TIMEOUT}s"
+      elif [ "$rc" = 0 ]; then
+        why='axi printed nothing'
+      else
+        why=$(axi_error "$axi" "$axi_err")
+        if [ -n "$why" ]; then
+          why="axi status failed (exit $rc): $why"
+        else
+          why="axi status failed (exit $rc)"
+        fi
+      fi
+      collect_ok=false
+      collect_reason="$why"
+    fi
+    rm -f "$axi_err"
+    if [ "$collect_ok" = true ]; then
+      steps=$(steps_json "$axi")
+      actives=$(active_steps_json "$axi")
+      # fm_nm_field, not a reader of this script's own: these scalars are not
+      # all at one indentation - `head` is a child of the run block while
+      # `error` sits at column 0 - so a reader keyed on two spaces misses them.
+      run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" head)")
+      run_error=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" error)")
+    fi
+  fi
+
+  # The worker's own implementation phase, which no pipeline record describes
+  # because it happens before the pipeline exists; its start and precision are
+  # the header's second limit. No readable record leaves the step `unknown`
+  # rather than `pending`, which would be the wrong claim for a running worker.
+  local built_at build_step build_active=''
+  built_at=$(path_mtime "$meta")
+  if [ -n "$run_id" ]; then
+    build_step='{"step":"building","status":"completed","findings":0,"duration_ms":null}'
+  elif [ -n "$built_at" ]; then
+    build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
+    # Not one of the tool's own steps, so `active_for` is empty and active_ms is
+    # computed from the two epochs directly.
+    local since=$(( (NOW_EPOCH - built_at) * 1000 ))
+    [ "$since" -ge 0 ] || since=0
+    build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
+  else
+    # No start time could be read, so the duration is unknown, not zero.
+    build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":null}'
+  fi
+
+  # Only when the pipeline read succeeded: `collection.ok` false means the step
+  # list could not be established, so one step slipped in beside it would be a
+  # fact reported inside a frame that says nothing is known.
+  if [ "$collect_ok" = true ]; then
+    steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
+    if [ -n "$build_active" ]; then
+      actives=$(printf '%s' "$actives" | jq -c --argjson b "$build_active" '[$b] + .')
+    fi
+  else
+    actives='[]'
+  fi
+
+  # Three different answers, never one: "skipped" is the operator's --no-ci, a
+  # task with no recorded pull request has nothing to read checks FOR, and only
+  # a task with both gets a real read.
+  if [ -z "$pr_url" ]; then
+    ci=$(ci_unread "no pull request recorded for this task")
+  elif [ "$WANT_CI" = 0 ]; then
+    ci=$(ci_unread "skipped")
+  else
+    ci=$(ci_json "$pr_url")
+  fi
+
+  local pr_num=$FM_ROW_PR_NUMBER
+
+  jq -n \
+    --arg id "$id" \
+    --arg branch "$branch" \
+    --arg project "$project" \
+    --arg worktree "$worktree" \
+    --arg window "$window" \
+    --arg kind "$kind" \
+    --arg mode "$mode" \
+    --arg pr_url "$pr_url" \
+    --arg run_id "$run_id" \
+    --arg run_status "$run_status" \
+    --arg run_error "$run_error" \
+    --arg run_head "$run_head" \
+    --arg collect_reason "$collect_reason" \
+    --argjson endpoint_alive "$endpoint_alive" \
+    --argjson collect_ok "$collect_ok" \
+    --argjson pr_num "$pr_num" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
+    --argjson steps "$steps" \
+    --argjson actives "$actives" \
+    --argjson ci "$ci" \
+    '{
+      id:$id, branch:$branch, project:$project, worktree:$worktree,
+      window:$window, kind:$kind, mode:$mode,
+      pipeline:true,
+      state:null,
+      endpoint_alive:$endpoint_alive,
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
+      pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
+      collection:{ok:$collect_ok, reason:$collect_reason},
+      run:{
+        present:($run_id != ""),
+        id:$run_id, status:$run_status,
+        error:$run_error, head:$run_head
+      },
+      steps:$steps,
+      active_steps:$actives,
+      ci:$ci
+    }'
+}
+
+# A live worker that runs no no-mistakes pipeline: a scout, a second mate. It is
+# drawn like any other live worker, because that is what liveness earns, but
+# with no run, steps or checks, since permanently empty boxes would be an
+# invented journey; `pipeline:false` states that rather than leaving the
+# renderer to infer it from the kind string.
+compact_json() {  # <task-json>
+  local task=$1 state
+
+  row_common "$task"
+  state=$(row_state "$task")
+
+  jq -n \
+    --arg id "$FM_ROW_ID" \
+    --arg branch "$FM_ROW_BRANCH" \
+    --arg project "$FM_ROW_PROJECT" \
+    --arg worktree "$FM_ROW_WORKTREE" \
+    --arg window "$FM_ROW_WINDOW" \
+    --arg kind "$FM_ROW_KIND" \
+    --arg mode "$FM_ROW_MODE" \
+    --arg harness "$FM_ROW_HARNESS" \
+    --arg w_model "$FM_ROW_MODEL" \
+    --arg w_effort "$FM_ROW_EFFORT" \
+    --arg pr_url "$FM_ROW_PR_URL" \
+    --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
+    --argjson state "$state" \
+    --argjson pr_num "$FM_ROW_PR_NUMBER" \
+    --argjson ci "$CI_EMPTY" \
+    '{
+      id:$id, branch:$branch, project:$project, worktree:$worktree,
+      window:$window, kind:$kind, mode:$mode,
+      pipeline:false,
+      state:$state,
+      endpoint_alive:$endpoint_alive,
+      worker:{
+        harness:(if $harness == "" then null else $harness end),
+        model:(if $w_model == "" then null else $w_model end),
+        effort:(if $w_effort == "" then null else $w_effort end)
+      },
+      pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
+      collection:{ok:true, reason:"this worker runs no pipeline"},
+      run:{present:false, id:"", status:"", error:"", head:""},
+      steps:[],
+      active_steps:[],
+      ci:($ci | .collection.reason = "this worker runs no pipeline, so no checks are read")
+    }'
+}
+
+# The fleet is always read through its owner, never from a file handed in: a
+# second input would be a second source of truth for the one thing this view
+# must not disagree with the rest of firstmate about. Under --no-ci that read is
+# told to skip its forge fallback, or "the whole snapshot is local" is false.
+FLEET_NO_FORGE=${FM_CREW_STATE_NO_FORGE:-0}
+[ "$WANT_CI" = 1 ] || FLEET_NO_FORGE=1
+FLEET=$(
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+  FM_CREW_STATE_NO_FORGE="$FLEET_NO_FORGE" \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
+) || FLEET=
+
+# The fleet read is the one hard dependency: an empty document would read as an
+# empty fleet, a different and much more dangerous claim than a failure.
+if [ -z "$FLEET" ] || ! printf '%s' "$FLEET" | jq -e '.tasks' >/dev/null 2>&1; then
+  echo "fm-flow-snapshot: fleet snapshot unavailable; refusing to emit an empty fleet" >&2
+  exit 1
+fi
+
+SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
+  [ .tasks[] | select($only == "" or .id == $only) ]')
+# `endpoint.exists` is consumed rather than re-derived, so this view can never
+# disagree with the rest of firstmate about which workers are running: only a
+# provable false drops a task, and null is drawn as unknown, not as dead.
+ORDER='([ .[] | select(.kind == "ship") ] + [ .[] | select(.kind != "ship") ])[]'
+TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists != false) ] | $ORDER")
+OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
+  .[]
+  | select(.endpoint.exists == false)
+  | {id, kind:(.kind // ""), window:(.endpoint.target // null),
+     reason:"recorded window no longer exists"}
+]')
+
+AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX") \
+  || { echo "fm-flow-snapshot: could not create temporary file" >&2; exit 1; }
+trap 'rm -f "$AGENTS_FILE"' EXIT INT TERM
+printf '[' > "$AGENTS_FILE"
+FIRST=1
+while IFS= read -r task; do
+  [ -n "$task" ] || continue
+  # The record is built BEFORE its separator, and a record that cannot be built
+  # is skipped together with its separator, so one failed agent cannot leave a
+  # dangling comma that the closing slurp refuses.
+  RECORD=
+  if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
+    RECORD=$(agent_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
+  else
+    RECORD=$(compact_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
+  fi
+  [ -n "$RECORD" ] || continue
+  printf '%s' "$RECORD" | jq -e . >/dev/null 2>&1 || continue
+  [ "$FIRST" = 1 ] || printf ',' >> "$AGENTS_FILE"
+  FIRST=0
+  printf '%s' "$RECORD" >> "$AGENTS_FILE"
+done <<EOF
+$TASKS
+EOF
+printf ']' >> "$AGENTS_FILE"
+
+# The agents array is passed by FILE, never as an argv string, so the document
+# does not stop being emittable once the fleet outgrows ARG_MAX.
+jq -n \
+  --arg generated "$NOW_ISO" \
+  --argjson generated_epoch "$NOW_EPOCH" \
+  --arg fm_home "$FM_HOME" \
+  --argjson omitted "$OMITTED" \
+  --slurpfile agents "$AGENTS_FILE" \
+  '{
+    schema:"fm-flow-snapshot.v1",
+    generated:$generated,
+    generated_epoch:$generated_epoch,
+    fm_home:$fm_home,
+    agents:($agents[0] // []),
+    omitted:$omitted
+  }'

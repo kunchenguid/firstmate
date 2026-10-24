@@ -34,6 +34,7 @@ The same run measured the wedge-cap parity suite at 27763 ms, which `bin/fm-test
 `test_portable_serial_packing_budget_boundary` now pins every other fixture script to 1 ms, so packing exactly at the 1200000 ms budget is accepted and one millisecond above it is refused even when real serial members have no hint.
 The coverage-guard test owns modeled real-hint headroom under that budget.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
+`tests/fm-flow-snapshot.test.sh` uses 25251 ms from run [37764585674](https://github.com/kunchenguid/firstmate/actions/runs/37764585674), its only successful sample, because that serial member was added after this baseline.
 
 ## Parallel lanes
 
