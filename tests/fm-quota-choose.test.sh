@@ -692,6 +692,12 @@ out=$(call_choose --snapshot "$LAB/schema6-default.json" --candidate codex:defau
 [ "$out" = "codex default" ] || fail "native Codex did not fall back to the default row: $out"
 ok "native Codex binds to codex-home before default, independently of model and row order"
 
+jq '.providers |= map(select(.provider != "codex" or .accountKey == "codex-home") |
+  if .accountKey == "codex-home" then .accountKey = "native-codex" | .accountKeys = ["codex-home"] else . end)' "$SCHEMA6_NATIVE" > "$LAB/schema6-covered-key.json"
+out=$(call_choose --snapshot "$LAB/schema6-covered-key.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex did not bind its covered credential key: $out"
+ok "native Codex matches its producer-declared covered credential key"
+
 jq '.schemaVersion = 5 | .providers |= unique_by(.provider) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 out=$(call_choose --snapshot "$SCHEMA5_PAIR" --candidate codex:default --candidate cursor:default)
 [ "$out" = "codex default" ] || fail "schema 5 pair snapshot returned: $out"
