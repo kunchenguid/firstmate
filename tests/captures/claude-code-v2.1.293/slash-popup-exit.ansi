@@ -1,0 +1,12 @@
+
+[0m[38;2;136;136;136m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ [0m[38;2;177;185;249m/exit[0m
+[0m[38;2;136;136;136m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;177;185;249m❯ /[0m[1m[38;2;177;185;249mexit[0m[38;2;177;185;249m                                          [0m[1m[38;2;177;185;249mExit[0m[38;2;177;185;249m the CLI[0m
+  [0m[38;2;153;153;153m  /context                                       Visualize current context usage as a colored grid[0m
+  [0m[38;2;153;153;153m  /usage-credits                                 Configure usage credits or request them from your admin when you[0m
+                                                   [0m[38;2;153;153;153mhit a limit[0m
+  [0m[38;2;153;153;153m  /example-plugin:a-long-namespaced-skill-name   (example-plugin) A namespaced plugin skill whose description is  [0m
+                                                   [0m[38;2;153;153;153mlong enough to wrap onto a continuation row at the description col…[0m
+  [0m[38;2;153;153;153m  /quiet                                         Enter quiet supervision mode when the captain invokes /quiet or[0m
+                                                   [0m[38;2;153;153;153masks for quiet mode, quiet-while-present, or fewer routine wake t…[0m
