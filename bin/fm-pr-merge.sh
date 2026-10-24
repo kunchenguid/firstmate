@@ -6,7 +6,7 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded; a Forgejo
 # pull request is addressed through tea by the derived owner and repository
-# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
+# plus a "tea login" resolved fresh from the parsed host and scheme on every run. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
@@ -533,7 +533,8 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
     exit 1
   fi
-  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST") || {
+  case "$URL" in http://*) F_SCHEME=http ;; *) F_SCHEME=https ;; esac
+  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST" "$F_SCHEME") || {
     echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }

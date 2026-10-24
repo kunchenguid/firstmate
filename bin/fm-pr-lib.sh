@@ -19,6 +19,15 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+# Forgejo alone also serves instances an operator reaches over a private
+# encrypted mesh, where plain http on a host[:port] URL is that instance's one
+# legitimate spelling. FM_PR_FORGEJO_HTTP_HOSTS is the operator's pin for
+# exactly those instances: a comma-separated list of exact host or host:port
+# entries, and a Forgejo pull request URL is accepted with the http scheme only
+# when its host[:port] is one of those entries byte-for-byte
+# (fm_pr_forgejo_http_host_allowed). An http URL is never accepted without an
+# exact operator pin, and the list is read at each parse and login resolution
+# rather than cached.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -189,6 +198,26 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# The operator's pin list for plain-http Forgejo instances,
+# FM_PR_FORGEJO_HTTP_HOSTS: a comma-separated list of exact host or host:port
+# entries. A Forgejo URL's host[:port] is allowed the plain-http scheme only
+# when it equals one of those entries byte-for-byte, so http is never accepted
+# without an exact operator pin. The comma-wrapped comparison is what makes the
+# match exact per entry: a pin can never match a host[:port] that merely
+# contains it or is contained by it, and an empty or malformed entry matches
+# nothing because no validated URL host can equal its bytes. The variable is
+# read at every call, never cached, like the rest of this library's
+# environment reads.
+fm_pr_forgejo_http_host_allowed() {  # <host[:port]>
+  local host=${1-}
+  local LC_ALL=C
+  [ -n "$host" ] || return 1
+  case ",${FM_PR_FORGEJO_HTTP_HOSTS-}," in
+    *",$host,"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
 # exactly owner/repository, so each segment is validated the same way GitHub's
 # owner and repo are, minus GitHub's specific hyphen-run and length rules.
@@ -270,6 +299,48 @@ fm_pr_url_parse() {
     FM_PR_HOST=$host
     FM_PR_PATH=$path
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A Forgejo instance reached over a private encrypted mesh may legitimately
+  # serve plain http, and its URL then carries a host[:port]. That form is
+  # accepted only for a host[:port] the operator pinned in
+  # FM_PR_FORGEJO_HTTP_HOSTS, matched exactly after the scheme strip
+  # (fm_pr_forgejo_http_host_allowed), so an http URL is never accepted without
+  # an exact operator pin. The port-bearing host class lives on this branch
+  # alone: the https pattern below still accepts no port, so the
+  # one-canonical-spelling rule for https URLs is unchanged. The port is split
+  # back off at the last colon before the DNS-name rules run, a port is digits
+  # only of at most five, and owner/repository keep the same segment rules as
+  # the https branch. FM_PR_HOST carries the whole host[:port] so the tea-login
+  # resolution below sees the same string the pin and the tea login's own URL
+  # use.
+  pattern='^http://([a-z0-9.:-]{1,259})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    case "$host" in
+      *:*)
+        fm_pr_forge_host_valid "${host%:*}" || return 1
+        case "${host##*:}" in
+          ''|*[!0-9]*|??????*) return 1 ;;
+        esac
+        ;;
+      *)
+        fm_pr_forge_host_valid "$host" || return 1
+        ;;
+    esac
+    fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
+    fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+    fm_pr_forgejo_http_host_allowed "$host" || return 1
+    FM_PR_PROVIDER=forgejo
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[2]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
@@ -1102,29 +1173,44 @@ FIELDS
 # than split on quotes per line, because tea's JSON is not guaranteed to put
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
-# then refuse every host. A login matches when its url's host - scheme,
-# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
-# its own copy of this filter because the watcher body sources nothing.
-# shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
+# then refuse every host. A login matches when its url's scheme pairs with the
+# URL's own (the optional second argument, default https) and its url's host -
+# userinfo, port, and path stripped for https, port kept for the
+# plain-http form - is exactly <host>, where a plain-http host is the
+# host[:port] the operator pinned in FM_PR_FORGEJO_HTTP_HOSTS. An https URL is
+# therefore served only by an https login, and an http login serves only the
+# operator-pinned plain-http form, so a login can never widen the match beyond
+# the scheme and host the parsed URL carried. bin/fm-pr-poll.sh keeps its own
+# copy of this filter because the watcher body sources nothing.
+# shellcheck disable=SC2016 # $h and $s are jq variables bound by --arg, not shell ones.
 FM_PR_FORGEJO_LOGIN_JQ='
   if type == "array" then
     [ .[]
       | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                and (.url | type) == "string")
-      | select((.url
-                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                | sub("[/?#].*$"; "")
-                | sub("^.*@"; "")
-                | sub(":[0-9]+$"; "")) == $h)
+      | select(
+          ($s == "https" and (.url | startswith("https://"))
+            and ((.url
+                  | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                  | sub("[/?#].*$"; "")
+                  | sub("^.*@"; "")
+                  | sub(":[0-9]+$"; "")) == $h))
+          or ($s == "http" and (.url | startswith("http://"))
+            and ((.url
+                  | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                  | sub("[/?#].*$"; "")
+                  | sub("^.*@"; "")) == $h)))
       | .name ]
     | if length == 1 then .[0] else error("not exactly one matching login") end
   else
     error("login list is not an array")
   end'
-fm_pr_forgejo_login() {  # <host>
+fm_pr_forgejo_login() {  # <host[:port]> [scheme]
+  local scheme=${2:-https}
   command -v tea >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
+  tea login list --output json 2>/dev/null \
+    | jq -er --arg h "$1" --arg s "$scheme" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
 }
 
 # The state, merged flag, and head commit of one Forgejo pull request, read
@@ -1132,8 +1218,11 @@ fm_pr_forgejo_login() {  # <host>
 # "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
 # types is accepted; anything else returns 1 for an honest unknown.
-fm_pr_forgejo_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 login json fields line
+# The optional fourth argument is the pull request's own URL, whose scheme
+# pairs the tea login resolution (fm_pr_forgejo_login) the same way the arming
+# and merge paths pair it.
+fm_pr_forgejo_read_record() {  # <host> <path> <number> [url]
+  local host=$1 path=$2 number=$3 url=${4-} scheme login json fields line
   local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
@@ -1142,7 +1231,9 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  login=$(fm_pr_forgejo_login "$host") || return 1
+  scheme=https
+  case "$url" in http://*) scheme=http ;; esac
+  login=$(fm_pr_forgejo_login "$host" "$scheme") || return 1
   [ -n "$login" ] || return 1
   if ! json=$(tea api --login "$login" --repo "$path" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then

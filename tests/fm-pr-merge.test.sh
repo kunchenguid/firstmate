@@ -22,6 +22,10 @@ BASE_PATH=$PATH
 MR_HOST=gitlab.example
 MR_PATH=group/subgroup/project
 MR_PROJECT_URL="https://$MR_HOST/$MR_PATH"
+# The Forgejo plain-http pin is unset for the whole suite so an operator's
+# ambient FM_PR_FORGEJO_HTTP_HOSTS can never flip an adversarial case; only
+# the test that names the variable arms its behavior.
+unset FM_PR_FORGEJO_HTTP_HOSTS
 MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -2435,6 +2439,51 @@ test_forgejo_invalid_head_refuses() {
   pass "fm-pr-merge refuses a Forgejo head commit it cannot validate"
 }
 
+# A plain-http Forgejo URL merges only behind the operator's pin
+# (FM_PR_FORGEJO_HTTP_HOSTS): without it the URL is invalid, and with it the
+# instance is addressed through the tea login whose own URL is the same
+# http://host[:port], so the scheme pairing in the login resolution is what
+# carries the merge to the pinned instance rather than any other login.
+test_forgejo_http_allowlisted_host_merges() {
+  local case_dir rc merge_line host url
+  host=10.10.0.1:3001
+  url="http://$host/$FJ_OWNER/$FJ_REPO/pulls/7"
+  case_dir=$(make_forgejo_case forgejo-http-pin)
+  write_tea_logins_json "$case_dir/tea-logins.json" \
+    other "https://elsewhere.example" "$FJ_LOGIN" "http://$host"
+
+  set +e
+  FM_PR_FORGEJO_HTTP_HOSTS='' run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" \
+    "forgejo-http-pin: an unpinned http pull request URL must be refused as invalid"
+  assert_grep "error: invalid PR merge request" "$case_dir/stderr" \
+    "forgejo-http-pin: the unpinned refusal did not name the invalid request"
+  [ ! -e "$case_dir/state/task-x1.check.sh" ] \
+    || fail "forgejo-http-pin: a refused http merge left a poll armed"
+
+  set +e
+  FM_PR_FORGEJO_HTTP_HOSTS=$host run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forgejo-http-pin: a pinned http pull request URL should merge"
+  assert_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "forgejo-http-pin: pr= was not recorded before merging"
+  assert_grep "--login $FJ_LOGIN --repo $FJ_OWNER/$FJ_REPO /repos/{owner}/{repo}/pulls/7" "$case_dir/tea.log" \
+    "forgejo-http-pin: the pull request was not read through the host:port-pinned tea login"
+  assert_no_grep 'other' "$case_dir/tea.log" \
+    "forgejo-http-pin: an unrelated login leaked into a tea invocation"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"--login $FJ_LOGIN --repo $FJ_OWNER/$FJ_REPO -X POST /repos/{owner}/{repo}/pulls/7/merge"*) ;;
+    *) fail "forgejo-http-pin: unexpected merge invocation: '$merge_line'" ;;
+  esac
+  pass "fm-pr-merge merges a plain-http Forgejo pull request only behind the operator's pin"
+}
+
 test_forgejo_missing_tool_refuses_before_recording() {
   local case_dir rc tool other
   for tool in tea jq; do
@@ -2985,6 +3034,7 @@ test_forgejo_combined_status_reads_every_page
 test_forgejo_stale_recorded_head_is_reported
 test_forgejo_invalid_head_refuses
 test_forgejo_missing_tool_refuses_before_recording
+test_forgejo_http_allowlisted_host_merges
 test_forgejo_rejected_merge_is_never_trusted_by_exit_status
 test_forgejo_transient_confirm_read_failure_still_persists_authority
 test_forgejo_merge_method_and_extra_args

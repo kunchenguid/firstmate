@@ -18,6 +18,10 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 fm_git_identity fmtest fmtest@example.invalid
+# The Forgejo plain-http pin is unset for the whole suite so an operator's
+# ambient FM_PR_FORGEJO_HTTP_HOSTS can never flip an adversarial case; only
+# the tests that name the variable arm its behavior.
+unset FM_PR_FORGEJO_HTTP_HOSTS
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
@@ -541,7 +545,11 @@ EOF
   for row in \
     'https://github.com/fixture/fixture-repo/pulls/1' \
     'https://git.example.com/fixture/fixture-repo/pull/1' \
-    'https://git.example.com/group/sub/project/pulls/1'
+    'https://git.example.com/group/sub/project/pulls/1' \
+    'http://git.example.com/fixture/fixture-repo/pulls/1' \
+    'http://git.example.com:3000/fixture/fixture-repo/pulls/1' \
+    'http://git.example.com:30001/fixture/fixture-repo/pulls/1' \
+    'http://10.10.0.1:3001.evil.com/fixture/fixture-repo/pulls/1'
   do
     ! fm_pr_url_parse "$row" || fail "parser accepted a URL that must not resolve as forgejo: $row"
   done
@@ -966,11 +974,11 @@ make_poll_fixture() {
 }
 
 run_poll() {
-  local dir=$1
+  local dir=$1 id=${2:-task-a}
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
-    bash "$dir/home/state/task-a.check.sh"
+    bash "$dir/home/state/$id.check.sh"
 }
 
 test_static_poll_contract() {
@@ -2077,7 +2085,7 @@ test_forgejo_login_list_shapes() {
   },
   {
     "name": "fixture-two",
-    "url": "http://code.internal:3000/",
+    "url": "https://code.internal:3000/",
     "ssh_host": "code.internal",
     "user": "other",
     "default": "false"
@@ -2132,6 +2140,178 @@ SH
   out=$(FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
   [ -z "$out" ] || fail "the static poll read through an ambiguous login"
   pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
+}
+
+# A plain-http Forgejo URL is the one spelling an instance on a private mesh
+# may legitimately serve, and it is accepted only behind the operator's exact
+# pin list FM_PR_FORGEJO_HTTP_HOSTS: parse, arming, and the poll each read the
+# pin fresh from their environment, the match is exact per entry, the tea
+# login's scheme pairs with the URL's, and every other http URL stays refused
+# exactly as before.
+test_forgejo_http_allowlist() {
+  local dir state url out rc csv row
+  dir=$(make_case forgejo-http-allowlist)
+  state="$dir/home/state"
+  url=http://10.10.0.1:3001/o/r/pulls/7
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[{"name":"main","url":"%s"}]\n' "${FM_TEST_TEA_LOGIN_URL:-http://10.10.0.1:3001}"
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+if [ "${FM_TEST_TEA_MERGED:-}" = true ]; then
+  printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+else
+  printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n'
+fi
+SH
+  chmod +x "$dir/fakebin/tea"
+
+  # The pinned host:port parses and keeps the whole string as its host, so the
+  # tea-login resolution sees the same string the pin and the login URL spell.
+  FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001,internal.git.local \
+    fm_pr_url_parse "$url" || fail "parser refused an allowlisted http host:port"
+  [ "$FM_PR_PROVIDER" = forgejo ] || fail "an allowlisted http URL was not tagged forgejo"
+  [ "$FM_PR_URL" = "$url" ] || fail "parser changed an allowlisted http URL"
+  [ "$FM_PR_HOST" = 10.10.0.1:3001 ] \
+    || fail "parser did not keep the pinned host:port as the host"
+  [ "$FM_PR_PATH" = o/r ] || fail "parser returned the wrong path for an http URL"
+  [ "$FM_PR_OWNER" = o ] && [ "$FM_PR_REPO" = r ] \
+    || fail "parser returned the wrong owner/repository for an http URL"
+  FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001,internal.git.local \
+    fm_pr_url_parse http://internal.git.local/team/repo/pulls/9 \
+    || fail "parser refused an allowlisted bare http host"
+  [ "$FM_PR_HOST" = internal.git.local ] \
+    || fail "parser returned the wrong allowlisted bare http host"
+
+  # The match is exact per entry: containing or contained spellings, a
+  # port-bearing pin over a bare host and the reverse, an https URL carrying
+  # the pinned port (the https pattern still accepts no port), non-forgejo
+  # http URL shapes the pin must not unlock, other hosts, a pin list of only
+  # malformed entries, and no pin list at all each refuse, while empty entries
+  # around the one real pin do not hide it.
+  for row in \
+    'http://10.10.0.1:3001.evil.com/o/r/pulls/7' \
+    'http://10.10.0.1:300/o/r/pulls/7' \
+    'http://10.10.0.1/o/r/pulls/7' \
+    'http://internal.git.local:3001/o/r/pulls/7' \
+    'https://10.10.0.1:3001/o/r/pulls/7' \
+    'http://internal.git.local/g/p/-/merge_requests/1' \
+    'http://internal.git.local/c/p/+/1' \
+    'http://elsewhere.example/o/r/pulls/7' \
+    'http://git.example.com/o/r/pulls/7'
+  do
+    ! FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001,internal.git.local \
+      fm_pr_url_parse "$row" \
+      || fail "parser accepted '$row' against a pin list that does not carry it"
+  done
+  ! fm_pr_url_parse "$url" \
+    || fail "parser accepted an http URL with no pin list"
+  ! FM_PR_FORGEJO_HTTP_HOSTS='' fm_pr_url_parse "$url" \
+    || fail "parser accepted an http URL with an empty pin list"
+  ! FM_PR_FORGEJO_HTTP_HOSTS='10.10.0.1:3001.evil.com, http://10.10.0.1:3001,10.10.0.1:3001:' \
+    fm_pr_url_parse "$url" \
+    || fail "a malformed-only pin list admitted an http URL"
+  FM_PR_FORGEJO_HTTP_HOSTS=',,10.10.0.1:3001,,' fm_pr_url_parse "$url" \
+    || fail "empty pin entries hid the one real pin"
+
+  # tea login resolution scheme-pairs with the URL: an http login serves only
+  # the pinned plain-http form for the same literal host[:port], and an https
+  # login never serves a plain-http URL.
+  csv='http://10.10.0.1:3001'
+  [ "$(PATH="$dir/fakebin:$PATH" FM_TEST_TEA_LOGIN_URL="$csv" \
+      fm_pr_forgejo_login 10.10.0.1:3001 http)" = main ] \
+    || fail "an http login did not serve the pinned host:port over http"
+  ! PATH="$dir/fakebin:$PATH" FM_TEST_TEA_LOGIN_URL="$csv" \
+    fm_pr_forgejo_login 10.10.0.1:3001 https >/dev/null \
+    || fail "an http login served an https URL"
+  ! PATH="$dir/fakebin:$PATH" FM_TEST_TEA_LOGIN_URL="$csv" \
+    fm_pr_forgejo_login 10.10.0.1 http >/dev/null \
+    || fail "a host:port login matched from a bare host"
+  csv='https://10.10.0.1:3001'
+  ! PATH="$dir/fakebin:$PATH" FM_TEST_TEA_LOGIN_URL="$csv" \
+    fm_pr_forgejo_login 10.10.0.1:3001 http >/dev/null \
+    || fail "an https login served a plain-http URL"
+
+  # Arming records and arms the http URL behind the pin, and the poll wakes
+  # only while the pin is still present in its own environment.
+  write_task_meta "$dir" task-a
+  FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001 \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/arm.err" \
+    || fail "arming an allowlisted http pull request failed: $(cat "$dir/arm.err")"
+  grep -qxF "pr=$url" "$state/task-a.meta" \
+    || fail "the allowlisted http URL was not recorded"
+  [ "$(sed -n '3p' "$state/task-a.pr-poll")" = 10.10.0.1:3001 ] \
+    || fail "the poll sidecar did not carry the pinned host:port"
+  [ -f "$state/task-a.check.sh" ] || fail "an allowlisted http pull request was not armed"
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001 \
+    FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] \
+    || fail "the poll did not wake for a merged allowlisted http pull request"
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS='' FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] \
+    || fail "the poll woke for an http pull request with no pin in its environment"
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001 FM_TEST_TEA_MERGED=true \
+    FM_TEST_TEA_LOGIN_URL=https://elsewhere.example run_poll "$dir")
+  [ -z "$out" ] || fail "the poll woke through a login pinned to another host"
+
+  # A pinned bare http host arms and wakes the same way, so the port is no
+  # part of what the http path requires: the sidecar carries the bare host and
+  # the poll reconstructs its URL behind that bare host's own pin.
+  write_task_meta "$dir" task-d
+  FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001,internal.git.local \
+    FM_TEST_TEA_LOGIN_URL=http://internal.git.local \
+    run_check_entry "$dir" task-d http://internal.git.local/team/repo/pulls/9 \
+    >/dev/null 2> "$dir/arm-d.err" \
+    || fail "arming a pinned bare http host failed: $(cat "$dir/arm-d.err")"
+  [ "$(sed -n '3p' "$state/task-d.pr-poll")" = internal.git.local ] \
+    || fail "the poll sidecar did not carry the pinned bare host"
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS=internal.git.local \
+    FM_TEST_TEA_LOGIN_URL=http://internal.git.local \
+    FM_TEST_TEA_MERGED=true run_poll "$dir" task-d)
+  [ "$out" = merged ] \
+    || fail "the poll did not wake for a merged pinned bare http host"
+
+  # A doctored sidecar cannot swap the host:port: the reconstruction refuses
+  # any spelling the pin does not carry exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo http://10.10.0.1:9999/o/r/pulls/7 \
+    10.10.0.1:9999 o/r 7 > "$state/task-a.pr-poll"
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001 \
+    FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "the poll woke for a sidecar whose host:port was swapped"
+
+  # Without the pin, arming refuses the http URL as an invalid request and
+  # arms nothing; with the pin but no login for the host:port it names the
+  # missing login instead of reading through another instance's login.
+  write_task_meta "$dir" task-b
+  set +e
+  FM_PR_FORGEJO_HTTP_HOSTS='' \
+    run_check_entry "$dir" task-b "$url" > "$dir/arm-b.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an http URL succeeded with no pin list"
+  case "$(cat "$dir/arm-b.out")" in
+    *"invalid PR check request"*) ;;
+    *) fail "arming without the pin did not report an invalid request" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "an unpinned http arming left a poll armed"
+  write_task_meta "$dir" task-c
+  set +e
+  out=$(FM_PR_FORGEJO_HTTP_HOSTS=10.10.0.1:3001 \
+    FM_TEST_TEA_LOGIN_URL=https://elsewhere.example \
+    run_check_entry "$dir" task-c "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an http URL succeeded with no login for its host:port"
+  case "$out" in
+    *"requires exactly one 'tea login' registered for that host"*) ;;
+    *) fail "arming did not name the missing host:port login: $out" ;;
+  esac
+  [ ! -e "$state/task-c.check.sh" ] || fail "a loginless http arming left a poll armed"
+
+  pass "plain-http Forgejo URLs arm and wake only behind the operator's exact pin"
 }
 
 test_gitlab_merge_watch() {
@@ -3606,6 +3786,7 @@ test_parser_matrix
 test_gitlab_merge_watch
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
+test_forgejo_http_allowlist
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
