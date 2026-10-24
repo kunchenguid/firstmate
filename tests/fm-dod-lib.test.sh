@@ -406,6 +406,32 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# The PR-publishing DoD ends with the worker recording its full-suite result
+# where bin/fm-pr-merge.sh reads it, bound to the base the task targets;
+# local-only publishes no PR and carries no record step.
+test_pr_based_dod_renders_the_suite_record_step() {
+  local mode out
+  for mode in direct-PR no-mistakes; do
+    out="$TMP_ROOT/dod-suite-$mode.md"
+    fm_dod_block "$mode" dod-suite-task fm/dod-suite-task none feature/hub '' "$TMP_ROOT/home/data" > "$out"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep "Write the result to \`$TMP_ROOT/home/data/dod-suite-task/suite-result\` with exactly these lines" "$out" \
+      "$mode: DoD must name the suite record at the data directory it was given"
+    # shellcheck disable=SC2016
+    assert_grep '`base=` followed by the output of `git merge-base HEAD origin/feature/hub`' "$out" \
+      "$mode: DoD must bind the record to the task's base branch"
+    assert_grep 'a record made against an older base is refused at merge' "$out" \
+      "$mode: DoD must say a stale record is refused"
+  done
+  out="$TMP_ROOT/dod-suite-default.md"
+  fm_dod_block direct-PR dod-suite-task > "$out"
+  assert_grep 'git merge-base HEAD origin/<default branch>' "$out" \
+    "DoD without a named base must bind the record to the default branch"
+  fm_dod_block local-only dod-suite-task > "$out"
+  assert_no_grep 'suite-result' "$out" "local-only DoD must not carry a suite record step"
+  pass "PR-based DoD renders the suite record step and local-only does not"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -467,6 +493,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_pr_based_dod_renders_the_suite_record_step
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

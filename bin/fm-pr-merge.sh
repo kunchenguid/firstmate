@@ -90,6 +90,23 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# On GitHub, a base branch whose required-check set was read and is empty
+# leaves the conditions above vacuously true, so two further conditions apply
+# and no repository code is executed for either. First, one forge compare
+# read refuses a pull request whose head is behind the live base tip
+# (behind_by > 0), naming "rebase and re-validate". Second, the ship worker's
+# last step must have recorded its full-suite result in
+# <data>/<task-id>/suite-result (bin/fm-dod-lib.sh tells it how and
+# bin/fm-pr-lib.sh's fm_pr_suite_record_path owns the location): suite=pass
+# with base=<sha> equal to that same live base tip, so a record made against
+# an older base is refused as stale; suite=fail refuses; and suite=none with a
+# non-empty reason= is the explicit no-suite escape, accepted and reported as
+# a worker attestation. A missing, unreadable, or unparsable record, or a
+# compare that cannot be read, refuses. An attended --attended-override waives
+# both conditions; while the away-posture record exists it waives neither.
+# GitLab and Forgejo are not covered: their merges already require the head
+# pipeline or combined status to have succeeded.
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -172,7 +189,8 @@
 # --remove-source-branch) are refused by default; --attended-override, parsed
 # before the optional -- separator, re-enables those forge flags for an
 # explicit captain instruction and never skips the live green check, the
-# away-record read, or a captain hold.
+# away-record read, or a captain hold; it does waive the no-required-checks
+# conditions described above while no away-posture record exists.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
@@ -188,6 +206,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -1001,12 +1020,82 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# The two extra conditions for a base branch with no required checks, where
+# every other pre-merge condition holds vacuously (header: "On GitHub, a base
+# branch whose required-check set..."). Prints one "  - ..." refusal line per
+# failing condition and nothing when both hold; progress notes go to stderr.
+# Only a live forge compare and one task-owned record are read, so no
+# repository code runs on the supervisor.
+github_unchecked_base_refusals() {  # <base> <live-head>
+  local base=$1 head=$2 position line behind='' tip='' record
+  local suite='' recorded_base='' reason=''
+  if [ "$ATTENDED_OVERRIDE" = true ] && [ "$FM_PR_AWAY_POSTURE" != true ]; then
+    printf 'note: base branch %s has no required checks; the behind-base and recorded-suite conditions are waived by --attended-override\n' "$base" >&2
+    return 0
+  fi
+  if ! position=$(gh api "repos/$PR_OWNER/$PR_REPO/compare/$(github_urlencode_path_segment "$base")...$head?per_page=1" \
+      --jq '"behind_by=" + (.behind_by | tostring), "base_sha=" + (.base_commit.sha | tostring)' 2>/dev/null) \
+    || [ -z "$position" ]; then
+    position=
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      behind_by=*) behind=${line#behind_by=} ;;
+      base_sha=*) tip=${line#base_sha=} ;;
+    esac
+  done <<FIELDS
+$position
+FIELDS
+  case "$behind" in
+    '' | *[!0-9]*) tip= ;;
+  esac
+  if ! fm_pr_head_valid "$tip"; then
+    printf '  - base branch %s has no required checks and how far the head is behind it could not be read, so a stale base cannot be ruled out\n' "$base"
+    return 0
+  fi
+  if [ "$behind" -gt 0 ]; then
+    printf '  - base branch %s has no required checks and the head is %s commit(s) behind it: rebase and re-validate\n' "$base" "$behind"
+  fi
+  record=$(fm_pr_suite_record_path "$DATA" "$ID")
+  if [ ! -f "$record" ] || [ -L "$record" ]; then
+    printf '  - base branch %s has no required checks and the worker recorded no full-suite result at %s: have the worker run the project suite and record it\n' "$base" "$record"
+    return 0
+  fi
+  suite=$(sed -n 's/^suite=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
+  recorded_base=$(sed -n 's/^base=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
+  reason=$(sed -n 's/^reason=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
+  case "$suite" in
+    pass)
+      if ! fm_pr_head_valid "$recorded_base"; then
+        printf '  - the recorded full-suite result at %s names no base commit: have the worker re-run the suite and record it\n' "$record"
+      elif [ "$recorded_base" != "$tip" ]; then
+        printf '  - the recorded full-suite result ran against base %s but %s is now at %s: rebase and re-validate\n' "$recorded_base" "$base" "$tip"
+      elif [ "$behind" -eq 0 ]; then
+        printf 'note: base branch %s has no required checks; the head is not behind it and the worker recorded a passing full suite against %s\n' "$base" "$tip" >&2
+      fi
+      ;;
+    fail)
+      printf '  - the worker recorded a failing full-suite result at %s\n' "$record"
+      ;;
+    none)
+      if [ -z "$reason" ]; then
+        printf '  - the recorded full-suite result at %s says suite=none with no reason=\n' "$record"
+      else
+        printf 'note: base branch %s has no required checks; the worker attested the project has no full suite: %s\n' "$base" "$reason" >&2
+      fi
+      ;;
+    *)
+      printf '  - the recorded full-suite result at %s is unreadable: it must name suite=pass, suite=fail, or suite=none\n' "$record"
+      ;;
+  esac
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line red name covered missing unreported producers runs unchecked
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -1127,6 +1216,15 @@ EOF
     done <<EOF
 $missing
 EOF
+  fi
+
+  if [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ] \
+    && printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'length == 0' >/dev/null 2>&1; then
+    unchecked=$(github_unchecked_base_refusals "$base" "$live_head")
+    if [ -n "$unchecked" ]; then
+      refusals="$refusals$unchecked
+"
+    fi
   fi
 
   if [ -n "$mergeable_refusal" ]; then

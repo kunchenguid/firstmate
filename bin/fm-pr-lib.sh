@@ -325,6 +325,14 @@ fm_pr_json_draft_state() {  # <pull-request-json>
   ' 2>/dev/null || true
 }
 
+# The one location of a ship worker's recorded full-suite result: the record
+# bin/fm-dod-lib.sh tells a PR-publishing worker to write as its last step and
+# bin/fm-pr-merge.sh reads, with no repository code executed, when the base
+# branch has no required checks.
+fm_pr_suite_record_path() {  # <data-dir> <task-id>
+  printf '%s/%s/suite-result' "${1%/}" "$2"
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null
