@@ -263,6 +263,24 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_RUNS"
         exit $?
         ;;
+      *" repos/"*"/commits/"*"/statuses"*)
+        case "$*" in
+          *"/commits/$(cat "$FM_TEST_GH_HEAD")/statuses"*) ;;
+          *) exit 1 ;;
+        esac
+        # No statuses file means the head has no commit statuses at all.
+        [ -e "$FM_TEST_GH_STATUSES" ] || { printf '[]\n'; exit 0; }
+        cat "$FM_TEST_GH_STATUSES"
+        exit $?
+        ;;
+      *" apps/"*)
+        # One "<slug> <id>" line per app the apps API knows; others are 404.
+        slug=${2#apps/}
+        app_id=$(awk -v s="$slug" '$1 == s { print $2 }' "$FM_TEST_GH_APPS" 2>/dev/null)
+        [ -n "$app_id" ] || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+        printf '%s\n' "$app_id"
+        exit 0
+        ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
         if [ -f "${FM_TEST_GH_REQUIRED_RULES_FAIL:-}" ]; then
@@ -671,6 +689,8 @@ run_pr_merge() {
   FM_TEST_GH_MERGEABLE_CALLS="$case_dir/mergeable-calls" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
+  FM_TEST_GH_STATUSES="$case_dir/github-statuses.json" \
+  FM_TEST_GH_APPS="$case_dir/github-apps" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
@@ -4083,22 +4103,53 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
-# A commit status carries no app id to compare, so an app-bound required context
-# that arrives as a green status matches by name, while the same context left
-# unreported still refuses.
-test_app_bound_required_status_context_matches_by_name() {
-  local case_dir head kind variant
+# A required check bound to a GitHub App is satisfied only by verifiable
+# producer evidence at the verified head: a green same-name commit status
+# satisfies it only when its newest entry was created by the bound app's bot,
+# resolved through the apps API, and a check run from another app satisfies
+# nothing, while a check run from the bound app satisfies and an unbound
+# requirement still matches a status by name. The attended
+# named --allow-missing waiver remains the explicit path for a bound
+# requirement whose producer evidence is missing.
+# The license/cla statuses at a head, one per "<login> <type>" argument, newest
+# first with descending created_at, the way the REST statuses read lists them.
+status_creators() {
+  local creator n=$#
+  for creator in "$@"; do
+    printf '{"context":"license/cla","state":"success","id":%s,"created_at":"2026-01-01T00:00:%02dZ","creator":{"login":"%s","type":"%s"}}\n' \
+      "$n" "$n" "${creator% *}" "${creator#* }"
+    n=$((n - 1))
+  done | jq -sc .
+}
+
+test_app_bound_required_status_requires_producer_evidence() {
+  local case_dir head spec kind variant
   head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
-  for kind in classic ruleset; do
-    for variant in reported absent; do
-      case_dir=$(make_case "required-app-status-$kind-$variant")
-      add_gh_mocks "$case_dir" "$head"
-      if [ "$variant" = reported ]; then
+  for spec in classic:status ruleset:status classic:absent ruleset:absent \
+    classic:unbound ruleset:unbound classic:wrong-app classic:correct-app classic:waived \
+    classic:bot-status ruleset:bot-status classic:other-bot-status classic:user-status \
+    classic:superseded-bot-status classic:unresolved-bot-status classic:statuses-unreadable; do
+    kind=${spec%%:*}
+    variant=${spec#*:}
+    case_dir=$(make_case "required-app-evidence-$kind-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    case "$variant" in
+      absent)
+        # The default live rollup holds only the green ci check run.
+        ;;
+      wrong-app|correct-app)
+        write_github_rollup_json "$case_dir" "$head" \
+          "$(check_run ci COMPLETED SUCCESS)" \
+          "$(check_run license/cla COMPLETED SUCCESS)"
+        ;;
+      *)
         write_github_rollup_json "$case_dir" "$head" \
           "$(check_run ci COMPLETED SUCCESS)" \
           "$(status_context 'license/cla' SUCCESS)"
-      fi
-      write_github_required "$case_dir" "$kind:license/cla"
+        ;;
+    esac
+    write_github_required "$case_dir" "$kind:license/cla"
+    if [ "$variant" != unbound ]; then
       if [ "$kind" = classic ]; then
         jq '.protection.required_status_checks.checks[0].app_id = 865473' \
           "$case_dir/github-branch.json" > "$case_dir/updated.json"
@@ -4108,22 +4159,57 @@ test_app_bound_required_status_context_matches_by_name() {
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
-        "$head" > "$case_dir/github-runs.json"
-      run_required_case "$case_dir" 111
-      if [ "$variant" = reported ]; then
-        expect_code 0 "$RC" "app-status-$kind-reported: a green app-bound status must merge: $(cat "$case_dir/stderr")"
-        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
-      else
-        expect_code 1 "$RC" "app-status-$kind-absent: an unreported app-bound status must refuse"
+    fi
+    case "$variant" in
+      wrong-app)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"},{"name":"license/cla","app":{"id":42},"head_sha":"%s"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+        ;;
+      correct-app)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"},{"name":"license/cla","app":{"id":865473},"head_sha":"%s"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+        ;;
+      *)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+          "$head" > "$case_dir/github-runs.json"
+        ;;
+    esac
+    # Commit statuses as the REST statuses read reports them, newest first.
+    printf '%s\n' 'cla-bot 865473' 'other-bot 42' > "$case_dir/github-apps"
+    case "$variant" in
+      bot-status) status_creators 'cla-bot[bot] Bot' > "$case_dir/github-statuses.json" ;;
+      other-bot-status) status_creators 'other-bot[bot] Bot' > "$case_dir/github-statuses.json" ;;
+      user-status) status_creators 'cla-bot User' > "$case_dir/github-statuses.json" ;;
+      superseded-bot-status) status_creators 'someone User' 'cla-bot[bot] Bot' > "$case_dir/github-statuses.json" ;;
+      unresolved-bot-status) status_creators 'unknown-bot[bot] Bot' > "$case_dir/github-statuses.json" ;;
+      statuses-unreadable) printf '{}' > "$case_dir/github-statuses.json" ;;
+    esac
+    case "$variant" in
+      waived)
+        run_required_case "$case_dir" 111 --attended-override --allow-missing license/cla -- --admin
+        expect_code 0 "$RC" "app-evidence-$kind-$variant: the named waiver must merge: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 111 example/repo --squash --admin
+        ;;
+      status|wrong-app|absent|other-bot-status|user-status|superseded-bot-status|unresolved-bot-status|statuses-unreadable)
+        run_required_case "$case_dir" 111
+        expect_code 1 "$RC" "app-evidence-$kind-$variant: an app-bound requirement without producer evidence must refuse: $(cat "$case_dir/stderr")"
         assert_grep "required check 'license/cla' has not reported" "$case_dir/stderr" \
-          "app-status-$kind-absent: the unreported status was not named"
+          "app-evidence-$kind-$variant: the unverified requirement was not named"
         assert_no_grep 'pr merge' "$case_dir/gh.log" \
-          "app-status-$kind-absent: gh pr merge ran with the status unreported"
-      fi
-    done
+          "app-evidence-$kind-$variant: gh pr merge ran without producer evidence"
+        if [ "$variant" = statuses-unreadable ]; then
+          assert_grep 'required status producers at head' "$case_dir/stderr" \
+            "app-evidence-$kind-$variant: the unreadable statuses read was not reported"
+        fi
+        ;;
+      unbound|correct-app|bot-status)
+        run_required_case "$case_dir" 111
+        expect_code 0 "$RC" "app-evidence-$kind-$variant: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
+        ;;
+    esac
   done
-  pass "fm-pr-merge matches an app-bound required commit status by name"
+  pass "fm-pr-merge requires producer evidence for app-bound required checks"
 }
 
 test_required_partial_reads_report_all_failures() {
@@ -4614,7 +4700,7 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
-test_app_bound_required_status_context_matches_by_name
+test_app_bound_required_status_requires_producer_evidence
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
