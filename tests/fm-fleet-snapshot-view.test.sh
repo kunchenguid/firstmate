@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+CREW="$ROOT/bin/fm-crew-state.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
@@ -130,6 +131,90 @@ EOF
     "harness=codex" \
     "kind=ship" \
     "mode=ship"
+}
+
+test_crew_state_env_overrides_stay_scoped_to_snapshot() {
+  local home fakebin out
+  home=$(make_home env-scope)
+  mkdir -p "$home/data/leaktask" "$home/projects/leaktask-wt"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] leaktask - Leak Task data/leaktask/report.md (repo: alpha) (kind: scout) (since 2026-07-07)
+EOF
+  printf '# Report\n' > "$home/data/leaktask/report.md"
+  fm_write_meta "$home/state/leaktask.meta" \
+    "window=firstmate:fm-leaktask" \
+    "worktree=$home/projects/leaktask-wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout" \
+    "yolo=off"
+  printf 'working: pre-snapshot\n' > "$home/state/leaktask.status"
+  # An idle busy verdict lets the crew-state read fall through to the live
+  # status log, so a later status rewrite is observable in its output.
+  record_claude_idle "$home/state" leaktask
+  fakebin=$(make_fakebin "$home")
+
+  # Direct invocation: the calling shell keeps no override variables and a
+  # following crew-state read must resolve the live state/ status without any
+  # manual empty-value prefix.
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" SNAPSHOT="$SNAPSHOT" CREW="$CREW" \
+    bash -c '
+      unset FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE
+      "$SNAPSHOT" --json >/dev/null
+      [ -z "${FM_CREW_STATE_META_OVERRIDE+is-set}" ] && echo "meta-unset" || echo "meta-set"
+      [ -z "${FM_CREW_STATE_STATUS_OVERRIDE+is-set}" ] && echo "status-unset" || echo "status-set"
+      printf "blocked: live-path-proof\n" > "$FM_HOME/state/leaktask.status"
+      "$CREW" leaktask
+    ')
+  assert_contains "$out" "meta-unset" "direct snapshot must leave FM_CREW_STATE_META_OVERRIDE unset"
+  assert_contains "$out" "status-unset" "direct snapshot must leave FM_CREW_STATE_STATUS_OVERRIDE unset"
+  assert_contains "$out" "live-path-proof" "crew-state after a direct snapshot should read the live status path"
+
+  # Source-style invocation: the snapshot's functions run inside the calling
+  # shell, so the scoping guarantee has to survive being sourced too.
+  rm -f "$home/state/leaktask.status"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" SNAPSHOT="$SNAPSHOT" CREW="$CREW" \
+    bash -c '
+      unset FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE
+      . "$SNAPSHOT" --json >/dev/null
+      [ -z "${FM_CREW_STATE_META_OVERRIDE+is-set}" ] && echo "meta-unset" || echo "meta-set"
+      [ -z "${FM_CREW_STATE_STATUS_OVERRIDE+is-set}" ] && echo "status-unset" || echo "status-set"
+      printf "failed: live-path-proof-two\n" > "$FM_HOME/state/leaktask.status"
+      "$CREW" leaktask
+    ')
+  assert_contains "$out" "meta-unset" "sourced snapshot must leave FM_CREW_STATE_META_OVERRIDE unset"
+  assert_contains "$out" "status-unset" "sourced snapshot must leave FM_CREW_STATE_STATUS_OVERRIDE unset"
+  assert_contains "$out" "live-path-proof-two" "crew-state after a sourced snapshot should read the live status path"
+
+  # A shell that already carries override values (or inherits them from a
+  # polluted environment) maintains its own previous values, unchanged.
+  out=$(FM_CREW_STATE_META_OVERRIDE=caller-meta FM_CREW_STATE_STATUS_OVERRIDE=caller-status \
+    FM_HOME="$home" PATH="$fakebin:$PATH" SNAPSHOT="$SNAPSHOT" \
+    bash -c '
+      "$SNAPSHOT" --json >/dev/null
+      [ "$FM_CREW_STATE_META_OVERRIDE" = caller-meta ] && echo "meta-preserved"
+      [ "$FM_CREW_STATE_STATUS_OVERRIDE" = caller-status ] && echo "status-preserved"
+    ')
+  assert_contains "$out" "meta-preserved" "direct snapshot must not clobber a caller-owned FM_CREW_STATE_META_OVERRIDE"
+  assert_contains "$out" "status-preserved" "direct snapshot must not clobber a caller-owned FM_CREW_STATE_STATUS_OVERRIDE"
+
+  # A polluted ambient override naming this task must not corrupt the
+  # snapshot's own crew-state read: the child's captured values win.
+  mkdir -p "$TMP_ROOT/poison-leaktask"
+  printf 'worktree=/nonexistent-poison\nkind=ship\n' > "$TMP_ROOT/poison-leaktask/leaktask.meta"
+  printf 'blocked: poison-won\n' > "$TMP_ROOT/poison-leaktask/leaktask.status"
+  out=$(FM_CREW_STATE_META_OVERRIDE="$TMP_ROOT/poison-leaktask/leaktask.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$TMP_ROOT/poison-leaktask/leaktask.status" \
+    FM_HOME="$home" PATH="$fakebin:$PATH" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '.tasks[] | select(.id == "leaktask")
+    | .current_state.state == "failed"
+      and .current_state.source == "status-log"
+      and .current_state.detail == "live-path-proof-two"
+  ' >/dev/null \
+    || fail "ambient stale override must never override the snapshot's captured crew-state read"
+  pass "crew-state env overrides stay scoped to the snapshot child"
 }
 
 test_empty_fleet_json() {
@@ -1152,6 +1237,7 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_crew_state_env_overrides_stay_scoped_to_snapshot
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
