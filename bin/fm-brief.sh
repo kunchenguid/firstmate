@@ -63,7 +63,7 @@
 # --branch-name <name> replaces that prefix-plus-id crew branch with one full
 # git branch name. It is mutually exclusive with --branch-prefix, refused on
 # scout and secondmate, and cannot equal --base-branch.
-# --base-branch <branch> starts the task from origin's <branch> instead of the
+# --base-branch <branch> starts the task from the named <branch> instead of the
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
 # bin/fm-spawn.sh requires to agree with the same --base-branch it is passed to

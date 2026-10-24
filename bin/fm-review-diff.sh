@@ -5,7 +5,8 @@
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
 # A task whose meta records base_branch= (bin/fm-spawn.sh) compares against
-# origin/<base_branch> instead of the default branch.
+# origin/<base_branch> instead of the default branch, a scout whose origin
+# lacks the base falling back to the local branch.
 # When state/<id>.meta records pr= as a GitHub pull-request URL, a Forgejo
 # pull-request URL (addressed /pulls/<n> but served by the instance as the
 # same refs/pull/<n>/head ref), or a bare number for an open PR, the compare

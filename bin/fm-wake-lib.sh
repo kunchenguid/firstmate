@@ -1632,7 +1632,8 @@ fm_local_firstmate_state_dirs() {  # <first-state>
 # below it, including a remote-seeded home and its own local descendants -
 # derives the identical path. Its identity is the project's resolved origin, so
 # separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
+# project falls back to its own worktree top, or its git directory when the
+# repository is bare, instead of failing to resolve.
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top bare
   [ -d "$project" ] || return 1

@@ -54,10 +54,12 @@
 #   the same project is refused before any endpoint exists.
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
-#   resets its pooled copy to origin/<branch>, refusing when the project has no
-#   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it; a local-only task without origin requires the named ref
-#   locally. It must agree with every Setup "Base branch:" line in the
+#   resets its pooled copy to origin/<branch> when origin carries it, or to the
+#   local <branch> when the project has no origin or a scout's origin lacks it,
+#   refusing when the named ref exists nowhere (a ship on an origin-backed
+#   project must find it on origin), when the project's registered forge cannot
+#   carry it, and on local-only, which cannot carry a base at all. It must
+#   agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
