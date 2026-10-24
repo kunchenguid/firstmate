@@ -315,7 +315,7 @@ test_agent_root_resolution() {
 
   # 1. The invoking process's PI_CODING_AGENT_DIR is not evidence: panes are
   #    created by a daemon that does not inherit it, and an unpinned launch line
-  #    names no root, so that worker reads Pi's default ~/.pi/agent.
+  #    unsets it, so that worker reads Pi's default ~/.pi/agent.
   out=$(HOME="$USER_HOME" PI_CODING_AGENT_DIR="$CASE/env-agent" "$TRUST" "$WT" "$PROJ" 2>&1)
   expect_code 0 $? "a registration under an ambient PI_CODING_AGENT_DIR must succeed: $out"
   assert_trusted "$USER_HOME/.pi/agent/trust.json" "$(wt_real)" \
@@ -381,14 +381,17 @@ EOF
     launch=$(cat "$CASE/launch.log")
     assert_not_contains "$launch" "--approve" \
       "$harness crewmate launches must keep the session-only --approve off"
+    assert_contains "$launch" "-u PI_CODING_AGENT_DIR" \
+      "an unpinned $harness launch must unset the pane's ambient agent root"
     pass "$harness ship spawn registers its worktree before launch"
   done
 }
 
 # The spawning process's PI_CODING_AGENT_DIR is not the store an unpinned
-# launch reads: its launch line names no root and the pane comes from a daemon
-# that does not inherit firstmate's environment. Registering the spawning
-# root instead would leave the dialog exactly where it was.
+# launch reads: the launch line unsets the variable, so no pane daemon
+# environment can redirect it, and the default store is the only possibility.
+# Registering the spawning root instead would leave the dialog exactly where it
+# was.
 test_pi_spawn_ignores_the_spawning_process_agent_root() {
   local rec id out store launch
   id=pi-trust-divergent-root
@@ -407,8 +410,10 @@ EOF
   assert_absent "$CASE/work-root/trust.json" \
     "the spawning process's PI_CODING_AGENT_DIR must not receive the entry"
   launch=$(cat "$CASE/launch.log")
-  assert_not_contains "$launch" "PI_CODING_AGENT_DIR" \
+  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
     "an unpinned launch line must still carry no agent root"
+  assert_contains "$launch" "-u PI_CODING_AGENT_DIR" \
+    "an unpinned launch line must unset the pane's ambient agent root"
   pass "an unpinned pi spawn registers Pi's default store even when the spawn environment names another root"
 }
 

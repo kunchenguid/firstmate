@@ -1245,7 +1245,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
 The pin is opt-in: without a home-wide or per-secondmate pin, pane-backed Claude launches keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
-Unpinned Pi launches use the destination pane's ambient account.
+Unpinned Pi and pi-signed launches explicitly unset `PI_CODING_AGENT_DIR` on their launch line, so every unpinned launch deterministically uses Pi's default `~/.pi/agent` store instead of whatever account the pane's daemon happens to export; select a different agent root or account with `config/pi-account`, not by exporting the variable.
 
 Both files are local and gitignored.
 
@@ -1382,6 +1382,7 @@ Firstmate retains basic home, executable search, terminal, locale, temporary-dir
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
+An unpinned Pi or pi-signed launch unsets `PI_CODING_AGENT_DIR` after even an allowlisted forwarding, so this file cannot select their agent root; use [`config/pi-account`](#worker-account-pin-configclaude-account-configpi-account) instead.
 The command shell and worker may still create their own variables.
 
 Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.

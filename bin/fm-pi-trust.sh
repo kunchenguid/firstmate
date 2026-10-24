@@ -42,9 +42,11 @@
 #
 # THE STORE IS THE ONE THE LAUNCH LINE NAMES. A worker account pin puts its root
 # on the launch line and bin/fm-spawn.sh passes that root as --agent-dir; an
-# unpinned launch line carries no root at all, so that worker reads Pi's default
-# `<home>/.pi/agent`, which is this script's default. Those are the only two
-# shapes; the invoking process's environment is not one of the inputs.
+# unpinned pi/pi-signed launch line explicitly unsets PI_CODING_AGENT_DIR, so
+# that worker deterministically reads Pi's default `<home>/.pi/agent`, which is
+# this script's default. An operator who needs a different agent root or account
+# selects one with config/pi-account rather than by exporting the variable. The
+# invoking process's environment is not one of the inputs.
 #
 # A lookup resolves the nearest recorded decision on the worktree path itself or
 # any ancestor, matching Pi's own `findNearestTrustEntry` walk, which skips
