@@ -16,6 +16,16 @@
 # locked drain rotates such leftovers away before doing anything else.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
+# OPEN DECISIONS prints in full only when the open set differs from the one
+# recorded at this actor's last successful acknowledgement (state/
+# .open-decisions-acked.<actor>), otherwise as one `OPEN DECISIONS: N unchanged`
+# line. A presentation stages its set (.open-decisions-presented.<actor>) and a
+# successful --ack-through promotes it, so an unacknowledged drain repeats the
+# full form; a drain with nothing to acknowledge records its set directly.
+# FM_WAKE_DRAIN_OPEN_DECISIONS=full forces the full form (the session-start
+# digest and the away-return brief set it). FM_WAKE_DRAIN_OPEN_DECISIONS=discard
+# is for a drain nobody reads (the away daemon): it records nothing and its
+# --ack-through promotes nothing, so the next reading drain still prints in full.
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -49,6 +59,8 @@ PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
+OD_CANDIDATE=
+OD_COMMIT_NOW=false
 BRANCH_OUTCOMES_RC=0
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
@@ -474,7 +486,18 @@ print_open_decisions_section() {
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
+  # Stage the folded set for the caller to record once the bytes are presented;
+  # when it cannot be staged the section simply keeps printing in full.
+  if [ -n "$OD_CANDIDATE" ] && ! printf '%s\n' "$open" > "$OD_CANDIDATE" 2>/dev/null; then
+    rm -f -- "$OD_CANDIDATE"
+    OD_CANDIDATE=
+  fi
   [ -n "$open" ] || return 0
+  if [ -n "$OD_CANDIDATE" ] && [ "${FM_WAKE_DRAIN_OPEN_DECISIONS:-}" != full ] \
+    && cmp -s "$OD_CANDIDATE" "$STATE/.open-decisions-acked.$ACTOR" 2>/dev/null; then
+    printf 'OPEN DECISIONS: %d unchanged\n' "$(printf '%s\n' "$open" | awk 'NF { n++ } END { print n + 0 }')" || return 1
+    return 0
+  fi
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
@@ -754,27 +777,50 @@ print_status_sections() {
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
+  OD_CANDIDATE="$prepared.decisions"
   if ! {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
       && print_record_divergence_section
   } > "$prepared"; then
-    rm -f -- "$prepared"
+    rm -f -- "$prepared" "$prepared.decisions"
     return 1
   fi
   # Prepare every section before presentation, but do not commit its receipt
   # until the prepared bytes reach stdout. If the consumer closes or fails,
   # leave the receipt behind so the next drain can recover the presentation.
   if ! command cat "$prepared"; then
-    rm -f -- "$prepared"
+    rm -f -- "$prepared" "$prepared.decisions"
     return 1
   fi
   if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
-    rm -f -- "$prepared"
+    rm -f -- "$prepared" "$prepared.decisions"
     return 1
   fi
   rm -f -- "$prepared"
+  record_open_decisions_presented "$prepared.decisions"
+}
+
+# Record the OPEN DECISIONS set a presentation just printed. A drain with
+# something to acknowledge only stages it; the successful --ack-through
+# promotes it, so an unacknowledged drain keeps printing the full section. A
+# drain with nothing to acknowledge (OD_COMMIT_NOW) records it directly.
+# Best effort: a missed record only costs one extra full section.
+record_open_decisions_presented() {  # <staged-set>
+  local staged=$1 target
+  [ -e "$staged" ] || return 0
+  if [ "${FM_WAKE_DRAIN_OPEN_DECISIONS:-}" = discard ]; then
+    rm -f -- "$staged"
+    return 0
+  fi
+  if [ "$OD_COMMIT_NOW" = true ]; then
+    target="$STATE/.open-decisions-acked.$ACTOR"
+  else
+    target="$STATE/.open-decisions-presented.$ACTOR"
+  fi
+  mv -f -- "$staged" "$target" 2>/dev/null || rm -f -- "$staged"
+  return 0
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
@@ -963,9 +1009,15 @@ if [ -n "$ACK_THROUGH" ]; then
           "$ACK_THROUGH" "$PRESENTED_MAX" >&2
         ;;
     esac
-  elif [ "$RECOVERY_ACK_MOVED" = true ]; then
-    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
-      "$ACK_THROUGH" "$ACK_REMOVED" >&2
+  else
+    # The set the acknowledged presentation printed becomes the one later
+    # drains compare against.
+    [ "${FM_WAKE_DRAIN_OPEN_DECISIONS:-}" = discard ] || [ ! -e "$STATE/.open-decisions-presented.$ACTOR" ] \
+      || mv -f -- "$STATE/.open-decisions-presented.$ACTOR" "$STATE/.open-decisions-acked.$ACTOR" 2>/dev/null || true
+    if [ "$RECOVERY_ACK_MOVED" = true ]; then
+      printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+        "$ACK_THROUGH" "$ACK_REMOVED" >&2
+    fi
   fi
   exit 0
 fi
@@ -987,6 +1039,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  [ "$RECOVERY_ACK_REQUIRED" = true ] || OD_COMMIT_NOW=true
   (print_status_presentation) || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
@@ -1009,6 +1062,7 @@ if [ "$ACTOR" = main ]; then
     print_branch_held_notice
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
+    OD_COMMIT_NOW=true
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
     assert_watcher_liveness
