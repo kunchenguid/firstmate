@@ -7,6 +7,7 @@
 # the OpenCode plugin) in a plain Node host, so the artifact, the real
 # bin/fm-busy-event.sh writer, and the real classifier are exercised together
 # with no live harness session.
+# Set FM_TEST_ONLY to a test function name for a focused executable regression.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -381,6 +382,231 @@ test_claude_hooks_semantic_lifecycle() {
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
 }
 
+test_claude_worker_settings_preserved() {
+  local rec id=worker-settings-1 out settings prior event cmd
+  rec=$(make_spawn_case worker-settings claude "$id")
+  read_case_record "$rec"
+  settings="$WT_DIR/.claude/settings.local.json"
+  prior="$CASE_DIR/prior.json"
+  mkdir -p "$WT_DIR/.claude"
+  printf '.claude/settings.local.json\n' >> "$PROJ_DIR/.git/info/exclude"
+  cat > "$prior" <<'JSON'
+{
+  "permissions": {"allow": ["Read(./docs/**)"], "deny": ["Bash(rm *)"], "defaultMode": "default"},
+  "env": {"FIXTURE_FLAG": "enabled"},
+  "model": "fixture-model",
+  "accountFixture": {"provider": "fixture", "nested": {"keep": [true, null, 7]}},
+  "feedbackDrafts": "on",
+  "attribution": {"commit": "fixture attribution", "pr": "fixture PR", "sessionUrl": true}
+}
+JSON
+  cp "$prior" "$settings"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn with existing settings should succeed: $out"
+  jq -e --slurpfile prior "$prior" 'del(.hooks) == $prior[0]' "$settings" >/dev/null \
+    || fail "initial hook installation changed unrelated worker settings"
+  for event in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e --arg event "$event" '.hooks[$event] | length == 1' "$settings" >/dev/null \
+      || fail "initial hook installation did not create exactly one $event entry"
+  done
+
+  # Seed ordinary hooks, including matcher/timeout/async and prompt semantics.
+  # These entries must remain structurally identical on refresh.
+  jq '.hooks = {
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "printf fixture-submit", "timeout": 17}]}],
+    "Stop": [{"hooks": [{"type": "prompt", "prompt": "Fixture stop check", "timeout": 23}]}],
+    "StopFailure": [{"hooks": [{"type": "command", "command": "printf fixture-failure", "async": true}]}],
+    "SessionEnd": [{"matcher": "logout", "hooks": [{"type": "command", "command": "printf fixture-end"}]}],
+    "PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read"}]}]
+  }' "$prior" > "$settings"
+  cp "$settings" "$prior"
+  id=worker-settings-2
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn with existing hooks should succeed: $out"
+  for event in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e --arg event "$event" --slurpfile prior "$prior" '
+      .hooks[$event][:-1] == $prior[0].hooks[$event] and (.hooks[$event] | length == 2)
+    ' "$settings" >/dev/null || fail "adding Firstmate hooks changed existing $event semantics"
+  done
+  jq -e --slurpfile prior "$prior" '
+    del(.hooks) == ($prior[0] | del(.hooks)) and .hooks.PreToolUse == $prior[0].hooks.PreToolUse
+  ' "$settings" >/dev/null || fail "adding hooks changed unrelated settings or hook events"
+
+  # A user hook can share a group with the old Firstmate hook; refresh must
+  # remove only the old generated command, retaining the group and its matcher.
+  jq '.hooks.Stop[-1].matcher = "fixture-matcher" |
+    .hooks.Stop[-1].hooks += [{"type": "command", "command": "printf fixture-mixed"}]' \
+    "$settings" > "$CASE_DIR/mixed.json"
+  cp "$CASE_DIR/mixed.json" "$settings"
+  id=worker-settings-3
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude hook refresh should succeed: $out"
+  jq -e --slurpfile prior "$prior" '
+    del(.hooks) == ($prior[0] | del(.hooks)) and
+    .hooks.PreToolUse == $prior[0].hooks.PreToolUse and
+    .hooks.Stop[-2] == {"matcher": "fixture-matcher", "hooks": [{"type": "command", "command": "printf fixture-mixed"}]}
+  ' "$settings" >/dev/null || fail "refresh lost unrelated settings, hook events, or a mixed hook group"
+  for event in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e --arg event "$event" --arg id "$id" --slurpfile prior "$prior" '
+      .hooks[$event][0] == $prior[0].hooks[$event][0] and
+      (.hooks[$event] | length == (if $event == "Stop" then 3 else 2 end)) and
+      (.hooks[$event][-1].hooks | length == 1) and
+      (.hooks[$event][-1].hooks[0].command | contains($id))
+    ' "$settings" >/dev/null || fail "refresh duplicated stale Firstmate hooks or changed existing $event semantics"
+    cmd=$(jq -r --arg event "$event" '.hooks[$event][-1].hooks[0].command' "$settings")
+    sh -c "$cmd" || fail "refreshed $event command failed"
+    out=$(classify claude "$id" "$HOME_DIR/state")
+    if [ "$event" = UserPromptSubmit ]; then
+      [ "$out" = "busy claude-hook" ] || fail "refreshed submit hook did not open busy: $out"
+    else
+      [ "$out" = "idle claude-hook" ] || fail "refreshed $event hook did not close busy: $out"
+    fi
+  done
+  [ -f "$HOME_DIR/state/$id.turn-ended" ] || fail "refreshed Stop lost its notification"
+  pass "Claude worker hook creation and refresh preserve settings, nested fields, and ordinary hook semantics"
+}
+
+test_claude_worker_invalid_settings_untouched() {
+  local fixture rec id out settings prior index=0
+  for fixture in '' 'not-json' '[]' '{} {}' '{"hooks":null}' '{"hooks":{"Stop":{}}}'; do
+    index=$((index + 1))
+    id="worker-invalid-$index"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    settings="$WT_DIR/.claude/settings.local.json"
+    prior="$CASE_DIR/prior.json"
+    mkdir -p "$WT_DIR/.claude"
+    printf '.claude/settings.local.json\n' >> "$PROJ_DIR/.git/info/exclude"
+    printf '%s\n' "$fixture" > "$prior"
+    cp "$prior" "$settings"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 1 $? "claude spawn should refuse invalid existing settings: $out"
+    assert_contains "$out" 'could not refresh Claude worker hooks without losing existing settings' \
+      "invalid fixture was not refused by the settings writer"
+    cmp -s "$prior" "$settings" || fail "invalid existing settings were overwritten"
+  done
+  pass "Claude worker refuses malformed settings without overwriting the existing file"
+}
+
+# Stubs that fail one step of a settings publication: staging beside <settings>
+# (mktemp), the staged write (cp leaves the staged copy read-only, so the
+# complete write into it fails), or the replacement (mv onto <settings>).
+make_settings_publish_failure_stubs() {  # <fakebin>
+  local fakebin=$1 tool real
+  for tool in mktemp cp mv; do
+    real=$(command -v "$tool")
+    cat > "$fakebin/$tool" <<SH
+#!/usr/bin/env bash
+dir=\${FM_FAKE_SETTINGS_PATH%/*}
+last=
+for arg in "\$@"; do last=\$arg; done
+case "\${FM_FAKE_SETTINGS_FAIL:-}:$tool:\$last" in
+  "stage:mktemp:\$dir/"*) exit 1 ;;
+  "write:cp:\$dir/"*) "$real" "\$@" || exit; chmod 400 "\$last"; exit 0 ;;
+  "publish:mv:\$FM_FAKE_SETTINGS_PATH") exit 1 ;;
+esac
+exec "$real" "\$@"
+SH
+    chmod +x "$fakebin/$tool"
+  done
+}
+
+test_claude_worker_settings_publish_failures_keep_original() {
+  local mode rec id out settings prior
+  for mode in stage write publish; do
+    if [ "$mode" = write ] && [ "$(id -u)" = 0 ]; then
+      continue
+    fi
+    id="worker-publish-$mode"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    settings="$WT_DIR/.claude/settings.local.json"
+    prior="$CASE_DIR/prior.json"
+    printf '.claude/settings.local.json\n' >> "$PROJ_DIR/.git/info/exclude"
+    out=$(umask 022; run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "claude spawn creating worker settings should succeed: $out"
+    [ -n "$(find "$settings" -prune -perm 644)" ] \
+      || fail "new worker settings did not get the creating umask's mode"
+    jq '.permissions = {"allow": ["Read(./docs/**)"]} |
+      .hooks.PreToolUse = [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read"}]}]' \
+      "$settings" > "$prior"
+    cp "$prior" "$settings"
+    chmod 640 "$settings"
+    make_settings_publish_failure_stubs "$FAKEBIN_DIR"
+    id="$id-refresh"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    out=$(FM_FAKE_SETTINGS_FAIL=$mode FM_FAKE_SETTINGS_PATH=$settings \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 1 $? "a failed $mode of refreshed worker settings should refuse the spawn: $out"
+    if [ "$mode" = stage ]; then
+      assert_contains "$out" "could not stage refreshed Claude worker hooks" \
+        "the $mode failure was not reported by the settings writer"
+    else
+      assert_contains "$out" "could not publish refreshed Claude worker hooks" \
+        "the $mode failure was not reported by the settings writer"
+    fi
+    cmp -s "$prior" "$settings" || fail "a failed $mode changed the existing worker settings"
+    [ -n "$(find "$settings" -prune -perm 640)" ] || fail "a failed $mode changed the settings mode"
+    [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+      || fail "a failed $mode left staged settings behind: $(ls -A "${settings%/*}")"
+    id="$id-retry"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "the refresh should succeed once publication works: $out"
+    jq -e --slurpfile prior "$prior" --arg id "$id" '
+      del(.hooks) == ($prior[0] | del(.hooks)) and
+      .hooks.PreToolUse == $prior[0].hooks.PreToolUse and
+      (.hooks.Stop | length == 1) and (.hooks.Stop[0].hooks[0].command | contains($id))
+    ' "$settings" >/dev/null || fail "the refresh after a failed $mode did not replace only the generated hooks"
+    [ -n "$(find "$settings" -prune -perm 640)" ] || fail "a refresh after a failed $mode changed the settings mode"
+    [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+      || fail "a refresh after a failed $mode left staged settings behind"
+  done
+  pass "Claude worker settings stay intact through failed staging, writes, and replacement"
+}
+
+# A real file-size limit interrupts the staged printf with SIGXFSZ after a
+# partial write. The writer must contain that signal, refuse publication, and
+# remove the incomplete staging file without touching the saved settings.
+# The limit is 1 MiB, not a few KiB: every other spawn write must fit under it,
+# including bash 3.2's here-document temp files and the first-run cache of the
+# macOS /usr/bin/git xcrun shim. The saved settings sit just below the limit,
+# so only the merged settings, with the generated hooks added, cross it.
+test_claude_worker_partial_settings_write_keeps_original() {
+  local rec id=worker-partial-write out settings prior rc
+  rec=$(make_spawn_case worker-partial-write claude "$id")
+  read_case_record "$rec"
+  settings="$WT_DIR/.claude/settings.local.json"
+  prior="$CASE_DIR/prior.json"
+  mkdir -p "${settings%/*}"
+  printf '.claude/settings.local.json\n' >> "$PROJ_DIR/.git/info/exclude"
+  jq -n '{permissions: {allow: ["Read(./docs/**)"]},
+    env: {FIXTURE_FLAG: "preserve"}, savedFixture: ("x" * 1047552)}' > "$prior"
+  [ "$(wc -c < "$prior")" -lt 1048576 ] || fail "partial-write fixture exceeds its output limit"
+  cp "$prior" "$settings"
+  chmod 640 "$settings"
+  out=$(ulimit -f 1024; run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR"); rc=$?
+  expect_code 1 "$rc" "a partial staged write must refuse the spawn rather than kill its writer: $out"
+  assert_contains "$out" 'could not publish refreshed Claude worker hooks' \
+    "a partial staged write did not surface the settings publication refusal"
+  cmp -s "$prior" "$settings" || fail "a partial staged write changed the saved settings"
+  [ -n "$(find "$settings" -prune -perm 640)" ] || fail "a partial staged write changed the saved settings mode"
+  [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+    || fail "a partial staged write left incomplete settings output behind"
+  id="$id-retry"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "installation should succeed once the output limit is removed: $out"
+  jq -e --slurpfile prior "$prior" 'del(.hooks) == $prior[0]' "$settings" >/dev/null \
+    || fail "retry after a partial staged write changed unrelated saved settings"
+  [ -n "$(find "$settings" -prune -perm 640)" ] || fail "retry after a partial write changed the saved settings mode"
+  [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+    || fail "retry after a partial write left staged settings behind"
+  pass "Claude worker settings survive a real partial staged write with no incomplete output left behind"
+}
+
 test_claude_hooks_stale_incarnation_harmless() {
   local rec id=busy-cl-2 out state settings
   rec=$(make_spawn_case claude-stale claude "$id")
@@ -564,7 +790,7 @@ spawn_secondmate_harness() { # <case-dir> <id> <harness> [extra fake tools...]
 }
 
 secondmate_stall_watch() { # <primary> <id> <out> [seconds]
-  local primary=$1 id=$2 out=$3 seconds=${4:-4} state window fakebin
+  local primary=$1 id=$2 out=$3 seconds=${4:-4} state window fakebin agent_state
   state="$primary/state"
   window=$(grep '^window=' "$state/$id.meta" | cut -d= -f2-)
   # A previous quiet checkpoint leaves a downtime marker. The next watcher
@@ -590,11 +816,22 @@ case "\${1:-}" in
     esac
     ;;
   capture-pane) printf 'working\n' ;;
-  display-message) printf '0\n' ;;
+  display-message)
+    # This checkpoint observes a running Claude mate, not an absent agent.
+    # Returning 0 for its command makes liveness recovery run before the
+    # busy/idle stall gate gets a chance to inspect the frozen wake row.
+    case "\$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac
 SH
   chmod +x "$fakebin/tmux"
+  agent_state=$(PATH="$fakebin:$PATH" FM_HOME="$primary" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state tmux "$2"' _ "$ROOT" "$window")
+  [ "$agent_state" = alive ] || fail "stall fixture must model a running agent, got $agent_state"
   PATH="$fakebin:$PATH" FM_HOME="$primary" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_BACKEND=tmux \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
@@ -945,6 +1182,15 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
   pass "codex and grok secondmates stay on their existing verdicts and do not emit a parent turn-end"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  case "$FM_TEST_ONLY" in
+    test_*) declare -F "$FM_TEST_ONLY" >/dev/null || fail "unknown FM_TEST_ONLY test: $FM_TEST_ONLY" ;;
+    *) fail "FM_TEST_ONLY must name a test_ function: $FM_TEST_ONLY" ;;
+  esac
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
 test_raw_secondmate_launch_writes_no_busy_wiring
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
@@ -961,6 +1207,10 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_opencode_plugin_v2_execution_lifecycle
 test_claude_hooks_semantic_lifecycle
+test_claude_worker_settings_preserved
+test_claude_worker_invalid_settings_untouched
+test_claude_worker_settings_publish_failures_keep_original
+test_claude_worker_partial_settings_write_keeps_original
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless

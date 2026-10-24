@@ -1082,6 +1082,14 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 
 ### Installed hooks and launch details
 
+For Claude crewmates and scouts, `fm-spawn.sh` merges Firstmate's generated busy hooks into the worktree's `.claude/settings.local.json` instead of replacing the file.
+Existing non-hook settings, including saved permission rules, and unrelated hook events, commands, and group metadata survive installation and refresh, including worker hooks sharing a group with a generated command.
+Refresh replaces the previous generated commands rather than accumulating them.
+Relaunch retirement, including a switch away from Claude or cleanup of an aborted replacement, removes only those generated commands and the groups or events they leave empty; the file is removed only when that removal leaves no settings.
+An unchanged file is not rewritten; a successful update may reformat JSON but preserves the existing file's permission mode.
+Settings that cannot be safely read or merged refuse the operation without overwriting the file, and a failed staged write or replacement leaves the original file intact.
+The focused executable fixtures in [`tests/fm-busy-adapter-wiring.test.sh`](../tests/fm-busy-adapter-wiring.test.sh) and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) cover preservation, retirement, refusal, and publication failures with stubbed session transports, not live worker-session proof.
+
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 
