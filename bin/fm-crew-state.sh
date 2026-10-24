@@ -465,6 +465,11 @@ passed_pr_detail() {
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
+  if [ -n "${FM_CREW_STATE_EXPECTED_PR:-}" ] \
+    && [ "$url" != "$FM_CREW_STATE_EXPECTED_PR" ]; then
+    printf 'run passed: PR state unknown (identity mismatch)'
+    return
+  fi
   if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \
@@ -553,6 +558,17 @@ passed_pr_detail() {
       printf 'run passed: PR state unknown (unreadable: %s)' "$url"
       ;;
   esac
+}
+
+# Green checks alone do not require a forge read. The fleet snapshot opts into
+# one only for a structured external hold whose current PR disposition affects
+# terminal-in-flight classification.
+green_pr_detail() {
+  if [ -n "${FM_CREW_STATE_EXPECTED_PR:-}" ]; then
+    passed_pr_detail
+  else
+    printf 'run passed: PR state unknown (current disposition not requested)'
+  fi
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -814,8 +830,8 @@ nm_reclassify_failed_run_as_held_green() {
   local disposition pr_url
   disposition=$(passed_pr_detail)
   case "$disposition" in
-    "run passed: PR open") RUN_DETAIL="checks green: PR held for merge (ci monitor ended)" ;;
-    "run passed: PR merged") RUN_DETAIL="checks green: PR merged (ci monitor ended)" ;;
+    "run passed: PR open") RUN_DETAIL="$disposition${SEP}checks green: PR held for merge (ci monitor ended)" ;;
+    "run passed: PR merged") RUN_DETAIL="$disposition${SEP}checks green: PR merged (ci monitor ended)" ;;
     *) return 1 ;;
   esac
   RUN_STATE="done"
@@ -1163,8 +1179,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail)${SEP}publication/CI verification skipped" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="$(green_pr_detail)${SEP}checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1216,7 +1232,7 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              RUN_DETAIL="$(green_pr_detail)${SEP}checks green: PR ready for review (still monitoring for merge/close)"
               # The run's own PR URL makes this reading actionable even when
               # the worker never reported it and no pr= was recorded.
               ci_pr_url=$(strip_quotes "$(nm_field pr)")
