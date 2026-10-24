@@ -517,7 +517,7 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   # row from the 18.1.2 investigation. Without the status-row rule the bare
   # wrap region swallows that row and an idle omp pane reads `pending`, which
   # skipped the doorbell on the first live omp worker.
-  local idle_unicode idle_nerd busy typed wrapped
+  local idle_unicode idle_nerd idle_m busy typed wrapped
   idle_unicode=$'transcript line
 
 ❯
@@ -526,6 +526,13 @@ test_matrix_omp_status_row_bounds_bare_composer() {
 
 ❯
  󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K'
+  # A status row with no identity or spinner cell leaves the M-unit context
+  # cell as its only proof; before M units were recognized this idle pane
+  # read `pending` and the doorbell was skipped.
+  idle_m=$'transcript line
+
+❯
+ ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)'
   busy=$'transcript line
 
   ⎋ Working…
@@ -542,6 +549,12 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     || fail "the unicode-preset omp status row must be recognized as furniture"
   _fm_composer_row_is_omp_status ' 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K' \
     || fail "the nerd-preset omp status row must be recognized as furniture"
+  # A status row with no identity cell is recognized by its context cell
+  # alone, in K or M units; no other unit is an omp context window.
+  _fm_composer_row_is_omp_status '…-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)' \
+    || fail "an M-unit omp status row without an identity cell must be recognized as furniture"
+  _fm_composer_row_is_omp_status 'resize the cache · keep 5%/2G free' \
+    && fail "typed text with a G-unit ratio must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status ' ⠧ 11s  · ◔ GPT-6-Astra' \
     || fail "the busy omp spinner row must be recognized as furniture"
   _fm_composer_row_is_omp_status 'fix the flaky test' \
@@ -560,6 +573,7 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     || fail "the status-set omp spinner row must be recognized as furniture"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
+  assert_screen "idle omp (M-unit context)" empty "$CAPS_STYLED" "$idle_m"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
   assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
   assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
