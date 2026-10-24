@@ -35,6 +35,9 @@ test_family_pool_json_identifies_admission() {
   skipped_json="$tmp/skipped-proof.json"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$PROOF" "$proof"
+  # The harness isolates itself from the ambient fleet environment at startup, so
+  # the fixture repo must carry that owner as well as the harness itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
 #!/usr/bin/env bash
 if { [ "$1" = --list ] || [ "$1" = --list-scheduled ]; } && [ "$2" = --family ]; then
