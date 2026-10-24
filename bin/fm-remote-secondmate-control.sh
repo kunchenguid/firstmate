@@ -305,19 +305,25 @@ cmd_send() {
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
   fi
   fm_lock_release "$meta_lock"
+  # Report the far-side record on stdout for the parent's confirmation.
+  # This line is decoration only: the parent proves delivery from this leg's
+  # exit status and prints its own `sent:` line, so a parent that cannot read
+  # this report still reports a delivered steer instead of staying silent and
+  # inviting a resend (bin/fm-send.sh owns that confirmation).
+  printf 'steer_record=%s\n' "$rec"
   case "$rec" in
     */handled/*)
       # The dedup landed on a record the worker already acknowledged: the
       # steer was delivered and acted on, so there is nothing to announce.
-      printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
+      printf 'notice: steer already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
       return 0
       ;;
   esac
   fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
   case "$ring_rc" in
-    1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
-    2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
-    3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
+    1) printf 'notice: steer durably recorded at %s; doorbell skipped (composer visibly holds pending text)\n' "$rec" >&2 ;;
+    2) printf 'notice: steer durably recorded at %s; doorbell did not reach %s\n' "$rec" "$REMOTE_ENDPOINT_TARGET" >&2 ;;
+    3) printf 'notice: steer durably recorded at %s for recovery; doorbell not typed because the agent in %s has exited\n' "$rec" "$REMOTE_ENDPOINT_TARGET" >&2 ;;
   esac
 }
 
