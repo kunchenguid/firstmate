@@ -921,6 +921,32 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# One turn's status write and its trailing turn-end hook land inside one signal
+# grace window and surface as ONE wake, so they must queue ONE row: a second row
+# for the same task and wake reason costs the supervisor a presentation line that
+# names nothing the first did not. A turn-end with no status file in its batch is
+# a distinct event and keeps its own row.
+test_status_and_turn_end_batch_queue_one_row() {
+  local dir state fakebin out pid rows
+  dir=$(make_case batch-one-row); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'done: finished the change\n' > "$state/task.status"
+  : > "$state/task.turn-ended"
+  : > "$state/solo.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a batched status write and turn-end"
+  grep -F "signal:" "$out" | grep -F "$state/task.status" | grep -F "$state/task.turn-ended" >/dev/null \
+    || fail "the wake reason no longer names both files of the batch: $(cat "$out")"
+  rows=$(awk -F '\t' '$3 == "signal" && ($4 == "task.status" || $4 == "task.turn-ended") { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$rows" -eq 1 ] || fail "a status write plus its turn-end queued $rows rows instead of one: $(cat "$state/.wake-queue")"
+  awk -F '\t' '$3 == "signal" && $4 == "task.status"' "$state/.wake-queue" | grep -q . \
+    || fail "the coalesced row did not keep the status file's key: $(cat "$state/.wake-queue")"
+  awk -F '\t' '$3 == "signal" && $4 == "solo.turn-ended"' "$state/.wake-queue" | grep -q . \
+    || fail "a turn-end with no status file in its batch lost its own row: $(cat "$state/.wake-queue")"
+  pass "a status write and its same-batch turn-end queue one signal row; a lone turn-end keeps its row"
+}
+
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
 # report working, so the two proofs above are unreachable for it and EVERY worker
@@ -3033,6 +3059,81 @@ test_live_paused_until_controls_recheck_time() {
     "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "a due declared time rechecked again inside the long cadence"
   pass "a live paused worker stays absorbed until its declared time, then rechecks"
+}
+
+test_live_paused_far_future_until_is_bounded_by_the_resurface_cadence() {
+  local dir state fakebin out capture_file statusf window key sig wakes future back throttle
+  dir=$(make_case live-paused-far-until); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  future=$(iso_utc_at "$(( $(date +%s) + 259200 ))")
+  printf 'paused: waiting on the vendor, until %s\n' "$future" > "$statusf"
+  back=$(( $(date +%s) - 2000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.paused-resurfaced-$key"
+  printf 'parked, elapsed 1s' > "$capture_file"
+  printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a declaration that outlasted the recheck cadence was absorbed on first sight"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "a far-future until past the cadence produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the bounded far-future recheck"
+  printf 'parked, elapsed 2s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "pane churn re-alarmed a far-future declaration inside the recheck cadence"
+  printf 'parked, elapsed 3s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "a second hash change re-alarmed a far-future declaration inside the recheck cadence"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "pane churn produced $wakes wakes inside the recheck cadence of a far-future declaration"
+  back=$(( $(date +%s) - 2000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$throttle"
+  else touch -m -d "@$back" "$throttle"; fi
+  printf 'parked, elapsed 4s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a far-future declaration was never rechecked after the cadence elapsed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "the elapsed cadence produced $wakes wakes instead of one"
+  pass "a live worker paused until days out is rechecked once per cadence, not absorbed on every new pane hash"
+}
+
+# The first-sight path (surface_nonterminal_stale) is reached from the pane's
+# first stable poll, before handle_paused_stale ever sees the hash, so the cadence
+# bound has to hold there too: a declaration older than the recheck cadence whose
+# `until` is still days out surfaces on that FIRST poll. A 30s poll interval
+# against a 10s exit budget is what separates the two - a watcher that absorbed
+# first sight would only surface on the next poll, a full interval later.
+test_live_paused_far_future_until_first_sight_is_bounded() {
+  local dir state fakebin out capture_file statusf window key sig pid future wakes
+  dir=$(make_case live-paused-far-until-first-sight); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle worker\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  future=$(iso_utc_at "$(( $(date +%s) + 259200 ))")
+  printf 'paused: waiting on the vendor, until %s\n' "$future" > "$statusf"
+  set_mtime "$(( $(date +%s) - 2000 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    watch_bg "$state" "$fakebin" "$out" env FM_POLL=30 FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a declaration past the recheck cadence was absorbed on first sight"; }
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "first sight past the cadence produced $wakes wakes instead of one"
+  pass "a far-future paused until older than the recheck cadence surfaces on first sight, not a poll later"
 }
 
 # --- the wedge threshold consults the worker's own declared wait ------------
@@ -7335,6 +7436,7 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_status_and_turn_end_batch_queue_one_row
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
@@ -7414,6 +7516,8 @@ test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
+test_live_paused_far_future_until_is_bounded_by_the_resurface_cadence
+test_live_paused_far_future_until_first_sight_is_bounded
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane

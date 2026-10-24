@@ -2582,7 +2582,7 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
-  local win=$1 h=$2 dialog=${3-} key task last declared=1 bounded=1 throttled=1 until now reason=''
+  local win=$1 h=$2 dialog=${3-} key task last declared=1 bounded=1 throttled=1 until now mtime reason=''
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(status_declared_wait_line "$STATE/$task.status")
@@ -2593,8 +2593,14 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
+      mtime=$(stat_mtime "$STATE/$task.status")
+      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
       if [ "$now" -lt "$until" ]; then
-        throttled=0
+        if [ $(( now - mtime )) -lt "$PAUSE_RESURFACE_SECS" ]; then
+          throttled=0
+        else
+          stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+        fi
       else
         STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
         stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
@@ -3413,6 +3419,30 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# The files of one coalesced signal batch that earn a queue row, one per line.
+# The batch lists a file once per scan that saw it (the grace re-scan repeats
+# every file the first scan found), and a turn's status write and its trailing
+# turn-end hook land together; both are ONE wake, so each file queues at most one
+# row and a turn-end whose own status file is in the batch adds no second row for
+# the same wake. A turn-end with no status file in its batch is its own event and
+# keeps its row. The surviving row is the status file's, whose key the drain maps
+# to the status-line annotation directly instead of as a historical replay, and
+# the wake reason line still names every file in the batch.
+signal_batch_row_files() {  # <space-separated files in the batch> <pending scan lines>
+  local files=$1 pending=$2 sf sig f listed=" "
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    case "$listed" in *" $f "*) continue ;; esac
+    case "$f" in
+      *.turn-ended) case " $files " in *" ${f%.turn-ended}.status "*) continue ;; esac ;;
+    esac
+    listed="$listed$f "
+    printf '%s\n' "$f"
+  done <<EOF
+$pending
+EOF
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -3749,13 +3779,13 @@ EOF
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
       done <<EOF
-$pending
+$(signal_batch_row_files "$files" "$pending")
 EOF
       # The wake signature advances for every file in this batch, including one
       # whose span could not be classified: it has now been reported, and this is
@@ -3798,11 +3828,11 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       if [ "$signal_commit_error" -ne 0 ]; then
-        while IFS=$(printf '\t') read -r sf sig f; do
-          [ -n "$sf" ] || continue
+        while IFS= read -r f; do
+          [ -n "$f" ] || continue
           fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
         done <<EOF
-$pending
+$(signal_batch_row_files "$files" "$pending")
 EOF
         wake "$reason"
       fi
