@@ -376,26 +376,33 @@ test_lock_steals_dead_pid_lock() {
 # Start a process that claims each given link lock, then SIGKILL it so every
 # claim is left behind with a dead owner - an acquirer TERMed mid-steal.
 leave_dead_link_locks() {  # <state> <lock>...
-  local state=$1 holder i last
+  local state=$1 holder i held
   shift
-  last=${!#}
+  held="$state/.dead-link-locks-held"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    shift
+    held=$2
+    shift 2
     for lock do fm_lock_try_create "$lock" || exit 7; done
+    : > "$held"
     exec sleep 30
-  ' _ "$LIB" "$@" >/dev/null 2>&1 &
+  ' _ "$LIB" "$held" "$@" >/dev/null 2>&1 &
   holder=$!
+  # Kill only once the holder reports every claim complete, not when the last
+  # lock's pid file appears: that file appears before fm_lock_claim rewrites
+  # it, so a KILL timed off it can land mid-rewrite and leave an empty pid,
+  # which the reaper defers to as a fresh mid-acquire claim instead of reaping.
   # A loaded serial shard can stall the holder's startup past a second; allow
   # the same ~5s as this file's other child-startup waits.
   i=0
-  while [ "$i" -lt 250 ] && [ ! -s "$last/pid" ]; do
+  while [ "$i" -lt 250 ] && [ ! -e "$held" ]; do
     sleep 0.02
     i=$((i + 1))
   done
-  [ -s "$last/pid" ] || fail "dead link-lock owner did not publish its pid"
+  [ -e "$held" ] || { kill -KILL "$holder" 2>/dev/null || true; fail "dead link-lock owner never finished its claims"; }
   kill -KILL "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+  rm -f "$held"
 }
 
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {

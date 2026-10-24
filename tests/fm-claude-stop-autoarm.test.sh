@@ -924,7 +924,7 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
 # owner. The next reclaim must reap it directly, never by nesting another
 # .steal.steal mutex around it.
 test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
-  local dir out status pid holder lnbin lnlog i
+  local dir out status pid holder held lnbin lnlog i
   dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim-dead-steal")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
@@ -932,19 +932,27 @@ test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_epoch "$dir" 464 "$pid" rewake
+  held="$dir/state/steal-held"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1"
     fm_lock_try_create "$2" || exit 7
+    : > "$3"
     exec sleep 30
-  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock.steal" >/dev/null 2>&1 &
+  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock.steal" "$held" >/dev/null 2>&1 &
   holder=$!
+  # Kill only once the holder reports its claim complete. The pid file appears
+  # before fm_lock_claim rewrites it, so a KILL timed off that file can land
+  # mid-rewrite and leave an empty pid, which the reaper defers to as a fresh
+  # mid-acquire claim instead of reaping (exit 0 in place of the rewake).
   i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$dir/state/.claude-autoarm.lock.steal/pid" ]; do
+  while [ "$i" -lt 250 ] && [ ! -e "$held" ]; do
     sleep 0.02
     i=$((i + 1))
   done
+  [ -e "$held" ] || { kill -KILL "$holder" 2>/dev/null || true; fail "fixture holder never claimed the steal mutex"; }
   kill -KILL "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+  rm -f "$held"
   assert_present "$dir/state/.claude-autoarm.lock.steal" "fixture did not leave a dead-owner steal mutex"
   lnbin="$dir/lnbin"
   lnlog="$dir/ln.log"
