@@ -15,6 +15,15 @@ export FM_HOME="$TMP_ROOT/home"
 export FM_STATE_OVERRIDE="$FM_HOME/state"
 export FM_CONFIG_OVERRIDE="$FM_HOME/config"
 mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE"
+mkfifo "$TMP_ROOT/idle-shell.fifo"
+# Job control gives the fixture shell its own real foreground process group.
+set -m
+bash -c 'read -r _ < "$1"' -- "$TMP_ROOT/idle-shell.fifo" &
+SHELL_PID=$!
+set +m
+FM_HERDR_PS_BIN=$(command -v ps)
+export FM_HERDR_PS_BIN
+trap 'kill "$SHELL_PID" 2>/dev/null || true; wait "$SHELL_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
 touch "$FM_CONFIG_OVERRIDE/herdr-presentation-spaces"
 printf '%s\n' herdr > "$FM_CONFIG_OVERRIDE/backend"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
@@ -74,7 +83,6 @@ fm_lock_try_acquire() {
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
-fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
 fm_backend_herdr_projection_focus_snapshot() {
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
   printf 'w1\t%s' "$(cat "$FIXTURE_DIR/active-tab")"
@@ -160,6 +168,13 @@ fm_backend_herdr_cli() {
       ;;
     "pane get")
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
+      ;;
+    "pane process-info")
+      if [ -e "$FIXTURE_DIR/process-unsafe" ]; then
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[]}}}\n' "$PANE" "$SHELL_PID"
+      else
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["bash"]}]}}}\n' "$PANE" "$SHELL_PID" "$SHELL_PID" "$SHELL_PID"
+      fi
       ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in

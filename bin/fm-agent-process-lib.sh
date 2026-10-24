@@ -21,6 +21,29 @@ _FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-gemini-lib.sh"
 unset _FM_AGENT_PROCESS_LIB_DIR
 
+# fm_agent_process_start: one OS process incarnation, without its mutable
+# command line. Linux start ticks survive wall-clock changes; elsewhere the
+# portable ps start time is used. A failed/empty read never proves absence.
+fm_agent_process_start() {  # <pid> [ps-binary]
+  local pid=$1 ps_bin=${2:-ps} line start
+  local -a fields
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  if [ -d /proc ]; then
+    [ -r "/proc/$pid/stat" ] || return 1
+    IFS= read -r line < "/proc/$pid/stat" || return 1
+    read -r -a fields <<< "${line##*)}"
+    [ "${#fields[@]}" -ge 20 ] || return 1
+    start=${fields[19]}
+    case "$start" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc:%s' "$start"
+  else
+    start=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+    start=${start#"${start%%[![:space:]]*}"}
+    [ -n "$start" ] || return 1
+    printf 'ps:%s' "$start"
+  fi
+}
+
 # fm_agent_process_classify_name: the single owner of the process-name
 # vocabulary shared by every liveness signal - `agent` for a verified harness,
 # `shell` for an idle login/interactive shell, `other` for anything else.
