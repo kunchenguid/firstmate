@@ -451,6 +451,7 @@ test_propagate_lib() {
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
   : > "$src/trace-context"
+  printf 'claude=claudeAgent_claude_proxy\ncodex=codex\n' > "$src/t3code-instances"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -461,6 +462,7 @@ test_propagate_lib() {
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
+  [ "$(cat "$dest/t3code-instances")" = "$(printf 'claude=claudeAgent_claude_proxy\ncodex=codex')" ] || fail "t3code-instances not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
@@ -482,11 +484,13 @@ test_propagate_lib() {
   printf 'claude\n' > "$src/crew-harness"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   printf 'zellij\n' > "$src/backend"
+  printf 'claude=claudeAgent_epplerdev\n' > "$src/t3code-instances"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
   [ "$(cat "$dest/backend")" = zellij ] || fail "changed backend did not converge"
+  [ "$(cat "$dest/t3code-instances")" = claude=claudeAgent_epplerdev ] || fail "changed t3code-instances did not converge"
 
   outside="$d/outside-target"
   rm -f "$dest/crew-harness" "$outside"
@@ -501,7 +505,7 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
+    "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context" "$src/t3code-instances"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
@@ -509,6 +513,7 @@ test_propagate_lib() {
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
   [ -e "$dest/trace-context" ] && fail "trace-context absence not mirrored downstream"
+  [ -e "$dest/t3code-instances" ] && fail "t3code-instances absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"
@@ -1152,7 +1157,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
   assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
-    "explicit-harness-no-tokens: launch did not use codex"
+    "explicit-harness-no-tokens: launch did not use Codex bypass flag"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"
@@ -1302,7 +1307,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/codex-approval-mode\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1755,26 +1760,33 @@ test_spawn_secondmate_claude_grants_parent_inbox_dir() {
   pass "claude secondmate launches cover the parent-home steering inbox in auto and bypass modes"
 }
 
-# The file is a captain-wide safety preference, so it inherits like
-# config/backend: present values converge exactly and primary absence mirrors.
-test_claude_permission_mode_inheritance_present_and_absent() {
-  local w head out err status
+test_approval_mode_inheritance_present_and_absent() {
+  local w head out err status setting fallback
   w=$(new_world permmode-inherit)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
-
-  printf 'auto\n' > "$w/home/config/claude-permission-mode"
+  mkdir -p "$w/sm/config"
   err="$w/permmode-inherit.err"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "claude-permission-mode present push should succeed"
-  assert_contains "$out" "claude-permission-mode: pushed" "present value should report pushed"
-  [ "$(cat "$w/sm/config/claude-permission-mode")" = auto ] || fail "claude-permission-mode present value not pushed"
 
-  rm -f "$w/home/config/claude-permission-mode"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "claude-permission-mode absence push should succeed"
-  [ -e "$w/sm/config/claude-permission-mode" ] && fail "claude-permission-mode not removed on primary absence"
-  pass "B12c claude-permission-mode inheritance: present values and primary absence converge exactly"
+  for setting in claude-permission-mode codex-approval-mode; do
+    if [ "$setting" = claude-permission-mode ]; then fallback=auto; else fallback=approve-for-me; fi
+    printf '%s\n' "$fallback" > "$w/sm/config/$setting"
+    out=$(run_config_push "$w" 2>"$err"); status=$?
+    expect_code 0 "$status" "$setting primary-absent push should succeed"
+    [ ! -e "$w/sm/config/$setting" ] || fail "$setting local fallback survived primary absence"
+
+    printf 'bypass\n' > "$w/home/config/$setting"
+    out=$(run_config_push "$w" 2>"$err"); status=$?
+    expect_code 0 "$status" "$setting present push should succeed"
+    assert_contains "$out" "$setting: pushed" "present value should report pushed"
+    [ "$(cat "$w/sm/config/$setting")" = bypass ] || fail "$setting explicit primary did not win"
+
+    rm -f "$w/home/config/$setting"
+    out=$(run_config_push "$w" 2>"$err"); status=$?
+    expect_code 0 "$status" "$setting absence push should succeed"
+    [ ! -e "$w/sm/config/$setting" ] || fail "$setting inherited value survived primary absence"
+  done
+  pass "B12c approval modes follow primary values and primary absence"
 }
 
 test_backend_inheritance_present_and_absent() {
@@ -2983,7 +2995,7 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_spawn_secondmate_claude_grants_parent_inbox_dir
-test_claude_permission_mode_inheritance_present_and_absent
+test_approval_mode_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

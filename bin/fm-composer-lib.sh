@@ -493,7 +493,8 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # hence the unanchored tail). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
+# 2026.08.11-e8db854, and again on 2026.10.19-6bbf2c4 as one fully dim run).
+# Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
 # live, devin 3000.11.1). Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
@@ -708,6 +709,23 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     if _fm_composer_is_prompt_glyph "$plain_content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
       printf 'empty'; return 0
+    fi
+    # Ghost stripping emptied the row, glyph included. cursor-agent 2026.10.19
+    # draws `→` and `Add a follow-up` as one SGR 2 run and parks the terminal
+    # cursor below the footer, so there is no reverse-video remnant for the
+    # rule below to see. The plain row is the same anchored idle placeholder.
+    # Bright typed text is not stripped, so it never arrives here. Unstyled
+    # input has no de-emphasis proof and stays unknown. A shell glyph is not
+    # an agent glyph, so a dead shell still cannot read empty.
+    if [ "$styled" = 1 ]; then
+      local plain_body=$plain_content plain_glyph=''
+      if fm_composer_leading_agent_glyph_var plain_glyph "$plain_body"; then
+        plain_body=${plain_body#*"$plain_glyph"}
+        fm_composer_normalize_trim_var plain_body
+        if fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
+          printf 'empty'; return 0
+        fi
+      fi
     fi
     printf 'unknown'; return 0
   fi

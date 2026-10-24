@@ -189,6 +189,47 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_named_session_titled_rule() {
+  # Real claude 2.1.284 started as `claude -n <name>` (captured live through
+  # Herdr 0.9.1): the session name is right-aligned inside the rule ABOVE the
+  # composer, `───…─── <name> ─`, at the same width as the solid rule below.
+  # Herdr gives no cursor, so before the titled rule was recognized the
+  # cursorless path saw only the lower rule, read the idle composer `unknown`,
+  # and the away-mode injector deferred every escalation on a named primary.
+  local rule titled multi idle ghost typed out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  rule='────────────────────────────────'
+  titled='─────────────────────── Andrew ─'
+  idle="transcript line"$'\n'"$titled"$'\n'"❯$NBSP"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  assert_screen "named claude idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$claude_idle"
+  assert_screen "named claude idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "named claude idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "named claude idle on tmux" empty "$CAPS_TMUX" "$idle" 2 "$claude_idle"
+  # A multiword session name renders the same way, at the same width.
+  multi='────────────────── Andrew Chen ─'
+  assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
+    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
+  assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
+    "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
+  # Claude's prompt suggestion is dim ghost text, not input.
+  ghost="transcript line"$'\n'"$titled"$'\n'"❯$NBSP${ESC}[0m${ESC}[2mTry \"fix lint errors\"${ESC}[0m"$'\n'"$rule"
+  assert_screen "named claude ghost suggestion on herdr" empty "$CAPS_STYLED" "$ghost" '' "$claude_idle"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "${ghost/ Andrew ─/─────────}" '' "$claude_idle")
+  [ "$out" = empty ] || fail "unnamed claude ghost suggestion on herdr: expected empty, got '$out'"
+  # The protection that must not move: typed text in the named composer.
+  typed="transcript line"$'\n'"$titled"$'\n'"❯ fix the login bug"$'\n'"$rule"
+  assert_screen "named claude typed on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "named claude typed on tmux" pending "$CAPS_TMUX" "$typed" 2 "$claude_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = 'fix the login bug' ] \
+    || fail "named claude composer content should extract the typed text, got '$out'"
+  # Pi non-regression: a titled rule over a blank row never proves a pi
+  # composer, even with a live idle pi identity.
+  assert_screen "titled pair over a blank row is not pi" unknown "$CAPS_STYLED" \
+    "transcript"$'\n'"$titled"$'\n\n'"$rule"$'\n footer' '' "$pi_idle"
+  pass "matrix: a named claude session's titled top rule proves its composer; pi stays unchanged"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -397,6 +438,52 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   [ "$out" != empty ] \
     || fail "an unstyled cursor row matching the placeholder must not read empty, got '$out'"
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
+}
+
+test_matrix_cursor_fully_dim_placeholder() {
+  # cursor-agent 2026.10.19-6bbf2c4, tmux, idle pane. The glyph and the whole
+  # placeholder are one SGR 2 run on a truecolor background. The terminal
+  # cursor sits below the footer (cursor_flag 0), so nothing on this row is
+  # reverse video. Ghost stripping therefore empties the row instead of
+  # leaving the lone-character remnant the case above covers. Half-block
+  # rules are the live frame; they are edges, not a cornered box.
+  local row screen plain stripped typed
+  row="${ESC}[48;2;42;44;57m ${ESC}[2m→ Add a follow-up${ESC}[0m"
+  row="${row}${ESC}[48;2;42;44;57m        ${ESC}[49m"
+  screen=$'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$row"
+  screen="$screen"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"
+  screen="$screen"$'\n  Auto · 64%                                                                   Run Everything\n  ~/wt · <branch>\n'
+  plain=$'transcript\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\n  Auto · 64%                                                                   Run Everything\n  ~/wt · <branch>'
+
+  # NON-VACUOUSNESS: this row must strip to nothing. A surviving remnant would
+  # be the older case, and this one would no longer prove the empty-content path.
+  stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ -z "$stripped" ] \
+    || fail "the fully dim cursor row must ghost-strip to empty, got '$stripped'"
+
+  assert_screen "cursor 2026.10 fully dim idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "cursor 2026.10 fully dim idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # The cursor-anchored read stays blind: the cursor is on the blank row under
+  # the footer, not on the composer. The tmux adapter reclassifies only after
+  # process identity; this owner must not treat that blank row as empty.
+  assert_screen "cursor 2026.10 anchored blank row stays unknown" unknown \
+    "$CAPS_TMUX" "$screen" 6
+  assert_screen "cursor 2026.10 unstyled placeholder stays unknown" unknown \
+    "$CAPS_PLAIN" "$plain"
+
+  # Bright typed text, including text that is exactly the placeholder, survives
+  # stripping and must stay pending.
+  typed="${ESC}[48;2;42;44;57m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
+  assert_screen "cursor 2026.10 typed placeholder stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$typed"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"$'\n'
+
+  # Dim text that is not an anchored placeholder is not proof of an empty
+  # composer. Unknown keeps the injection guard closed.
+  row="${ESC}[48;2;42;44;57m ${ESC}[2m→ ship the fix${ESC}[0m"
+  assert_screen "cursor 2026.10 dim non-placeholder stays unknown" unknown \
+    "$CAPS_STYLED" $'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$row"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"$'\n'
+  pass "matrix: cursor's fully dim placeholder reads empty; typed text stays pending"
 }
 
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
@@ -1376,6 +1463,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_named_session_titled_rule
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
@@ -1383,6 +1471,7 @@ test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_cursor_fully_dim_placeholder
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture

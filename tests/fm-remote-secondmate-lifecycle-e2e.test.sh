@@ -1302,21 +1302,26 @@ jq --arg p "$ios_pane" \
   || fail "the agent-free remote pane did not classify dead"
 
 tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+# The watcher bounds this relaunch itself: its guarded spawn runs under
+# FM_SECONDMATE_LIVENESS_TIMEOUT, and either outcome wakes and exits the
+# watcher. The leg waits for that same bound plus probe headroom on the wall
+# clock, so a slow runner cannot fail a relaunch the watcher still accepts.
+watch_relaunch_timeout=120
 # exec keeps $! the watcher itself rather than the function's subshell, so a
 # kill reaches the process that probes and writes into the fixture root.
 FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
+  FM_SECONDMATE_LIVENESS_TIMEOUT="$watch_relaunch_timeout" \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
-  sleep 0.02
-  watch_wait=$((watch_wait + 1))
+watch_deadline=$((SECONDS + watch_relaunch_timeout + 30))
+while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_deadline" ]; do
+  sleep 0.1
 done
 if kill -0 "$watch_pid" 2>/dev/null; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within the bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fail "the watcher did not exit on its auto-relaunch wake within its ${watch_relaunch_timeout}s relaunch bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"

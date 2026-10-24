@@ -66,7 +66,7 @@ Coordinate any workflow rollback with its required-check names so a retired chec
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file stays gitignored; [runtime backend configuration](docs/configuration.md#runtime-backend-configbackend--fm_backend) owns supported values, selection, and limits.
   It does not make `data/` tracked.
-- Helper scripts in `bin/` are plain bash.
+- Shell helpers in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, pinned actionlint workflow lint, and the backend-purity check rejecting direct Beads CLI calls in core `bin/` scripts).
@@ -146,6 +146,7 @@ Source those instead of copying a fake toolchain into a new suite.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux/paseo/rex smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+[`tests/rex-test-safety.sh`](tests/rex-test-safety.sh) owns the real-Rex suites' private-server isolation and capability gates.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
 ## Questions

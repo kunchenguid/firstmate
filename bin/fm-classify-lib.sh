@@ -2188,23 +2188,25 @@ status_open_activities() {  # <status-file-or-dash>
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
-  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t line
+  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t3_thread t line
   if [ -n "$state" ]; then
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue
-      # The last window= and terminal= values, read in one pass without the
+      # The last endpoint values, read in one pass without the
       # grep | tail -1 | cut -d= -f2- pipelines this once forked per key.
       mw=
       mt=
+      t3_thread=
       {
         while IFS= read -r line || [ -n "$line" ]; do
           case "$line" in
             window=*) mw=${line#window=} ;;
             terminal=*) mt=${line#terminal=} ;;
+            t3_thread_id=*) t3_thread=${line#t3_thread_id=} ;;
           esac
         done < "$meta"
       } 2>/dev/null
-      [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
+      [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || [ "$t3_thread" = "$w" ] || continue
       t=${meta##*/}
       t=${t%.meta}
       printf '%s' "$t"
@@ -2621,6 +2623,40 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
+# whose step is running or fixing: the pipeline itself is executing a round, and
+# the worker is correctly idle behind its own drive call.
+# Only the whole `validating (running)` or `validating (fixing)` component that
+# bin/fm-crew-state.sh mints for an id-addressed run step counts, together with
+# its whole `run: <id>` component. A parked, terminal, ci-monitoring, coarse
+# `validating (background run)`, runless or unreadable verdict is not this
+# evidence, because none of them proves a round is executing for a named run.
+# On success it prints `<run-id> <running|fixing>`.
+# Same cost and caveat as crew_absorb_class: one fm-crew-state.sh read.
+crew_run_is_validating() {  # <id> -> "<run-id> <step>" on stdout
+  local id=$1 line state src rest part step='' run=''
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      'validating (running)') step=running ;;
+      'validating (fixing)') step=fixing ;;
+      "run: "?*) run=${part#run: } ;;
+    esac
+  done
+  [ -n "$step" ] && [ -n "$run" ] || return 1
+  case "$run" in *[[:space:]]*) return 1 ;; esac
+  printf '%s %s\n' "$run" "$step"
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

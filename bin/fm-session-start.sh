@@ -381,11 +381,14 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
 # the backlog listing and again inside the fm-bootstrap.sh child, which reports
-# an incompatible build as MISSING. Computing it once and handing it to that
-# child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
-# layers and the one-hop consumption rule that keeps the verdict out of any
-# agent's environment.
+# an incompatible build as OUTDATED. Computing it once and handing it, with the
+# reason behind it, to that child collapses six subprocesses to three; the reason
+# travels too so the child's OUTDATED requirement text names a missing capability
+# without running the child's own `--help` probes over again. fm-tasks-axi-lib.sh
+# owns both reuse layers and the one-hop consumption rule that keeps them out of
+# any agent's environment.
 if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
+TASKS_AXI_CHECK_REASON=$(fm_tasks_axi_check_reason)
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -756,14 +759,17 @@ stage bootstrap
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+    FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+    FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
     FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+      FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" \
       "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
 fi
@@ -1099,9 +1105,7 @@ EOF
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$COMPLETION_PID" in
-    ''|*[!0-9]*) COMPLETION_PID= ;;
-  esac
+  fm_session_pid_valid "$COMPLETION_PID" || COMPLETION_PID=
   COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
   if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
     && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \

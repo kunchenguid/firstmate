@@ -33,6 +33,7 @@
     "docs/cmux-backend.md",
     "docs/paseo-backend.md",
     "docs/rex-backend.md",
+    "docs/t3code-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -98,6 +99,10 @@
     },
     {
       "source": "docs/cmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/t3code-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -359,6 +364,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/usage-warner",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
@@ -483,6 +492,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/t3code-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
@@ -492,6 +505,14 @@
     },
     {
       "path": "docs/turnend-guard.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/opencode-2-plugin-port-scope.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/usage-warner.md",
       "audience": "operator-current"
     },
     {
@@ -580,6 +601,10 @@
     },
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/kimi-code-2.3.0/README.md",
       "audience": "maintainer-verification"
     },
     {
