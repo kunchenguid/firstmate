@@ -646,8 +646,14 @@ nm_gate_findings_count() {
 # Residual bound, which no unquoted positional parse of this table escapes: a
 # comma inside a whitelisted field's own value (a path with a comma in it, say)
 # still shifts the walk.
+# On success it also sets GATE_FINDINGS_CHECKSUM to a digest of the raw table
+# (header plus its N rows), so a consumer can tell a repeat of this gate from a
+# changed table at the same step without the verdict exposing finding content;
+# it stays empty when no digest tool is available.
+GATE_FINDINGS_CHECKSUM=''
 nm_gate_awaits_human_decision() {
   local header count cols idx i name field rows row rest
+  GATE_FINDINGS_CHECKSUM=''
   header=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*findings\[[0-9]+\]\{[^}]*\}:' | head -1)
   [ -n "$header" ] || return 1
   count=$(printf '%s' "$header" | sed -n 's/^[[:space:]]*findings\[\([0-9][0-9]*\)\].*/\1/p')
@@ -680,11 +686,24 @@ nm_gate_awaits_human_decision() {
     done
     [ -n "$rest" ] || continue
     field=$(strip_quotes "$(trim "${rest%%,*}")")
-    [ "$field" = ask-user ] && return 0
+    if [ "$field" = ask-user ]; then
+      GATE_FINDINGS_CHECKSUM=$(printf '%s\n%s\n' "$header" "$rows" | nm_findings_checksum) \
+        || GATE_FINDINGS_CHECKSUM=''
+      return 0
+    fi
   done <<EOF
 $rows
 EOF
   return 1
+}
+nm_findings_checksum() {
+  if command -v shasum >/dev/null 2>&1; then
+    LC_ALL=C shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    LC_ALL=C sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
@@ -1189,6 +1208,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       # later note happens to contain can mint it.
       if nm_gate_awaits_human_decision; then
         RUN_DETAIL="$RUN_DETAIL${SEP}$FM_GATE_HUMAN_DECISION"
+        [ -z "$GATE_FINDINGS_CHECKSUM" ] \
+          || RUN_DETAIL="$RUN_DETAIL${SEP}$FM_GATE_FINDINGS_CHECKSUM_PREFIX$GATE_FINDINGS_CHECKSUM"
       fi
     else
       case "$status" in

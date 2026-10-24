@@ -2578,8 +2578,13 @@ crew_is_paused() {  # <id>
 # The one spelling of the verdict component that says a parked gate's answer is
 # owed by a HUMAN. bin/fm-crew-state.sh mints it (nm_gate_awaits_human_decision
 # owns the derivation: the findings table's `action` column, read by position);
-# crew_gate_awaits_human_decision below is its only consumer.
+# _crew_state_line_human_gate_run below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
+
+# The prefix of the component bin/fm-crew-state.sh mints right after
+# FM_GATE_HUMAN_DECISION, carrying a digest of that gate's raw findings table;
+# crew_parked_human_gate below is its only consumer.
+FM_GATE_FINDINGS_CHECKSUM_PREFIX='ask-user findings checksum: '
 
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
 # is owed by a human rather than by the crewmate itself.
@@ -2603,9 +2608,16 @@ FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 # which may make a bounded no-mistakes call, so callers take it only where they
 # already accept that cost.
 crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
-  local id=$1 line state src rest part human='' run=''
+  local id=$1 line
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  _crew_state_line_human_gate_run "$line"
+}
+
+# The verdict-line half of crew_gate_awaits_human_decision, shared with
+# crew_parked_human_gate so both read one fm-crew-state.sh line the same way.
+_crew_state_line_human_gate_run() {  # <fm-crew-state-line> -> <run-id> on stdout
+  local line=$1 state src rest part human='' run=''
   case "$line" in state:*) ;; *) return 1 ;; esac
   state=${line#state: }; state=${state%% *}
   [ "$state" = parked ] || return 1
@@ -2621,6 +2633,33 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# Prints "<run>\t<step>\t<findings-checksum>" when crew <id>'s authoritative
+# current state is a gate owed a human, by exactly the test
+# crew_gate_awaits_human_decision applies, else fails. <step> is the gate name
+# from the verdict's `parked at <step>` component, which is the <step> of the
+# `nm-<run>-<step>` key the brief mandates for a gate escalation, and the
+# checksum is the FM_GATE_FINDINGS_CHECKSUM_PREFIX component. A verdict naming no
+# step or no checksum cannot key a once-per-gate notice, so it fails.
+# Same cost and caveat as crew_absorb_class: one fm-crew-state.sh read.
+crew_parked_human_gate() {  # <id> -> "<run>\t<step>\t<checksum>" on stdout
+  local id=$1 line run step='' checksum='' rest part
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  run=$(_crew_state_line_human_gate_run "$line") || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      "parked at "?*) step=${part#parked at }; step=${step%%:*} ;;
+      "$FM_GATE_FINDINGS_CHECKSUM_PREFIX"?*) checksum=${part#"$FM_GATE_FINDINGS_CHECKSUM_PREFIX"} ;;
+    esac
+  done
+  case "$step" in ''|*[[:space:]]*) return 1 ;; esac
+  case "$checksum" in ''|*[[:space:]]*) return 1 ;; esac
+  printf '%s\t%s\t%s\n' "$run" "$step" "$checksum"
 }
 
 # 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
