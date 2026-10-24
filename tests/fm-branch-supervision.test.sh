@@ -65,6 +65,13 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A worker whose pull request has landed is finished, not stuck"*"\`check: merge landed:\` wake names exactly that moment"*"\`bin/fm-teardown.sh <task>\` with no flags"*"never forced, worked around, or repaired by hand"*) ;;
     *) fail "branch prompt lost the landed-work cleanup rule" ;;
   esac
+  # The merge poll now retires a finished direct report itself and says so in
+  # the merge notice; an actor that re-ran teardown would report a refusal for
+  # a healthy, already-cleaned lane.
+  case "$out_a" in
+    *"Report the cleanup in that event's outcome with the PR's URL."*"already ran that cleanup"*"run no teardown for it"*) ;;
+    *) fail "branch prompt re-runs teardown on a lane its own merge notice already cleaned up" ;;
+  esac
   case "$out_a" in
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
