@@ -73,8 +73,10 @@
 # settings file only when no nearest decision exists. It then follows all three
 # outcomes for the selected root - the pinned root under a pin, else the default
 # root: `"never"` writes NOTHING and reports that the operator configured Pi
-# never to auto-trust project folders, so this spawn does not pre-register trust
-# and the worker will need a human confirmation; an absent setting or `"ask"`
+# never to auto-trust project folders, so this spawn does not pre-register trust;
+# Pi renders no dialog at all under that policy, and the worker launches without
+# the project settings, project extensions, and project skills it would
+# otherwise load. An absent setting or `"ask"`
 # writes this worktree's true entry, which is what replaces the interactive
 # confirmation; `"always"` writes nothing because Pi trusts on its own, and the
 # report says the policy already trusts the directory instead of claiming this
@@ -345,7 +347,7 @@ try {
       process.exit(1);
     }
     if (result === "policy:never") {
-      console.error(`fm-pi-trust: ${settingsPath} sets defaultProjectTrust to "never", so this spawn does not pre-register trust for ${target}; the worker will need a human confirmation`);
+      console.error(`fm-pi-trust: ${settingsPath} sets defaultProjectTrust to "never", so Pi declines project trust for ${target} and renders no dialog; nothing was written, and that worker starts without the project settings, project extensions, and project skills it would otherwise load`);
       process.exit(0);
     }
     if (result === "policy:always") {
