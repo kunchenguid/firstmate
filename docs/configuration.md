@@ -1570,13 +1570,14 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Typed dispatch resolution (.env FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief through typesafe.ai or OpenRouter, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-`FM_DISPATCH_PROVIDER` selects `typesafe` or `openrouter`, and `FM_DISPATCH_MODEL` selects the model.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief through typesafe.ai, OpenRouter, any System One-compatible host, or OpenAI, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+`FM_DISPATCH_PROVIDER` selects `typesafe`, `openrouter`, `systemone`, or `openai`, and `FM_DISPATCH_MODEL` selects the model.
 Each setting comes from the calling environment or the home's gitignored `.env` through `bin/fm-env-lib.sh`; a non-empty environment value wins.
-OpenRouter requires both `FM_DISPATCH_PROVIDER=openrouter` and a non-empty `FM_DISPATCH_MODEL`; an omitted model is an actionable configuration error, and the presence of an OpenRouter key never selects the provider by itself.
+OpenRouter, `systemone`, and OpenAI each require their explicit `FM_DISPATCH_PROVIDER` value and a non-empty `FM_DISPATCH_MODEL`; an omitted model is an actionable configuration error, and the presence of a provider's key never selects that provider by itself.
+`systemone` also requires `FM_DISPATCH_BASE_URL`, an `http://` or `https://` base such as a local llama.cpp server or a hosted System One-compatible service, and posts to `<base>/v1/systemone`; a missing or scheme-less base URL is an actionable configuration error.
 With no provider setting, the original typesafe.ai behavior is unchanged: `jev-latest` is used when `TYPESAFE_API_KEY` is available, `FM_DISPATCH_MODEL` is ignored, and the resolver is off otherwise.
 Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is set.
-The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence.
+The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
@@ -1594,7 +1595,9 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 **What the model receives**
 
 When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
-OpenRouter's Decisions API accepts the same Choice request shape and returns the same typed answer, including confidence and a probability per option; both providers use the same response validation and post-model gates.
+OpenRouter's Decisions API and a `systemone` host accept the same Choice request shape and return the same typed answer, including confidence and a probability per option.
+For OpenAI's Decisions API the resolver rewrites that request into OpenAI's shape - the state as JSON text `input` and one `choice` question named `rule` whose `choices` are the same options - and maps the answer's per-option probability array back; a refusal, a missing or duplicated rule answer, or duplicated option values is rejected as malformed.
+Every provider then uses the same response validation and post-model gates.
 The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 
 When the sections are sent from a scout brief, the line `Brief kind: scout (report only)` comes first, taken from the scaffold's scout contract line; ship briefs and briefs sent whole get no kind line.
@@ -1616,7 +1619,7 @@ Every entry is trimmed of surrounding whitespace, and any run of whitespace, in 
 Example Client Ltd
 ```
 
-Before the request is sent, every string in it is checked, including the selected model, the project name, the task text, each rule's `when`, and the fixed question text.
+Before the request is sent, the endpoint URL and every string in the final provider-specific request body are checked, including strings inside JSON text such as OpenAI's `input`: the selected model, the project name, the task text, each rule's `when`, and the fixed question text.
 A match stops the request: the resolver behaves exactly as when it is off, printing one `dispatch-resolve: off (...; nothing sent)` line on stderr and nothing on stdout, making no network or quota call, and exiting 0, so firstmate dispatches through its existing intake.
 A list that is present but not a readable regular file also stops the request the same way rather than sending unchecked text.
 That one diagnostic names the list line number at most and never prints the listed value or the matching text.
@@ -1669,7 +1672,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 Every result above exits 0.
 
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, or an OpenRouter provider without a model, each reported and never selected around.
+- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, a non-typesafe provider without a model, or `systemone` without a valid base URL, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
@@ -1681,10 +1684,11 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Key handling and provider settings**
 
-- The resolver copies either environment-provided key into a non-exported private variable and unsets both `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
-- The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes either key.
-- The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, and the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`.
-- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter.
+- The resolver copies every environment-provided key into a non-exported private variable and unsets `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `FM_DISPATCH_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
+- The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes any key.
+- The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`, the OpenAI endpoint is `https://api.openai.com/v1/decisions`, and the `systemone` endpoint is `<FM_DISPATCH_BASE_URL>/v1/systemone`.
+- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter, `systemone`, and OpenAI.
+- A CPU-only local `systemone` host may not answer within its 10-second timeout; that is an ordinary `error` outcome, and firstmate keeps its existing intake.
 
 The recommended OpenRouter model is `typesafe/jev-1.13` because it is built for fast typed choices and supplies native per-option probabilities without generated text.
 The dated model catalog observation is recorded in [dispatch verification](verification/dispatch-resolve.md#the-api-the-tool-depends-on).
@@ -1693,6 +1697,14 @@ The resolver never chooses this model automatically; use these settings in the c
 ```dotenv
 FM_DISPATCH_PROVIDER=openrouter
 FM_DISPATCH_MODEL=typesafe/jev-1.13
+```
+
+A `systemone` or OpenAI setup names its model the same way; the resolver never picks one for them:
+
+```dotenv
+FM_DISPATCH_PROVIDER=systemone
+FM_DISPATCH_MODEL=<model the host serves>
+FM_DISPATCH_BASE_URL=http://127.0.0.1:8080
 ```
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
@@ -2872,10 +2884,13 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-FM_DISPATCH_PROVIDER=   # typesafe or openrouter; absent preserves the original typesafe key gate ("Typed dispatch resolution")
-FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter
+FM_DISPATCH_PROVIDER=   # typesafe, openrouter, systemone, or openai; absent preserves the original typesafe key gate ("Typed dispatch resolution")
+FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter, systemone, and openai
+FM_DISPATCH_BASE_URL=   # http(s) base of a System One-compatible host; required for systemone
+FM_DISPATCH_API_KEY=    # optional systemone key; absent sends no Authorization header
 TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment or .env
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment or .env
+OPENAI_API_KEY=         # OpenAI dispatch key, from the environment or .env
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
