@@ -19,6 +19,17 @@
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
+# GitHub readiness also requires a readable complete title/body passing
+# bin/fm-public-text-check.sh, the public-evidence policy owner. This detects
+# publication failures after the fact; it never edits or redacts public text.
+# If gh, jq, or the forge response is unavailable or unreadable, readiness stays
+# unconfirmed: restore the tools or readable response and retry before reporting
+# ready. Correct flagged text publicly while retaining the original privately.
+# FM_PR_CHECK_MERGE=1 skips this readiness check as well as the draft check above.
+# Other forges rely on the generated worker read-back instructions, without
+# automatic public-text refusal.
+# Regression coverage: tests/fm-pr-check-security.test.sh exercises readiness;
+# tests/fm-public-text-check.test.sh covers the shared policy and Relay boundary.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -121,13 +132,34 @@ if [ "$PROVIDER" = forgejo ]; then
 fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
-# draft reading refuses, because an unreadable one must not block arming.
+# draft reading refuses at this step; the separate public-text read must succeed.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
   if [ "$(fm_pr_json_draft_state "$DRAFT_JSON")" = true ]; then
     echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
     exit 1
   fi
+fi
+
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo 'error: public PR text could not be read because gh or jq is unavailable; restore the tools and retry before reporting ready' >&2
+    exit 1
+  fi
+  PUBLIC_JSON=$(gh pr view "$URL" --json title,body 2>/dev/null) || {
+    echo 'error: public PR text could not be read; readiness is unconfirmed; retry when the forge is available' >&2
+    exit 1
+  }
+  PUBLIC_TEXT=$(printf '%s' "$PUBLIC_JSON" | jq -er '
+    if (.title | type) == "string" and (.body | type) == "string"
+    then .title + "\n" + .body else error("unreadable public text") end') || {
+    echo 'error: public PR title/body could not be read; readiness is unconfirmed; retry after restoring a readable forge response' >&2
+    exit 1
+  }
+  printf '%s\n' "$PUBLIC_TEXT" | "$SCRIPT_DIR/fm-public-text-check.sh" - || {
+    echo 'error: public PR text must be corrected before reporting ready; original evidence stays private' >&2
+    exit 1
+  }
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
