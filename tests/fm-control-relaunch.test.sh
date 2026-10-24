@@ -466,6 +466,28 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 
+test_pane_metadata_survives_relaunch_without_new_refusals() {
+  local dir out rc binding before after
+  for binding in absent %1 %999999 invalid empty duplicate; do
+    dir=$(new_case "pane-parity-$binding" rl-pane)
+    add_ship_task "$dir" rl-pane claude
+    case "$binding" in
+      absent) ;;
+      empty) printf 'tmux_pane_id=\n' >> "$dir/home/state/rl-pane.meta" ;;
+      duplicate) printf 'tmux_pane_id=%%1\ntmux_pane_id=%%2\n' >> "$dir/home/state/rl-pane.meta" ;;
+      *) printf 'tmux_pane_id=%s\n' "$binding" >> "$dir/home/state/rl-pane.meta" ;;
+    esac
+    before=$(sed -n '/^tmux_pane_id=/p' "$dir/home/state/rl-pane.meta")
+    out=$(run_control "$dir" rl-pane relaunch --note "continue the same work"); rc=$?
+    expect_code 0 "$rc" "relaunch changed with $binding pane metadata"$'\n'"$out"
+    after=$(sed -n '/^tmux_pane_id=/p' "$dir/home/state/rl-pane.meta")
+    [ "$after" = "$before" ] || fail "relaunch changed the existing pane field"
+    [ "$(meta_field "$dir" rl-pane window)" = fmses:fm-rl-pane ] || fail "relaunch changed its window"
+    [ ! -s "$dir/fake/created-windows" ] || fail "relaunch unexpectedly created an endpoint"
+  done
+  pass "fm-control relaunch: pane fields survive without adding lifecycle refusals or adoption"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -3054,3 +3076,5 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+
+test_pane_metadata_survives_relaunch_without_new_refusals

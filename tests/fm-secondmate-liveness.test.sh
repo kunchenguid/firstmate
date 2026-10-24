@@ -34,6 +34,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -307,7 +309,9 @@ case "${1:-}" in
         exit 0 ;;
       unreadable) exit 1 ;;
       *)
-        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
+        if [ ! -e "${FM_TMUX_CALL_LOG:?}.killed" ] && ! grep -Fqx fm-sm1 "$windows" 2>/dev/null; then
+          printf '%s\n' fm-sm1
+        fi
         [ ! -s "$windows" ] || cat "$windows"
         exit 0 ;;
     esac
@@ -336,6 +340,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   printf '%s\n' "$fakebin"
 }
 

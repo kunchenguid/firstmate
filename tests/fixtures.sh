@@ -17,6 +17,8 @@
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 if [ -n "${FM_TEST_FIXTURES_SOURCED:-}" ]; then
   return 0
@@ -155,6 +157,7 @@ window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message)
     case "$*" in
+      *'#{pane_id}'*) printf '%%1\n'; exit 0 ;;
       *"#{cursor_y}"*)
         if [ -f "$(fake_opencode_plugin)" ]; then
           reads=$(cat "$(fake_opencode_plugin).fake-composer-reads" 2>/dev/null) || reads=0
@@ -166,6 +169,7 @@ case "${1:-}" in
     printf 'firstmate\n'
     exit 0
     ;;
+  list-panes) [ ! -s "$window_file" ] || printf '%%1\n'; exit 0 ;;
   capture-pane)
     if ! fake_opencode_composer_drawn; then
       :
@@ -180,7 +184,12 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
-    [ ! -s "$window_file" ] || cat "$window_file"
+    if [ -s "$window_file" ]; then
+      case "$*" in
+        *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|%s\n' "$(cat "$window_file")" ;;
+        *) cat "$window_file" ;;
+      esac
+    fi
     exit 0
     ;;
   new-window)
@@ -191,6 +200,7 @@ case "${1:-}" in
       previous=$arg
     done
     printf '%s\n' "$name" > "$window_file"
+    printf '@1\n'
     exit 0
     ;;
   kill-window)

@@ -575,6 +575,7 @@ secondmate_stall_watch() { # <primary> <id> <out> [seconds]
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
+  list-panes) printf '%%1\\n' ;;
   list-windows)
     # The watcher asks for session:window. The liveness inventory asks for the
     # window name alone, and a full target there reads as a missing endpoint.
@@ -585,12 +586,15 @@ case "\${1:-}" in
       prev=\$arg
     done
     case "\$format" in
+      '#{window_id}|#{window_index}|#{window_name}') printf '@1|0|%s\\n' '${window#*:}' ;;
       '#{window_name}') printf '%s\n' '${window#*:}' ;;
       *) printf '%s\n' '$window' ;;
     esac
     ;;
   capture-pane) printf 'working\n' ;;
-  display-message) printf '0\n' ;;
+  display-message)
+    case "\$*" in *'#{pane_id}'*) printf '%%1\\n' ;; *) printf '0\n' ;; esac
+    ;;
   *) exit 0 ;;
 esac
 SH

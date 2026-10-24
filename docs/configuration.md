@@ -490,9 +490,11 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 
 ### Task metadata
 
-Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, keeping backend selection compatible with existing default-path meta files.
 
 - Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
+
+- A freshly spawned tmux task additionally records `tmux_pane_id=` for task input, while `window=` remains its lifecycle target.
 
 - A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 
@@ -506,11 +508,12 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 ### Task selectors
 
-Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
-A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
+Task selectors share the metadata helpers in `bin/fm-backend.sh`; `fm_backend_resolve_selector` owns explicit and legacy fallback resolution, and the `fm-send.sh` header owns its stricter delivery resolution.
+A selector containing `:` is an explicit backend endpoint escape hatch.
 
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
-A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+A metadata-routed selector returns the recorded backend endpoint, and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+Task input and its guarding reads use `fm_backend_io_target_of_meta` in `bin/fm-backend.sh`, which owns tmux pane binding and legacy compatibility.
 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These rules are the single owner of the task-selector vocabulary.

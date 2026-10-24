@@ -834,6 +834,59 @@ SH
   chmod +x "$fakebin/tmux"
 }
 
+install_secondmate_bound_alive_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+prev=
+for arg in "$@"; do
+  [ "$prev" != -t ] || target=$arg
+  prev=$arg
+done
+[ -z "${FM_FAKE_TMUX_TARGET_LOG:-}" ] || printf '%s\t%s\n' "${1:-}" "$target" >> "$FM_FAKE_TMUX_TARGET_LOG"
+case "${1:-}" in
+  list-windows)
+    case "$*" in
+      *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|fm-mate\n' ;;
+      *) printf 'fm-mate\n' ;;
+    esac
+    ;;
+  list-panes)
+    case " $* " in
+      *' -a '*) printf '%%1\n%%2\n' ;;
+      *) printf '%%1\n%%2\n' ;;
+    esac
+    ;;
+  capture-pane) exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_id*) [ "$target" = %1 ] && printf '%%1\n' || printf '%%2\n' ;;
+      *pane_current_command*) [ "$target" = %1 ] && printf 'claude\n' || printf 'bash\n' ;;
+      *pane_tty*) exit 1 ;;
+      *cursor_y*) printf '0\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
+  send-keys)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) shift; [ "$#" -gt 0 ] && printf '%s\n' "$1" >> "${FM_FAKE_TMUX_SENT:-/dev/null}" ;;
+        Enter)
+          printf '[ENTER]\n' >> "${FM_FAKE_TMUX_SENT:-/dev/null}"
+          [ -z "${FM_FAKE_CHILD_WAKE_QUEUE:-}" ] || : > "$FM_FAKE_CHILD_WAKE_QUEUE"
+          ;;
+      esac
+      shift
+    done
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+}
+
 install_secondmate_stall_date() {  # <fakebin>
   local fakebin=$1 real_date
   real_date=$(command -v date)
@@ -859,10 +912,10 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   fakebin="$dir/fakebin"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\ntmux_pane_id=%%1\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
-  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_bound_alive_tmux "$fakebin"
   install_secondmate_stall_date "$fakebin"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
     || fail "could not arm the mate's busy contract"
@@ -873,6 +926,7 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   printf '1000\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_TMUX_TARGET_LOG="$dir/targets" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     secondmate_stall_watch_leg "$dir" "first" progress mate "$(printf '1000\t100-7')"
@@ -882,6 +936,7 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   printf '1002\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_TMUX_TARGET_LOG="$dir/targets" \
     FM_FAKE_CHILD_WAKE_QUEUE="$sub/state/.wake-queue" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -907,6 +962,14 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
     || fail "the child-first ring wrote the wrong drain instruction: $steer"
   grep -F '[ENTER]' "$dir/sent" >/dev/null \
     || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
+  awk -F '\t' '
+    $1 == "display-message" && $2 == "%1" { pane_guard=1 }
+    $1 == "display-message" && $2 == "%2" { bad=1 }
+    ($1 == "capture-pane" || $1 == "send-keys") && $2 != "%1" { bad=1 }
+    $1 == "send-keys" && $2 == "%1" { sent=1 }
+    END { exit(bad || !pane_guard || !sent) }
+  ' "$dir/targets" \
+    || fail "the bound child-drain delivery left the recorded pane: $(cat "$dir/targets")"
   pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
 }
 
@@ -3177,6 +3240,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }

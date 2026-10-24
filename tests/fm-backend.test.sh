@@ -675,7 +675,7 @@ test_backend_validate_spawn_accepts_orca() {
 }
 
 test_meta_get_and_backend_of_meta() {
-  local meta=$TMP_ROOT/meta-get.meta edge=$TMP_ROOT/meta-get-edge.meta
+  local meta=$TMP_ROOT/meta-get.meta edge=$TMP_ROOT/meta-get-edge.meta backend target
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
   [ "$(fm_meta_get "$meta" window)" = "firstmate:fm-x1" ] || fail "fm_meta_get did not read window="
   [ "$(fm_meta_get "$meta" missing)" = "" ] || fail "fm_meta_get should print nothing for an absent key"
@@ -688,7 +688,16 @@ test_meta_get_and_backend_of_meta() {
   [ "$(fm_meta_get "$edge" token)" = "last=value" ] \
     || fail "fm_meta_get did not preserve last-value or no-final-newline semantics"
 
+  for backend in herdr zellij cmux orca paseo rex; do
+    fm_write_meta "$edge" "backend=$backend" "window=session:pane" "terminal=terminal-id" \
+      "tmux_pane_id=not-a-tmux-pane"
+    target=session:pane
+    [ "$backend" != orca ] || target=terminal-id
+    [ "$(fm_backend_io_target_of_meta "$edge")" = "$target" ] \
+      || fail "$backend task I/O must keep its existing endpoint identity"
+  done
   pass "fm_meta_get / fm_backend_of_meta: read last key=value and default backend to tmux"
+  pass "task I/O targets: non-tmux backends retain their pane, surface or terminal identity"
 }
 
 test_resolve_selector_three_forms() {
@@ -939,6 +948,7 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  list-panes) printf '%%1\\n'; exit 0 ;;
   new-window)
     _name=
     _previous=
@@ -952,6 +962,7 @@ case "\${1:-}" in
   list-windows)
     [ -s "$window_file" ] || exit 0
     case "\$*" in
+      *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|%s\\n' "\$(cat "$window_file")" ;;
       *'#{window_id}'*) printf '@1\\n' ;;
       *) cat "$window_file" ;;
     esac
@@ -1027,6 +1038,7 @@ case "\${1:-}" in
       exit 0
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  list-panes) printf '%%1\\n'; exit 0 ;;
   new-window)
     : > "$counter.window-created"
     printf '@1\\n'
@@ -1034,6 +1046,7 @@ case "\${1:-}" in
   list-windows)
     [ -e "$counter.window-created" ] || exit 0
     case "\$*" in
+      *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|%s\\n' "$window_name" ;;
       *'#{window_id}'*) printf '@1\\n' ;;
       *) printf '%s\\n' "$window_name" ;;
     esac

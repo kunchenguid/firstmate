@@ -2689,7 +2689,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
   printf 'idle bare shell after agent exit\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
   printf 'paused: held per captain while an external decision is pending\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -2735,7 +2735,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
   printf 'idle bare shell after captain-held transfer\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
   printf 'captain-held [key=route]: tracked by held-decision-route\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -2760,7 +2760,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
   window="test:fm-gate"
   printf 'idle external-decision gate\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/gate.meta"
   printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -2820,7 +2820,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
     window="test:fm-held"
     printf 'idle after agent exit\n' > "$capture_file"
-    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
     printf '%s\n' "$initial" > "$statusf"
     back=$(( $(date +%s) - 500 ))
     if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -2918,7 +2918,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
     window="test:fm-parked"
-    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/parked.meta"
     printf '%s\n' "$status_line" > "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
     key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -2999,7 +2999,7 @@ test_live_paused_until_controls_recheck_time() {
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
   window="test:fm-parked"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/parked.meta"
   future=$(iso_utc_at "$(( $(date +%s) + 7200 ))")
   printf 'paused: rate limit until %s\n' "$future" > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
@@ -3100,7 +3100,7 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   statusf="$state/wedge.status"
   text='waiting at the gate'
   printf '%s' "$text" > "$dir/pane.txt"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wedge.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/wedge.meta"
   printf '%s\n' "$log" > "$statusf"
   back=$(( $(date +%s) - age ))
   set_mtime "$back" "$statusf"
@@ -4110,8 +4110,10 @@ test_wedge_threshold_validating_run_is_off_until_armed() {
 # and `missing` is an inventory that no longer carries that window at all.
 gone_endpoint_env() {  # <dead|missing> -> assignments for the round below
   case "$1" in
-    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge ;;
-    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else ;;
+    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge
+      export FM_FAKE_TMUX_ALL_PANES='%1' ;;
+    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else
+      export FM_FAKE_TMUX_ALL_PANES='%2' ;;
   esac
 }
 
@@ -4150,9 +4152,77 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
         || fail "a $verdict endpoint advanced the escalation count on round $round"
       round=$((round + 1))
     done
-    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   done
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
+}
+
+test_missing_pane_binding_keeps_window_lifecycle_and_delivery_ladder() {
+  local monitor_command dir state fakebin out window key rec pid action since
+  window='test:fm-bound-window'; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for monitor_command in grok bash; do
+    dir=$(make_case "missing-bound-pane-$monitor_command"); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%2\n' "$window" > "$state/bound.meta"
+    printf 'working: processing the next turn\n' > "$state/bound.status"
+    prime_status_seen "$state" "$state/bound.status"
+    rec=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_task_inbox_write "$2" bound "inspect this durable steer"
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the bound-pane inbox fixture"
+    set_mtime "$(( $(date +%s) - 2000 ))" "$rec"
+    since=$(( $(date +%s) - 500 ))
+    printf '%s\n' "$since" > "$state/.stale-since-$key"
+
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_WINDOWS=fm-bound-window \
+      FM_FAKE_TMUX_PANES='%1' FM_FAKE_TMUX_ALL_PANES='%1' \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$monitor_command" FM_FAKE_CREW_STATE='state: working · source: run-step · monitor busy' \
+      watch_bg "$state" "$fakebin" "$out" env FM_TASK_INBOX_GRACE_SECS=999
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the live-window missing-pane case exited as lifecycle death with a $monitor_command monitor"; }
+    [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
+      || { reap "$pid"; fail "the missing pane changed the live window's existing supervision timer with a $monitor_command monitor"; }
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || { reap "$pid"; fail "the missing pane advanced a refusal-driven wedge escalation with a $monitor_command monitor"; }
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+      || { reap "$pid"; fail "the missing pane queued a refusal-driven stale wake with a $monitor_command monitor"; }
+    action=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_task_inbox_due_action "$2" bound
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state")
+    [ "$action" = quiet ] || { reap "$pid"; fail "the failed pane ring bypassed its delivery-attempt grace: $action"; }
+    IFS=$(printf '\t') read -r _ count _ < "$state/bound.inbox/.ring-state"
+    [ "$count" = 1 ] || { reap "$pid"; fail "the missing pane did not consume one ordinary delivery attempt"; }
+    [ ! -e "$state/bound.inbox/.escalated" ] || { reap "$pid"; fail "the missing pane bypassed the delivery ladder"; }
+    [ ! -e "$state/.dead-reported-$key" ] || { reap "$pid"; fail "the missing pane became lifecycle death"; }
+    [ ! -e "$state/.binding-unavailable-$key" ] || { reap "$pid"; fail "the missing pane created recovery-only binding state"; }
+    if grep -E 'capture-pane|send-keys' "$dir/tmux.log" >/dev/null; then
+      reap "$pid"
+      fail "the missing binding routed I/O to the surviving monitor: $(cat "$dir/tmux.log")"
+    fi
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the missing-pane watcher stop"
+  done
+
+  dir=$(make_case missing-lifecycle-window); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%2\n' "$window" > "$state/bound.meta"
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_task_inbox_write "$2" bound "inspect this durable steer"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the missing-window inbox fixture"
+  set_mtime "$(( $(date +%s) - 2000 ))" "$rec"
+  FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_WINDOWS=fm-other \
+    FM_FAKE_TMUX_PANES='%1' FM_FAKE_TMUX_ALL_PANES='%1' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · missing' \
+    watch_bg "$state" "$fakebin" "$out" env FM_TASK_INBOX_GRACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the missing lifecycle window did not surface recovery"; }
+  [ -e "$state/bound.inbox/.escalated" ] || fail "the missing lifecycle window did not bypass the delivery ladder"
+  grep -F 'agent has exited or its endpoint is missing' "$out" >/dev/null \
+    || fail "the missing lifecycle window lost its recovery reason: $(cat "$out")"
+  if grep -E 'capture-pane|send-keys' "$dir/tmux.log" >/dev/null; then
+    fail "the missing lifecycle window routed I/O to another pane: $(cat "$dir/tmux.log")"
+  fi
+  pass "a missing pane refuses I/O without changing supervision while only a missing window enters recovery"
 }
 
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
@@ -4185,7 +4255,7 @@ test_live_and_unproven_endpoints_still_wedge_escalate() {
     grep -F 'possible wedge, escalation 2' "$out" >/dev/null \
       || fail "an $verdict endpoint did not keep counting: $(cat "$out")"
     ack_stopped_cycle "$state" || fail "could not acknowledge the second $verdict escalation"
-    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   done
   pass "a live wedged agent, an unattributable one, and an unreadable endpoint escalate unchanged"
 }
@@ -4373,7 +4443,7 @@ test_wedge_guard_never_defers_a_gone_endpoint() {
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
     || fail "a CRITICAL guard hid a gone endpoint: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the gone report"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   grep -F 'agent missing' "$out" >/dev/null || fail "the gone endpoint was not reported as gone: $(cat "$out")"
   [ "$(wedge_guard_calls "$dir")" -eq 0 ] || fail "a guard was asked about a gone endpoint"
   pass "a gone endpoint is reported before any guard is asked, so a guard never defers it"
@@ -4398,6 +4468,7 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
 
   # A replacement is launched into the same window and then wedges for real.
   FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  export FM_FAKE_TMUX_ALL_PANES='%1'
   : > "$out"
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a replacement agent's wedge was swallowed by the earlier gone report: $(cat "$out")"
@@ -4415,7 +4486,7 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
   grep -F 'agent dead' "$out" >/dev/null \
     || fail "a second death was not reported as a gone endpoint: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
 }
 
@@ -4450,6 +4521,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
   # round ends before the fresh timer could reach a threshold, so no probe runs
   # and the once-record survives the churn untouched.
   FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  export FM_FAKE_TMUX_ALL_PANES='%1'
   printf '%s\n' 'waiting on the build queue' > "$capture"
   : > "$out"
   FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
@@ -4487,7 +4559,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
     || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   pass "a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent"
 }
 
@@ -4558,7 +4630,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
     || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_ALL_PANES
   pass "a successor's byte-identical dead display reports in full, and the same incarnation still absorbs"
 }
 
@@ -5205,44 +5277,72 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # cleanup at any point of a poll. A TERM trap body cannot promise that: bash
 # defers it until the blocked command returns, and bash 5.2 can drop it outright
 # when it is pending as a command substitution is parsed, which left CI watchers
-# polling after reap until the job timed out. The pane capture here blocks on a
-# FIFO whose writer never writes, so only a TERM honored mid-poll stops the
+# polling after reap until the job timed out. The pane inventory here blocks
+# before capture, so only a stop honored across the complete read stops the
 # watcher inside the bound; the released lock and acknowledgeable stop record
 # prove its cleanup still ran.
 test_term_stops_a_watcher_blocked_inside_a_poll() {
-  local dir state fakebin out fifo window sig pid holder i rc
-  dir=$(make_case term-blocked-poll); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; fifo="$dir/pane.fifo"; window="test:fm-blocked-capture"
-  mkfifo "$fifo"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/blocked.meta"
-  printf 'working: implementing\n' > "$state/blocked.status"
-  sig=$(seen_sig "$state/blocked.status"); printf '%s' "$sig" > "$state/.seen-blocked_status"
-  # Opening the write end waits for the capture to open the read end, and the
-  # holder then keeps it open without writing, so that capture blocks mid-poll.
-  ( exec 3> "$fifo"; : > "$dir/capture-blocked"; exec sleep 30 ) &
-  holder=$!
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$fifo" \
-    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  i=0
-  while [ ! -e "$dir/capture-blocked" ] && [ "$i" -lt 300 ]; do
-    sleep 0.1
-    i=$((i + 1))
+  local signal name dir state fakebin out window sig pid i rc inventory_pid sleep_pid
+  for signal in TERM HUP; do
+    name=$(printf '%s' "$signal" | tr '[:upper:]' '[:lower:]')
+    dir=$(make_case "$name-blocked-inventory"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; window="test:fm-blocked-inventory"
+    mv "$fakebin/tmux" "$fakebin/tmux-base"
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = list-panes ]; then
+  sleep 30 &
+  child=$!
+  printf '%s %s\n' "$$" "$child" > "$FM_FAKE_TMUX_INVENTORY_BLOCKED"
+  wait "$child"
+  exit $?
+fi
+exec "$(dirname "$0")/tmux-base" "$@"
+SH
+    chmod +x "$fakebin/tmux"
+    printf 'window=%s\nkind=ship\n' "$window" > "$state/blocked.meta"
+    printf 'working: implementing\n' > "$state/blocked.status"
+    sig=$(seen_sig "$state/blocked.status"); printf '%s' "$sig" > "$state/.seen-blocked_status"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+      FM_FAKE_TMUX_INVENTORY_BLOCKED="$dir/inventory-blocked" \
+      FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    i=0
+    while [ ! -e "$state/.last-watcher-beat" ] && [ "$i" -lt 300 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if [ ! -e "$state/.last-watcher-beat" ] || ! is_live_non_zombie "$pid"; then
+      reap "$pid"
+      fail "the watcher did not finish startup under $signal: $(cat "$out")"
+    fi
+    printf 'window=%s\nkind=ship\ntmux_pane_id=%%1\n' "$window" > "$state/blocked.meta"
+    i=0
+    while [ ! -s "$dir/inventory-blocked" ] && [ "$i" -lt 300 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if [ ! -s "$dir/inventory-blocked" ] || ! is_live_non_zombie "$pid"; then
+      reap "$pid"
+      fail "the watcher never blocked inside its pane inventory under $signal: $(cat "$out")"
+    fi
+    read -r inventory_pid sleep_pid < "$dir/inventory-blocked"
+    kill -s "$signal" "$pid" 2>/dev/null || true
+    wait_for_exit "$pid" 100
+    rc=$?
+    [ "$rc" -ne 124 ] || fail "$signal did not stop a watcher blocked inside pane inventory"
+    ! kill -0 "$inventory_pid" 2>/dev/null \
+      || fail "$signal left the pane-inventory shell running"
+    ! kill -0 "$sleep_pid" 2>/dev/null \
+      || fail "$signal left the pane-inventory child running"
+    [ ! -e "$state/.watch.lock" ] \
+      || fail "a watcher stopped by $signal kept its singleton lock, so its cleanup did not run"
+    ack_stopped_cycle "$state" \
+      || fail "could not acknowledge the $signal stop of a watcher blocked inside pane inventory"
   done
-  if [ ! -e "$dir/capture-blocked" ] || ! is_live_non_zombie "$pid"; then
-    kill "$holder" 2>/dev/null || true; reap "$pid"
-    fail "the watcher never blocked inside its pane capture: $(cat "$out")"
-  fi
-  kill "$pid" 2>/dev/null || true
-  wait_for_exit "$pid" 100
-  rc=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  [ "$rc" -ne 124 ] || fail "TERM did not stop a watcher blocked inside a poll"
-  [ ! -e "$state/.watch.lock" ] || fail "a watcher stopped mid-poll kept its singleton lock, so its cleanup did not run"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the stop of a watcher blocked inside a poll"
-  pass "TERM stops a watcher blocked inside a poll and still runs its cleanup"
+  pass "TERM and HUP stop the watcher across pane inventory and run cleanup"
 }
 
 # --- held downtime-marker lock must not wedge a TERM'd watcher -------------
@@ -5847,24 +5947,18 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once() {
   dir=$(make_case afk-busy-declared-pause-ticking); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-afk-ticking-scout"
   statusf="$state/afk-ticking-scout.status"; ticks="$dir/ticks"
+  mv "$fakebin/tmux" "$fakebin/tmux-base"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
-    exit 0 ;;
   capture-pane)
     n=$(( $(cat "$FM_FAKE_TMUX_TICKS" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$FM_FAKE_TMUX_TICKS"
     printf 'Working... (%d.%ds) lavish-axi poll' "$(( 7200 + n ))" "$(( n % 10 ))"
     exit 0 ;;
-  display-message)
-    case "$*" in
-      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
-    esac ;;
 esac
-exit 1
+exec "$(dirname "$0")/tmux-base" "$@"
 SH
   chmod +x "$fakebin/tmux"
   printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/afk-ticking-scout.meta"
@@ -7063,7 +7157,7 @@ test_captain_held_rechecked_under_a_quiet_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-afk.status"
   window="test:fm-held-afk"
   printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held-afk_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -7086,7 +7180,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-live.status"
   window="test:fm-held-live"
   printf 'parked at the decision gate\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-live.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-live.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-live_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -7133,7 +7227,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-afk.status"
   window="test:fm-held-afk"
   printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-afk_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -7386,6 +7480,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
+test_missing_pane_binding_keeps_window_lifecycle_and_delivery_ladder
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_wedge_guards_absent_config_keeps_the_unchanged_ladder
 test_wedge_guard_critical_defers_one_window_at_a_time_up_to_the_cap

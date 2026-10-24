@@ -1646,12 +1646,13 @@ fm_pending_reply_tick() {  # <state-dir>
     if [ -f "$meta" ]; then
       remote_host=$(fm_meta_get "$meta" remote_host)
       backend=$(fm_backend_of_meta "$meta")
-      target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
       harness=$(fm_meta_get "$meta" harness)
       if [ -n "$remote_host" ]; then
         target="remote:$task_id"
         sm_home=
+      else
+        target=$(fm_backend_io_target_of_meta "$meta" 2>/dev/null) || target=
       fi
       if [ -n "$target" ]; then
         label="fm-$task_id"

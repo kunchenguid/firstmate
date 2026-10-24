@@ -686,6 +686,34 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+test_pane_metadata_does_not_change_window_teardown() {
+  local case_dir rc binding
+  for binding in absent %1 %999999 invalid empty duplicate; do
+    case_dir=$(make_case "pane-parity-$binding")
+    write_meta "$case_dir" local-only ship
+    wt_commit "$case_dir" "landed work"
+    add_fork_with_pushed_branch "$case_dir"
+    case "$binding" in
+      absent) ;;
+      empty) printf 'tmux_pane_id=\n' >> "$case_dir/state/task-x1.meta" ;;
+      duplicate) printf 'tmux_pane_id=%%1\ntmux_pane_id=%%2\n' >> "$case_dir/state/task-x1.meta" ;;
+      *) printf 'tmux_pane_id=%s\n' "$binding" >> "$case_dir/state/task-x1.meta" ;;
+    esac
+    cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> '$case_dir/tmux.calls'
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/tmux"
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"; rc=$?
+    expect_code 0 "$rc" "teardown changed with $binding pane metadata"
+    [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown retained $binding metadata"
+    grep -q '^kill-window -t =firstmate:=fm-task-x1$' "$case_dir/tmux.calls" \
+      || fail "teardown lost its window target with $binding metadata"
+  done
+  pass "teardown: bound, malformed and unbound pane fields retain window-based cleanup"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -5740,3 +5768,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+test_pane_metadata_does_not_change_window_teardown

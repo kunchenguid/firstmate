@@ -25,6 +25,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
@@ -126,6 +128,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
 
   fm_git_init_commit "$case_dir/project"
@@ -469,14 +472,11 @@ SH
 
 break_launch_delivery() {  # <case-dir>
   local case_dir=$1
+  mv "$case_dir/fakebin/tmux" "$case_dir/fakebin/tmux-before-delivery-failure"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  send-keys) exit 1 ;;
-esac
-exit 0
+[ "${1:-}" != send-keys ] || exit 1
+exec "$(dirname "$0")/tmux-before-delivery-failure" "$@"
 SH
   chmod +x "$case_dir/fakebin/tmux"
 }
@@ -518,6 +518,7 @@ interrupt_kimi_readiness() {  # <case-dir>
   mkdir -p "$home/.kimi-code"
   printf '# test config\n' > "$home/.kimi-code/config.toml"
   fm_fake_exit0 "$case_dir/fakebin" kimi
+  mv "$case_dir/fakebin/tmux" "$case_dir/fakebin/tmux-before-kimi-interrupt"
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -525,7 +526,6 @@ case "\$*" in
   *"#{cursor_y}"*) printf '1\\n'; exit 0 ;;
 esac
 case "\${1:-}" in
-  display-message) printf 'firstmate\\n'; exit 0 ;;
   capture-pane)
     if [ ! -f "$case_dir/kimi-interrupted" ]; then
       : > "$case_dir/kimi-interrupted"
@@ -537,7 +537,7 @@ case "\${1:-}" in
     exit 0
     ;;
 esac
-exit 0
+exec "$case_dir/fakebin/tmux-before-kimi-interrupt" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tmux"
 }

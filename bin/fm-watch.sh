@@ -555,7 +555,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # Runs for secondmates too: their pane-staleness exemption is about quiet panes
 # being healthy, while an unacknowledged instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state meta io_target bound=0 capture_rc=0
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -571,7 +571,21 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   backend=$(window_backend "$w")
-  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  if [ "$backend" = tmux ] && [ -n "$meta" ] && grep -q '^tmux_pane_id=' "$meta"; then
+    bound=1
+    watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || capture_rc=$?
+    if [ "$capture_rc" -eq 3 ]; then
+      agent_state=missing
+    elif [ "$capture_rc" -eq 2 ]; then
+      agent_state=unreadable
+    else
+      io_target=$(fm_meta_get "$meta" tmux_pane_id)
+      agent_state=$(fm_backend_agent_state "$backend" "$io_target" 2>/dev/null || true)
+    fi
+  else
+    agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  fi
   case "$agent_state" in
     dead|missing)
       if [ "$verb" = retry ]; then
@@ -582,7 +596,11 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
+  if [ "$bound" -eq 0 ]; then
+    watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
+  elif [ "$capture_rc" -ne 0 ]; then
+    WATCHER_CAPTURE=
+  fi
   tail40=$WATCHER_CAPTURE
   if window_is_busy "$w" "$tail40"; then
     [ "$verb" != retry ] || return 0
@@ -935,14 +953,21 @@ secondmate_busy_class() {  # <window>
 # composer all refuse, so a Kimi or Claude pane without an exact idle
 # verdict is never typed into.
 secondmate_idle_ring_safe() {  # <window>
-  local w=$1 backend agent_state cstate
+  local w=$1 backend agent_state cstate task meta target
   [ -n "$w" ] || return 1
   secondmate_busy_class "$w"
   [ "$SECONDMATE_BUSY_CLASS" = idle ] || return 1
   backend=$(window_backend "$w")
-  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  target=$w
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ "$backend" = tmux ] && [ -f "$meta" ] && grep -q '^tmux_pane_id=' "$meta"; then
+    target=$(fm_meta_get "$meta" tmux_pane_id)
+  fi
+  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   [ "$agent_state" = alive ] || return 1
-  cstate=$(fm_backend_composer_state "$backend" "$w" "$(window_label "$w")" 2>/dev/null) || cstate=unknown
+  watcher_capture "$backend" "$w" 0 "$(window_label "$w")" composer || return 1
+  cstate=$WATCHER_CAPTURE
   [ "$cstate" != pending ] || return 1
   return 0
 }
@@ -2919,10 +2944,35 @@ fm_capture_output_cleanup() {
   FM_CAPTURE_OUTPUT=
 }
 
-# watcher_capture: fm_backend_capture into WATCHER_CAPTURE with its exit status.
-# The read runs as a waited background process group rather than inside $(...),
-# so a stop is not held for a blocked read (watcher_stop_signals). The group is
-# recorded like a check's, so watcher_cleanup stops a read still in flight.
+# watcher_capture: resolve metadata-bound task I/O, then capture the pane or read
+# its composer state into WATCHER_CAPTURE with the operation's exit status.
+# The complete read runs as a waited background process group rather than inside
+# $(...), so a stop is not held by blocked resolution or capture
+# (watcher_stop_signals). The group is recorded like a check's, so
+# watcher_cleanup stops a read still in flight.
+watcher_capture_process() {  # <backend> <target> <lines> [expected-label] [capture|composer]
+  local meta window target=$2 window_rc
+  if [ "$1" = tmux ]; then
+    meta=$(fm_backend_meta_for_window "$2" "$STATE" 2>/dev/null || true)
+    if [ -n "$meta" ]; then
+      target=$(fm_backend_io_target_of_meta "$meta" 2>/dev/null) || {
+        window=$(fm_backend_target_of_meta "$meta")
+        case "$window" in *:*:*|:*|*:) return 2 ;; *:*) ;; *) return 2 ;; esac
+        fm_backend_source tmux || return 2
+        fm_backend_tmux_window_id "${window%%:*}" "${window#*:}" >/dev/null 2>&1
+        window_rc=$?
+        [ "$window_rc" -ne 2 ] || return 3
+        return 2
+      }
+    fi
+  fi
+  case "${5:-capture}" in
+    capture) fm_backend_capture "$1" "$target" "$3" "${4:-}" ;;
+    composer) fm_backend_composer_state "$1" "$target" "${4:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
   local rc pgid
   fm_capture_output_cleanup
@@ -2934,7 +2984,7 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
   # print a harmless "child setpgid ... Operation not permitted" race from the
   # child before the command's own redirections apply.
   set -m
-  { fm_backend_capture "$@" < /dev/null > "$FM_CAPTURE_OUTPUT" & } 2>/dev/null
+  ( watcher_capture_process "$@" < /dev/null ) > "$FM_CAPTURE_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -3844,7 +3894,15 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
+    capture_rc=0
+    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+      if [ "$capture_rc" -eq 3 ]; then
+        wedge_timer_check "$w" "$STATE/.stale-since-$key" "non-terminal stale" \
+          "$STATE/.wedge-escalations-$key" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+      fi
+      continue
+    fi
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.

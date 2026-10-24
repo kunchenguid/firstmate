@@ -115,6 +115,32 @@ The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, 
 
 ## tmux
 
+### Task pane routing
+
+Verified on 2026-10-21 with tmux 3.2a on Linux x86_64.
+The transport regression uses a private tmux socket and raw byte collectors, without model calls or vendor-screen assumptions.
+The observed task retains its recorded pane when a monitor becomes active, including focus changes between typing and Enter and watcher retries.
+Unbound task I/O and both bound and unbound recovery probes retain window-based behavior.
+
+```sh
+bash tests/fm-backend-tmux-smoke.test.sh
+```
+
+Relevant output:
+
+```text
+ok - real tmux: task doorbell, keys and guarding reads stay on the recorded pane with the monitor active
+ok - real tmux: re-rings and a focus change between typing and Enter preserve the agent pane
+ok - real tmux: ordinary watcher delivery ignores a focused idle-shell monitor
+ok - real tmux: explicit watcher retry ignores a focused idle-shell monitor
+ok - real tmux: Enter retries and the pending-composer guard use the bound pane despite focus changes
+ok - real tmux: unbound split windows retain active-pane I/O
+ok - real tmux: mismatched, duplicate and stale pane bindings fail closed
+ok - real tmux: recovery retains window-based behavior for bound and unbound records
+```
+
+### Foreground-process classification
+
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
 
 ```sh

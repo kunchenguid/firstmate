@@ -6,6 +6,8 @@
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 # fm-wake-drain.sh now calls fm-guard.sh to assert watcher liveness on every
 # drain. fm-guard.sh's first check warns when the firstmate PRIMARY checkout
@@ -62,7 +64,28 @@ make_case() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+if [ "${1:-}" = "list-panes" ]; then
+  case " $* " in
+    *' -a '*) printf '%s\n' "${FM_FAKE_TMUX_ALL_PANES-${FM_FAKE_TMUX_PANES-%1}}" ;;
+    *) printf '%s\n' "${FM_FAKE_TMUX_PANES-%1}" ;;
+  esac
+  exit 0
+fi
 if [ "${1:-}" = "list-windows" ]; then
+  case "$*" in
+    *'#{window_id}|#{window_index}|#{window_name}'*)
+      _windows=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW:-}}
+      _index=0
+      while IFS= read -r _window; do
+        [ -n "$_window" ] || continue
+        printf '@%s|%s|%s\n' "$_index" "$_index" "${_window#*:}"
+        _index=$((_index + 1))
+      done <<EOF
+$_windows
+EOF
+      exit 0 ;;
+  esac
   if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
     printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
   elif [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
@@ -95,6 +118,21 @@ if [ "${1:-}" = "capture-pane" ]; then
 fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
+    *'#{pane_id}'*)
+      if [ "${FM_FAKE_TMUX_ALL_PANES+x}" = x ]; then
+        _target=
+        _prev=
+        for _arg in "$@"; do
+          [ "$_prev" != -t ] || _target=$_arg
+          _prev=$_arg
+        done
+        if printf '%s\n' "$FM_FAKE_TMUX_ALL_PANES" | grep -Fqx -- "$_target"; then
+          printf '%s\n' "$_target"
+        fi
+      else
+        printf '%%1\n'
+      fi
+      exit 0 ;;
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
   esac
 fi
@@ -170,6 +208,7 @@ make_supercase() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes) printf '%%1\n'; exit 0 ;;
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
@@ -178,7 +217,7 @@ case "${1:-}" in
       case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
       [ "$_a" = "-p" ] && _print=1
     done
-    [ "$_print" = 1 ] && printf 'fakepane\n'
+    [ "$_print" = 1 ] && printf '%%1\n'
     exit 0 ;;
   list-windows)
     _window=${FM_FAKE_TMUX_WINDOW:-firstmate:supervisor}
@@ -271,11 +310,12 @@ write_composer() {
   printf '╭%s╮\n│ > %s │\n╰%s╯\n' "$border" "$text" "$border" > "$COMPOSER"
 }
 case "${1:-}" in
+  list-panes) printf '%%1\n'; exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
-    [ "$print" = 1 ] && printf 'fakepane\n'
+    [ "$print" = 1 ] && printf '%%1\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows)

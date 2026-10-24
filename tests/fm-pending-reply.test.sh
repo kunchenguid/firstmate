@@ -1280,6 +1280,8 @@ test_unknown_backend_state_uses_capture_fallback() {
       fm_pending_reply_mark_delivered "$state" "$corr"
       fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
+      # This unit boundary models backend observation; pane membership has its own tests.
+      fm_backend_io_target_of_meta() { fm_backend_target_of_meta "$1"; }
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
@@ -1337,6 +1339,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   corr=$(fm_pending_reply_create "$home" "$state" hibit "kimi fallback")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
+  fm_backend_io_target_of_meta() { fm_backend_target_of_meta "$1"; }
   fm_backend_busy_state() { printf 'unknown'; }
   fm_backend_capture() { printf '%s' "$FM_PENDING_KIMI_CAPTURE"; }
   export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
@@ -1386,6 +1389,8 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
     # Runtime overrides called indirectly by the pending-reply tick.
+    # shellcheck disable=SC2329
+    fm_backend_io_target_of_meta() { fm_backend_target_of_meta "$1"; }
     # shellcheck disable=SC2329
     fm_backend_busy_state() {
       printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
