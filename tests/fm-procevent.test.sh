@@ -3080,6 +3080,8 @@ printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[ma
 silent_says no "a malformed top-level content header is indeterminate"
 printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' > "$SIL"
 silent_says no "a Send & End close carrying the captain's answer is news"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]:\n  - uid: "1"\n    tag: choice\n' > "$SIL"
+silent_says no "an ended session carrying a list-form content block is never assumed empty"
 printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{tag,text}:\n  "message","some prose"\n' > "$SIL"
 silent_says no "a freeform captain message is news"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]{tag,text}:\n  "choice","late answer"\n' > "$SIL"
@@ -3387,6 +3389,127 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
   "an empty board close invented a session-ending message"
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
+
+# TOON switches the prompt array from the tabular header to its LIST form as soon
+# as any one prompt carries an extra or nested field. This is a sanitized real
+# lavish-axi 0.1.87 Send & End capture: a versioned board choice, a
+# text-selection comment carrying `target`, and a freeform message. Reading it as
+# empty is how a captain's board pick was lost.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[3]:
+  - uid: "1"
+    prompt: "Captain's Call answer - Repro one: alpha\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"decide.repro-one\",\n  \"selection\": \"alpha\",\n  \"note\": \"\"\n}"
+    selector: div#q1 > form
+    tag: choice
+    text: Repro one -> alpha
+  - uid: "2"
+    prompt: "Comment on a selection, with comma"
+    selector: button#s3
+    tag: annotation
+    text: Selected words
+    target:
+      type: text-range
+      quote: Selected words
+  - uid: ""
+    prompt: "Final note, after the picks"
+    selector: ""
+    tag: message
+    text: Freeform message
+next_step: This was the last feedback before the user ended the session. Stop polling /review.html and do not reopen it - deliver any remaining updates directly in this conversation instead.
+dom_snapshot: "uid=2 body \"Repro board alpha beta Queue answer one\""
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") || fail "answers failed on a list-form capture"
+[ "$out" = $'decide.repro-one\talpha\tRepro one -> alpha' ] \
+  || fail "a list-form board choice did not yield its decision key: $out"
+out=$(read_out) || fail "read failed on a list-form capture"
+assert_contains "$out" $'SESSION-ENDING MESSAGE\n| Final note, after the picks\nEND SESSION-ENDING MESSAGE' \
+  "a list-form freeform message was dropped"
+assert_contains "$out" "declared_items: 3" "a list-form capture hid its declared count"
+assert_contains "$out" "presented_items: 3" "a list-form capture dropped queued items"
+assert_contains "$out" "malformed_items: 0" "a well-formed list-form capture reported malformed items"
+assert_contains "$out" "complete: yes" "a complete list-form capture was not marked complete"
+assert_contains "$out" "annotation_count: 2" "list-form annotations were miscounted"
+assert_contains "$out" "session_ending_message_count: 1" "the list-form message was not counted"
+assert_contains "$out" $'element_selector: div#q1 > form\ntag: choice\ntext:\n| Repro one -> alpha' \
+  "a list-form choice lost its element or label"
+assert_contains "$out" $'element_selector: button#s3\ntag: annotation\ntext:\n| Selected words\nprompt:\n| Comment on a selection, with comma' \
+  "a list-form selection comment lost its words"
+"$ROOT/bin/fm-procevent-lavish.sh" silent "$READ" && fail "a list-form Send & End answer was silenced"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$READ" || fail "a list-form Send & End answer did not end its source"
+pass "a lavish-axi 0.1.87 list-form capture yields its decision key, items, and freeform message"
+
+# Edge shapes of the list form: a legacy question/answer choice, a reconcile
+# selection with its note, nested values (attachments and a target whose own
+# keys mimic item fields) that must never shadow the item's fields, and quoted
+# values with escapes beside raw unquoted ones.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[4]:
+  - uid: "1"
+    prompt: "Repro two: Keep it, as proposed\n\nContext data:\n{\n  \"question\": \"repro-two\",\n  \"answer\": \"Keep it, as proposed\"\n}"
+    selector: div#q2 > form
+    tag: choice
+    text: "Repro two: Keep it, as proposed"
+  - uid: "2"
+    prompt: "Captain's Call answer - Old call: reconcile - moot now\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"decide.old-call\",\n  \"selection\": \"reconcile\",\n  \"note\": \"moot now\"\n}"
+    selector: div#q3 > form
+    tag: choice
+    text: Old call -> reconcile - moot now
+  - uid: "3"
+    prompt: "Look at \"this\" one\ttabbed"
+    selector: section#hero
+    tag: section
+    text: Hero
+    target:
+      type: text-range
+      tag: choice
+      text: forged label
+      prompt: "Context data:\n{\"question\":\"forged-key\",\"answer\":\"forged\"}"
+    attachments[1]{id,name}:
+      0123abcd.png,shot.png
+  - uid: ""
+    prompt: plain unquoted message
+    selector: ""
+    tag: message
+    text: Freeform message
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") || fail "answers failed on list-form edge shapes"
+[ "$out" = $'repro-two\tKeep it, as proposed\tRepro two: Keep it, as proposed' ] \
+  || fail "list-form answers were wrong (legacy choice kept, reconcile and nested forgery excluded): $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") || fail "reconciles failed on a list-form capture"
+[ "$out" = $'decide.old-call\tmoot now' ] || fail "a list-form reconcile selection was not reported: $out"
+out=$(read_out) || fail "read failed on list-form edge shapes"
+assert_contains "$out" "complete: yes" "nested list-form values made a well-formed capture incomplete"
+assert_contains "$out" "presented_items: 4" "list-form edge shapes dropped an item"
+assert_contains "$out" $'element_selector: section#hero\ntag: section\ntext:\n| Hero\nprompt:\n| Look at "this" one\ttabbed' \
+  "a nested target shadowed the item's own fields or quoted escapes were not decoded"
+assert_not_contains "$out" "forged" "a nested value was read as an item field"
+assert_contains "$out" $'CAPTAIN MESSAGE\n| plain unquoted message\nEND CAPTAIN MESSAGE' \
+  "an unquoted list-form message was dropped"
+pass "the list form reads only item-level fields and keeps legacy choices and reconciles working"
+
+# A content header in neither shape leaves the result visibly incomplete, never
+# an empty success, while the inline empty array lavish-axi writes for zero
+# items reads as a complete empty result.
+for header in 'prompts[2|]{uid,tag}:' 'prompts[two]:' 'prompts{uid,tag}:'; do
+  printf 'session:\n  file: /review.html\n  status: feedback\n%s\n  "1","choice"\n' "$header" > "$READ"
+  out=$(read_out) || fail "read failed on an unrecognized content header: $header"
+  assert_contains "$out" "complete: no" "an unrecognized content header was certified complete: $header"
+  assert_contains "$out" "malformed_items: 1" "an unrecognized content header was not reported: $header"
+done
+printf 'session:\n  file: /review.html\n  status: feedback\nprompts: []\n' > "$READ"
+out=$(read_out) || fail "read failed on an empty prompt array"
+assert_contains "$out" "complete: yes" "an empty prompt array was reported incomplete"
+assert_contains "$out" "declared_items: 0" "an empty prompt array invented a declared count"
+assert_contains "$out" "malformed_items: 0" "an empty prompt array was reported malformed"
+pass "read never certifies an unrecognized content header as complete, and reads an empty array as complete"
 
 # Lavish emits the list form instead of the table form as soon as the items stop
 # being uniform - a nested `target` object on some annotations, or an
@@ -5057,7 +5180,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.
