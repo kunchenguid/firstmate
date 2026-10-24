@@ -13,6 +13,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
+RUN_TIMED_NATIVE_PATH=$PATH
 
 # A PATH with perl and the shell tools the bounded commands use, and no
 # timeout variant: fm_exec_timed must take its perl watchdog here.
@@ -416,6 +417,72 @@ test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout()
   pass "fm_run_timed keeps stdout and nonzero status when a function shadows timeout"
 }
 
+# Each inner runner owns a separate process group. An outer deadline used to
+# kill the waiting runner but miss its TERM-resistant descendant in that group.
+# Record the actual command PID, not just the wrapper's exit status.
+test_run_timed_nested_bounds_clean_descendants() {
+  local mode dir rc pid i inner_path override
+  for mode in native perl bash; do
+    dir="$TMP_ROOT/nested-$mode"
+    mkdir -p "$dir"
+    inner_path=$RUN_TIMED_NATIVE_PATH
+    override=''
+    case "$mode" in
+      perl) inner_path=$PERL_ONLY ;;
+      bash) override=bash ;;
+    esac
+    rc=0
+    exec_timed "$PERL_ONLY" 2 1 bash -c '
+      . "$1/bin/fm-timeout-lib.sh"
+      PATH=$3 FM_TIMEOUT_MECHANISM_OVERRIDE=$4 fm_run_timed 60 bash -c '\''
+        trap "" TERM
+        echo $$ > "$1"
+        exec sleep 300
+      '\'' _ "$2"
+    ' _ "$ROOT" "$dir/pid" "$inner_path" "$override" \
+      >"$dir/output" 2>&1 || rc=$?
+    [ "$rc" -eq 124 ] || fail "$mode nested bound did not expire (rc=$rc)"
+    [ -s "$dir/pid" ] || fail "$mode nested bound never started its command"
+    pid=$(cat "$dir/pid")
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+      fail "$mode inner runner orphaned its descendant after the outer bound"
+    fi
+  done
+  pass "fm_run_timed native, perl, and bash runners clean descendants when an outer bound interrupts them"
+}
+
+# Runner traps live in subshells: cleanup must not replace a sourcing caller's
+# signal/EXIT handlers, change its monitor mode, or swallow ordinary exits.
+test_run_timed_preserves_caller_traps_and_monitor_mode() {
+  local mode before after out rc
+  for mode in native bash; do
+    (
+      . "$ROOT/bin/fm-timeout-lib.sh"
+      [ "$mode" != bash ] || FM_TIMEOUT_MECHANISM_OVERRIDE=bash
+      trap ': caller-exit' EXIT
+      trap ': caller-term' TERM
+      set +m
+      before=$(trap -p EXIT TERM)
+      rc=0
+      fm_run_timed 5 bash -c 'echo kept; exit 7' > "$TMP_ROOT/caller-output" || rc=$?
+      out=$(cat "$TMP_ROOT/caller-output")
+      after=$(trap -p EXIT TERM)
+      [ "$before" = "$after" ] || fail "$mode runner replaced caller traps"
+      case $- in *m*) fail "$mode runner changed caller monitor mode" ;; esac
+      [ "$out" = kept ] && [ "$rc" -eq 7 ] || fail "$mode runner lost command output/status"
+    ) || exit 1
+  done
+  pass "fm_run_timed preserves caller traps, monitor mode, output, and ordinary failure status"
+}
+
+test_run_timed_nested_bounds_clean_descendants
+test_run_timed_preserves_caller_traps_and_monitor_mode
 test_passes_the_command_status_and_output_through
 test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death

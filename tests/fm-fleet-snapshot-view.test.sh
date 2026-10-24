@@ -1152,6 +1152,338 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# Terminal validation evidence plus a structured hold describes a retained
+# attempt, not execution or completion of the logical work. All observations
+# and the refused cleanup below stay inside disposable synthetic repositories.
+test_retained_terminal_attempts_and_current_work() {
+  local home fakebin id wt head out rc before after parent parent_fakebin gen
+  home=$(make_home retained-attempts)
+  fakebin=$(make_fakebin "$home")
+  fm_git_identity fixture fixture@example.invalid
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] predecessor - Retained failed attempt (repo: sample) (kind: ship) (hold: source retention) (hold-kind: external)
+- [ ] delivered - Delivered attempt awaiting approval (repo: sample) (kind: ship) (hold: review delivery) (hold-kind: captain)
+- [ ] continuation - Current continuation (repo: sample) (kind: ship)
+- [ ] review - Completed review evidence (repo: sample) (kind: scout) (hold: retain report) (hold-kind: external)
+
+## Queued
+
+## Done
+EOF
+  # Model the native id-addressed overview/detail surface, with files scoped to
+  # each fixture repository; no shared daemon, native database, or forge reads.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  axi) cat .fixture-overview ;;
+  'axi status')
+    if [ -f .fixture-current ]; then cat .fixture-current; else cat .fixture-detail; fi ;;
+  'axi status --run fixture-run') cat .fixture-detail ;;
+  'axi status --run fixture-next') cat .fixture-current ;;
+  'daemon status') printf 'daemon running\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  for id in predecessor delivered continuation; do
+    wt="$home/projects/$id"
+    git init -q -b main "$wt"
+    git -C "$wt" commit -q --allow-empty -m baseline
+    head=$(git -C "$wt" rev-parse HEAD)
+    git -C "$wt" update-ref refs/remotes/origin/main "$head"
+    git -C "$wt" checkout -q -b "fm/$id"
+    if [ "$id" = predecessor ]; then
+      printf 'protected change\n' > "$wt/evidence.txt"
+      git -C "$wt" add evidence.txt
+      git -C "$wt" commit -q -m 'retained change'
+      head=$(git -C "$wt" rev-parse HEAD)
+      printf 'failed' > "$home/$id-result"
+    elif [ "$id" = delivered ]; then
+      printf 'completed' > "$home/$id-result"
+    else
+      printf 'running' > "$home/$id-result"
+    fi
+    printf 'count: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n  fixture-run,fm/%s,%s,%s,\n' \
+      "$id" "$(<"$home/$id-result")" "$head" > "$wt/.fixture-overview"
+    printf 'id: fixture-run\nbranch: fm/%s\nstatus: %s\nhead: %s\n' \
+      "$id" "$(<"$home/$id-result")" "$head" > "$wt/.fixture-detail"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" "spawn_gen=fixture-$id" \
+      "worktree=$wt" "project=$wt" "harness=claude" "kind=ship" "mode=no-mistakes"
+    printf 'paused: historical wait wording\n' > "$home/state/$id.status"
+    record_claude_idle "$home/state" "$id"
+    # Neither endpoint presence nor an idle label establishes native terminality;
+    # the independently current lifecycle record only measures the worker.
+  done
+  mkdir -p "$home/projects/review" "$home/data/review"
+  fm_write_meta "$home/state/review.meta" \
+    "window=firstmate:fm-review" "worktree=$home/projects/review" \
+    "project=sample" "harness=claude" "kind=scout" "mode=scout"
+  record_claude_idle "$home/state" review
+  printf '# Synthetic completed review\n' > "$home/data/review/report.md"
+  printf 'done: report delivered\n' > "$home/state/review.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=99999 \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true and .invalidity == {kind:null,ids:[]}
+    and .state == "captain_decision"
+    and [.active_children[].id] == ["continuation"]
+    and [.retained_attempts[].id] == ["delivered","predecessor","review"]
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed" and .source == "run-step"))
+    and (.retained_attempts | any(.id == "delivered" and .state == "done"))
+    and (.decisions_open | any(.id == "delivered" and .verb == "captain-hold"))
+    and (.holds | any(.id == "predecessor" and .source == "backlog"))
+    and .counts.retained_attempts == 3 and .counts.landed == 0
+  ' >/dev/null || fail "retained attempt displaced current work/approval or became logical completion: $out"
+
+  # Parent consumers preserve the canonical distinction without recomputing
+  # it, and cannot infer empty coverage from an older ledger or a failed read.
+  parent=$(make_home retained-parent)
+  parent_fakebin=$(make_fakebin "$parent")
+  mkdir -p "$home/bin"
+  printf '# Synthetic home\n' > "$home/AGENTS.md"
+  printf 'mate\n' > "$home/.fm-secondmate-home"
+  printf -- '- mate - Synthetic mate (home: %s; scope: fixture; projects: sample; added 2026-07-11)\n' \
+    "$home" > "$parent/data/secondmates.md"
+  printf '%s\n' "$out" > "$home/state/home-summary.json"
+  out=$(PATH="$parent_fakebin:$PATH" FM_HOME="$parent" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0]
+    | .provenance.trust == "complete" and .current.state == "captain_decision"
+    and [.retained_attempts[].id] == ["delivered","predecessor","review"]
+    and [.active_children[].id] == ["continuation"]
+    and (.decisions_open | any(.id == "delivered"))
+  ' >/dev/null || fail "parent dropped canonical retained-attempt evidence: $out"
+  jq 'del(.retained_attempts, .counts.retained_attempts)' "$home/state/home-summary.json" \
+    > "$home/legacy-summary.json"
+  cp "$home/legacy-summary.json" "$home/state/home-summary.json"
+  out=$(PATH="$parent_fakebin:$PATH" FM_HOME="$parent" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0]
+    | .provenance.trust == "complete" and .retained_attempts == null
+    and .current.state == "captain_decision"
+  ' >/dev/null || fail "older ledger was rejected or fabricated retained coverage: $out"
+  jq '.retained_attempts = {}' "$home/legacy-summary.json" > "$home/state/home-summary.json"
+  out=$(PATH="$parent_fakebin:$PATH" FM_HOME="$parent" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0]
+    | .current.state == "unknown" and .retained_attempts == null
+  ' >/dev/null || fail "unreadable retained-attempt coverage was normalized healthy: $out"
+
+  # A finished validation attempt does not imply its worker stopped. Positive
+  # structured activity can coexist with historical failure on that same task.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" predecessor)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" predecessor busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid and (.active_children | any(.id == "predecessor" and .source == "claude-hook"))
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed" and .runtime_activity.state == "busy"))
+  ' >/dev/null || fail "terminal validation suppressed its worker continuing: $out"
+
+  # A busy record outliving its endpoint is not current work. Only the
+  # recovery-grade verdict proves death; an unreadable probe stays unknown.
+  cp "$fakebin/tmux" "$fakebin/tmux-live"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+live="$(dirname "$0")/tmux-live"
+fault=$(cat "${FM_HOME:?}/endpoint-fault" 2>/dev/null) || exec "$live" "$@"
+case "$fault:$*" in
+  unreadable:list-windows*) printf 'server not answering\n' >&2; exit 1 ;;
+  missing:list-windows*) "$live" "$@" | grep -vFx fm-predecessor; exit 0 ;;
+  stalled:list-windows*) sleep 60; exec "$live" "$@" ;;
+  stalled:*) exec "$live" "$@" ;;
+  *fm-predecessor*) printf "can't find window: fm-predecessor\n" >&2; exit 1 ;;
+esac
+exec "$live" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+  printf missing > "$home/endpoint-fault"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid and .state == "captain_decision"
+    and [.active_children[].id] == ["continuation"]
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed"
+          and .runtime_activity.state == "dead" and .runtime_activity.source == "endpoint-gone"))
+    and (.holds | any(.id == "predecessor" and .source == "backlog"))
+    and (.decisions_open | any(.id == "delivered" and .verb == "captain-hold"))
+    and .counts.landed == 0
+  ' >/dev/null || fail "busy record behind a lost endpoint was reported as current work: $out"
+  printf unreadable > "$home/endpoint-fault"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor","review"]}
+    and [.active_children[].id] == ["continuation"]
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed"
+          and .runtime_activity.state == "unknown" and .runtime_activity.source == "endpoint-unverified"))
+    and (.decisions_open | any(.id == "delivered"))
+  ' >/dev/null || fail "unreadable endpoint evidence became current or inactive execution: $out"
+  rm "$home/endpoint-fault"
+  rm "$home/state/predecessor.busy-state"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor"]}
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed" and .runtime_activity.state == "unknown"))
+    and (.decisions_open | any(.id == "delivered"))
+  ' >/dev/null || fail "native failure was mistaken for proof its worker is inactive: $out"
+  record_claude_idle "$home/state" predecessor
+  printf 'needs-decision [key=current-choice]: choose the next action\n' >> "$home/state/predecessor.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid and .state == "captain_decision"
+    and (.decisions_open | any(.id == "predecessor" and .key == "current-choice"))
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed"))
+  ' >/dev/null || fail "terminal native attempt answered an unresolved current call: $out"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" predecessor)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" predecessor busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf stalled > "$home/endpoint-fault"
+  started=$SECONDS
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CREW_STATE_TIMEOUT=3 \
+    "$SNAPSHOT" --secondmate-home-summary)
+  elapsed=$((SECONDS - started))
+  rm "$home/endpoint-fault"
+  [ "$elapsed" -lt 30 ] || fail "stalled endpoint probe held the snapshot for ${elapsed}s"
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor","review"]}
+    and [.active_children[].id] == ["continuation"]
+    and (.retained_attempts | any(.id == "predecessor" and .state == "failed" and .source == "run-step"
+          and .runtime_activity.state == "unknown" and .runtime_activity.source == "endpoint-unverified"))
+    and (.holds | any(.id == "predecessor" and .source == "backlog"))
+    and (.decisions_open | any(.id == "predecessor" and .key == "current-choice"
+          and .verb == "needs-decision"))
+    and (.decisions_open | any(.id == "delivered" and .verb == "captain-hold"))
+  ' >/dev/null || fail "stalled endpoint probe became inactive or answered an open call: $out"
+  record_claude_idle "$home/state" predecessor
+  wt="$home/projects/predecessor"
+  cp "$wt/.fixture-overview" "$home/predecessor-overview"
+  printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n' > "$wt/.fixture-overview"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor"]}
+    and (.decisions_open | any(.id == "predecessor" and .key == "current-choice"
+          and .verb == "needs-decision"))
+  ' >/dev/null || fail "unknown native coverage closed an unresolved current call: $out"
+  cp "$home/predecessor-overview" "$wt/.fixture-overview"
+  printf 'resolved [key=current-choice]: synthetic choice recorded\n' >> "$home/state/predecessor.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .decisions_open | all(.key != "current-choice")
+  ' >/dev/null || fail "explicit keyed resolution no longer closed its call: $out"
+
+  # A new active run on the same held task must win over its old terminal
+  # evidence; no historical failure should suppress an independently current job.
+  wt="$home/projects/predecessor"
+  head=$(git -C "$wt" rev-parse HEAD)
+  printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n  fixture-next,fm/predecessor,running,%s,\n  fixture-run,fm/predecessor,failed,%s,\n' \
+    "$head" "$head" > "$wt/.fixture-overview"
+  printf 'id: fixture-next\nbranch: fm/predecessor\nstatus: running\nhead: %s\n' \
+    "$head" > "$wt/.fixture-current"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid and (.active_children | any(.id == "predecessor"))
+    and (.retained_attempts | all(.id != "predecessor"))
+  ' >/dev/null || fail "active native continuation was hidden by retention: $out"
+
+  # Competing live ownership is an actual contradiction, not retention.
+  printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n  fixture-next,fm/predecessor,running,%s,\n  fixture-other,fm/predecessor,running,%s,\n' \
+    "$head" "$head" > "$wt/.fixture-overview"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor"]}
+    and (.retained_attempts | all(.id != "predecessor"))
+    and (.decisions_open | any(.id == "delivered"))
+  ' >/dev/null || fail "competing live ownership was normalized as retention: $out"
+
+  # Incomplete native coverage must not be converted to a retained verdict.
+  printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n' \
+    > "$home/projects/predecessor/.fixture-overview"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_CHILDREN=1 \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"child_current_unavailable",ids:["predecessor"]}
+    and (.retained_attempts | all(.id != "predecessor"))
+    and (.decisions_open | any(.id == "delivered"))
+    and (.omitted | any(.surface == "retained_attempts" and .count == 1))
+    and (.omitted | any(.surface == "endpoints" and .count == 3))
+  ' >/dev/null || fail "incomplete native coverage lost unknowns, approvals, or bounds: $out"
+
+  # A report pointer or stale terminal event cannot classify a scout when its
+  # structured lifecycle becomes unavailable, even though the endpoint exists.
+  rm "$home/state/review.busy-state"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .state == "unknown" and (.invalidity.ids | index("review") != null)
+    and (.retained_attempts | all(.id != "review"))
+  ' >/dev/null || fail "missing lifecycle evidence was treated as inactive: $out"
+  cp "$home/state/review.status" "$home/review-status"
+  printf 'needs-decision [key=review-choice]: choose the report follow-up\n' >> "$home/state/review.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .state == "unknown" and (.invalidity.ids | index("review") != null)
+    and (.decisions_open | any(.id == "review" and .key == "review-choice"))
+  ' >/dev/null || fail "unknown pane activity closed an unresolved call: $out"
+  cp "$home/review-status" "$home/state/review.status"
+
+  # A rendered idle fallback plus a report and terminal declaration is still
+  # not structured activity coverage for this reporting distinction.
+  fm_write_meta "$home/state/review.meta" \
+    "window=firstmate:fm-review" "worktree=$home/projects/review" \
+    "project=sample" "harness=grok" "kind=scout" "mode=scout"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .state == "unknown"
+    and .invalidity == {kind:"terminal_in_flight",ids:["review"]}
+    and (.retained_attempts | all(.id != "review"))
+  ' >/dev/null || fail "unmeasured structured activity was silently normalized: $out"
+
+  # Reporting never grants cleanup authority for unlanded code. Fake all
+  # external tools and fail if a lifecycle mutation is even attempted.
+  wt="$home/projects/predecessor"
+  rm "$wt/.fixture-overview" "$wt/.fixture-detail" "$wt/.fixture-current"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'count: 0 (showing first 0)\npull_requests[]: []\n'
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected lifecycle mutation\n' >> "${FM_HOME:?}/mutation.log"
+exit 1
+SH
+  # The existing tmux stub is read-only during reporting; add a tripwire for
+  # teardown's destructive command without contacting a real endpoint.
+  cp "$fakebin/tmux" "$fakebin/tmux-read"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-*) printf 'unexpected lifecycle mutation\n' >> "${FM_HOME:?}/mutation.log"; exit 1 ;;
+  *) exec "$(dirname "$0")/tmux-read" "$@" ;;
+esac
+SH
+  touch "$home/state/.last-watcher-beat"
+  chmod +x "$fakebin/gh-axi" "$fakebin/treehouse"
+  before=$(git -C "$wt" rev-parse HEAD)
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-teardown.sh" predecessor > "$home/cleanup.out" 2> "$home/cleanup.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unlanded retained attempt was cleaned up"
+  assert_grep 'REFUSED' "$home/cleanup.err" "unlanded retained attempt lost its cleanup refusal"
+  assert_grep 'not on any remote and not landed' "$home/cleanup.err" "cleanup refusal did not preserve the unlanded-work boundary: $(<"$home/cleanup.err")"
+  after=$(git -C "$wt" rev-parse HEAD)
+  [ "$before" = "$after" ] || fail "reporting or refused cleanup moved the protected head"
+  assert_present "$wt/evidence.txt" "reporting or refused cleanup erased evidence"
+  assert_present "$home/state/predecessor.meta" "reporting or refused cleanup erased ownership"
+  assert_absent "$home/mutation.log" "refused cleanup attempted a lifecycle mutation"
+  pass "canonical retention distinguishes terminal attempts, live continuations, open approvals, unknown coverage and unlanded cleanup refusal"
+}
+
+test_retained_terminal_attempts_and_current_work
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
