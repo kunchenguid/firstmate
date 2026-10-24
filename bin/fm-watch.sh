@@ -2743,6 +2743,39 @@ scan_signals() {
   return 0
 }
 
+# 0 when the batch has at least one terminal or paused status and every such
+# status has a <id>.turn-ended marker newer than the status file, so its
+# status write and turn-end have already coalesced.
+signal_batch_settled() {  # <pending-scan-output>
+  local _sf _sig f last settled=1
+  while IFS=$(printf '\t') read -r _sf _sig f; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    last=$(last_status_line "$f")
+    if status_is_terminal_verb "$last" || status_is_paused "$last"; then
+      [ "${f%.status}.turn-ended" -nt "$f" ] || return 1
+      settled=0
+    fi
+  done <<EOF
+$1
+EOF
+  return "$settled"
+}
+
+# Treat SIGNAL_GRACE as a maximum: poll once a second and stop early once the
+# batch has settled. A non-integer grace keeps the single sleep.
+wait_signal_grace() {  # <pending-scan-output>
+  local waited=0
+  case "$SIGNAL_GRACE" in
+    ''|*[!0-9]*) sleep "$SIGNAL_GRACE"; return 0 ;;
+  esac
+  while [ "$waited" -lt "$SIGNAL_GRACE" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    signal_batch_settled "$1" && return 0
+  done
+  return 0
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -3692,7 +3725,7 @@ EOF
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    wait_signal_grace "$pending"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
