@@ -96,12 +96,18 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+# `treehouse return --force <wt>`: record the call, succeed silently.
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+if [ "${1:-}" = display-message ] && [ "${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PID:-}"
+fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_KILL_PID:-}" ]; then
+  ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
+fi
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -646,6 +652,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
+  FM_FAKE_PANE_PID="${FM_FAKE_PANE_PID:-$$}" \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
@@ -4792,6 +4799,191 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+test_foreign_session_survives_and_is_reported() {
+  local case_dir rc endpoint owned foreign launcher survived=0 i foreign_tty endpoint_tty foreign_command owned_command
+  case_dir=$(make_case foreign-session)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { chdir $dir or die; exec "sleep", "300"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  python3 - "$case_dir/wt" "$case_dir/foreign.pid" <<'PYTHON' &
+import os
+import pty
+import sys
+import time
+
+pid, master = pty.fork()
+if pid == 0:
+    os.chdir(sys.argv[1])
+    os.execlp("bash", "bash", "--noprofile", "--norc", "--login", "-c", "read -r unused")
+with open(sys.argv[2], "w") as stream:
+    stream.write(str(pid))
+time.sleep(300)
+PYTHON
+  launcher=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/foreign.pid" ] || [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: fixture processes did not start"
+  foreign=$(cat "$case_dir/foreign.pid")
+  owned=$(cat "$case_dir/owned.pid")
+  for ((i=0; i<100; i++)); do
+    foreign_tty=$(ps -p "$foreign" -o tty= 2>/dev/null | tr -d '[:space:]')
+    case "$foreign_tty" in ''|'?'|'??') sleep 0.1; continue ;; esac
+    foreign_command=$(ps -p "$foreign" -o comm= 2>/dev/null | tr -d '[:space:]')
+    owned_command=$(ps -p "$owned" -o comm= 2>/dev/null | tr -d '[:space:]')
+    if [ "${foreign_command##*/}" = bash ] && [ "${owned_command##*/}" = sleep ]; then break; fi
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: shell has no TTY"
+  endpoint_tty=$(ps -p "$endpoint" -o tty= | tr -d '[:space:]')
+  [ "$foreign_tty" != "$endpoint_tty" ] || fail "foreign-session: shell shares the endpoint TTY"
+  [ "$(ps -p "$foreign" -o pgid= | tr -d '[:space:]')" = "$foreign" ] \
+    || fail "foreign-session: shell does not have its own process group"
+
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$foreign" 2>/dev/null && survived=1
+  kill -KILL "$foreign" "$launcher" "$endpoint" 2>/dev/null || true
+  wait "$launcher" "$endpoint" 2>/dev/null || true
+  if kill -0 "$owned" 2>/dev/null; then
+    kill -KILL "$owned" 2>/dev/null || true
+    fail "foreign-session: task-owned child survived"
+  fi
+  [ "$survived" -eq 1 ] || fail "foreign-session: teardown killed an unowned shell"
+  expect_code 0 "$rc" "foreign-session: unproven ownership must not block teardown"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "foreign-session: treehouse return ran with a spared process"
+  assert_grep "kept worktree" "$case_dir/stderr" "foreign-session: kept worktree not reported"
+  assert_grep "spared unowned process $foreign: bash" "$case_dir/stderr" \
+    "foreign-session: teardown did not report the foreign pid and command"
+  grep -Eq "^[^	]+	task-x1	$foreign	spared	[^	]+	.*bash" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the spared shell was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  grep -Eq "^[^	]+	task-x1	$owned	killed	[^	]+	.*sleep" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the reaped child was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${foreign}[^	]*	.*$case_dir" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the kept worktree was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  pass "foreign TTY shell survives and is reported while the task-owned child is reaped, and both are logged durably"
+}
+
+test_reparented_child_in_endpoint_session_is_reaped() {
+  local case_dir rc endpoint orphan i
+  case_dir=$(make_case endpoint-session-orphan)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -MPOSIX -e '
+    my ($dir, $file) = @ARGV;
+    POSIX::setsid() or die "setsid";
+    my $parent = fork();
+    die "fork" unless defined $parent;
+    if (!$parent) {
+      my $child = fork();
+      die "fork" unless defined $child;
+      if (!$child) { setpgrp(0, 0); chdir $dir or die; exec "sleep", "300"; }
+      open my $fh, ">", $file or die;
+      print {$fh} "$child\n";
+      close $fh;
+      POSIX::_exit(0);
+    }
+    waitpid($parent, 0);
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/orphan.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/orphan.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: fixture processes did not start"
+  orphan=$(cat "$case_dir/orphan.pid")
+  for ((i=0; i<100; i++)); do
+    [ "$(ps -p "$orphan" -o ppid= 2>/dev/null | tr -d '[:space:]')" != "$endpoint" ] \
+      && [ "$(ps -p "$orphan" -o comm= 2>/dev/null | tr -d '[:space:]')" = sleep ] && break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: child was not reparented away from the endpoint"
+  [ "$(ps -p "$orphan" -o pgid= | tr -d '[:space:]')" = "$orphan" ] \
+    || fail "endpoint-session-orphan: child does not have its own process group"
+
+  rc=0
+  FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  if kill -0 "$orphan" 2>/dev/null; then
+    kill -KILL "$orphan" 2>/dev/null || true
+    fail "endpoint-session-orphan: reparented child in the endpoint session survived: $(cat "$case_dir/stderr")"
+  fi
+  expect_code 0 "$rc" "endpoint-session-orphan: teardown should complete"
+  grep -Eq "^[^	]+	task-x1	$orphan	killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "endpoint-session-orphan: the reaped child was not logged durably"
+  pass "an init-reparented child in the endpoint shell's session is reaped and logged"
+}
+
+test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree() {
+  local case_dir rc agent
+  case_dir=$(make_case no-oracle-agent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e 'chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  agent=$!
+  sleep 0.3
+  rc=0
+  FM_FAKE_KILL_PID="$agent" FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 0 "$rc" "no-oracle-agent: teardown should complete"
+  assert_grep "spared unowned process $agent:" "$case_dir/stderr" \
+    "no-oracle-agent: the unproven agent was not reported"
+  [ -s "$case_dir/treehouse.log" ] || fail "no-oracle-agent: worktree was not returned after the pane close ended the agent"
+  pass "an unproven agent that ends at pane close does not keep the worktree"
+}
+
+test_term_resistant_owned_children_are_reaped_with_the_leader() {
+  local case_dir rc endpoint child i
+  case_dir=$(make_case term-resistant-owned)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    chdir $dir or die;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { exec "sh", "-c", "trap \"\" TERM; while :; do sleep 1; done"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "term-resistant-owned: fixture did not start"
+  child=$(cat "$case_dir/owned.pid")
+
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$child" "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  expect_code 0 "$rc" "term-resistant-owned: teardown should succeed"
+  grep -Eq "^[^	]+	task-x1	$child	force-killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "term-resistant-owned: owned child was not force-killed: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  if grep -Eq "^[^	]+	task-x1	$child	spared	" "$case_dir/state/teardown-processes.log"; then
+    fail "term-resistant-owned: owned child was reported as spared after the leader was signaled"
+  fi
+  pass "TERM-resistant task-owned processes are force-killed without being spared when the endpoint shell dies"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -4816,10 +5008,16 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "lsof-absent-process-group-reap: treehouse return ran although processes in the worktree could not be listed"
+  assert_grep "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/stderr" \
+    "lsof-absent-process-group-reap: kept worktree not reported"
+  grep -q "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/state/teardown-processes.log" \
+    || fail "lsof-absent-process-group-reap: kept worktree not logged durably"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "lsof-absent-process-group-reap: tmux process group survived teardown"
@@ -4966,31 +5164,45 @@ SH
 }
 
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
-  local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  local case_dir rc leader pid child_file child_pid="" parent_survived=0 child_survived=0
   case_dir=$(make_case grace-spawn-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   child_file="$case_dir/child.pid"
 
-  ( cd "$case_dir/wt" && exec perl -e '
-      my $file = shift;
-      $SIG{TERM} = sub {
-        my $child = fork();
-        die "fork" unless defined $child;
-        if (!$child) { exec "sleep", "300"; }
-        open my $fh, ">", $file or die "open";
-        print {$fh} "$child\n";
-        close $fh;
+  perl -e '
+      my ($dir, $file, $worker_file) = @ARGV;
+      require POSIX;
+      POSIX::setsid();
+      my $worker = fork();
+      die "fork" unless defined $worker;
+      if (!$worker) {
+        chdir $dir or die;
+        open my $wf, ">", $worker_file or die;
+        print {$wf} "$$\n";
+        close $wf;
+        $SIG{TERM} = sub {
+          my $child = fork();
+          die "fork" unless defined $child;
+          if (!$child) { exec "sleep", "300"; }
+          open my $fh, ">", $file or die "open";
+          print {$fh} "$child\n";
+          close $fh;
+          exit 0;
+        };
+        sleep 300;
         exit 0;
-      };
+      }
+      $SIG{CHLD} = "IGNORE";
       sleep 300;
-    ' "$child_file" ) &
-  pid=$!
+    ' "$case_dir/wt" "$child_file" "$case_dir/worker.pid" &
+  leader=$!
   disown
-  sleep 0.2
+  for _ in $(seq 1 50); do [ -s "$case_dir/worker.pid" ] && break; sleep 0.1; done
+  pid=$(cat "$case_dir/worker.pid")
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_FAKE_PANE_PID="$leader" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
   if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
@@ -5001,6 +5213,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
     parent_survived=1
     kill -KILL "$pid" 2>/dev/null || true
   fi
+  kill -KILL "$leader" 2>/dev/null || true
   expect_code 0 "$rc" "grace-spawn-convergence: teardown should converge"
   assert_present "$child_file" "grace-spawn-convergence: TERM handler did not spawn a child"
   [ "$child_survived" -eq 0 ] || fail "grace-spawn-convergence: spawned child survived"
@@ -5020,6 +5233,11 @@ printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -axo ]; then
+  "$REAL_PS_FOR_TEST" "$@"
+  printf '%s %s %s\n' "$FM_FAKE_PERSISTENT_PID" "$FM_FAKE_PANE_PID" "$FM_FAKE_PERSISTENT_PID"
+  exit 0
+fi
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
    && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
   printf 'Tue Aug  4 10:00:00 2026\n'
@@ -5732,6 +5950,10 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_foreign_session_survives_and_is_reported
+test_reparented_child_in_endpoint_session_is_reaped
+test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree
+test_term_resistant_owned_children_are_reaped_with_the_leader
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
