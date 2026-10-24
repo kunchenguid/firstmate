@@ -2485,6 +2485,20 @@ TEARDOWN_SPARED_PIDS=
 TEARDOWN_RETURN_DEFERRED=0
 TEARDOWN_CWD_UNLISTABLE=0
 
+teardown_spared_pids_in_worktree() {  # [dir]
+  local dir=${1:-$WT} current pid identity
+  [ -n "$TEARDOWN_SPARED_PIDS" ] || return 0
+  current=$(pids_with_cwd_under "$dir") || current=$(printf '%s\n' "$TEARDOWN_SPARED_PIDS" | cut -f1)
+  while IFS=$'\t' read -r pid identity; do
+    [ -n "$pid" ] || continue
+    task_pid_list_contains "$current" "$pid" || continue
+    [ -z "$identity" ] || task_process_identity_matches "$pid" "$identity" || continue
+    printf '%s\n' "$pid"
+  done <<EOF
+$TEARDOWN_SPARED_PIDS
+EOF
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -3041,7 +3055,13 @@ EOF
 # home is quiet, and the home and its records are kept.
 t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   t3code_secondmate_lsof_check "$2" "$1" || return 1
-  reap_task_worktree_processes "secondmate home" "$1"
+  reap_task_worktree_processes "secondmate home" "$1" || return 1
+  local survivors
+  survivors=$(teardown_spared_pids_in_worktree "$1" | tr '\n' ' ')
+  [ -z "$survivors" ] && return 0
+  echo "teardown: kept secondmate home $1; spared unowned process(es) still run in it: $survivors" >&2
+  teardown_process_log - kept "spared pid(s) still in secondmate home: $survivors" "$1"
+  return 1
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
@@ -4105,20 +4125,6 @@ else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
 fi
-
-teardown_spared_pids_in_worktree() {
-  local current pid identity
-  [ -n "$TEARDOWN_SPARED_PIDS" ] || return 0
-  current=$(pids_with_cwd_under "$WT") || current=$(printf '%s\n' "$TEARDOWN_SPARED_PIDS" | cut -f1)
-  while IFS=$'\t' read -r pid identity; do
-    [ -n "$pid" ] || continue
-    task_pid_list_contains "$current" "$pid" || continue
-    [ -z "$identity" ] || task_process_identity_matches "$pid" "$identity" || continue
-    printf '%s\n' "$pid"
-  done <<EOF
-$TEARDOWN_SPARED_PIDS
-EOF
-}
 
 teardown_finish_treehouse_return() {  # early|final
   local survivors waits=0
