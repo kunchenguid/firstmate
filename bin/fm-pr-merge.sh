@@ -1102,13 +1102,17 @@ $FM_PR_GITHUB_REQUIRED_ERROR
 EOF
   fi
   producers='[]'
+  # Keep only distinct required (name, app id) pairs: github_required_checks_missing
+  # takes producers as one --argjson, which Linux MAX_ARG_STRLEN (128 KiB) caps.
   if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
     if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
       || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
+      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" --argjson required "$FM_PR_GITHUB_REQUIRED" '
         [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
           | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
+            then {name, app: {id: .app.id}} else error("invalid check producer") end
+          | select(. as $p | any($required[]; .context == $p.name and .app_id == $p.app.id)) ]
+        | unique' 2>/dev/null); then
       producers='[]'
       refusals="$refusals  - required check producers at head $live_head could not be read
 "

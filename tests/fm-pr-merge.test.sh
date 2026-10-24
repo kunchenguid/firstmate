@@ -4083,6 +4083,39 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
+# Real check runs carry large output bodies, and a head can carry thousands of
+# runs; neither may exceed the per-argument exec limit when producers are compared.
+test_required_producer_large_check_runs() {
+  local case_dir head kind filler
+  head=a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
+  filler=$(head -c 4000 /dev/zero | tr '\0' x)
+  for kind in classic ruleset; do
+    case_dir=$(make_case "required-producer-large-$kind")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_required "$case_dir" "$kind:ci"
+    if [ "$kind" = classic ]; then
+      jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+        "$case_dir/github-branch.json" > "$case_dir/updated.json"
+      mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+    else
+      jq '.[1].parameters.required_status_checks[0].integration_id = 15368' \
+        "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
+      mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
+    fi
+    jq -n --arg head "$head" --arg filler "$filler" '{check_runs: (
+        [range(60) | {name: "other-\(.)", app: {id: 42}, head_sha: $head, output: {text: $filler}}]
+        + [range(2500) | {name: "matrix / build (os-\(.), toolchain-stable, feature-set-full)", app: {id: 42}, head_sha: $head}]
+        + [range(3) | {name: "ci", app: {id: 15368}, head_sha: $head, output: {text: $filler}}])}' \
+      > "$case_dir/github-runs.json"
+    [ "$(wc -c < "$case_dir/github-runs.json")" -gt 131072 ] \
+      || fail "large check-runs fixture is not larger than the per-argument limit"
+    run_required_case "$case_dir" 110 --attended-override -- --admin
+    expect_code 0 "$RC" "producer-large-$kind: $(cat "$case_dir/stderr")"
+    assert_grep 'pr merge' "$case_dir/gh.log" "large producer set did not merge"
+  done
+  pass "fm-pr-merge compares required producers from large check-run sets"
+}
+
 # A commit status carries no app id to compare, so an app-bound required context
 # that arrives as a green status matches by name, while the same context left
 # unreported still refuses.
@@ -4614,6 +4647,7 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
+test_required_producer_large_check_runs
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
