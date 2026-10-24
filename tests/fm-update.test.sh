@@ -49,15 +49,20 @@ new_world() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  list-windows) cat "$FM_FAKE_DIR/windows" ;;
+  list-windows)
+    case " $*" in
+      *window_id*) awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$FM_FAKE_DIR/windows" ;;
+      *) cat "$FM_FAKE_DIR/windows" ;;
+    esac ;;
   display-message)
     target=
     for arg in "$@"; do
-      case "$arg" in main:fm-*) target=$arg ;; esac
+      case "$arg" in main:fm-*|@*) target=$arg ;; esac
     done
     case "${*: -1}" in
       *pane_current_command*)
         id=${target##*fm-}
+        case "$target" in @*) id=$(sed -n 's/^fm-//p' "$FM_FAKE_DIR/windows" | tail -1) ;; esac
         if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'claude\n'; fi
         ;;
       *) printf '\n' ;;

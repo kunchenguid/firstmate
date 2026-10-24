@@ -100,7 +100,12 @@ window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  list-windows)
+    case " $*" in
+      *window_id*) [ ! -s "$window_file" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$window_file" ;;
+      *) [ ! -s "$window_file" ] || cat "$window_file" ;;
+    esac
+    exit 0 ;;
   new-window)
     name=
     previous=

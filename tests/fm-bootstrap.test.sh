@@ -989,7 +989,13 @@ case "${1:-}" in
     esac
     ;;
   capture-pane) printf '❯\n' ;;
-  list-windows) printf '%s\n' fm-sm ;;
+  list-windows)
+    _fm_fake_names() { printf '%s\n' fm-sm; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

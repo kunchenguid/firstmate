@@ -83,30 +83,38 @@ case "${1:-}" in
       prev=$arg
     done
     session=${session#=}
-    while IFS= read -r recorded; do
-      [ -n "$recorded" ] || continue
-      if [ -z "$session" ]; then
-        printf '%s\n' "$recorded"
-        continue
-      fi
-      case "$recorded" in
-        "$session":*) printf '%s\n' "${recorded#*:}" ;;
-        *:*) ;;
-        *) printf '%s\n' "$recorded" ;;
-      esac
-    done <<EOF
-${FM_FAKE_TMUX_WINDOW:-}
-EOF
-    if [ -s "$window_file" ]; then
+    fake_names=$(
       while IFS= read -r recorded; do
         [ -n "$recorded" ] || continue
         if [ -z "$session" ]; then
           printf '%s\n' "$recorded"
-        else
-          case "$recorded" in "$session":*) printf '%s\n' "${recorded#*:}" ;; esac
+          continue
         fi
-      done < "$window_file"
-    fi
+        case "$recorded" in
+          "$session":*) printf '%s\n' "${recorded#*:}" ;;
+          *:*) ;;
+          *) printf '%s\n' "$recorded" ;;
+        esac
+      done <<EOF
+${FM_FAKE_TMUX_WINDOW:-}
+EOF
+      if [ -s "$window_file" ]; then
+        while IFS= read -r recorded; do
+          [ -n "$recorded" ] || continue
+          if [ -z "$session" ]; then
+            printf '%s\n' "$recorded"
+          else
+            case "$recorded" in "$session":*) printf '%s\n' "${recorded#*:}" ;; esac
+          fi
+        done < "$window_file"
+      fi
+    )
+    case " $*" in
+      *window_id*)
+        printf '%s\n' "$fake_names" | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }'
+        ;;
+      *) printf '%s\n' "$fake_names" ;;
+    esac
     exit 0
     ;;
   display-message)

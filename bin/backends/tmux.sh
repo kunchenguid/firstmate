@@ -149,10 +149,10 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_window_inventory: <session-target>'s window names, one per
-# line on stdout, together with a verdict on the READ ITSELF, which is what
-# every caller that must not guess depends on:
-#   0 - the inventory was read; its lines are that session's windows.
+# fm_backend_tmux_window_rows: <session-target>'s window rows in <format>,
+# one per line on stdout, together with a verdict on the READ ITSELF, which is
+# what every caller that must not guess depends on:
+#   0 - the rows were read; its lines are that session's windows.
 #   2 - tmux answered definitively that the session, or its whole server, is
 #       absent, so no window of that session exists.
 #   1 - the read could not be made at all, and proves nothing either way. A
@@ -163,13 +163,13 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # The target is passed through exactly as the caller means it, so a caller that
 # requires the exact recorded session asks for `=session` and still gets the
 # same classification.
-fm_backend_tmux_window_inventory() {  # <session-target>
-  local windows
-  if windows=$(LC_ALL=C tmux list-windows -t "$1" -F '#{window_name}' 2>&1); then
-    printf '%s\n' "$windows"
+fm_backend_tmux_window_rows() {  # <session-target> <format>
+  local rows
+  if rows=$(LC_ALL=C tmux list-windows -t "$1" -F "$2" 2>&1); then
+    printf '%s\n' "$rows"
     return 0
   fi
-  case "$windows" in
+  case "$rows" in
     *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
       return 2
       ;;
@@ -177,12 +177,30 @@ fm_backend_tmux_window_inventory() {  # <session-target>
   return 1
 }
 
-# Resolve one exact window selector in one exact session to its stable id.
+# fm_backend_tmux_window_inventory: <session-target>'s window names, one per
+# line on stdout, with fm_backend_tmux_window_rows' 0/2/1 read verdict.
+fm_backend_tmux_window_inventory() {  # <session-target>
+  fm_backend_tmux_window_rows "$1" '#{window_name}'
+}
+
+# Resolve one exact window selector in one exact session to its stable @id and
+# print it, keeping the read honest in both directions so a caller can tell an
+# absent window from a read that proved nothing:
+#   0 - the selector resolved; the printed @id is the exact window.
+#   1 - the session's rows were read and no row matched: the window is absent.
+#   2 - the row read could not be made at all (transient), proving nothing.
+#   3 - tmux answered definitively that the session or server is absent.
 # The shared dispatcher header owns the accepted target grammar.
 fm_backend_tmux_window_id() {  # <session-name> <window-name|index|@id>
-  local session=$1 selector=$2 rows window_id window_index window_name
-  rows=$(LC_ALL=C tmux list-windows -t "=$session" \
-    -F '#{window_id}|#{window_index}|#{window_name}' 2>/dev/null) || return 1
+  local session=$1 selector=$2 rows status window_id window_index window_name
+  rows=$(fm_backend_tmux_window_rows "=$session" \
+    '#{window_id}|#{window_index}|#{window_name}')
+  status=$?
+  case "$status" in
+    0) ;;
+    2) return 3 ;;
+    *) return 2 ;;
+  esac
   while IFS='|' read -r window_id window_index window_name; do
     case "$selector" in
       @*) [ "$window_id" = "$selector" ] || continue ;;
@@ -403,13 +421,17 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
 # the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
-# `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
-# fm_backend_tmux_window_inventory above owns that read classification, shared
-# with fm_backend_tmux_kill so both mean the same thing by an absent session.
+# named target is absent, and it prefix-matches a missing session to a live
+# neighbor, so every read is anchored on the EXACT recorded session
+# (`=session`) and the window is resolved to its stable @id through
+# fm_backend_tmux_window_id before any pane read is trusted - a fuzzy session
+# match or a plain `session:window` target would otherwise describe a
+# neighbor's pane. An absent selector or a definitive missing-session/server
+# response is `missing`; any other inventory or pane read failure is
+# `unreadable`, so a transient tmux problem never licenses a duplicate.
+# fm_backend_tmux_window_rows above owns that read classification, shared with
+# fm_backend_tmux_window_inventory and fm_backend_tmux_kill so all mean the
+# same thing by an absent session.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -418,7 +440,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+  local target=$1 comm session window window_id window_status
   local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -427,22 +449,21 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  windows=$(fm_backend_tmux_window_inventory "$session")
-  inventory_status=$?
-  if [ "$inventory_status" -ne 0 ]; then
-    if [ "$inventory_status" -eq 2 ]; then
-      printf 'missing'
-    else
-      printf 'unreadable'
-    fi
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
-  fi
+  case "$session" in =*) session=${session#=} ;; esac
+  case "$window" in =*) window=${window#=} ;; esac
+  # Resolve the window to its stable @id so every pane read below is anchored
+  # on an exact identifier: a `session:window` target left as-is would let
+  # tmux's prefix matching describe a different session's same-named window,
+  # and a name grep cannot represent indexes, @ids, or dash-leading names.
+  window_id=$(fm_backend_tmux_window_id "$session" "$window")
+  window_status=$?
+  case "$window_status" in
+    0) ;;
+    2) printf 'unreadable'; return 0 ;;   # the read failed; proves nothing
+    *) printf 'missing'; return 0 ;;      # absent window or definitively absent session
+  esac
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
+  foreground=$(fm_backend_tmux_foreground_comms "$window_id")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
@@ -455,7 +476,7 @@ fm_backend_tmux_agent_state() {  # <target>
 $foreground
 EOF
 
-  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
+  argv0s=$(fm_backend_tmux_foreground_argv0s "$window_id")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ "$(fm_agent_process_classify_name '' "$name")" = agent ]; then
@@ -476,7 +497,7 @@ EOF
       return 0
     fi
   done <<EOF
-$(fm_backend_tmux_foreground_pids "$target")
+$(fm_backend_tmux_foreground_pids "$window_id")
 EOF
 
   # Fall back to flattened arguments on platforms without /proc. Positive
@@ -488,10 +509,10 @@ EOF
       return 0
     fi
   done <<EOF
-$(fm_backend_tmux_foreground_args "$target")
+$(fm_backend_tmux_foreground_args "$window_id")
 EOF
 
-  comm=$(fm_backend_tmux_current_command "$target") || {
+  comm=$(fm_backend_tmux_current_command "$window_id") || {
     printf 'unreadable'
     return 0
   }

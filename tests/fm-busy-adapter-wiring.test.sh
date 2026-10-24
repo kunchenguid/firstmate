@@ -576,19 +576,25 @@ secondmate_stall_watch() { # <primary> <id> <out> [seconds]
 #!/usr/bin/env bash
 case "\${1:-}" in
   list-windows)
-    # The watcher asks for session:window. The liveness inventory asks for the
-    # window name alone, and a full target there reads as a missing endpoint.
-    format=
-    prev=
-    for arg in "\$@"; do
-      if [ "\$prev" = -F ]; then format=\$arg; fi
-      prev=\$arg
-    done
-    case "\$format" in
-      '#{window_name}') printf '%s\n' '${window#*:}' ;;
-      *) printf '%s\n' '$window' ;;
+    _fm_fake_names() {
+      # The watcher asks for session:window. The liveness inventory asks for the
+      # window name alone, and a full target there reads as a missing endpoint.
+      format=
+      prev=
+      for arg in "\$@"; do
+        if [ "\$prev" = -F ]; then format=\$arg; fi
+        prev=\$arg
+      done
+      case "\$format" in
+        '#{window_name}') printf '%s\n' '${window#*:}' ;;
+        *) printf '%s\n' '$window' ;;
+      esac
+    }
+    case " \$*" in
+      *window_id*) printf '%s\n' '${window#*:}' | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, \$0 }' ;;
+      *) _fm_fake_names ;;
     esac
-    ;;
+    exit 0 ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;

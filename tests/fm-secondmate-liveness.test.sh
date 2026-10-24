@@ -55,7 +55,13 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
     exit 0 ;;
-  list-windows) printf '%s\n' win; exit 0 ;;
+  list-windows)
+    _fm_fake_names() { printf '%s\n' win; }
+    case " \$*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, \$0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -79,11 +85,21 @@ case "\${1:-}" in
     ;;
   list-windows)
     case '$inventory' in
-      missing) printf '%s\n' main ; exit 0 ;;
+      missing)
+        case "\$*" in
+          *window_id*) printf '@1|0|main\n' ;;
+          *) printf '%s\n' main ;;
+        esac
+        exit 0 ;;
       missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
       missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
       missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
-      present) printf '%s\n' fm-sm1 ; exit 0 ;;
+      present)
+        case "\$*" in
+          *window_id*) printf '@1|0|fm-sm1\n' ;;
+          *) printf '%s\n' fm-sm1 ;;
+        esac
+        exit 0 ;;
       *) printf '%s\n' "permission denied" >&2; exit 1 ;;
     esac
     ;;
@@ -300,18 +316,27 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    case "$mode" in
-      missing)
-        printf '%s\n' main
-        [ ! -s "$windows" ] || cat "$windows"
-        exit 0 ;;
-      unreadable) exit 1 ;;
+    case " $*" in
+      *window_id*)
+        case "$mode" in
+          missing)
+            { printf 'main\n'; [ ! -s "$windows" ] || cat "$windows"; } \
+              | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+          unreadable) exit 1 ;;
+          *)
+            { [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf 'fm-sm1\n'; [ ! -s "$windows" ] || cat "$windows"; } \
+              | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+        esac
+        ;;
       *)
-        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
-        [ ! -s "$windows" ] || cat "$windows"
-        exit 0 ;;
+        case "$mode" in
+          missing) printf '%s\n' main; [ ! -s "$windows" ] || cat "$windows" ;;
+          unreadable) exit 1 ;;
+          *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; [ ! -s "$windows" ] || cat "$windows" ;;
+        esac
+        ;;
     esac
-    ;;
+    exit 0 ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     if [ "${1:-}" = new-window ] && [ -n "${FM_TEST_NEW_WINDOW_PAUSE:-}" ]; then

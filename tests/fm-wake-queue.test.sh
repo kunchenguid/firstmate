@@ -697,7 +697,13 @@ test_secondmate_active_turn_defers_stall_until_the_turn_ends() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows)
+    _fm_fake_names() { printf '%s\n' 'firstmate:fm-mate'; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
@@ -759,7 +765,7 @@ test_secondmate_long_lived_mate_mid_turn_is_not_a_stall() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows) case " $*" in *window_id*) printf '@1|0|firstmate:fm-mate\n' ;; *) printf '%s\n' 'firstmate:fm-mate' ;; esac; exit 0 ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
@@ -804,7 +810,7 @@ install_secondmate_alive_tmux() {  # <fakebin>
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  list-windows) printf '%s\n' 'fm-mate' ;;
+  list-windows) case " $*" in *window_id*) printf '@1|0|fm-mate\n' ;; *) printf '%s\n' 'fm-mate' ;; esac; exit 0 ;;
   capture-pane) exit 0 ;;
   display-message)
     case "$*" in
@@ -1135,7 +1141,7 @@ test_secondmate_stall_marker_rejects_symlink() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows) case " $*" in *window_id*) printf '@1|0|firstmate:fm-mate\n' ;; *) printf '%s\n' 'firstmate:fm-mate' ;; esac; exit 0 ;;
   capture-pane) : ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
@@ -3143,17 +3149,23 @@ case "${1:-}" in
     done
     exit 0 ;;
   list-windows)
-    if { [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || [ -f "$probe.killed" ]; } \
-      && [ ! -f "$probe.spawned" ]; then
-      printf 'main\n'
-    else
-      printf 'main\n'
-      if [ -s "$probe.windows" ]; then
-        cat "$probe.windows"
+    _fm_fake_names() {
+      if { [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || [ -f "$probe.killed" ]; } \
+        && [ ! -f "$probe.spawned" ]; then
+        printf 'main\n'
       else
-        printf 'fm-sm1\n'
+        printf 'main\n'
+        if [ -s "$probe.windows" ]; then
+          cat "$probe.windows"
+        else
+          printf 'fm-sm1\n'
+        fi
       fi
-    fi
+    }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
     exit 0 ;;
   capture-pane) [ -z "${FM_FAKE_TMUX_CAPTURE:-}" ] || cat "$FM_FAKE_TMUX_CAPTURE"; exit 0 ;;
   new-window)

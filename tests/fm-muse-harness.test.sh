@@ -83,7 +83,12 @@ case "${1:-}" in
     exit 0
     ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  list-windows)
+    case " $*" in
+      *window_id*) [ ! -s "$window_file" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$window_file" ;;
+      *) [ ! -s "$window_file" ] || cat "$window_file" ;;
+    esac
+    exit 0 ;;
   new-window)
     name=
     previous=

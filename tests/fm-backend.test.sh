@@ -727,7 +727,13 @@ test_resolve_selector_three_forms() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf 'firstmate:adhoc\nother:otherwin\n' ;;
+  list-windows)
+    _fm_fake_names() { printf 'firstmate:adhoc\nother:otherwin\n'; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -808,7 +814,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) printf 'win\n'; exit 0 ;;
+  list-windows) case " $*" in *window_id*) printf '@1|0|win\n' ;; *) printf 'win\n' ;; esac; exit 0 ;;
 esac
 exit 0
 SH

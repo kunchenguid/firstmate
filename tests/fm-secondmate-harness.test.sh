@@ -605,7 +605,11 @@ make_noop_tmux() {
 window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n' ;;
-  list-windows) [ ! -s "$window_file" ] || cat "$window_file" ;;
+  list-windows)
+    case " $*" in
+      *window_id*) [ ! -s "$window_file" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$window_file" ;;
+      *) [ ! -s "$window_file" ] || cat "$window_file" ;;
+    esac ;;
   new-window)
     name=
     previous=
@@ -849,7 +853,12 @@ esac
 window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  list-windows)
+    case " $*" in
+      *window_id*) [ ! -s "$window_file" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$window_file" ;;
+      *) [ ! -s "$window_file" ] || cat "$window_file" ;;
+    esac
+    exit 0 ;;
   new-window)
     name=
     previous=
@@ -1362,7 +1371,10 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
 fi
 case "$*" in
   list-windows*)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    case "$*" in
+      *window_id*) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta ;;
+    esac
     exit 0
     ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;

@@ -252,6 +252,49 @@ if fm_backend_tmux_send_key "$SESSION:fm-v1.0" X; then
 fi
 pass "real tmux: a gone dotted window reads absent beside its undotted neighbor"
 
+# --- agent_state exact endpoint anchoring -------------------------------------
+# The recovery classifier must anchor on the exact recorded session: a missing
+# session whose name prefixes a live session's must not let the probe describe
+# that neighbor's same-named window as the recorded endpoint.
+state=$(fm_backend_agent_state tmux "smoke-prefix:$WINDOW")
+[ "$state" = missing ] \
+  || fail "fm_backend_agent_state prefix-matched a missing session to a live neighbor, got '$state'"
+pass "real tmux: fm_backend_agent_state reports a prefix-matched missing session missing"
+
+state=$(fm_backend_agent_state tmux "smoke-missing:$WINDOW")
+[ "$state" = missing ] \
+  || fail "fm_backend_agent_state should report a window in a missing session missing, got '$state'"
+pass "real tmux: fm_backend_agent_state reports a missing session missing"
+
+# Every recorded-target form that fm_backend_target_exists accepts must reach
+# the same live window: explicit `=` markers, a window index, and a
+# dash-leading window name (which a bare grep -qx pattern cannot represent).
+state=$(fm_backend_agent_state tmux "=$SESSION:=$WINDOW")
+[ "$state" = dead ] \
+  || fail "fm_backend_agent_state lost the exact-marked live window, got '$state'"
+state=$(fm_backend_agent_state tmux "$SESSION:$LIVE_WINDOW_INDEX")
+[ "$state" = dead ] \
+  || fail "fm_backend_agent_state lost the index-addressed live window, got '$state'"
+DASH_WINDOW='-x-dash-window'
+tmux new-window -d -t "$SESSION:" -n "$DASH_WINDOW" \
+  || fail "real tmux: dash-named window failed"
+state=$(fm_backend_agent_state tmux "$SESSION:$DASH_WINDOW")
+[ "$state" = dead ] \
+  || fail "fm_backend_agent_state lost the dash-leading live window, got '$state'"
+pass "real tmux: fm_backend_agent_state resolves exact-marked, index, and dash-leading targets"
+
+# A window-rows read that fails without a definitive absent answer must
+# classify unreadable, never missing: only a successful exact-session read or
+# a "can't find session"-class response may produce missing, or a transient
+# tmux problem could license a duplicate launch.
+# shellcheck disable=SC2329  # Invoked indirectly by the sourced tmux adapter.
+tmux() { echo "tmux: simulated transient failure" >&2; return 1; }
+state=$(fm_backend_agent_state tmux "$TARGET")
+[ "$state" = unreadable ] \
+  || fail "a failed window read must classify unreadable, got '$state'"
+unset -f tmux
+pass "real tmux: a failed window read classifies unreadable, never missing"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regression coverage for bin/fm-fleet-snapshot.sh --contribution-input:
 # a failing final jq assembly must exit non-zero instead of exiting 0 with
-# empty output (issue #5349).
+# empty output (issue #5349), and a backlog larger than MAX_ARG_STRLEN must
+# assemble through file staging instead of dying at the argv limit.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,4 +64,30 @@ test_contribution_input_propagates_jq_failure() {
   pass "contribution-input propagates a failing jq assembly as a non-zero exit"
 }
 
+# A backlog whose JSON exceeds MAX_ARG_STRLEN (128 KiB on Linux) cannot ride
+# one --argjson argument: the pre-fix assembly died with "Argument list too
+# long". The whole document must reach jq through file staging instead.
+test_contribution_input_survives_arg_max_backlog() {
+  local home out records i=0
+  home=$(make_home arg-max-backlog)
+  {
+    printf '## In flight\n'
+    while [ "$i" -lt 1500 ]; do
+      printf -- '- [ ] task-%05d - a task title padded with enough plain prose to keep every record comfortably over one hundred bytes of backlog JSON (repo: alpha) (kind: ship) (priority: 2) (since 2026-07-07)\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "contribution-input must not die when the backlog JSON exceeds MAX_ARG_STRLEN: $out"
+  records=$(printf '%s' "$out" | jq '.backlog.records | length') \
+    || fail "contribution-input output was not parseable JSON: $out"
+  [ "$records" -ge 1500 ] \
+    || fail "expected all 1500 backlog records in the assembled input, got $records"
+  printf '%s' "$out" | jq -e '.tasks | type == "array"' >/dev/null \
+    || fail "contribution-input output lacks the tasks array"
+  pass "contribution-input assembles a >128KiB backlog without exceeding the argv limit"
+}
+
 test_contribution_input_propagates_jq_failure
+test_contribution_input_survives_arg_max_backlog

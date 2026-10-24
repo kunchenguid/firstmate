@@ -1102,7 +1102,13 @@ case "${1:-}" in
   capture-pane)
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
-  list-windows) printf 'fm-worker-6\n'; exit 0 ;;
+  list-windows)
+    _fm_fake_names() { printf 'fm-worker-6\n'; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

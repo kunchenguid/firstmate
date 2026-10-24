@@ -376,7 +376,7 @@ The refusal is reached only through a close that could not do its job, and each 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
 Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
-It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
+It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_rows` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
 Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
 
 Two bounds of the refusal are known and deliberately not closed here.
@@ -435,6 +435,21 @@ ok - kimi 2.3.0: folder-prompt predicates agree with the installed Kimi on every
 The portable regression `tests/fm-kimi-harness.test.sh` replays the recorded panes through its fake pane: the plain prompt is answered once and the brief delivered, each announcing wording and the paged prompt receive no key and report why, and the collapsed prompt reports that it is not ready.
 Each case is non-vacuous: dropping the 2.3.0 option pair from the complete-dialog test fails the plain case, making the announcement test never fire fails the root `.mcp.json` case, and making the page test never fire fails the paged case.
 The 2.0.0 wording keeps its existing cases in the same suite.
+
+### Agent-state endpoint anchoring
+
+`fm_backend_tmux_agent_state` resolves the recorded window to its stable `@id` inside the exact recorded session before any pane read, because tmux answers fuzzy targets from a neighbor it matched itself.
+Verified on 2026-10-23 with tmux 3.4 on Linux x86_64 against an isolated server (`tmux -L`), where `probe` held `main`, `fm-live-worker`, and `-x`, and `fmprefix` held `fm-worker`:
+
+```text
+tmux display-message -p -t probe:no-such-window '#{pane_id}'   -> %0, exit 0 (the absent window falls back to the current pane)
+tmux list-windows -t fm -F '#{session_name}:#{window_name}'    -> fmprefix:fm-worker, exit 0 (a missing session prefix-matches a live one)
+tmux display-message -p -t fm:fm-worker '#{pane_tty}'          -> /dev/pts/6, exit 0 (reads the neighbor's pane)
+```
+
+Under the earlier name-grep membership check, `fm_backend_agent_state tmux fm:fm-worker` returned `ambiguous` about the neighbor's window, `probe:-x` returned `missing` for a live dash-named window (a bare `grep -qx` pattern cannot take a leading dash), and `=probe:=fm-live-worker` plus `probe:<index>` returned `missing` for live windows.
+After the fix those same calls return `missing`, `dead`, `dead`, and `dead` respectively.
+The regression is pinned by the "agent_state exact endpoint anchoring" block in `tests/fm-backend-tmux-smoke.test.sh`, run against real tmux.
 
 ## Claude workspace trust
 

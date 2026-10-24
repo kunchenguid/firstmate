@@ -1381,7 +1381,13 @@ assert_returned_driver_is_caught() {  # <attended|away>
   cat > "$home/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf 'fm-demo\n'; exit 0 ;;
+  list-windows)
+    _fm_fake_names() { printf 'fm-demo\n'; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
   capture-pane) printf 'Pi idle prompt; measurement driver returned\n'; exit 0 ;;
   display-message) printf 'node\n'; exit 0 ;;
 esac
