@@ -154,8 +154,11 @@
 # appends the closing resolved line to that status file, so the captain-facing
 # OPEN DECISIONS record closes at answer time and never depends on the busy
 # worker writing a matching resolved line. For ordinary keys the payload is
-# "resolved [key=<key>]: answered: <capped excerpt>" before the emission-time
-# handling owned by bin/fm-classify-lib.sh. A reserved key
+# "resolved [key=<key>]: answered: <answer>" before the emission-time
+# handling owned by bin/fm-classify-lib.sh. An answer too long for the
+# status-line cap is never stored only as a fragment: its complete text is
+# first written to state/resolved-answers/<id>.txt, and the close keeps the
+# " [truncated]" marker followed by a pointer to that file. A reserved key
 # (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
 # closed with the owning library's vocabulary note
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
@@ -601,6 +604,49 @@ fm_send_resolve_close_note() { # <key> <excerpt>
   printf 'answered: %s' "$excerpt"
 }
 
+# The close line for one key, bounded by RESOLVE_CLOSE_MAX. A close that fits is
+# stored whole. One that does not keeps the loud cut marker and ends with a
+# pointer to the complete answer under state/resolved-answers/, which
+# fm_send_store_full_answer writes before any close is appended, so the
+# durable record never holds a decision's words only as a fragment.
+FM_SEND_FULL_ANSWER_DIR=resolved-answers
+fm_send_close_line_var() { # <key> <note> <answer-id>
+  local k=$1 note=$2 id=$3 line pointer
+  line="resolved [key=$k]: $(fm_send_resolve_close_note "$k" "$note")"
+  if [ "${#line}" -le "$RESOLVE_CLOSE_MAX" ]; then
+    FM_SEND_CLOSE_LINE=$line
+    FM_SEND_CLOSE_CUT=0
+    return 0
+  fi
+  pointer=" [full answer: state/$FM_SEND_FULL_ANSWER_DIR/$id.txt]"
+  fm_cap_line_var "$line" "$((RESOLVE_CLOSE_MAX - ${#pointer}))"
+  FM_SEND_CLOSE_LINE="$FM_LINE_CAP_LINE$pointer"
+  FM_SEND_CLOSE_CUT=1
+}
+
+# Content-addressed id of the complete answer: the same answer always maps to
+# the same file, so a repeated close never forks its record.
+fm_send_answer_id() { # <answer-text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,16)}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print substr($1,1,16)}'
+  fi
+}
+
+# Persist the complete answer the pointer names, atomically.
+fm_send_store_full_answer() { # <answer-text> <answer-id>
+  local dir="$STATE/$FM_SEND_FULL_ANSWER_DIR" tmp
+  mkdir -p "$dir" || return 1
+  [ -f "$dir/$2.txt" ] && return 0
+  tmp=$(mktemp "$dir/.$2.XXXXXX") || return 1
+  if printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/$2.txt"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
   printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
     {
@@ -683,9 +729,9 @@ if [ -n "$RESOLVE_KEYS" ]; then
       exit 1
     fi
     probe_line="resolved [key=$k]: $probe"
-    fm_cap_line_var "$probe_line" "$RESOLVE_CLOSE_MAX"
-    probe_key=$(_fm_decision_key "$FM_LINE_CAP_LINE") || probe_key=
-    if [ "$(status_line_verb "$FM_LINE_CAP_LINE")" != resolved ] || [ "$probe_key" != "$k" ]; then
+    fm_send_close_line_var "$k" "$resolve_excerpt" 0000000000000000
+    probe_key=$(_fm_decision_key "$FM_SEND_CLOSE_LINE") || probe_key=
+    if [ "$(status_line_verb "$FM_SEND_CLOSE_LINE")" != resolved ] || [ "$probe_key" != "$k" ]; then
       echo "error: --resolve-key cannot close a decision key of length ${#k}: its ${#probe_line}-character close record exceeds the $FM_LINE_CAP_DEFAULT-character status-line cap, and truncation would remove the structural key delimiter. Refusing rather than writing an ineffective close; nothing was sent." >&2
       exit 1
     fi
@@ -705,14 +751,19 @@ fi
 # or a worker line the fold read but never listed, leave the watcher's wake
 # path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
-  local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
-  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  local full=$1 note k append_rc still manual_close_cmd close_lines=() i=0 id cut=0
+  note=$(printf '%s' "$full" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  id=$(fm_send_answer_id "$full")
   for k in $RESOLVE_STATUS_KEYS; do
-    close_note=$(fm_send_resolve_close_note "$k" "$note")
-    fm_cap_line_var "resolved [key=$k]: $close_note" "$RESOLVE_CLOSE_MAX"
-    close_lines+=("$FM_LINE_CAP_LINE")
+    fm_send_close_line_var "$k" "$note" "$id"
+    close_lines+=("$FM_SEND_CLOSE_LINE")
+    [ "$FM_SEND_CLOSE_CUT" = 0 ] || cut=1
   done
   [ "${#close_lines[@]}" -gt 0 ] || return 0
+  if [ "$cut" = 1 ] && ! fm_send_store_full_answer "$full" "$id"; then
+    echo "error: the answer was delivered to $T, but its complete text could not be stored at $STATE/$FM_SEND_FULL_ANSWER_DIR/$id.txt, so decision key(s) '$RESOLVE_STATUS_KEYS' were left open rather than closed with a truncated record. Fix that directory, then close the key(s) with the full answer recorded - do not resend the answer." >&2
+    return 1
+  fi
   append_rc=0
   fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "${close_lines[@]}" || append_rc=$?
   if [ "$append_rc" -eq 2 ]; then
