@@ -1461,6 +1461,30 @@ rc=1
 The refusal is a JSON error on stderr with exit 1 and empty stdout, and both client generations report `.server.compatible` and `.server.protocol` per named session, which is what the selection in `bin/backends/herdr.sh` reads.
 `tests/fm-backend-herdr.test.sh` pins the bypass, same-process same-session caching, cross-session isolation, forced reselection, and both status shapes against fakes; `tests/fm-backend-herdr-smoke.test.sh` refreshes the real status normalization against the installed binary's running lab server.
 
+### Session directory
+
+Measured 2026-10-15 on Linux x86_64 with Herdr 0.9.5, reading only `status`: the default and an empty `sessions/probe` session under a fresh `XDG_CONFIG_HOME` with no server, then the host's running `firstmate` session.
+
+```sh
+herdr --version
+d=$(mktemp -d /tmp/hx.XXXXXX); mkdir -p "$d/herdr/sessions/probe"
+for s in default probe; do XDG_CONFIG_HOME="$d" herdr --session "$s" status --json | jq -c --arg d "$d" '{session: .server.session, running: .server.running, socket: (.server.socket | sub("^" + $d; "$XDG_CONFIG_HOME"))}'; done
+herdr --session firstmate status --json | jq -c --arg h "$HOME" '{session: .server.session, running: .server.running, socket: (.server.socket | sub("^" + $h; "~"))}'
+HERDR_SOCKET_PATH=/tmp/xx/zz.sock herdr --session default status --json | jq -c '.server.socket | sub("^" + env.HOME; "~")'
+```
+
+```text
+herdr 0.9.5
+{"session":null,"running":false,"socket":"$XDG_CONFIG_HOME/herdr/herdr.sock"}
+{"session":"probe","running":false,"socket":"$XDG_CONFIG_HOME/herdr/sessions/probe/herdr.sock"}
+{"session":"firstmate","running":true,"socket":"~/.config/herdr/sessions/firstmate/herdr.sock"}
+"~/.config/herdr/herdr.sock"
+```
+
+A session whose server is stopped still reports its socket, the socket's directory is the session directory `herdr session list --json` reports as `session_dir`, it follows `XDG_CONFIG_HOME`, and an inherited `HERDR_SOCKET_PATH` does not move it under `--session`, so the [externally managed server](../herdr-backend.md#externally-managed-servers) markers stay readable through a restart without an extra Herdr call.
+The `status` read created nothing under the fresh config directory.
+`tests/fm-backend-herdr.test.sh` pins the marker behavior against fakes.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
