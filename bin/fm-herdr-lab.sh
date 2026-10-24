@@ -25,8 +25,9 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
-# teardown requires that record to be identical afterward.
+# Provision records the default session, running or stopped, as a fleet-state
+# tripwire; a missing or duplicate default or a non-boolean running state is
+# refused, and teardown requires that record to be identical afterward.
 # The viewer command attaches or detaches one real foreground Herdr client on
 # an owned lab session over a fixed 40-row by 120-column pty;
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
@@ -84,13 +85,13 @@ fm_herdr_lab_fleet_state() { # <session>
   }
   snapshot=$(printf '%s' "$sessions" | jq -c '
     [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
+    | if length == 1 and .[0].name == "default" and (.[0].running | type) == "boolean"
       then .[0] | {name, default, running, socket_path}
       else empty
       end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one default session with a boolean running state"
     return 1
   }
   printf '%s\n' "$snapshot"
