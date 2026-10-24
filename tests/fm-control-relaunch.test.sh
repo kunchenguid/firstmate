@@ -368,10 +368,18 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
+  mkdir -p "$dir/home/config"
+  cat > "$dir/home/config/spawn-preflight" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "$FM_HOME/preflight.arg"
+exit 3
+SH
+  chmod +x "$dir/home/config/spawn-preflight"
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/preflight.arg" ] || fail "relaunch invoked the new-task preflight"
   assert_contains "$out" "relaunched rl1 harness=claude from=claude" "the outcome should name the transition"
   [ "$(meta_field "$dir" rl1 window)" = "fmses:fm-rl1" ] \
     || fail "the endpoint must be reused, not recreated"
