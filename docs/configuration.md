@@ -1805,9 +1805,11 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
-| `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
-| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, `commandcode`, `cortex`, and `kiro`; omission is an actionable configuration error before any request. |
+| `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse`, `devin` | The resolver has an authoritative single-provider mapping. |
+| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `commandcode`, `cortex`, and `kiro`; omission is an actionable configuration error before any request. |
 
+Devin's mapped provider is `devin`.
+The typed resolver ranks that provider on the `included_quota` plan window.
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
 **Profile quota floors**

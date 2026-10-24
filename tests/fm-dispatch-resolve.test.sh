@@ -1737,10 +1737,11 @@ for bad in \
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
-printf '%s\n' '{"rules":[{"when":"x","use":[{"harness":"opencode"},{"harness":"rovo"},{"harness":"codex"}]}],"default":[{"harness":"pi"},{"harness":"claude"}]}' > "$RULES"
+printf '%s\n' '{"rules":[{"when":"x","use":[{"harness":"opencode"},{"harness":"devin","model":"swe-2-medium"},{"harness":"rovo"},{"harness":"codex"}]}],"default":[{"harness":"pi"},{"harness":"claude"}]}' > "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "multiple provider-less profiles exit 2"
 assert_contains "$err" "malformed rules file: $RULES - use profiles whose harness lacks one authoritative provider family require provider: opencode; use profiles whose harness lacks one authoritative provider family require provider: rovo; default profiles whose harness lacks one authoritative provider family require provider: pi" "all provider-less profiles are reported together across use and default"
+assert_not_contains "$err" 'provider: devin' "a provider-less devin profile uses the single-provider map"
 [ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" -eq 1 ] || fail "provider errors must use one diagnostic"
 assert_absent "$LOG/argv" "configuration errors never reach the network"
 cp "$BASE_RULES" "$RULES"
@@ -1839,5 +1840,46 @@ assert_not_contains "$out" 'quota ranking off' "shared_quota false prints no opt
 assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidence"
 pass "shared_quota false keeps the unchanged quota-ranked behavior"
 cp "$BASE_RULES" "$RULES"
+
+# --- devin included_quota ranks without an explicit provider -----------------
+reset_log
+DEVIN_RULES="$TMP_ROOT/devin-rules.json"
+DEVIN_QUOTA="$TMP_ROOT/devin-quota.json"
+cat > "$DEVIN_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Included SWE-2 work.",
+      "use": [
+        { "harness": "devin", "model": "swe-2-medium" },
+        { "harness": "claude", "model": "sonnet", "effort": "high" }
+      ]
+    }
+  ]
+}
+JSON
+cp "$DEVIN_RULES" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.9, "default": 0.1 } } },
+  "usage": { "input_tokens": 10, "output_tokens": 4 } }
+JSON
+jq '.providers += [{"provider":"devin","state":{"status":"fresh"},"quotaSemantics":{"status":"known","effectiveAvailability":[
+  {"scope":"included_quota","status":"known","effectivePercentRemaining":100,"runway":{"status":"through_reset"},"selection":{"spendPriority":12.9}}
+]}}]' "$QUOTA" > "$DEVIN_QUOTA"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "devin included quota resolves"
+assert_contains "$out" 'candidate: devin:swe-2-medium  provider=devin  scope=included_quota  remaining=100%  spendPriority=12.9  runway=through_reset  -> eligible' "included_quota is the devin plan window"
+assert_contains "$out" "  profile: --harness 'devin' --model 'swe-2-medium'" "the included window outranks a tighter provider"
+
+DEVIN_EXHAUSTED="$TMP_ROOT/devin-exhausted.json"
+jq '(.providers[] | select(.provider == "devin") | .quotaSemantics.effectiveAvailability[] | select(.scope == "included_quota")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$DEVIN_QUOTA" > "$DEVIN_EXHAUSTED"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_EXHAUSTED" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: devin:swe-2-medium  provider=devin  scope=included_quota  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at included_quota' "an exhausted included window vetoes devin"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "a healthy other provider still clears"
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+pass "devin maps to provider devin and ranks on included_quota"
 
 printf '# all fm-dispatch-resolve tests passed\n'
