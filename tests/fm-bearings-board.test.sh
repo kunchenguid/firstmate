@@ -324,12 +324,15 @@ test_build_injects_binds_then_arms() {
   assert_present "$board" "build reported success without a board"
 
   # Round-trip: apart from the reconcile choice the build adds to every
-  # decision card, the payload extracted from the built page is the same JSON
-  # document, and the escaped </script> string can no longer terminate the
-  # data block.
+  # decision card and the generated report-preview map (empty here, since the
+  # payload names no report), the payload extracted from the built page is the
+  # same JSON document, and the escaped </script> string can no longer
+  # terminate the data block.
   extract_payload "$board" | jq -S . > "$home/extracted.json" \
     || fail "the built board does not carry parseable payload JSON"
-  jq -S '.captains_call = [.captains_call[]
+  jq -e '.report_previews == {}' "$home/extracted.json" >/dev/null \
+    || fail "a payload naming no report carried report previews"
+  jq -S 'del(.report_previews) | .captains_call = [.captains_call[]
       | .options = [.options[] | select(.value != "reconcile")]]' \
     "$home/extracted.json" > "$home/stripped.json"
   jq -S '.captains_call = [.captains_call[]
@@ -474,6 +477,107 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   records=$(find "$home/state/procevent" -name '*.source' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "rebuilding left $records source registrations instead of 1"
   pass "rebuild refreshes the board in place without double-arming"
+}
+
+test_a_failed_board_publish_keeps_the_previews_the_old_board_links() {
+  local home data board report href rc
+  home=$(make_home preview-swap)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  report="$home/data/scout-1/report.md"
+  mkdir -p "${report%/*}"
+  printf '# First snapshot\n' > "$report"
+  write_valid_payload "$data"
+  jq --arg report "$report" '.charted[0].title = "Queued work, see " + $report' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  href=$(extract_payload "$board" | jq -r --arg report "$report" '.report_previews[$report]')
+  grep -q 'First snapshot' "$home/.lavish/$href" || fail "the first build did not preview the report at $href"
+
+  # Only the board publish fails; every other move in the build still works.
+  cat > "$home/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  */bearings-board.html) [ ! -e "$FM_HOME/fail-board-publish" ] || exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$home/fakebin/mv"
+  : > "$home/fail-board-publish"
+  printf '# Second snapshot\n' > "$report"
+  jq '.generated = "2026-08-19T01:00Z"' "$data" > "$data.tmp" && /bin/mv "$data.tmp" "$data"
+  set +e; run_board "$home" build "$data" >/dev/null 2>"$home/build.err"; rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "the build reported success although the board publish failed"
+  grep -q "cannot publish the board" "$home/build.err" \
+    || fail "the build failed for a reason other than the board publish: $(cat "$home/build.err")"
+  extract_payload "$board" | jq -e --arg report "$report" --arg href "$href" \
+    '.generated == "2026-08-19T00:00Z" and .report_previews[$report] == $href' >/dev/null \
+    || fail "a failed board publish replaced the old board"
+  grep -q 'First snapshot' "$home/.lavish/$href" \
+    || fail "a failed board publish left the old board linking a missing or replaced preview"
+  [ -z "$(find "$home/.lavish" -maxdepth 1 -name '.reports*')" ] \
+    || fail "a failed board publish left staged preview directories behind: $(ls -A "$home/.lavish")"
+  pass "a failed board publish restores the previews the old board links"
+}
+
+test_overlapping_builds_publish_whole_preview_sets() {
+  local home board a b data_a data_b pid_a pid_b rc_a rc_b href final
+  home=$(make_home preview-overlap)
+  board="$home/.lavish/bearings-board.html"
+  a="$home/data/scout-a/report.md"
+  b="$home/data/scout-b/report.md"
+  mkdir -p "${a%/*}" "${b%/*}"
+  printf '# Report A\n' > "$a"
+  printf '# Report B\n' > "$b"
+  data_a="$home/payload-a.json"
+  data_b="$home/payload-b.json"
+  write_valid_payload "$data_a"
+  jq --arg report "$a" '.charted[0].title = "Queued work, see " + $report' "$data_a" > "$data_a.tmp" \
+    && mv "$data_a.tmp" "$data_a"
+  jq --arg report "$b" '.charted[0].title = "Queued work, see " + $report' "$data_a" > "$data_b"
+  run_board "$home" build "$data_a" >/dev/null || fail "the first build failed"
+
+  # Each preview publish waits (up to 5s) until a second one arrives, so two
+  # unserialized builds always swap at once; a serialized build waits alone.
+  cat > "$home/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${1-}:${!#}" in
+  */.reports.*:*/bearings-board-reports)
+    : > "$FM_HOME/publishing.$$"
+    i=0
+    while [ "$(find "$FM_HOME" -maxdepth 1 -name 'publishing.*' | wc -l)" -lt 2 ] && [ "$i" -lt 50 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$home/fakebin/mv"
+  set +e
+  run_board "$home" build "$data_a" >/dev/null 2>"$home/build-a.err" &
+  pid_a=$!
+  run_board "$home" build "$data_b" >/dev/null 2>"$home/build-b.err" &
+  pid_b=$!
+  wait "$pid_a"; rc_a=$?
+  wait "$pid_b"; rc_b=$?
+  set -e
+  [ "$rc_a" -eq 0 ] && [ "$rc_b" -eq 0 ] \
+    || fail "an overlapping build failed: A rc=$rc_a $(cat "$home/build-a.err"); B rc=$rc_b $(cat "$home/build-b.err")"
+  # The lock does not order waiting builds, so either board may be the final one;
+  # whichever it is must link a preview of its own report.
+  final=$(extract_payload "$board" | jq -r --arg a "$a" --arg b "$b" '
+    .report_previews | if has($a) and (has($b) | not) then "A \(.[$a])"
+      elif has($b) and (has($a) | not) then "B \(.[$b])" else empty end')
+  [ -n "$final" ] || fail "the final board does not link exactly one of the two reports"
+  href=${final#* }
+  grep -q "Report ${final%% *}" "$home/.lavish/$href" \
+    || fail "the final board links a preview that does not resolve to its own report: $final"
+  [ -z "$(find "$home/.lavish/bearings-board-reports" -mindepth 1 -type d)" ] \
+    || fail "overlapping builds nested one preview set inside another: $(find "$home/.lavish/bearings-board-reports")"
+  [ -z "$(find "$home/.lavish" -maxdepth 1 -name '.reports*')" ] \
+    || fail "overlapping builds left staged preview directories behind: $(ls -A "$home/.lavish")"
+  pass "overlapping builds serialize, so the published board's previews resolve and no preview set nests"
 }
 
 test_build_refuses_a_template_without_exactly_one_slot() {
@@ -776,6 +880,8 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
+test_a_failed_board_publish_keeps_the_previews_the_old_board_links
+test_overlapping_builds_publish_whole_preview_sets
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
 test_build_reopens_when_an_opened_session_ends_before_listing
