@@ -23,8 +23,8 @@
 #       /pulls/ segment names the number, never an earlier one
 #   (k) pr= forgejo URL with no remote pull ref -> offline fallback to a
 #       recorded pr_head=
-#   (l) pr= Azure DevOps /pullrequest/<n> URL -> the second parent of the
-#       fetched refs/pull/<n>/merge, the pull request's source commit
+#   (l) pr= Azure DevOps /pullrequest/<n> URL -> local branch + warning, even
+#       when the remote serves a refs/pull/<n>/merge preview
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -296,34 +296,31 @@ test_forgejo_pr_url_falls_back_to_recorded_head() {
   pass "fm-review-diff falls back to a recorded Forgejo pr_head when the pull ref cannot be fetched"
 }
 
-# Azure DevOps serves no refs/pull/<n>/head, only refs/pull/<n>/merge, its merge
-# preview of an active pull request. The preview's second parent is the source
-# commit, so that commit is reviewed, never the preview's own merged tree or an
-# unrelated head ref.
-test_azure_devops_pr_url_reviews_the_merge_preview_source() {
-  local case_dir out main_sha merge_sha decoy_sha
-  case_dir=$(make_case azure-devops-merge-preview)
-  stale_and_pr_commits "$case_dir"
+# Azure DevOps serves no refs/pull/<n>/head, and the second parent of its
+# refs/pull/<n>/merge preview lags a push until the merge is recomputed, so a
+# fix round pushed after the preview must not lose to it: an Azure DevOps pr=
+# URL reviews the local branch under the warning a GitLab or Gerrit task takes.
+test_azure_devops_pr_url_reviews_local_branch_with_warning() {
+  local case_dir out main_sha lagging_sha merge_sha
+  case_dir=$(make_case azure-devops-local-branch)
   main_sha=$(git -C "$case_dir/wt" rev-parse main)
-  merge_sha=$(git -C "$case_dir/wt" commit-tree "$PR_SHA^{tree}" -p "$main_sha" -p "$PR_SHA" -m "Merge pull request 9")
+  printf 'lagging-merge-source\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "source commit the merge preview was computed from"
+  lagging_sha=$(git -C "$case_dir/wt" rev-parse HEAD)
+  merge_sha=$(git -C "$case_dir/wt" commit-tree "$lagging_sha^{tree}" -p "$main_sha" -p "$lagging_sha" -m "Merge pull request 9")
   git -C "$case_dir/wt" push -q origin "$merge_sha:refs/pull/9/merge"
-  git -C "$case_dir/wt" checkout -q -b decoy main
-  printf 'decoy-head\n' > "$case_dir/wt/feature.txt"
-  git -C "$case_dir/wt" commit -qam "not the pull request"
-  decoy_sha=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" push -q origin "$decoy_sha:refs/pull/9/head"
-  git -C "$case_dir/wt" checkout -q fm/task-x1
+  printf 'fix-round-push\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "fix round pushed after the preview was computed"
   write_task_meta "$case_dir" \
     "pr=https://dev.azure.com/example/Team%20Project/_git/repo/pullrequest/9"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
-  assert_contains "$out" '+pr-fixed' "azure-devops-merge-preview: diff should show the pull request's source commit"
-  assert_not_contains "$out" 'stale-local' "azure-devops-merge-preview: diff must not use the stale local branch"
-  assert_not_contains "$out" 'decoy-head' "azure-devops-merge-preview: diff must not use a refs/pull/<n>/head ref"
-  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
-    "azure-devops-merge-preview: should not warn when the merge preview is fetchable"
-  pass "fm-review-diff reviews the source commit of an Azure DevOps refs/pull/<n>/merge preview"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable; diff may lag the open PR (using local branch fm/task-x1)' \
+    "azure-devops-local-branch: must warn that the local branch stands in for the pull request"
+  assert_contains "$out" '+fix-round-push' "azure-devops-local-branch: diff should show the local branch's current content"
+  assert_not_contains "$out" 'lagging-merge-source' "azure-devops-local-branch: diff must not use the lagging merge preview"
+  pass "fm-review-diff reviews an Azure DevOps pull request's local branch with a warning, never its merge preview"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local
@@ -337,4 +334,4 @@ test_recorded_base_branch_is_the_review_base
 test_forgejo_pr_url_fetches_pull_head
 test_forgejo_repo_named_pulls_resolves_by_last_segment
 test_forgejo_pr_url_falls_back_to_recorded_head
-test_azure_devops_pr_url_reviews_the_merge_preview_source
+test_azure_devops_pr_url_reviews_local_branch_with_warning

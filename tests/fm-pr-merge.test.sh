@@ -2601,8 +2601,10 @@ export FM_PR_AZURE_DEVOPS_CONFIRM_DELAY=0
 # while az-post-view-failures counts down; `repos pr policy list` answers from
 # az-policies.json; and `rest --method patch` is the one path that can complete
 # the pull request, copying its body to az-rest-body.json and failing with the
-# contents of az-rest-fails when that file exists. az-no-extension makes the
-# azure-devops extension read fail.
+# contents of az-rest-fails when that file exists, after completing the pull
+# request anyway when az-rest-applied also exists, as when the response is lost
+# after Azure DevOps applied the PATCH. az-no-extension makes the azure-devops
+# extension read fail.
 add_az_mock() {
   local case_dir=$1
   cat > "$case_dir/fakebin/az" <<'SH'
@@ -2645,6 +2647,7 @@ case "${1:-} ${2:-} ${3:-}" in
     done
     cp "$body" "$case_dir/az-rest-body.json"
     if [ -e "$case_dir/az-rest-fails" ]; then
+      [ ! -e "$case_dir/az-rest-applied" ] || : > "$case_dir/az-completed"
       cat "$case_dir/az-rest-fails" >&2
       exit 1
     fi
@@ -3140,10 +3143,14 @@ test_azure_devops_missing_tool_refuses_before_recording() {
   pass "fm-pr-merge refuses before recording anything when az, jq, or the azure-devops extension is absent"
 }
 
+# A failed completion request is judged by reading the pull request back once.
 # Azure DevOps refuses a completion whose lastMergeSourceCommit is no longer the
-# source head with HTTP 409 TF401192 (docs/azure-devops-integration.md); that
-# refusal is reported verbatim and nothing is claimed as merged.
-test_azure_devops_refused_completion_reports_nothing_merged() {
+# source head with HTTP 409 TF401192 (docs/azure-devops-integration.md), and the
+# pull request stays active: that refusal is reported verbatim without claiming
+# anything about what merged. az also fails when the response is lost after
+# Azure DevOps applied the PATCH, and a pull request that then reads back
+# completed from the verified head is reported as landed.
+test_azure_devops_failed_completion_is_judged_by_its_read_back() {
   local case_dir rc
   case_dir=$(make_azure_devops_case azure-devops-completion-refused)
   printf '%s\n' "ERROR: Conflict({\"message\":\"TF401192: The pull request's source branch has been updated since the operation was requested.\",\"typeKey\":\"GitPullRequestStaleException\"})" \
@@ -3155,13 +3162,30 @@ test_azure_devops_refused_completion_reports_nothing_merged() {
   expect_code 1 "$rc" "azure-devops-completion-refused: a refused completion must fail"
   assert_grep 'error: > ERROR: Conflict({"message":"TF401192' "$case_dir/stderr" \
     "azure-devops-completion-refused: Azure DevOps' own refusal was not quoted"
-  assert_grep "Azure DevOps refused to complete $AZ_URL; nothing was merged by this run" "$case_dir/stderr" \
-    "azure-devops-completion-refused: the refusal did not say nothing was merged"
+  assert_grep "the completion request for $AZ_URL failed, and the pull request has not read back as completed from head $AZ_HEAD" "$case_dir/stderr" \
+    "azure-devops-completion-refused: the failure did not say the pull request has not completed: $(cat "$case_dir/stderr")"
+  assert_no_grep 'nothing was merged' "$case_dir/stderr" \
+    "azure-devops-completion-refused: the failure claimed an outcome it never read"
   assert_absent "$case_dir/state/task-x1.merge-authority" \
     "azure-devops-completion-refused: merge authority was persisted for a refused completion"
-  assert_no_grep 'verified:' "$case_dir/stdout" \
+  assert_no_grep "verified: $AZ_URL is completed" "$case_dir/stdout" \
     "azure-devops-completion-refused: a refused completion was reported as landed"
-  pass "fm-pr-merge reports Azure DevOps' refusal of a completion verbatim and claims nothing merged"
+
+  case_dir=$(make_azure_devops_case azure-devops-completion-response-lost)
+  printf '%s\n' 'ERROR: Connection aborted.' > "$case_dir/az-rest-fails"
+  : > "$case_dir/az-rest-applied"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-completion-response-lost: a completion that landed must not fail: $(cat "$case_dir/stderr")"
+  assert_grep "verified: $AZ_URL is completed from head $AZ_HEAD" "$case_dir/stdout" \
+    "azure-devops-completion-response-lost: the landing was not reported"
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = attended ] \
+    || fail "azure-devops-completion-response-lost: the merge authority was not persisted"
+  assert_no_grep 'has not read back as completed' "$case_dir/stderr" \
+    "azure-devops-completion-response-lost: a landed completion was reported as failed"
+  pass "fm-pr-merge judges a failed Azure DevOps completion request by reading the pull request back"
 }
 
 test_azure_devops_completion_is_confirmed_before_it_counts() {
@@ -3637,7 +3661,7 @@ test_azure_devops_merge_strategy
 test_azure_devops_unreadable_or_moving_state_refuses
 test_azure_devops_other_repository_refuses_before_recording
 test_azure_devops_missing_tool_refuses_before_recording
-test_azure_devops_refused_completion_reports_nothing_merged
+test_azure_devops_failed_completion_is_judged_by_its_read_back
 test_azure_devops_completion_is_confirmed_before_it_counts
 
 # The merge gate asks whether the task is still held for the captain. A home

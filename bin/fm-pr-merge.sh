@@ -2236,37 +2236,44 @@ case "$PROVIDER" in
       --body "@$azure_devops_body" --only-show-errors --output json 2>&1) || merge_status=$?
     rm -f "$azure_devops_body"
     if [ "$merge_status" -ne 0 ]; then
-      fm_afk_contract_lock_release || true
-      fm_lock_release "$MERGE_CONTROL_LOCK" || true
-      MERGE_CONTROL_LOCK=
-      while IFS= read -r line; do
-        printf 'error: > %s\n' "$line" >&2
-      done <<OUTPUT
+      azure_devops_confirm_rc=0
+      azure_devops_confirm_merged || azure_devops_confirm_rc=$?
+      if [ "$azure_devops_confirm_rc" -ne 0 ]; then
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        while IFS= read -r line; do
+          printf 'error: > %s\n' "$line" >&2
+        done <<OUTPUT
 $merge_output
 OUTPUT
-      echo "error: Azure DevOps refused to complete $URL; nothing was merged by this run" >&2
-      exit "$merge_status"
+        printf 'error: the completion request for %s failed, and the pull request has not read back as completed from head %s%s\n' \
+          "$URL" "$FM_PR_MERGE_HEAD" "${AZURE_DEVOPS_CONFIRM_DETAIL:+: $AZURE_DEVOPS_CONFIRM_DETAIL}" >&2
+        exit "$merge_status"
+      fi
     fi
     persist_accepted_merge_authority || exit 1
     fm_afk_contract_lock_release || true
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
-    # Azure DevOps finishes an accepted completion asynchronously, normally
-    # within seconds, so the landing is read back a bounded number of times.
-    # The delay is capped at 0-10 seconds per attempt.
-    azure_devops_confirm_delay=${FM_PR_AZURE_DEVOPS_CONFIRM_DELAY:-3}
-    case "$azure_devops_confirm_delay" in
-      [0-9] | 10) ;;
-      *) azure_devops_confirm_delay=3 ;;
-    esac
-    azure_devops_confirm_attempt=1
-    while :; do
-      azure_devops_confirm_rc=0
-      azure_devops_confirm_merged || azure_devops_confirm_rc=$?
-      [ "$azure_devops_confirm_rc" -eq 2 ] && [ "$azure_devops_confirm_attempt" -lt 10 ] || break
-      sleep "$azure_devops_confirm_delay"
-      azure_devops_confirm_attempt=$((azure_devops_confirm_attempt + 1))
-    done
+    if [ "$merge_status" -eq 0 ]; then
+      # Azure DevOps finishes an accepted completion asynchronously, normally
+      # within seconds, so the landing is read back a bounded number of times.
+      # The delay is capped at 0-10 seconds per attempt.
+      azure_devops_confirm_delay=${FM_PR_AZURE_DEVOPS_CONFIRM_DELAY:-3}
+      case "$azure_devops_confirm_delay" in
+        [0-9] | 10) ;;
+        *) azure_devops_confirm_delay=3 ;;
+      esac
+      azure_devops_confirm_attempt=1
+      while :; do
+        azure_devops_confirm_rc=0
+        azure_devops_confirm_merged || azure_devops_confirm_rc=$?
+        [ "$azure_devops_confirm_rc" -eq 2 ] && [ "$azure_devops_confirm_attempt" -lt 10 ] || break
+        sleep "$azure_devops_confirm_delay"
+        azure_devops_confirm_attempt=$((azure_devops_confirm_attempt + 1))
+      done
+    fi
     case "$azure_devops_confirm_rc" in
       0)
         printf 'verified: %s is completed from head %s\n' "$URL" "$FM_PR_MERGE_HEAD"

@@ -120,7 +120,8 @@ tasks-axi accepts only a GitHub or Forgejo pull request as a `--pr` link, so the
 ## Review diff
 
 Azure DevOps serves no `refs/pull/<id>/head`; an active pull request has only `refs/pull/<id>/merge`, its merge preview, and a shallow fetch of one showed the target branch as its first parent and the pull request's source commit as its second.
-`bin/fm-review-diff.sh` fetches that ref and reviews its second parent.
+That source commit is the one Azure DevOps last computed the merge from, so it lags a push until the merge is recomputed and stays behind for as long as a pushed commit conflicts with the target.
+`bin/fm-review-diff.sh` therefore never reviews the preview: an Azure DevOps task diffs the local branch under the same `PR head unavailable` warning a GitLab merge request or a Gerrit change takes.
 
 ## Not verified
 
