@@ -168,7 +168,7 @@ existing: prior
 working: test line
 ```
 
-The same grant, at directory granularity, also covers listing a directory, reading a file inside it, and moving (not copying) it into a `handled/` subdirectory - the exact shape the steering-inbox acknowledgement contract (`bin/fm-task-inbox-lib.sh`) needs - confirmed live in one pass against a pre-existing `inbox/handled/` directory:
+The same grant, at directory granularity, also covers listing a directory, reading a file inside it, and moving (not copying) it into a `handled/` subdirectory - the completed-handling half of the steering-inbox contract (`bin/fm-task-inbox-lib.sh`) - confirmed live in one pass against a pre-existing `inbox/handled/` directory:
 
 ```
 $ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":["'"$LAB"'/outside"]}}' \
@@ -176,6 +176,8 @@ $ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":
 $ ls "$LAB/outside/inbox/handled"
 001.msg
 ```
+
+The contract's other half, the empty `.read/NNN.msg` receipt that the brief's file-tool fallback writes under the same granted inbox directory, has not been run live here.
 
 `fm-spawn.sh`'s `rovo_config_override_flag` builds one merged JSON object per rovo launch (see "Effort and model" above for why it must be one), always granting `toolPermissions.allowedExternalPaths` for exactly three real (symlink-resolved) paths scoped to this task: the brief directory (`data/<id>/`, covering `brief.md`/`launch-brief.md`/`report.md`), the steering inbox directory (`state/<id>.inbox/`, covering every steer, its `.read/` receipt, and its `handled/` acknowledgement), and the status file itself (`state/<id>.status`).
 `tests/fm-rovo-signals-live-e2e.test.sh` extends the launch-then-send live guard with exactly this shape end to end: a real rovo process launched with the production `--config-override` grant reads an external brief and appends to an external status file (preserving its prior content), and the same brief and status file, launched WITHOUT the grant, are left untouched while the transcript shows rovo's own refusal - proving the fix closes the gap rather than merely adding an untested flag.
