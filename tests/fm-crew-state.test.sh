@@ -3398,6 +3398,37 @@ test_torn_down_worktree() {
   pass "torn-down worktree is handled gracefully"
 }
 
+# A torn-down copy reads done only when the done gate evaluates and accepts the
+# recorded status; a pipeline handoff or unverifiable PR stays unknown.
+test_torn_down_worktree_done_acceptance() {
+  reset_fakes
+  local d out
+  d=$(new_case torndown-done)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/rel.meta" "window=fm:fm-rel" "worktree=$d/no-such-worktree" \
+    "project=$d/no-such-project" "kind=ship" "mode=direct-PR" \
+    "pr=https://github.com/o/r/pull/7"
+  printf 'done: PR https://github.com/o/r/pull/7\n' > "$d/state/rel.status"
+  out=$(run_crew_state "$d" rel)
+  assert_contains "$out" "state: unknown" "unverifiable recorded PR must stay unknown"
+  assert_not_contains "$out" "working copy released" "unverifiable PR must not read released"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com o/r 7 \
+    > "$d/state/rel.pr-poll-merge-notified"
+  chmod 600 "$d/state/rel.pr-poll-merge-notified"
+  out=$(run_crew_state "$d" rel)
+  assert_contains "$out" "state: done" "accepted recorded PR must read done after teardown"
+  assert_contains "$out" "source: status-log" "accepted done is status-log sourced"
+  assert_contains "$out" "working copy released" "accepted done names the released copy"
+  fm_write_meta "$d/state/hand.meta" "window=fm:fm-hand" "worktree=$d/no-such-worktree" \
+    "project=$d/no-such-project" "kind=ship" "mode=no-mistakes"
+  printf 'done: handed to pipeline\n' > "$d/state/hand.status"
+  out=$(run_crew_state "$d" hand)
+  assert_contains "$out" "state: unknown" "ungated pipeline handoff must stay unknown after teardown"
+  assert_contains "$out" "source: none" "ungated handoff has no source"
+  assert_not_contains "$out" "working copy released" "ungated handoff must not read released"
+  pass "torn-down done reads done only when the done gate accepts it"
+}
+
 # --- remote secondmate arm ---------------------------------------------------
 # A meta recording remote_host= must never be read through the local worktree
 # probe or a local backend adapter: the recorded worktree and pane live on the
@@ -5938,6 +5969,7 @@ test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
+test_torn_down_worktree_done_acceptance
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
