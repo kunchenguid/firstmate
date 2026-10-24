@@ -2591,6 +2591,126 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# Exercise the public spawn interface for all Codex worker roles. The captured
+# command is what the pane receives, not an inspection of the launch template.
+test_codex_permission_modes() {
+  local kind mode rec id sm out status launch flags
+  for kind in ship scout secondmate; do
+    for mode in absent bypass restricted; do
+      id="codex-perm-$kind-$mode"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      if [ "$mode" != absent ]; then
+        printf '%s\n' "$mode" > "$HOME_DIR/config/codex-permission-mode"
+      fi
+      local args=("$id" "$PROJ_DIR")
+      case "$kind" in
+      ship) args+=(--mode no-mistakes --yolo off) ;;
+      scout) args+=(--scout) ;;
+      secondmate)
+        sm="$CASE_DIR/secondmate-home"
+        make_seeded_secondmate_home "$sm" "$id"
+        args=("$id" "$sm" --secondmate)
+        ;;
+      esac
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "${args[@]}" --model gpt-5 --effort high)
+      status=$?
+      expect_code 0 "$status" "Codex $kind spawn under $mode should succeed: $out"
+      launch=$(cat "$LAUNCH_LOG")
+      flags="codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' "
+      if [ "$mode" = restricted ]; then
+        flags+='--sandbox workspace-write --ask-for-approval on-request '
+        assert_not_contains "$launch" '--dangerously-bypass-approvals-and-sandbox' "restricted must not bypass approvals"
+      else
+        flags+='--dangerously-bypass-approvals-and-sandbox '
+        assert_not_contains "$launch" '--sandbox' "default must not add a sandbox flag"
+        assert_not_contains "$launch" '--ask-for-approval' "default must not add an approval flag"
+      fi
+      if [ "$kind" = secondmate ]; then
+        assert_not_contains "$launch" '--disable hooks' "secondmate must retain primary hooks"
+        assert_not_contains "$launch" 'notify=' "secondmate must retain its own turn-end wiring"
+      else
+        flags+='--disable hooks -c '
+        assert_contains "$launch" 'notify=' "worker must retain its turn-end notification"
+      fi
+      assert_contains "$launch" "$flags" "permission selection changed model, effort, or hook flags"
+      assert_not_contains "$launch" '--add-dir' "Codex must not grant extra writable directories"
+    done
+  done
+  pass "Codex absent, bypass, and restricted modes preserve flags for ships, scouts, and secondmates"
+}
+
+test_codex_permission_invalid_refuses_before_mutation() {
+  local kind value rec id out status file before
+  for kind in ship secondmate relaunch; do
+    for value in invalid empty whitespace directory dangling unreadable; do
+      id="codex-perm-$kind-$value"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      file="$HOME_DIR/config/codex-permission-mode"
+      case "$value" in
+      invalid) printf 'auto\n' > "$file" ;;
+      empty) : > "$file" ;;
+      whitespace) printf ' restricted\n' > "$file" ;;
+      directory) mkdir "$file" ;;
+      dangling) ln -s "$CASE_DIR/missing" "$file" ;;
+      unreadable)
+        printf 'restricted\n' > "$file"
+        chmod 000 "$file"
+        if [ -r "$file" ]; then
+          echo 'skip: current user can read mode-000 files'
+          continue
+        fi
+        ;;
+      esac
+      local args=("$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+      case "$kind" in
+      secondmate) args=("$id" "$CASE_DIR/not-yet-seeded" --secondmate) ;;
+      relaunch)
+        args=("$id" --relaunch)
+        printf 'preserve existing task metadata\n' > "$HOME_DIR/state/$id.meta"
+        ;;
+      esac
+      before=$(ls -a "$HOME_DIR/state")
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "${args[@]}")
+      status=$?
+      expect_code 1 "$status" "invalid Codex config must refuse $kind: $value"
+      assert_contains "$out" 'config/codex-permission-mode' "refusal must identify the setting"
+      assert_contains "$out" 'bypass or restricted' "refusal must identify accepted values"
+      [ ! -s "$LAUNCH_LOG" ] || fail "invalid config launched an agent"
+      [ ! -e "$FAKEBIN_DIR/.spawn-windows" ] || fail "invalid config created an endpoint"
+      [ "$(ls -a "$HOME_DIR/state")" = "$before" ] || fail "invalid config mutated state"
+      if [ "$kind" = relaunch ]; then
+        [ "$(cat "$HOME_DIR/state/$id.meta")" = 'preserve existing task metadata' ] \
+          || fail "invalid config changed relaunch metadata"
+      else
+        assert_absent "$HOME_DIR/state/$id.meta" "invalid config wrote metadata"
+      fi
+    done
+  done
+  pass "invalid Codex permission files refuse spawns and relaunches before mutation"
+}
+
+test_codex_permission_does_not_change_other_harnesses() {
+  local rec id out status launch
+  id=codex-perm-claude
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  printf 'restricted\n' > "$HOME_DIR/config/codex-permission-mode"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with Codex restriction should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'claude --dangerously-skip-permissions ' "Codex setting changed Claude permissions"
+  assert_not_contains "$launch" '--sandbox' "Codex sandbox flags leaked to Claude"
+  assert_not_contains "$launch" '--ask-for-approval' "Codex approval flags leaked to Claude"
+  pass "Codex restricted mode leaves other harness launch flags unchanged"
+}
+
+test_codex_permission_modes
+test_codex_permission_invalid_refuses_before_mutation
+test_codex_permission_does_not_change_other_harnesses
 test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
