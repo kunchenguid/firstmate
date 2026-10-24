@@ -483,9 +483,10 @@ browser_session_name() {
 BROWSER_SESSION_CMD="CHROME_DEVTOOLS_AXI_SESSION=$(browser_session_name "$(fm_backend_hometag)-$ID") chrome-devtools-axi"
 TASK_CLEANUP_RULE="Run every chrome-devtools-axi command under your own named session, as \`$BROWSER_SESSION_CMD <command>\`. \
 Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. \
-After the fix or feature finishes, or if the task fails or times out, clean up only temporary browser profiles and caches, preview servers, task temporary directories, test browsers, and other large tool downloads that the task created or fetched and that were not present before it began; leave the captain's browsers and caches and shared package caches and tools that predate the task untouched. \
-Never copy installed dependency or build-output directories (for example \`node_modules\`, \`.next\`, \`dist\`, or virtual environments) into Firstmate task evidence or data records; source and lockfiles are enough to rebuild. \
-Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session."
+Stop only your named session, with \`$BROWSER_SESSION_CMD stop\`, and never stop the default or another chrome-devtools-axi session. \
+Prefer the installed browser; when the task must download a test browser or another large tool, point it at a temporary directory you create for this task (for example with \`PLAYWRIGHT_BROWSERS_PATH\` or \`PUPPETEER_CACHE_DIR\`) so it can be removed at the end. \
+Before you report done or failed, and if the task times out, stop the preview servers you started and remove the temporary browser profiles, test browsers, and tool downloads the task created; delete only inside task-private locations (that task temporary directory, \`$DATA/$ID/\`, and this worktree), never from shared per-user caches, and keep your report and proof. \
+Never copy installed dependency or build-output directories (for example \`node_modules\`, \`.next\`, \`dist\`, or virtual environments) into Firstmate task evidence or data records; source and lockfiles are enough to rebuild."
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -744,7 +745,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
+2. Stay inside this worktree; outside it, write only the report, the status file below, and the task temporary directory Rule 3 lets you create and remove, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. $TASK_CLEANUP_RULE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`

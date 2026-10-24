@@ -238,14 +238,14 @@ assert_task_cleanup_rule() {
   local brief=$1 session=$2 label=$3 cli_rule=${4:-"Use gh-axi for GitHub operations"}
   assert_grep "3. $cli_rule and chrome-devtools-axi for browser operations. Run every chrome-devtools-axi command under your own named session, as \`CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi <command>\`." "$brief" \
     "$label must run chrome-devtools-axi under its named session"
-  assert_grep "Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start." "$brief" \
-    "$label must close only its own browser sessions"
-  assert_grep "After the fix or feature finishes, or if the task fails or times out, clean up only temporary browser profiles and caches, preview servers, task temporary directories, test browsers, and other large tool downloads that the task created or fetched and that were not present before it began; leave the captain's browsers and caches and shared package caches and tools that predate the task untouched." "$brief" \
-    "$label must clean up task-created resources and preserve pre-existing resources"
+  assert_grep "Close every Chrome/Chromium session you start, including that named session and Playwright or other automation browsers, plus their tabs, contexts, and preview helpers, when browser work ends, fails, or times out; reuse or close an earlier session before starting another, never leave sessions running, and never close browsers you did not start. Stop only your named session, with \`CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop\`, and never stop the default or another chrome-devtools-axi session." "$brief" \
+    "$label must close only its own browser sessions and stop only its named session"
+  assert_grep "Prefer the installed browser; when the task must download a test browser or another large tool, point it at a temporary directory you create for this task (for example with \`PLAYWRIGHT_BROWSERS_PATH\` or \`PUPPETEER_CACHE_DIR\`) so it can be removed at the end." "$brief" \
+    "$label must keep test-browser and large-tool downloads task-private"
+  assert_grep "Before you report done or failed, and if the task times out, stop the preview servers you started and remove the temporary browser profiles, test browsers, and tool downloads the task created; delete only inside task-private locations (that task temporary directory, \`${brief%brief.md}\`, and this worktree), never from shared per-user caches, and keep your report and proof." "$brief" \
+    "$label must clean up only task-private resources before its terminal report"
   assert_grep "Never copy installed dependency or build-output directories (for example \`node_modules\`, \`.next\`, \`dist\`, or virtual environments) into Firstmate task evidence or data records; source and lockfiles are enough to rebuild." "$brief" \
     "$label must keep installed dependencies and build output out of task records"
-  assert_grep "Stop only your named session, with \`CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop\`, and never stop the default or another chrome-devtools-axi session." "$brief" \
-    "$label must stop only its named session"
 }
 
 # --forge forgejo is the Forgejo value of the project's registered forge binding
@@ -275,6 +275,8 @@ test_forge_selection_renders_correct_cli() {
     || fail "a scout brief should still scaffold"
   brief="$home/data/brief-forge-scout/brief.md"
   assert_task_cleanup_rule "$brief" "$tag-brief-forge-scout" "a scout brief"
+  assert_grep "2. Stay inside this worktree; outside it, write only the report, the status file below, and the task temporary directory Rule 3 lets you create and remove." "$brief" \
+    "a scout brief's write scope must allow the task temporary directory Rule 3 removes"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
     || fail "--forge forgejo should scaffold a direct-PR ship brief"
