@@ -121,6 +121,47 @@ EOF
   pass "fm-codex-trust: inserts trust before a following table"
 }
 
+test_ignores_multiline_string_structure() {
+  local rec note
+  rec=$(make_case multiline)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[projects.'$WORKTREE']
+note = """
+A multiline note may contain a fake table header.
+[projects.'$WORKTREE']
+trust_level = "untrusted"
+"""
+trust_level = "untrusted"
+
+[profiles.review]
+trust_level = "unrelated"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "multiline TOML trust update failed"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "multiline TOML update did not change the real trust value"
+  note=$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)
+  assert_contains "$note" "trust_level = \"untrusted\"" \
+    "multiline project text was modified instead of preserved"
+  [ "$(config_value "$CODEX_HOME_DIR" "profiles.review.trust_level")" = unrelated ] \
+    || fail "multiline TOML update changed a following table"
+  pass "fm-codex-trust: ignores table-like text inside multiline strings"
+}
+
+test_refuses_invalid_config_without_replacement() {
+  local rec before after status=0
+  rec=$(make_case invalid)
+  read_case "$rec"
+  printf '[projects.\x27%s\x27\n' "$WORKTREE" > "$CODEX_HOME_DIR/config.toml"
+  before=$(sha256sum "$CODEX_HOME_DIR/config.toml")
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null 2>&1 || status=$?
+  after=$(sha256sum "$CODEX_HOME_DIR/config.toml")
+  [ "$status" -ne 0 ] || fail "invalid TOML was accepted"
+  [ "$before" = "$after" ] || fail "invalid TOML was modified"
+  pass "fm-codex-trust: refuses malformed TOML without replacement"
+}
+
 test_rejects_primary_checkout() {
   local rec status=0
   rec=$(make_case primary)
@@ -133,6 +174,8 @@ test_rejects_primary_checkout() {
 test_registers_exact_worktree
 test_preserves_existing_config_and_updates_entry
 test_inserts_before_following_table
+test_ignores_multiline_string_structure
+test_refuses_invalid_config_without_replacement
 test_rejects_primary_checkout
 
 echo "all fm-codex-trust tests passed"

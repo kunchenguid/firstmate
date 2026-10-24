@@ -118,7 +118,7 @@ target = sys.argv[2]
 original = store.read_bytes() if store.exists() else b""
 try:
     parsed = tomllib.loads(original.decode())
-except tomllib.TOMLDecodeError as exc:
+except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
     raise SystemExit(f"Codex config '{store}' is invalid TOML: {exc}")
 
 projects = parsed.get("projects", {})
@@ -130,37 +130,98 @@ if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
 text = original.decode() if original else ""
 escaped = target.replace("\\", "\\\\").replace('"', '\\"')
 header = f'[projects."{escaped}"]'
-header_re = re.compile(r'^(?P<header>\[projects\.(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')\])[ \t]*(?:#.*)?$', re.MULTILINE)
-table_re = re.compile(r'^\[\[?[^\n]+\]\]?[ \t]*(?:#.*)?$', re.MULTILINE)
-match = None
-for candidate in header_re.finditer(text):
-    candidate_config = tomllib.loads(candidate.group("header") + "\n__fm_marker = 1\n")
-    candidate_projects = candidate_config.get("projects", {})
-    if isinstance(candidate_projects, dict) and target in candidate_projects:
-        match = candidate
-        break
-if match is None:
+header_re = re.compile(r'^[ \t]*(?P<header>\[projects\.(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')\])[ \t]*(?:#.*)?(?:\r?\n)?$')
+table_re = re.compile(r'^[ \t]*\[\[?[^\n]+\]\]?[ \t]*(?:#.*)?(?:\r?\n)?$')
+
+# TOML strings can contain anything that resembles a table or assignment,
+# including newlines.  Find structural lines only while outside strings.
+def next_string_state(line, state):
+    index = 0
+    while index < len(line):
+        if state:
+            if line.startswith(state, index):
+                index += 3
+                state = None
+            else:
+                index += 1
+            continue
+        if line.startswith('"""', index) or line.startswith("'''"):
+            state = line[index:index + 3]
+            index += 3
+        elif line[index] == '"':
+            index += 1
+            while index < len(line):
+                if line[index] == '\\':
+                    index += 2
+                elif line[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+        elif line[index] == "'":
+            index += 1
+            while index < len(line) and line[index] != "'":
+                index += 1
+            if index < len(line):
+                index += 1
+        elif line[index] == '#':
+            break
+        else:
+            index += 1
+    return state
+
+lines = text.splitlines(keepends=True)
+starts = []
+offset = 0
+state = None
+for line in lines:
+    starts.append((offset, state))
+    state = next_string_state(line, state)
+    offset += len(line)
+
+match_index = None
+header_indexes = []
+for index, (line, (_, state_before)) in enumerate(zip(lines, starts)):
+    if state_before is not None or not table_re.match(line):
+        continue
+    header_indexes.append(index)
+    match = header_re.match(line)
+    if match:
+        candidate_config = tomllib.loads(match.group("header") + "\n__fm_marker = 1\n")
+        candidate_projects = candidate_config.get("projects", {})
+        if isinstance(candidate_projects, dict) and target in candidate_projects:
+            match_index = index
+if match_index is None:
     if text and not text.endswith("\n"):
         text += "\n"
     text += f"\n{header}\ntrust_level = \"trusted\"\n"
 else:
-    end = table_re.search(text, match.end())
-    section_end = end.start() if end else len(text)
-    section = text[match.end():section_end]
-    trust = re.search(r'(?m)^[ \t]*trust_level[ \t]*=[^\n]*$', section)
-    if trust:
-        start = match.end() + trust.start()
-        stop = match.end() + trust.end()
-        text = text[:start] + 'trust_level = "trusted"' + text[stop:]
+    section_end = len(lines)
+    for index in header_indexes:
+        if index > match_index:
+            section_end = index
+            break
+    trust_index = None
+    for index in range(match_index + 1, section_end):
+        line, (_, state_before) = lines[index], starts[index]
+        if state_before is None and re.match(r'^[ \t]*trust_level[ \t]*=', line):
+            trust_index = index
+            break
+    if trust_index is not None:
+        end_index = trust_index + 1
+        while end_index < section_end and starts[end_index][1] is not None:
+            end_index += 1
+        replacement = re.match(r'^([ \t]*)', lines[trust_index]).group(1) + 'trust_level = "trusted"\n'
+        start = starts[trust_index][0]
+        stop = starts[end_index][0] if end_index < len(starts) else len(text)
+        text = text[:start] + replacement + text[stop:]
     else:
-        insertion = match.end()
-        if text[insertion:insertion + 1] == "\n":
-            insertion += 1
+        insertion = starts[match_index][0] + len(lines[match_index])
         text = text[:insertion] + 'trust_level = "trusted"\n' + text[insertion:]
 
 try:
     tomllib.loads(text)
-except tomllib.TOMLDecodeError as exc:
+except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
     raise SystemExit(f"refusing to write invalid Codex config: {exc}")
 
 before = hashlib.sha256(original).digest()
