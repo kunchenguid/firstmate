@@ -1374,6 +1374,80 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
 }
 
+spawn_windows() {  # <case-dir>
+  cat "$1/fakebin/.spawn-window" 2>/dev/null || true
+}
+
+test_dispatch_closes_the_endpoint_it_cannot_hand_to_the_backlog() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-closes-endpoint
+  case_dir=$(make_home dispatch-closes-endpoint "$id")
+  add_item "$case_dir" "$id"
+  break_verb "$case_dir" start
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn reported success though the backlog transition failed"
+  assert_contains "$out" "its endpoint" "spawn did not report closing the unowned endpoint"
+  [ -z "$(spawn_windows "$case_dir")" ] \
+    || fail "a failed dispatch left a live endpoint behind: $(spawn_windows "$case_dir")"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "a failed dispatch left its record behind"
+  pass "a failed backlog transition closes the endpoint it launched and keeps no record"
+}
+
+test_dispatch_keeps_an_endpoint_whose_copy_holds_work() {
+  local case_dir id out real rc=0
+  id=atomic-dispatch-keeps-work
+  case_dir=$(make_home dispatch-keeps-work "$id")
+  add_item "$case_dir" "$id"
+  # The worker writes a file in the window between launch and the failed move.
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  printf 'unsaved\\n' > "$case_dir/wt/unlanded.txt"
+  echo 'error: "backlog is unwritable"' >&2
+  exit 1
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn reported success though the backlog transition failed"
+  assert_contains "$out" "close out endpoint" \
+    "spawn did not tell the operator to close out the endpoint holding work"
+  [ -n "$(spawn_windows "$case_dir")" ] \
+    || fail "a failed dispatch closed an endpoint whose copy held uncommitted work"
+  assert_present "$case_dir/wt/unlanded.txt" "a failed dispatch discarded uncommitted work"
+  pass "a failed backlog transition never closes an endpoint whose copy holds work"
+}
+
+# The incident this pins: the mutation wrapper ran a bash 4 only expansion under
+# `set -u`, so on stock macOS bash 3.2 every spawn died at its In flight move
+# after the worker had launched. Runs against /bin/bash itself, which is 3.2 on
+# macOS and still a valid shell elsewhere.
+test_backlog_mutation_runs_under_the_system_bash() {
+  local case_dir id out rc=0
+  [ -x /bin/bash ] || { pass "skipped (no /bin/bash)"; return 0; }
+  id=atomic-system-bash
+  case_dir=$(make_home system-bash-mutation "$id")
+  add_item "$case_dir" "$id"
+  out=$(
+    cd "$case_dir/home" &&
+    PATH="$case_dir/fakebin:$PATH" FM_TASKS_AXI_TIMEOUT=30 /bin/bash -uc '
+      . "$1/bin/fm-timeout-lib.sh"
+      . "$1/bin/fm-tasks-axi-lib.sh"
+      . "$1/bin/fm-backlog-transition-lib.sh"
+      ( fm_backlog_start "$2" "$3" || { echo "start: $FM_BACKLOG_TRANSITION_ERROR"; exit 11; } )
+    ' _ "$ROOT" "$case_dir/home/data" "$id" 2>&1
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the mutation wrapper failed under /bin/bash (status $rc): $out"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "the mutation under /bin/bash left the item $(row_state "$case_dir" "$id")"
+  pass "the backlog mutation wrapper runs under the system bash with nounset"
+}
+
 test_dispatch_reports_an_incomplete_record_rollback() {
   local case_dir id meta out rc=0
   id=atomic-dispatch-remove-failure-b5
@@ -3064,6 +3138,13 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the system-bash
+# mutation regression; the rest of this file is not a Bash 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
@@ -3090,6 +3171,9 @@ test_dispatch_reports_a_backlog_read_failure
 test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
+test_dispatch_closes_the_endpoint_it_cannot_hand_to_the_backlog
+test_dispatch_keeps_an_endpoint_whose_copy_holds_work
+test_backlog_mutation_runs_under_the_system_bash
 test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
