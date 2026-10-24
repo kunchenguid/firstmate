@@ -106,8 +106,12 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
-# contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. On a PR, comments, reviews and inline review comments whose
+# contribution author), issue transitions to ready-for-pr, and open
+# pull-request movement since the previous observation - a replaced head,
+# leaving draft, or a newly requested reviewer or team - persist as pending
+# before any wake. A first observation is the movement baseline, never movement
+# itself, and a merged or closed observation reports no movement. On a PR,
+# comments, reviews and inline review comments whose
 # author login is listed in the effective config/contribution-review-bots (one
 # exact login per line; blank and # lines ignored) are admitted too, marked
 # review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
@@ -462,6 +466,8 @@ observe() { # canonical GitHub URL -> normalized JSON
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
+          review_requests:(([$c.requested_reviewers[]? | .login | strings]
+            + [$c.requested_teams[]? | .slug | strings | "team:" + .]) | unique),
           can_merge:($repo[0].permissions.push // false),
           review_decision:($after[0].reviewDecision // ""),
           reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
@@ -639,7 +645,7 @@ poll() {
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-              else [] end)) as $events
+              else [] end) + movement($old.observation; $o; $old.url; $now)) as $events
           | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
           # An acknowledgement removes the signal, not the thread: a thread
           # with no author reply or resolution is raised again after reply_age.
