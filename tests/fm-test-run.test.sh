@@ -139,6 +139,10 @@ init_changed_fixture_repo() {
   : >"$repo/tests/unread-thing.sh"
   printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
   printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
+  # A shared test asset read by one suite.
+  mkdir -p "$repo/tests/assets"
+  : >"$repo/tests/assets/probe-harness.mjs"
+  printf '# probe-harness.mjs\n' >>"$repo/tests/fm-pr-merge.test.sh"
   # A nested fixture whose consuming suite names only the fixture directory,
   # the shape the tests/fixtures/<dir>/ arm is keyed for.
   mkdir -p "$repo/tests/fixtures/demo"
@@ -1435,6 +1439,13 @@ test_changed_shared_fixture_selects_its_readers() {
     || fail "the refusal did not name the unread tests/ path: $(cat "$tmp/err")"
   git -C "$repo" checkout -q -- tests/unread-thing.sh
 
+  # A shared tests/assets/ file selects the suite that names it by basename.
+  printf '\n' >>"$repo/tests/assets/probe-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
+    "a changed test asset selects the suite that names it"
+  git -C "$repo" checkout -q -- tests/assets/probe-harness.mjs
+
   # A nested tests/fixtures/<dir>/<name>-fixture.sh still reaches the
   # directory-scan arm rather than the top-level fixture arm's basename scan.
   printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
@@ -1443,7 +1454,7 @@ test_changed_shared_fixture_selects_its_readers() {
     "a nested fixture selects the suite that reads its directory"
 
   rm -rf "$tmp"
-  pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
+  pass "a changed shared test fixture or asset selects its readers while an unread tests/ path still refuses"
 }
 
 # Workers are handed scripts in order, so the slowest script must start first or
