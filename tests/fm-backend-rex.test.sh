@@ -500,6 +500,78 @@ test_agent_state_from_process_view() {
   pass "fm_backend_agent_state rex: alive/dead/ambiguous from the process view, missing on not-found, unreadable without starting a server"
 }
 
+# start_shell_tree: a real process tree shaped like a pane whose login shell
+# launched <leaf> through a wrapper script in its own process group: a root
+# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a `sleep` under that
+# name, TREE_LEAF) below the wrapper. Its args name <dir>/tree, so the suite's
+# fixture reaping also covers it.
+start_shell_tree() {  # <dir> <leaf-name>
+  local dir=$1 leaf=$2 i=0
+  mkdir -p "$dir/tree"
+  ln -sf "$(command -v sleep)" "$dir/tree/$leaf"
+  cat >"$dir/tree/wrapper" <<'SH'
+#!/usr/bin/env bash
+"$1" "$2"
+exit $?
+SH
+  chmod +x "$dir/tree/wrapper"
+  bash -c '"$1" "$2" "$3" & wait' root "$dir/tree/wrapper" "$dir/tree/$leaf" "$FM_TEST_STUB_MAX_BLOCK_SECONDS" >/dev/null 2>&1 &
+  TREE_ROOT=$!
+  TREE_LEAF=
+  while [ -z "$TREE_LEAF" ] && [ "$i" -lt 50 ]; do
+    TREE_LEAF=$(ps -axo pid=,args= | awk -v p="$dir/tree/$leaf" '$2 == p { print $1; exit }')
+    [ -n "$TREE_LEAF" ] || sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$TREE_LEAF" ] || fail "the $leaf fixture process never started"
+}
+
+stop_shell_tree() {  # <dir>
+  fm_test_reap_root_processes "$1/tree"
+}
+
+# shell_foreground_payload: the process view Rex reports for a pane whose
+# login shell (fish here, as captured live) is the foreground process with
+# treehouse, fish, and login above it.
+shell_foreground_payload() {  # <foreground-pid>
+  printf '{"foreground":{"pid":%s,"name":"fish","path":"/opt/homebrew/Cellar/fish/4.7.1/bin/fish","argv0":"/opt/homebrew/bin/fish","cwd":"/w"},"ancestors":[{"pid":%s,"name":"treehouse","argv0":"treehouse"},{"pid":%s,"name":"fish","argv0":"-fish"},{"pid":%s,"name":"login","argv0":null}],"last_exit":null}' \
+    "$1" "$DEAD_PID" "$DEAD_PID" "$DEAD_PID"
+}
+
+test_agent_state_sees_a_harness_below_a_shell_foreground() {
+  local dir out sid bid t
+  dir=$(new_case agent-state-below-shell)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+
+  start_shell_tree "$dir" claude
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$DEAD_PID")"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "the reported chain alone holds no harness, so a foreground shell with no live process below it is dead"
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "a harness running below the shell foreground, through a wrapper, is alive"
+  printf '{"records":[{"state":"working","kind":"agent","owner":{"pid":%s}}]}\n' "$TREE_LEAF" >"$dir/fake/status/${bid#block:}.json"
+  assert_equals busy "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" \
+    "an OSC 7501 record from the harness below the shell foreground is trusted"
+  stop_shell_tree "$dir"
+  rm -f "$dir/fake/status/${bid#block:}.json"
+
+  start_shell_tree "$dir" worker
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "a shell foreground with only non-harness processes below it is dead"
+  printf '{"records":[{"state":"working","owner":{"pid":%s}}]}\n' "$TREE_LEAF" >"$dir/fake/status/${bid#block:}.json"
+  assert_equals unknown "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" \
+    "a record from a non-harness process below the shell foreground is ignored"
+  stop_shell_tree "$dir"
+
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"2.1.310\",\"path\":\"/Users/u/.cac/versions/2.1.310/claude\",\"argv0\":\"claude\"},\"ancestors\":[{\"pid\":$DEAD_PID,\"name\":\"zsh\",\"argv0\":\"-zsh\"}],\"last_exit\":null}"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a harness foreground is still alive"
+  pass "fm_backend_agent_state rex: a harness below a shell foreground is alive and its records are trusted; a bare shell stays dead"
+}
+
 test_native_busy_trusts_live_owner_only() {
   local dir out sid bid t
   dir=$(new_case busy)
@@ -1093,6 +1165,7 @@ test_reclaim_fallback_placement_replaces_a_husk
 test_capture_and_derived_viewport
 test_composer_reads_the_cursor_row
 test_agent_state_from_process_view
+test_agent_state_sees_a_harness_below_a_shell_foreground
 test_native_busy_trusts_live_owner_only
 test_current_path_follows_foreground
 test_send_literal_and_keys
