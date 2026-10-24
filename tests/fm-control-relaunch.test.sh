@@ -640,6 +640,27 @@ test_relaunch_note_inbox_listing_is_safe_on_empty_inbox() {
   pass "fm-control relaunch: the progress note's inbox listing is silent on an empty inbox"
 }
 
+test_relaunch_clears_the_previous_workers_read_receipts() {
+  local dir out rc state rec action
+  dir=$(new_case receipts rl46)
+  add_ship_task "$dir" rl46 claude
+  state="$dir/home/state"
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" rl46 "long steer"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the pending steer"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "the previous worker could not record its read"
+  action=$(FM_STATE_OVERRIDE="$state" FM_TASK_INBOX_GRACE_SECS=0 bash -c '. "$1"; fm_task_inbox_due_action "$2" rl46' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state")
+  [ "$action" = quiet ] || fail "a read steer should be quiet before the relaunch, got '$action'"
+  out=$(run_control "$dir" rl46 relaunch --note "wedged after reading the steer"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  [ -f "$rec" ] || fail "the unhandled steer must survive the relaunch"
+  action=$(FM_STATE_OVERRIDE="$state" FM_TASK_INBOX_GRACE_SECS=0 bash -c '. "$1"; fm_task_inbox_due_action "$2" rl46' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state")
+  [ "$action" = "ring $rec" ] \
+    || fail "the replacement has not read the steer, so it must be rung again, got '$action'"
+  pass "fm-control relaunch: a replacement worker does not inherit its predecessor's read receipts"
+}
+
 test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
@@ -2978,6 +2999,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
+test_relaunch_clears_the_previous_workers_read_receipts
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer

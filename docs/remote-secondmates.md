@@ -514,6 +514,7 @@ The remote charter appends replies to `state/parent-replies.status` in the remot
 The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 The remote charter also names its steering inbox as `state/parent-route/<id>.inbox` in the remote home.
 That inbox is the record surface the routed transport writes to, so a steer never lands on a parent-home path the remote host cannot reach.
+The remote charter's read-receipt command runs `bin/fm-task-inbox-read.sh` from that host's code root, so the remote clone must carry the script before a steer can be recorded as read (`bin/fm-remote-home-seed.sh` header).
 
 ### How remote lines are mirrored
 

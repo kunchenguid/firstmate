@@ -809,6 +809,26 @@ assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote
 assert_grep "$PARENT_ROUTE_INBOX" "$REMOTE_HOME/data/charter.md" "remote charter did not name its host-local steering inbox"
 assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox path"
 assert_grep "$PARENT_ROUTE_INBOX'/NNN.msg '$PARENT_ROUTE_INBOX'/handled/" "$REMOTE_HOME/data/charter.md" "remote charter did not render the inbox acknowledgement move host-local"
+RECEIPT_HOME="$TMP_ROOT/seed-receipt-home"
+FM_SECONDMATE_CHARTER='Receipt charter.' FM_SECONDMATE_SCOPE='receipt routing' \
+  seed_env env FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-remote-home-seed.sh" seed-receipt remote-mac \
+  "$REMOTE_ROOT" "$RECEIPT_HOME" --no-projects >/dev/null \
+  || fail "seeding from a local code root distinct from the remote one failed"
+# shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+receipt_cmd=$(sed -n 's/^Immediately after reading each message.*: `\(.*\)`\.$/\1/p' "$RECEIPT_HOME/data/charter.md")
+[ -n "$receipt_cmd" ] || fail "remote charter carried no read-receipt command"
+eval "set -- $receipt_cmd"
+[ "$1" = "$REMOTE_ROOT/bin/fm-task-inbox-read.sh" ] \
+  || fail "remote charter's read-receipt command runs '$1', not the remote code root's copy"
+receipt_rec=$(bash -c '. "$1"; fm_task_inbox_write "$2" seed-receipt "long steer"' \
+  _ "$REMOTE_ROOT/bin/fm-task-inbox-lib.sh" "$RECEIPT_HOME/state/parent-route") \
+  || fail "could not write a host-local steer for the receipt check"
+[ "$receipt_rec" = "$RECEIPT_HOME/state/parent-route/seed-receipt.inbox/001.msg" ] \
+  || fail "host-local steer landed at '$receipt_rec'"
+bash -c "${receipt_cmd//NNN/001}" || fail "remote charter's read-receipt command failed on the remote host"
+assert_present "$RECEIPT_HOME/state/parent-route/seed-receipt.inbox/.read/001.msg" \
+  "remote charter's read-receipt command recorded no receipt in the host-local inbox"
+pass "remote charter's read-receipt command runs the remote code root's script against the host-local inbox"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \

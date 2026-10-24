@@ -846,6 +846,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -3365,7 +3367,8 @@ json_escape() {
 # Granted paths are real (symlink-resolved) directories/files under this
 # task's home, matching BRIEF_REAL's own resolution: the brief dir (covers
 # brief.md/launch-brief.md/report.md), the steering inbox directory (covers
-# every steer and its handled/ acknowledgement), and the status file itself.
+# every steer, its .read/ receipt, and its handled/ acknowledgement), and the
+# status file itself.
 rovo_config_override_flag() {
   local effort=$1 data_dir=$2 state_dir=$3 id=$4
   local data_real state_real agent_json paths_json config_json
@@ -6631,6 +6634,10 @@ fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
+fm_task_inbox_clear_reads "$STATE_REAL" "$ID" || {
+  echo "error: could not clear earlier read receipts under $STATE_REAL/$ID.inbox/.read; refusing to launch a worker the unread alarm would not cover" >&2
+  exit 1
+}
 # Every launch also exports the absolute path of this task's steering inbox, so
 # the constant doorbell line (bin/fm-task-inbox-lib.sh) can name
 # "$FM_TASK_INBOX" instead of a path that grows with the home's depth. Like the

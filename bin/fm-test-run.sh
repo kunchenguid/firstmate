@@ -1677,7 +1677,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-task-inbox-lib.sh)
+    bin/fm-task-inbox-lib.sh|bin/fm-task-inbox-read.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
       # (backend-dispatch), the watcher's re-ring check (watcher-wake-lock),
       # and the live doorbell guard against real harnesses.
