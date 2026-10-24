@@ -15,6 +15,12 @@
 # (bin/fm-afk-contract.sh owns the record schema; the words are the whole
 # mandate and no script parses them). The record is the posture in every
 # harness.
+# The away entry needs the fleet lock: a read-only session cannot carry out the
+# away words, so `enter` refuses while another live session holds the lock and
+# names that holder (pid, process start time, process age, read live from the
+# process). Stopping the holder is never automatic; the refusal only names it.
+# The quiet path is settled BEFORE that check, so a read-only session may still
+# enter quiet mode: quiet mode spawns nothing.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
@@ -162,8 +168,13 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 # The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
-
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+# The fleet-lock check for the away record is owned by the record writer
+# (bin/fm-afk-contract.sh), which runs it under its own mutation lock just
+# before the write. It lives there so every writer of the record is covered,
+# not only this launcher, and so the check and the write cannot be overtaken
+# between them.
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -381,6 +392,10 @@ fm_afk_launch_enter() {
         return 3 ;;
     esac
   fi
+  # The quiet path above is settled first on purpose: quiet mode spawns
+  # nothing, so a read-only session may still enter quiet mode. The fleet-lock
+  # check belongs to the record write itself, so a standing away record keeps
+  # away mode even for a quiet-mode caller, and that write is refused too.
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }

@@ -214,7 +214,10 @@ make_fake_ps_claude() {
 }
 
 make_fake_ps_harness() {
-  local fakebin=$1 harness=$2
+  local fakebin=$1 harness=$2 real_ps real_ps_q
+  real_ps=$(command -v ps 2>/dev/null || true)
+  [ -n "$real_ps" ] || real_ps=/bin/ps
+  printf -v real_ps_q '%q' "$real_ps"
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -222,6 +225,7 @@ set -u
 # for, so a case that builds a pi (or codex) fixture gets pi (or codex) ancestry
 # without having to repeat it per run; FM_FAKE_HARNESS still overrides it.
 harness=\${FM_FAKE_HARNESS:-$harness}
+real_ps=$real_ps_q
 SH
   cat >> "$fakebin/ps" <<'SH'
 pid=
@@ -251,7 +255,14 @@ case "$*" in
     ;;
   *"ppid="*)
     [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
-    /bin/ps -o ppid= -p "$pid"
+    "$real_ps" -o ppid= -p "$pid"
+    ;;
+  *"lstart="*)
+    # The holder naming reads the live process's start time and age from the
+    # process itself. One read answers both, so the two describe the same
+    # observation of the same process.
+    printf 'Wed Oct 21 12:34:56 2026      01:02:03\n'
+    exit 0
     ;;
 esac
 exit 1
@@ -902,6 +913,7 @@ EOF
   assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
   assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
+  assert_not_contains "$out" "Another live firstmate session holds the fleet lock" "lock publication failure named a live lock holder it could not prove"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
   pass "session start stays read-only when lock ownership cannot be published"
@@ -2557,6 +2569,72 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
+# A lock refused because another live session holds it names that holder: the
+# pid, the process start time, and the process age, read live from the process
+# itself. The digest then offers the two choices and stops nothing itself.
+test_read_only_session_names_the_live_lock_holder() {
+  local rec root home fakebin holder_pid out
+  rec=$(new_world read-only-holder-naming)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "the competing live lock owner did not force read-only mode"
+  assert_contains "$out" "Another live firstmate session holds the fleet lock" \
+    "the read-only banner did not name the live lock holder"
+  assert_contains "$out" "pid $holder_pid" "the holder naming did not carry the holder pid"
+  assert_contains "$out" "started Wed Oct 21 12:34:56 2026" \
+    "the holder naming did not carry the process start time"
+  assert_contains "$out" "age 01:02:03" "the holder naming did not carry the process age"
+  assert_contains "$out" "Choose one" "the read-only banner did not offer the two choices"
+  assert_contains "$out" "stop that session yourself" \
+    "the read-only banner did not offer the stop-the-holder choice"
+  assert_contains "$out" "keep this session read-only" \
+    "the read-only banner did not offer the read-only choice"
+  assert_contains "$out" "Nothing is stopped automatically" \
+    "the read-only banner did not say that nothing is stopped automatically"
+
+  pass "a read-only session names the live lock holder with its pid, start time, and age, and offers the two choices"
+}
+
+# A held lock alone does not prove that another session owns it. This session's
+# own recorded lock can still be live when the refusal came from a failed
+# write probe, and the digest must not then tell the operator to stop their
+# own session.
+test_read_only_session_does_not_name_its_own_lock_as_another_session() {
+  local rec root home fakebin out
+  rec=$(new_world read-only-own-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  # This session's own recorded lock, still live, and a state directory the
+  # lock cannot be republished into.
+  printf '%s\n' "$SESSION_START_TEST_HARNESS_PID" > "$home/state/.lock"
+  chmod 0500 "$home/state"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  chmod 0700 "$home/state"
+
+  assert_contains "$out" "READ-ONLY SESSION" "the failed lock publication did not force a read-only session"
+  assert_contains "$out" "cannot write session lock" "the failed lock publication was not surfaced"
+  assert_not_contains "$out" "Another live firstmate session holds the fleet lock" \
+    "the read-only banner named this session's own lock as another session's holder"
+  assert_not_contains "$out" "stop that session yourself" \
+    "the read-only banner told the operator to stop this session's own process"
+
+  pass "a read-only session does not name its own live lock as another session's holder"
+}
+
 test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
   local rec root home fakebin holder_pid out baseline_before completion_before
   rec=$(new_world agents-refresh-read-only)
@@ -3154,6 +3232,8 @@ test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_session_names_the_live_lock_holder
+test_read_only_session_does_not_name_its_own_lock_as_another_session
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion

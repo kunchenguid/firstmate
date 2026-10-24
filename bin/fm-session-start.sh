@@ -712,6 +712,36 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
   }
+  # When the reason is another live session holding the lock, name that holder
+  # and offer the two choices. A pid alone is not actionable - a recycled pid
+  # is not the same holder - so the process start time and the age come with
+  # it, read live from the process itself. Stopping the holder is the
+  # operator's call and is never done here.
+  #
+  # The lock owner itself decides whether a live holder is another session, so
+  # only its own live-holder refusal names one. Every other refusal reason -
+  # an unwritable lock, an unresolved identity - keeps its own diagnostic and
+  # never tells the operator to stop a process. A held lock alone does not
+  # prove that another session owns it: this session's own recorded lock can
+  # still be live when the refusal came from a failed write probe.
+  case "$LOCK_OUT" in
+    *"another live firstmate session holds the lock"*)
+      fm_session_lock_inspect "$STATE"
+      if [ "$FM_LOCK_INSPECT_STATE" = held ]; then
+        HOLDER_SUMMARY=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID" 2>/dev/null || true)
+        {
+          printf '●\n'
+          printf '●  Another live firstmate session holds the fleet lock:\n'
+          printf '●    %s\n' "${HOLDER_SUMMARY:-pid $FM_LOCK_INSPECT_PID, started unknown; age unknown}"
+          printf '●  Choose one:\n'
+          printf '●    - stop that session yourself, then start a new session, or\n'
+          printf '●    - keep this session read-only.\n'
+          printf '●  Nothing is stopped automatically.\n'
+          printf '%s\n' "$BAR"
+        }
+      fi
+      ;;
+  esac
 fi
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
