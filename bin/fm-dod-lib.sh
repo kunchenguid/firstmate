@@ -158,8 +158,8 @@ EOF
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing
-# fast-forwards the recorded integration branch or local default with content the
-# review server has never seen.
+# fast-forwards the local default branch with content the review server has
+# never seen.
 # forge=external also refuses no-mistakes, because the pipeline's push, pr, and
 # ci steps would push to the shared origin.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
