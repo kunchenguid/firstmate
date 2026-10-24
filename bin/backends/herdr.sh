@@ -1119,6 +1119,53 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   [ "$close_status" -eq 0 ]
 }
 
+# fm_backend_herdr_close_idle_endpoint: close one exact pane that holds nothing
+# but a lone idle shell, through the focus-preserving close above, and confirm
+# it is gone. This is the single owner of the "close a shell-only pane"
+# decision shared by fm-spawn.sh's pre-launch abort and the session-start husk
+# sweep (bin/fm-herdr-husk-lib.sh); the caller already holds the named-session
+# presentation lock and whatever task lock its own contract requires.
+# The pane must positively read no-agent, the idle-shell proof must name one
+# shell pid, and when <expected-shell-pid> is given it must be that same pid, so
+# a pane whose shell was replaced since the caller last looked is never closed
+# on the strength of the earlier look. The close is required to leave the pane
+# structurally gone; a refused or unconfirmed close keeps it.
+# Return codes: 0 the pane is confirmed gone (FM_BACKEND_HERDR_CLOSE_IDLE_REASON
+# says "already gone" when nothing had to be closed), 1 refused with the reason
+# in FM_BACKEND_HERDR_CLOSE_IDLE_REASON.
+fm_backend_herdr_close_idle_endpoint() {  # <session> <pane-id> [expected-shell-pid]
+  local session=$1 pane_id=$2 expected=${3:-} state shell_pid close_status=0
+  FM_BACKEND_HERDR_CLOSE_IDLE_REASON=""
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  case "$state" in
+    dead)
+      FM_BACKEND_HERDR_CLOSE_IDLE_REASON="already gone"
+      return 0
+      ;;
+    no-agent) ;;
+    *)
+      FM_BACKEND_HERDR_CLOSE_IDLE_REASON="its agent state is $state rather than no-agent"
+      return 1
+      ;;
+  esac
+  shell_pid=$(fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id") || {
+    FM_BACKEND_HERDR_CLOSE_IDLE_REASON="it is not a lone idle shell"
+    return 1
+  }
+  if [ -n "$expected" ] && [ "$shell_pid" != "$expected" ]; then
+    FM_BACKEND_HERDR_CLOSE_IDLE_REASON="its shell changed from pid $expected to pid $shell_pid"
+    return 1
+  fi
+  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" no-agent || close_status=$?
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")" = dead ] && return 0
+  if [ "$close_status" -ne 0 ]; then
+    FM_BACKEND_HERDR_CLOSE_IDLE_REASON="the focus-safe close was refused"
+  else
+    FM_BACKEND_HERDR_CLOSE_IDLE_REASON="the close could not be confirmed"
+  fi
+  return 1
+}
+
 # Herdr 0.7.5 workspace-removal focus rules (verified against the installed
 # 0.7.5 binary, its v0.7.5 tag source, and the isolated named lab):
 # - An EXPLICIT close that empties a workspace (API pane.close of its last
@@ -1411,6 +1458,28 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$max_attempts" ] || return 1
     sleep 0.1
+  done
+}
+
+# fm_backend_herdr_pane_idle_shell_wait: the shell-readiness gate. A freshly
+# created pane's shell can spend seconds initializing (verified on the 0.7.5
+# lab: the pane echoed typed text as typeahead while process-info still showed
+# a second foreground process), and text typed into it then runs late or not
+# at all. This waits until the same strict proof as
+# fm_backend_herdr_pane_idle_shell_pid passes on one sample, polling every
+# <interval> seconds for at most <polls> samples, and prints that shell pid so
+# the caller can later tell whether the SAME top-level shell is still the idle
+# foreground. Returns 1 when the shell never settles inside the budget.
+fm_backend_herdr_pane_idle_shell_wait() {  # <session> <pane-id> <polls> <interval-seconds>
+  local session=$1 pane=$2 polls=$3 interval=$4 attempt=0 shell_pid
+  while :; do
+    if shell_pid=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 fm_backend_herdr_pane_idle_shell_pid "$session" "$pane"); then
+      printf '%s\n' "$shell_pid"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$polls" ] || return 1
+    sleep "$interval"
   done
 }
 
@@ -3143,6 +3212,35 @@ fm_backend_herdr_send_key() {  # <target> <key>
   local key
   key=$(fm_backend_herdr_normalize_key "$2")
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+}
+
+# fm_backend_herdr_wait_output: one `pane wait-output` call, the single owner
+# of that CLI shape. Herdr searches the pane's recent snapshot immediately,
+# including output already on screen, then polls until <timeout-ms> elapses:
+# `herdr pane wait-output <pane> --match TEXT|--regex PATTERN --source recent
+# --timeout MS` (verified on 0.7.5: the pane id precedes the options; a hit
+# exits 0 with `.result.matched_line`, a miss exits 1 with error code
+# `timeout`, and an unknown option exits 2). <mode> is `match` for a literal
+# substring or `regex` for a Rust regular expression.
+# Sets FM_BACKEND_HERDR_WAIT_OUTPUT_LINE to the matched line on a hit.
+# Return codes: 0 matched, 1 no match within the timeout, 2 the verb or its
+# response is unusable on this client (unknown option, unreadable response, or
+# any error other than a timeout), so a caller can fall back rather than read
+# an unsupported verb as "no output".
+fm_backend_herdr_wait_output() {  # <session> <pane-id> <match|regex> <pattern> <timeout-ms>
+  local session=$1 pane=$2 mode=$3 pattern=$4 timeout=$5 out rc=0 code
+  FM_BACKEND_HERDR_WAIT_OUTPUT_LINE=""
+  case "$mode" in match|regex) ;; *) return 2 ;; esac
+  case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
+  out=$(fm_backend_herdr_cli "$session" pane wait-output "$pane" "--$mode" "$pattern" --source recent --timeout "$timeout" 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s' "$out" | jq -e '.result.type == "output_matched"' >/dev/null 2>&1 || return 2
+    FM_BACKEND_HERDR_WAIT_OUTPUT_LINE=$(printf '%s' "$out" | jq -r '.result.matched_line // empty' 2>/dev/null)
+    return 0
+  fi
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  [ "$code" = timeout ] && return 1
+  return 2
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors

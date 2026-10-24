@@ -205,11 +205,16 @@
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
-#   leaves no task record restores the pool as it found it: it retakes that lock
-#   once to drop its claim after metadata publication too, and before its launch
-#   is delivered it closes the endpoint whose `treehouse get` shell leases the
-#   slot and removes the wiring, task temp root, and staged launch file it wrote.
+#   the next spawn's claim replaces it. A fresh spawn that fails and leaves no
+#   task record before its launch is delivered closes the endpoint it opened on
+#   every session-provider backend, returning any slot its `treehouse get`
+#   shell leased; on Herdr that close is the focus-preserving close of a pane
+#   proven to hold only a lone idle shell, and a pane that fails that proof or
+#   is the captain's attended active tab is kept and named in the refusal.
+#   Orca, T3 Code, and the Herdr projection own their own abort cleanup. A
+#   fresh polytoken spawn additionally retakes that lock once to drop its claim
+#   after metadata publication and removes the wiring, task temp root, and
+#   staged launch file it wrote.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -315,6 +320,18 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   Treehouse get on Herdr: a fresh Herdr pane's shell can still be initializing
+#   when the tab exists, and text typed then runs late or is lost, so the Herdr
+#   path types `treehouse get` only after the pane is proven a lone idle shell
+#   (SPAWN_HERDR_READY_SECONDS, polled every SPAWN_HERDR_READY_INTERVAL
+#   seconds; a pane that never settles refuses, naming the pane), takes the
+#   echoed command as the receipt (`pane wait-output`), resends it at most once
+#   and only when no echo was seen while the same top-level shell is still the
+#   idle foreground, and turns the cwd poll's inter-poll wait into a one-second
+#   read of treehouse's own error text so an exhausted pool fails in seconds
+#   with treehouse's message. A client without a usable wait-output verb keeps
+#   the readiness gate and the plain poll, and never resends. Other backends
+#   keep the plain send and poll.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -1586,6 +1603,48 @@ spawn_orca_reclaim_launch_file() {
   return 1
 }
 
+# spawn_close_fresh_endpoint: close the endpoint a fresh spawn opened once the
+# spawn has failed before delivering its launch. Every session-provider
+# backend closes through its ordinary kill (the window or tab holds at most
+# the shell whose `treehouse get` leases the slot). Herdr instead closes
+# through fm_backend_herdr_close_idle_endpoint under the named-session
+# presentation lock, so a pane that is not provably a lone idle shell, or
+# whose tab is the captain's active tab with a viewer attached, is kept and
+# named rather than closed from under them. Orca, T3 Code, and the Herdr
+# projection never reach here: each owns its own abort cleanup.
+spawn_close_fresh_endpoint() {
+  local abort_tab_id='' session pane held=0
+  if [ "$BACKEND" != herdr ]; then
+    [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
+    if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
+      SPAWN_ENDPOINT_CLOSED=1
+    else
+      echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
+    fi
+    return 0
+  fi
+  fm_backend_herdr_parse_target "$T" || {
+    echo "warning: could not parse herdr endpoint $T after the failed spawn of $ID; inspect window $T" >&2
+    return 0
+  }
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+    if ! spawn_herdr_presentation_order_lock_acquire "$session"; then
+      echo "warning: leaving herdr pane $T open after the failed spawn of $ID: the session presentation lock is busy; inspect window $T" >&2
+      return 0
+    fi
+    held=1
+  fi
+  if fm_backend_herdr_close_idle_endpoint "$session" "$pane"; then
+    SPAWN_ENDPOINT_CLOSED=1
+  else
+    echo "warning: leaving herdr pane $T open after the failed spawn of $ID: ${FM_BACKEND_HERDR_CLOSE_IDLE_REASON:-the close was refused}; inspect window $T" >&2
+  fi
+  [ "$held" -eq 0 ] || spawn_herdr_presentation_order_lock_release
+  return 0
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
@@ -1736,28 +1795,29 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A fresh polytoken spawn that fails and leaves no record must leave the pool
-  # as it found it. Before its launch is delivered, the endpoint it opened holds nothing but
-  # the shell whose `treehouse get` leases the slot, so closing it returns the
-  # slot to the pool and leaves no window or tab for a retry to trip over; the
-  # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
-  # Once a launch was delivered into an endpoint still open, a worker may be
-  # running there, so those stay for the operator, as the refusal says.
+  # A fresh spawn that fails and leaves no record must leave the pool as it
+  # found it. Before its launch is delivered, the endpoint it opened holds
+  # nothing but the shell whose `treehouse get` leases the slot (or no slot at
+  # all when treehouse refused), so closing it returns any slot to the pool and
+  # leaves no window or tab for a retry to trip over. Once a launch was
+  # delivered into an endpoint still open, a worker may be running there, so it
+  # stays for the operator, as the refusal says. On Herdr the close is the
+  # focus-preserving close of a pane proven to hold only a lone idle shell;
+  # anything else keeps the pane and names it.
+  if [ "$status" -ne 0 ] && [ "$RELAUNCH" -eq 0 ] &&
+    [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "${T:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_FRESH_ENDPOINT_OPENED=0
+    spawn_close_fresh_endpoint
+  fi
+  # A fresh polytoken spawn also removes the Firstmate wiring, task temp root,
+  # and staged launch file it wrote, so the pool and the task's paths are
+  # exactly as it found them.
   if [ "$status" -ne 0 ] && [ "${HARNESS:-}" = polytoken ] &&
-    { [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] || [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
+    { [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
       [ "$SPAWN_TASK_TMP_CREATED" = 1 ] || [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; } &&
     [ "$RELAUNCH" -eq 0 ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-    if [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "${T:-}" ]; then
-      SPAWN_FRESH_ENDPOINT_OPENED=0
-      local abort_tab_id=
-      [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
-      if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
-        SPAWN_ENDPOINT_CLOSED=1
-      else
-        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
-      fi
-    fi
     # These paths are per task id, so the per-id spawn lock is retaken for them
     # exactly as for the strip dir below: a retry of the same id that took the
     # lock meanwhile may already be reusing them.
@@ -4132,18 +4192,22 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
-# fresh polytoken spawn closes its endpoint on abort, so only it points away
-# from the window; every other harness keeps the plain inspect pointer.
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. A fresh
+# endpoint that spawn_abort_cleanup will close points away from the window;
+# every other refusal keeps the plain inspect pointer. On Herdr the close is
+# conditional on the pane holding only an idle shell, and the refusal that
+# keeps the pane names it again at that point.
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
 
 spawn_endpoint_hint() {
-  if spawn_endpoint_closes_on_abort; then
-    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
-  else
+  if ! spawn_endpoint_closes_on_abort; then
     printf 'inspect window %s' "$T"
+  elif [ "$BACKEND" = herdr ]; then
+    printf 'window %s is closed on exit if it still holds only an idle shell, otherwise inspect it' "$T"
+  else
+    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
   fi
 }
 
@@ -4880,10 +4944,10 @@ EOF
     T3CODE_ABORT_CLEANUP=1
     ;;
   esac
-  # Orca and the Herdr projection own their own abort cleanup above; every other
-  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
-  # the spawn ends with no record before its launch is delivered.
-  if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+  # Orca, T3 Code, and the Herdr projection own their own abort cleanup above;
+  # every other fresh endpoint is closed by spawn_abort_cleanup when the spawn
+  # ends with no record before its launch is delivered.
+  if [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
     SPAWN_FRESH_ENDPOINT_OPENED=1
   fi
 fi
@@ -4943,6 +5007,126 @@ spawn_send_key() { # <target> <key>
   rex) fm_backend_rex_send_key "$1" "$2" "$W" ;;
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
   esac
+}
+
+# The interactive `treehouse get` on Herdr (header "Treehouse get on Herdr").
+# A fresh Herdr pane's shell can still be initializing when the tab create
+# returns, and `pane run` text typed then is preserved as typeahead: it runs
+# late, or not at all, and nothing below reads the pane's output, so an
+# exhausted pool used to surface only as a 60s silence. Three Herdr-only steps
+# wrap the send; every other backend keeps the plain send and the cwd poll.
+#   1. Readiness: the command is typed only after the pane's shell is proven a
+#      lone idle shell (the same proof every pane close relies on), polled for
+#      at most SPAWN_HERDR_READY_SECONDS; a pane that never settles refuses.
+#   2. Acknowledgement: Herdr types and submits in one call, so the echoed
+#      command is the receipt. A miss, with the SAME top-level shell still the
+#      idle foreground, is the one case the text provably never reached the
+#      shell, and the command is resent exactly once. A first `treehouse get`
+#      that silently succeeded leaves a subshell in the foreground, and one
+#      still running leaves treehouse there, so neither can ever be followed by
+#      a second `treehouse get` leasing a second slot.
+#   3. Fail-fast: the cwd poll's inter-poll wait becomes a one-second
+#      wait-output on treehouse's own error text, so an exhausted pool fails in
+#      seconds with treehouse's message instead of the deadline.
+# A client whose wait-output verb is unusable keeps the readiness gate and
+# falls back to the plain poll: without a readable receipt there is no proof
+# the text was lost, so it is never resent.
+SPAWN_HERDR_READY_SECONDS=10
+SPAWN_HERDR_READY_INTERVAL=0.25
+SPAWN_HERDR_ACK_TIMEOUT_MS=3000
+SPAWN_HERDR_FAIL_FAST_TIMEOUT_MS=1000
+SPAWN_TREEHOUSE_ERROR_REGEX='all [0-9]+ worktrees are in use or dirty|fetch failed|failed to create worktree|not in a git'
+SPAWN_HERDR_GET_SESSION=
+SPAWN_HERDR_GET_PANE=
+SPAWN_HERDR_GET_SHELL_PID=
+SPAWN_HERDR_GET_ECHOED=0
+SPAWN_HERDR_WAIT_OUTPUT=unknown
+
+spawn_herdr_get_acknowledged() {
+  local rc=0
+  fm_backend_herdr_wait_output "$SPAWN_HERDR_GET_SESSION" "$SPAWN_HERDR_GET_PANE" \
+    match 'treehouse get' "$SPAWN_HERDR_ACK_TIMEOUT_MS" || rc=$?
+  case "$rc" in
+  0)
+    SPAWN_HERDR_WAIT_OUTPUT=supported
+    SPAWN_HERDR_GET_ECHOED=1
+    return 0
+    ;;
+  1)
+    SPAWN_HERDR_WAIT_OUTPUT=supported
+    return 1
+    ;;
+  esac
+  SPAWN_HERDR_WAIT_OUTPUT=unsupported
+  echo "warning: this herdr client gave no usable 'pane wait-output' receipt for $WT_TARGET; waiting on the pane's cwd without send acknowledgement or treehouse fail-fast" >&2
+  return 1
+}
+
+spawn_treehouse_get_send() {
+  local polls shell_pid
+  if [ "$BACKEND" != herdr ]; then
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    return
+  fi
+  fm_backend_herdr_parse_target "$WT_TARGET" || {
+    echo "error: herdr endpoint '$WT_TARGET' for $ID is malformed; refusing to type 'treehouse get' into it" >&2
+    return 1
+  }
+  SPAWN_HERDR_GET_SESSION=$FM_BACKEND_HERDR_SESSION
+  SPAWN_HERDR_GET_PANE=$FM_BACKEND_HERDR_PANE
+  polls=$(awk -v s="$SPAWN_HERDR_READY_SECONDS" -v i="$SPAWN_HERDR_READY_INTERVAL" 'BEGIN { printf "%d", (s / i) + 0.5 }')
+  SPAWN_HERDR_GET_SHELL_PID=$(fm_backend_herdr_pane_idle_shell_wait \
+    "$SPAWN_HERDR_GET_SESSION" "$SPAWN_HERDR_GET_PANE" "$polls" "$SPAWN_HERDR_READY_INTERVAL") || {
+    echo "error: herdr pane $WT_TARGET did not settle into an idle shell within ${SPAWN_HERDR_READY_SECONDS}s; refusing to type 'treehouse get' into a pane that is not ready (spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+    return 1
+  }
+  spawn_send_text_line "$WT_TARGET" 'treehouse get' || return 1
+  spawn_herdr_get_acknowledged && return 0
+  [ "$SPAWN_HERDR_WAIT_OUTPUT" = supported ] || return 0
+  if ! shell_pid=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 fm_backend_herdr_pane_idle_shell_pid \
+    "$SPAWN_HERDR_GET_SESSION" "$SPAWN_HERDR_GET_PANE"); then
+    echo "warning: herdr pane $WT_TARGET did not echo 'treehouse get' within $((SPAWN_HERDR_ACK_TIMEOUT_MS / 1000))s but no longer holds an idle shell, so the command may be running; not resending" >&2
+    return 0
+  fi
+  if [ "$shell_pid" != "$SPAWN_HERDR_GET_SHELL_PID" ]; then
+    echo "warning: herdr pane $WT_TARGET did not echo 'treehouse get' within $((SPAWN_HERDR_ACK_TIMEOUT_MS / 1000))s and its shell changed from pid $SPAWN_HERDR_GET_SHELL_PID to pid $shell_pid; not resending" >&2
+    return 0
+  fi
+  echo "warning: herdr pane $WT_TARGET did not echo 'treehouse get' within $((SPAWN_HERDR_ACK_TIMEOUT_MS / 1000))s and still holds the same idle shell (pid $shell_pid); resending once" >&2
+  spawn_send_text_line "$WT_TARGET" 'treehouse get' || return 1
+  spawn_herdr_get_acknowledged ||
+    echo "warning: herdr pane $WT_TARGET still did not echo 'treehouse get' after one resend; waiting on the pane's cwd" >&2
+  return 0
+}
+
+# The cwd poll's inter-poll wait. On Herdr with a usable wait-output verb it is
+# the fail-fast read of treehouse's own error text, which exits the spawn with
+# that message at once; everywhere else it is the plain one-second sleep.
+spawn_treehouse_get_poll_wait() {
+  local rc=0
+  if [ "$BACKEND" = herdr ] && [ "$SPAWN_HERDR_WAIT_OUTPUT" = supported ]; then
+    fm_backend_herdr_wait_output "$SPAWN_HERDR_GET_SESSION" "$SPAWN_HERDR_GET_PANE" \
+      regex "$SPAWN_TREEHOUSE_ERROR_REGEX" "$SPAWN_HERDR_FAIL_FAST_TIMEOUT_MS" || rc=$?
+    case "$rc" in
+    0)
+      echo "error: treehouse get failed in pane $WT_TARGET: ${FM_BACKEND_HERDR_WAIT_OUTPUT_LINE:-treehouse reported an error} (spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+      exit 1
+      ;;
+    1) return 0 ;;
+    esac
+    SPAWN_HERDR_WAIT_OUTPUT=unsupported
+  fi
+  sleep 1
+}
+
+# The deadline refusal's note on the Herdr receipt, when one was readable.
+spawn_treehouse_get_echo_note() {
+  [ "$BACKEND" = herdr ] && [ "$SPAWN_HERDR_WAIT_OUTPUT" = supported ] || return 0
+  if [ "$SPAWN_HERDR_GET_ECHOED" = 1 ]; then
+    printf '; the pane echoed the command but treehouse printed no recognized error'
+  else
+    printf '; the pane never echoed the command'
+  fi
 }
 
 # Enter the exact copy recorded for this task immediately before trust setup and
@@ -5450,7 +5634,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" != t3code ]; then
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    spawn_treehouse_get_send || exit 1
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -5502,10 +5686,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      sleep 1
+      spawn_treehouse_get_poll_wait
     done
     if [ -z "$WT" ]; then
-      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason$(spawn_treehouse_get_echo_note); spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       exit 1
     fi
 

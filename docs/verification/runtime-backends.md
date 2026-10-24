@@ -1556,6 +1556,51 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Spawn readiness and husk sweep
+
+Measured on 2026-10-24 against Herdr 0.7.5 protocol 17 and treehouse v2.3.0 on macOS aarch64, on a named lab session.
+
+The `pane wait-output` shape the send receipt and the fail-fast read depend on:
+
+```sh
+herdr pane wait-output <pane> --match <text> --source recent --timeout 3000 --session <lab>
+herdr pane wait-output <pane> --regex '<pattern>' --source recent --timeout 1000 --session <lab>
+```
+
+```text
+{"result":{"matched_line":"echo marker-zz","type":"output_matched",...}}   exit 0
+{"error":{"code":"timeout","message":"timed out waiting for output match"}} exit 1
+unknown option: --bogus                                                    exit 2
+```
+
+The pane id precedes the options; placing it after them is rejected as an unknown option.
+A fresh pane's shell on this host read as a lone idle shell (one foreground process in the shell's own process group, no child, sleeping) 1.2 seconds after `tab create`, after transient `bash` and prompt-helper foreground processes.
+
+The live guards, both default-on and model-free:
+
+```sh
+tests/fm-spawn-herdr-readiness-live-e2e.test.sh
+tests/fm-herdr-husk-sweep-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real herdr+treehouse: an exhausted pool fails in 4s with treehouse's message and the fresh tab is closed
+ok - real herdr: 20 back-to-back tabs all echoed a marker typed before their first prompt (herdr 0.7.5)
+ok - real herdr+treehouse: the gated treehouse get landed the spawn in <pool>/.treehouse/project-2dbf25/1/project
+evidence: herdr=herdr 0.7.5 treehouse=v2.3.0 pool-full-elapsed=4s typeahead-missed=0 default-session-tripwire=armed
+```
+
+```text
+ok - real herdr: the sweep closed the restored-shape husk and kept the busy tab with its reason (herdr 0.7.5)
+ok - real herdr: a repeat sweep is a no-op for the closed husk
+evidence: herdr=herdr 0.7.5 husk-closed=w1:p2 busy-kept=w1:p3 default-session-tripwire=armed
+```
+
+Observed guarantees: a one-slot pool held by `treehouse get --lease` made the real spawn fail in 3 to 4 seconds with treehouse's own "worktrees are in use or dirty" text and no leftover task tab; twenty tabs created back to back all echoed a marker typed by `pane run` immediately after `tab create`, which is the typeahead the readiness gate no longer relies on; a labelled bare-shell tab no home recorded was closed and confirmed gone while a labelled tab running `sleep 300` was kept as not a lone idle shell.
+The portable suites `tests/fm-spawn-herdr-readiness.test.sh` and `tests/fm-herdr-husk-sweep.test.sh` pin the decision logic against a fake.
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:
