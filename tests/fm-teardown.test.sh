@@ -1358,6 +1358,75 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+test_untracked_pi_scratch_allows() {
+  local case_dir rc
+  case_dir=$(make_case pi-scratch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  mkdir -p "$case_dir/wt/.pi/tasks/12345678-1234-1234-1234-123456789abc"
+  printf '%s\n' scratch > "$case_dir/wt/.pi/tasks/12345678-1234-1234-1234-123456789abc/scratch.txt"
+  [ "$(git -C "$case_dir/wt" status --porcelain)" = '?? .pi/' ] \
+    || fail "pi-scratch: ordinary porcelain did not collapse the Pi directory"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "pi-scratch: teardown should allow untracked Pi scratch when work has landed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "pi-scratch: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "pi-scratch: teardown left task metadata"
+  pass "untracked Pi scratch does not block teardown of landed work"
+}
+
+test_untracked_pi_extensions_refuses() {
+  local case_dir rc scratch
+  for scratch in alone alongside; do
+    case_dir=$(make_case "pi-extension-$scratch")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    land_on_origin_main "$case_dir" feature.txt hello
+    mkdir -p "$case_dir/wt/.pi/extensions"
+    printf '%s\n' extension > "$case_dir/wt/.pi/extensions/foo.ts"
+    if [ "$scratch" = alongside ]; then
+      mkdir -p "$case_dir/wt/.pi/tasks/12345678-1234-1234-1234-123456789abc"
+      printf '%s\n' scratch > "$case_dir/wt/.pi/tasks/12345678-1234-1234-1234-123456789abc/scratch.txt"
+    fi
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code 1 "$rc" "pi-extension-$scratch: teardown should refuse untracked extensions"
+    assert_grep 'REFUSED' "$case_dir/stderr" "pi-extension-$scratch: no refusal in stderr"
+    assert_grep 'uncommitted changes' "$case_dir/stderr" \
+      "pi-extension-$scratch: refusal did not cite uncommitted changes"
+    assert_present "$case_dir/wt/.pi/extensions/foo.ts" "pi-extension-$scratch: refused teardown removed extension"
+    assert_present "$case_dir/state/task-x1.meta" "pi-extension-$scratch: refused teardown removed task metadata"
+    if [ "$scratch" = alongside ]; then
+      assert_present "$case_dir/wt/.pi/tasks/12345678-1234-1234-1234-123456789abc/scratch.txt" \
+        "pi-extension-$scratch: refused teardown removed scratch"
+    fi
+  done
+  pass "untracked Pi extensions remain protected alone and alongside tasks scratch"
+}
+
+test_untracked_pi_notes_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pi-notes)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  printf '%s\n' notes > "$case_dir/wt/.pi-notes"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "pi-notes: teardown should refuse untracked names outside .pi/"
+  grep -q REFUSED "$case_dir/stderr" || fail "pi-notes: no REFUSED line in stderr"
+  grep -q 'uncommitted changes' "$case_dir/stderr" || fail "pi-notes: refusal did not cite uncommitted changes"
+  assert_present "$case_dir/state/task-x1.meta" "pi-notes: refused teardown removed task metadata"
+  pass "untracked .pi-notes remains protected from teardown"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -5669,6 +5738,9 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
+test_untracked_pi_scratch_allows
+test_untracked_pi_extensions_refuses
+test_untracked_pi_notes_refuses
 test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
