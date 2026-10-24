@@ -218,9 +218,12 @@ test_an_inventory_mismatch_asks_the_mate_once_per_window() {
     || fail "the ask did not land as exactly one durable steering record"
   assert_contains "$(inbox_text "$home/state" mate)" "check your current books" \
     "the instruction did not ask the mate to inspect its current state"
-  if printf '%s' "$(inbox_text "$home/state" mate)" | grep -Fq 'stale-scout'; then
-    fail "the instruction prescribed a repair from sampled details that can become stale"
-  fi
+  # The ask names the mismatch kind and the flagged ids (so the mate checks the
+  # right thing) while still only asking for a check against its current books.
+  assert_contains "$(inbox_text "$home/state" mate)" "orphan_in_flight" \
+    "the instruction did not name the mismatch kind"
+  assert_contains "$(inbox_text "$home/state" mate)" "stale-scout, watch-row" \
+    "the instruction did not name the flagged ids"
 
   # Every later recap sees the same mismatch; none of them may nag.
   out=$(run_notify "$home" "$fakebin" once "$snap") || fail "the repeat run failed: $out"
@@ -256,6 +259,32 @@ test_a_mismatch_still_there_after_the_window_earns_one_more_nudge() {
   [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
     || fail "the re-nudge did not restart the cooldown"
   pass "a mismatch outliving the cooldown earns one re-nudge, then goes quiet again"
+}
+
+test_only_a_newly_flagged_id_restarts_the_window() {
+  local home mate fakebin snap out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home newid mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["a","b","c"]}'
+  run_notify "$home" "$fakebin" newid "$snap" >/dev/null || fail "the first ask failed"
+
+  # The mate repaired one row: progress on the same mismatch is not news.
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["b","c"]}'
+  out=$(run_notify "$home" "$fakebin" newid "$snap") || fail "the shrunken-set run failed: $out"
+  assert_contains "$out" "cooldown: mate" "a shrinking id set re-nudged the mate: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] || fail "a shrinking id set was nudged again"
+
+  # An id the last nudge did not name is a new mismatch.
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["b","d"]}'
+  out=$(run_notify "$home" "$fakebin" newid "$snap") || fail "the new-id run failed: $out"
+  assert_contains "$out" "sent: mate orphan_in_flight" "a newly flagged id was muted: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 2 ] || fail "a newly flagged id was not asked about"
+
+  # A record that does not name its ids (older digest-only) is unknown, so new.
+  printf '%s\n' 0123456789abcdef > "$home/state/mate.reconcile-nudged-ids"
+  out=$(run_notify "$home" "$fakebin" newid "$snap") || fail "the unknown-record run failed: $out"
+  assert_contains "$out" "sent: mate orphan_in_flight" "an unknown record muted the mismatch: $out"
+  pass "only a newly flagged id restarts the cooldown window"
 }
 
 test_the_cooldown_starts_when_delivery_finishes() {
@@ -483,19 +512,29 @@ test_a_delayed_snapshot_never_prescribes_a_stale_repair() {
     || fail "the delayed reconcile ask failed: $out"
   assert_contains "$out" "sent: mate orphan_in_flight" \
     "the delayed snapshot did not produce the cooldown-limited check: $out"
-  out=$(run_notify "$home" "$fakebin" delayed "$new_snap") \
-    || fail "the current snapshot reconcile failed: $out"
+  # The same flagged set seen again inside the window stays quiet.
+  out=$(run_notify "$home" "$fakebin" delayed "$old_snap") \
+    || fail "the repeated snapshot reconcile failed: $out"
   assert_contains "$out" "cooldown: mate" \
-    "the per-home cooldown did not deduplicate the newer observation: $out"
+    "the per-home cooldown did not deduplicate the same mismatch: $out"
   [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
-    || fail "the old and new snapshots produced more than one ask inside the cooldown"
+    || fail "the same mismatch produced more than one ask inside the cooldown"
   text=$(inbox_text "$home/state" mate)
   assert_contains "$text" "check your current books" \
     "the delayed ask did not direct the mate to current state"
-  if printf '%s' "$text" | grep -Eq 'already-repaired|current-row'; then
-    fail "the delayed ask embedded sampled row details and could prescribe a stale repair: $text"
-  fi
-  pass "a delayed snapshot asks for a current check instead of prescribing a stale repair"
+  assert_contains "$text" "Skip any that no longer apply" \
+    "the delayed ask did not let the mate skip rows that already changed"
+  # A DIFFERENT flagged set restarts the window, so a new mismatch is never
+  # muted by an old nudge; the new ask names the new kind and ids.
+  out=$(run_notify "$home" "$fakebin" delayed "$new_snap") \
+    || fail "the changed snapshot reconcile failed: $out"
+  assert_contains "$out" "sent: mate unowned_current" \
+    "a changed mismatch inside the window was muted by the old nudge: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 2 ] \
+    || fail "the changed mismatch did not produce its own ask"
+  assert_contains "$(inbox_text "$home/state" mate)" "current-row" \
+    "the second ask did not name the new flagged id"
+  pass "a delayed snapshot asks for a current check, and a changed mismatch restarts the window"
 }
 
 test_a_stale_snapshot_never_targets_a_replacement_mate() {
@@ -991,6 +1030,7 @@ test_reconcile_requests_coalesce_per_target_until_delivery
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
+test_only_a_newly_flagged_id_restarts_the_window
 test_the_cooldown_starts_when_delivery_finishes
 test_the_window_is_four_hours
 test_each_home_carries_its_own_cooldown

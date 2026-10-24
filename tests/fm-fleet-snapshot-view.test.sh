@@ -1152,9 +1152,63 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# A done child whose recorded PR has no merge record is waiting on its PR, which
+# is normal in-flight work; once the merge is recorded, or when the child failed,
+# the in-flight row is a genuine terminal mismatch.
+test_home_summary_terminal_in_flight_follows_pr_merge_record() {
+  local home fakebin out pr=https://github.com/kunchenguid/firstmate/pull/9
+  home=$(make_home summary-pr-wait)
+  mkdir -p "$home/projects/pr-ship"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] pr-ship - Child waiting on its PR (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/pr-ship.meta" \
+    "window=firstmate:fm-pr-ship" \
+    "worktree=$home/projects/pr-ship" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=$pr"
+  record_claude_idle "$home/state" pr-ship
+  fakebin=$(make_fakebin "$home")
+
+  printf 'done: PR opened\n' > "$home/state/pr-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done child waiting on an unmerged PR must not produce terminal_in_flight: $out"
+
+  (
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_url_parse "$pr" \
+      && fm_pr_poll_merge_mark_notified "$home/state" pr-ship \
+        "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"
+  ) || fail "could not record the merge notification for the scratch child"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .invalidity == {kind:"terminal_in_flight",ids:["pr-ship"]}
+  ' >/dev/null || fail "a done child whose PR merge is recorded must produce terminal_in_flight: $out"
+
+  rm -f "$home/state/pr-ship.pr-poll-merge-notified"
+  printf 'failed: worker crashed\n' > "$home/state/pr-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false and .invalidity == {kind:"terminal_in_flight",ids:["pr-ship"]}
+      and (.reason | contains("pr-ship=failed"))
+  ' >/dev/null || fail "a failed child with a PR must still produce terminal_in_flight: $out"
+  pass "home-summary terminal_in_flight exempts only a done child waiting on an unmerged PR"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_terminal_in_flight_follows_pr_merge_record
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
