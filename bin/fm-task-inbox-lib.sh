@@ -76,10 +76,10 @@
 # the watcher rings once more and spends the mark
 # whatever the result, so the record never rings a third time and never
 # escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
-# without this retry the record could sit unread until a checkpoint. A pending ordinary record's
-# ladder rings the same inbox, so the retry waits behind it, and an
-# acknowledged record drops its mark. The remote steer leg has no watcher
-# ladder and owes no retry.
+# without this retry the record could sit unread until a checkpoint. A pending
+# ordinary record's ladder rings the same inbox, so the retry waits behind it
+# until that record is handled or escalated, and an acknowledged record drops
+# its mark. The remote steer leg has no watcher ladder and owes no retry.
 #
 # Inbox names containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -461,6 +461,23 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
   rm -f "$dir/.retry-ring" 2>/dev/null
 }
 
+# Print `retry <record-path>` and succeed when the retry mark is due for an
+# unhandled record sequenced after <after-seq>. The one retry ring exists only
+# while config/wait-no-turns is present; absent, a mark is left untouched. A
+# mark naming a missing record is dropped.
+fm_task_inbox_due_retry() {  # <inbox-dir> <after-seq>
+  local dir=$1 base n
+  [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ] || return 1
+  base=$(cat "$dir/.retry-ring" 2>/dev/null || true)
+  if ! n=$(fm_task_inbox_seq_of "$base") || [ ! -f "$dir/$base" ]; then
+    rm -f "$dir/.retry-ring" 2>/dev/null || true
+    return 1
+  fi
+  [ "$n" -gt "$2" ] || return 1
+  [ "$(fm_path_age "$dir/.retry-ring")" -ge "$(fm_task_inbox_grace_secs)" ] || return 1
+  printf 'retry %s' "$dir/$base"
+}
+
 # The re-ring ladder decision for one task. Prints exactly one of:
 #   quiet                     nothing due (healthy, within grace or spacing,
 #                             or already escalated for the current oldest)
@@ -474,18 +491,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
-    # The one retry ring exists only while config/wait-no-turns is present.
-    # Absent, a mark is left untouched and the inbox stays quiet, as before.
-    if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
-      base=$(cat "$dir/.retry-ring" 2>/dev/null || true)
-      if ! fm_task_inbox_seq_of "$base" >/dev/null || [ ! -f "$dir/$base" ]; then
-        rm -f "$dir/.retry-ring" 2>/dev/null || true
-      elif [ "$(fm_path_age "$dir/.retry-ring")" -ge "$(fm_task_inbox_grace_secs)" ]; then
-        printf 'retry %s' "$dir/$base"
-        return 0
-      fi
-    fi
-    printf 'quiet'
+    fm_task_inbox_due_retry "$dir" 0 || printf 'quiet'
     return 0
   fi
   base=${oldest##*/}
@@ -507,7 +513,9 @@ EOF
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
-    printf 'quiet'
+    # Escalated, the oldest no longer rings the inbox, so a newer record's
+    # due retry need not wait behind it.
+    fm_task_inbox_due_retry "$dir" "$(fm_task_inbox_seq_of "$base")" || printf 'quiet'
     return 0
   fi
   max=$(fm_task_inbox_ring_max)
