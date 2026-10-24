@@ -132,6 +132,8 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -266,6 +268,7 @@ cycle_log_append() {
       ;;
   esac
   fm_lock_release "$CYCLE_LOG_LOCK"
+  fm_telemetry_emit "$reason" || true
   cycle_active=0
 }
 
