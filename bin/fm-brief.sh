@@ -123,9 +123,9 @@
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
 # scaffold never emits a substitution a file-write tool would copy through.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
-# process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
-# handled/, with an early read receipt (script or file-tool fallback) before acting (record, doorbell,
-# and ladder owned by bin/fm-task-inbox-lib.sh).
+# process state/<id>.inbox/*.msg in order, record an early read receipt (script
+# or file-tool fallback) before acting, and acknowledge each by moving it to
+# handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
 # Ship tasks include a project-memory section bounding crewmate edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
 # information, including wrong information the task itself introduced - never

@@ -564,7 +564,7 @@ EOF
 # missing endpoint never enters the ladder: the watcher escalates it directly.
 # A concurrently removed inbox is a successful no-op; otherwise failure means
 # the caller must surface the unwritable ladder while the record remains
-# unhandled.
+# unread.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   local dir base ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
