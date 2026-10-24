@@ -336,6 +336,139 @@ test_agent_root_resolution() {
   pass "the store root follows the pinned agent dir and else ~/.pi/agent, never the invoking environment"
 }
 
+# --- the operator's own Pi trust policy -------------------------------------
+
+# settings_write <agent-dir> <json>: the selected root's Pi settings file, which
+# is where Pi reads defaultProjectTrust from.
+settings_write() {
+  mkdir -p "$1"
+  printf '%s\n' "$2" > "$1/settings.json"
+}
+
+# Pi consults a saved decision first and defaultProjectTrust only when none
+# exists. An operator who configured Pi never to auto-trust project folders must
+# therefore get no entry, a named reason, and a spawn that still proceeds to the
+# confirmation Pi itself would render.
+test_default_trust_never_writes_nothing() {
+  local rec out store settings
+  rec=$(make_case trust-never)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  settings="$AGENT/settings.json"
+  settings_write "$AGENT" '{"defaultProjectTrust": "never"}'
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a 'never' policy must not refuse the spawn: $out"
+  assert_contains "$out" 'defaultProjectTrust to "never"' \
+    "the report must name the setting that suppressed the write"
+  assert_contains "$out" "$settings" "the report must name the settings file it read"
+  assert_contains "$out" "human confirmation" \
+    "the report must say the worker will need a human confirmation"
+  assert_not_contains "$out" "trusted:" "a 'never' policy must not report the worktree as trusted"
+  assert_absent "$store" "a 'never' policy must write no trust entry"
+  pass "defaultProjectTrust never is reported and never overridden"
+}
+
+test_default_trust_always_writes_nothing() {
+  local rec out store
+  rec=$(make_case trust-always)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  settings_write "$AGENT" '{"defaultProjectTrust": "always"}'
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "an 'always' policy must not refuse the spawn: $out"
+  assert_contains "$out" 'defaultProjectTrust to "always"' \
+    "the report must name the policy that already trusts the directory"
+  assert_contains "$out" "nothing was written" "an 'always' policy must not claim this script wrote the entry"
+  assert_not_contains "$out" "trusted:" "an 'always' policy must not claim this script wrote the entry"
+  assert_absent "$store" "an 'always' policy needs no trust entry"
+  pass "defaultProjectTrust always is reported without a redundant write"
+}
+
+test_default_trust_ask_writes_the_entry() {
+  local rec out store
+  rec=$(make_case trust-ask)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  settings_write "$AGENT" '{"theme": "dark", "defaultProjectTrust": "ask"}'
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "an 'ask' policy must register the worktree: $out"
+  assert_contains "$out" "trusted:" "an 'ask' policy must report the registration"
+  assert_trusted_only "$store" "$(wt_real)" "an 'ask' policy did not record the worktree"
+  pass "defaultProjectTrust ask registers the worktree, replacing the interactive confirmation"
+}
+
+# A saved decision outranks defaultProjectTrust in Pi, so it must here too: the
+# policy is only consulted when the nearest entry is undecided.
+test_saved_decision_outranks_the_policy() {
+  local rec out store before
+  rec=$(make_case trust-saved-wins)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  settings_write "$AGENT" '{"defaultProjectTrust": "never"}'
+  mkdir -p "$AGENT"
+  printf '{\n  "%s": true\n}\n' "$(wt_real)" > "$store"
+  before=$(cat "$store")
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a saved trust must win over a 'never' policy: $out"
+  assert_contains "$out" "already trusted:" "a saved trust must be reported as already trusted"
+  [ "$(cat "$store")" = "$before" ] || fail "a saved trust must not be rewritten"
+  pass "a saved trust decision outranks defaultProjectTrust"
+}
+
+# Under a pin the policy is the PINNED root's, never the default root's.
+test_policy_follows_the_pinned_root() {
+  local rec out pinned_store default_store pinned_settings
+  rec=$(make_case trust-pinned-policy)
+  read_case "$rec"
+  pinned_store="$AGENT/trust.json"
+  default_store="$USER_HOME/.pi/agent/trust.json"
+  pinned_settings="$AGENT/settings.json"
+  settings_write "$AGENT" '{"defaultProjectTrust": "never"}'
+  settings_write "$USER_HOME/.pi/agent" '{"defaultProjectTrust": "ask"}'
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a pinned 'never' policy must not refuse the spawn: $out"
+  assert_contains "$out" "$pinned_settings" "the report must name the pinned root's settings file"
+  assert_absent "$pinned_store" "a pinned 'never' policy must write no trust entry"
+  assert_absent "$default_store" "the registration must not fall back to the default store"
+  pass "a pinned root's defaultProjectTrust decides its own store, not the default root's"
+
+  settings_write "$AGENT" '{"defaultProjectTrust": "ask"}'
+  settings_write "$USER_HOME/.pi/agent" '{"defaultProjectTrust": "never"}'
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a pinned 'ask' policy must register: $out"
+  assert_trusted_only "$pinned_store" "$(wt_real)" "a pinned 'ask' policy did not record the worktree"
+  assert_absent "$default_store" "the default root's 'never' policy must not speak for the pinned root"
+  pass "the pinned root's own 'ask' policy registers the worktree"
+}
+
+# Fail loudly instead of reading an unparseable policy as anything at all.
+test_unreadable_settings_refuses_loudly() {
+  local rec out store settings
+  rec=$(make_case trust-settings-malformed)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  settings="$AGENT/settings.json"
+  settings_write "$AGENT" '{"defaultProjectTrust": '
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 1 $? "a malformed settings file must refuse: $out"
+  assert_contains "$out" "$settings" "the refusal must name the settings file it could not read"
+  assert_absent "$store" "a refused registration must write nothing"
+
+  settings_write "$AGENT" '[]'
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 1 $? "a non-object settings file must refuse: $out"
+  assert_contains "$out" "$settings" "the refusal must name the settings file it could not read"
+  assert_absent "$store" "a refused registration must write nothing"
+  pass "an unreadable or malformed Pi settings file refuses loudly, never as 'never'"
+}
+
 # --- the spawn that calls it ------------------------------------------------
 
 # make_pi_spawn_case <name> <harness> <id>: a spawn world with a fake pi-family
@@ -440,6 +573,30 @@ EOF
   pass "a failed registration stops the spawn with a named error"
 }
 
+# A 'never' policy is the operator's own decision, so the spawn still launches:
+# it just carries no pre-registered entry and says so.
+test_pi_spawn_respects_the_never_policy() {
+  local rec id out store settings
+  id=pi-trust-never
+  rec=$(make_pi_spawn_case spawn-never pi "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$HOME_DIR/user-home/.pi/agent/trust.json"
+  settings="$HOME_DIR/user-home/.pi/agent/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '{\n  "defaultProjectTrust": "never"\n}\n' > "$settings"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a 'never' policy must not refuse the spawn: $out"
+  assert_contains "$out" "$settings" "the spawn must name the settings file that suppressed the write"
+  assert_absent "$store" "a 'never' policy must leave the trust store unwritten"
+  [ -s "$CASE/launch.log" ] || fail "a 'never' policy must still launch the worker"
+  pass "a pi spawn under defaultProjectTrust never launches without pre-registering trust"
+}
+
 test_other_harnesses_get_no_pi_trust_write() {
   local rec id out store
   id=pi-trust-codex
@@ -470,9 +627,16 @@ test_write_failure_refuses_loudly
 test_malformed_store_refuses_loudly
 test_out_of_scope_paths_are_refused
 test_agent_root_resolution
+test_default_trust_never_writes_nothing
+test_default_trust_always_writes_nothing
+test_default_trust_ask_writes_the_entry
+test_saved_decision_outranks_the_policy
+test_policy_follows_the_pinned_root
+test_unreadable_settings_refuses_loudly
 test_pi_spawn_registers_the_worktree
 test_pi_spawn_ignores_the_spawning_process_agent_root
 test_pi_spawn_refuses_when_registration_fails
+test_pi_spawn_respects_the_never_policy
 test_other_harnesses_get_no_pi_trust_write
 
 echo "# all fm-pi-trust tests passed"
