@@ -39,7 +39,69 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
-  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh" "$dir/bin/fm-afk-contract.sh"
+  cp "$ROOT/bin/fm-line-cap-lib.sh" "$dir/bin/fm-line-cap-lib.sh"
+  cp "$ROOT/bin/fm-wake-ack.sh" "$dir/bin/fm-wake-ack.sh"
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh" "$dir/bin/fm-afk-contract.sh" "$dir/bin/fm-wake-ack.sh"
+}
+
+# Drain fixture for the pre-drained wake: the hook stages main's drain into its
+# banner and acknowledges it at the next Stop, so the fixture answers --stage
+# with the presentation in state/drain-present (nothing when absent), writes
+# the receipt the real drain would (ack_through from state/drain-ack, default
+# 0; the generation fixture-generation, which the arm fixtures publish), fails
+# while state/drain-fail exists, and records every invocation's arguments in
+# state/drain-calls. An acknowledgement removes the receipt named after
+# --commit-stage, as the real drain does. Without this fixture the hook has no
+# drain to stage and falls back to the plain banner, which is what the older
+# cases above exercise.
+write_drain_fixture() {
+  local dir=$1
+  cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/state/drain-calls"
+case "${1:-}" in
+  --stage)
+    [ ! -e "$FM_HOME/state/drain-fail" ] || exit 1
+    [ ! -e "$FM_HOME/state/drain-present" ] || cat "$FM_HOME/state/drain-present"
+    {
+      printf 'schema=fm-wake-stage.v1\n'
+      printf 'ack_through=%s\n' "$(cat "$FM_HOME/state/drain-ack" 2>/dev/null || echo 0)"
+      printf 'recovery_generation=%s\n' "$(cat "$FM_HOME/state/drain-gen" 2>/dev/null || echo fixture-generation)"
+      printf 'marker=fixture\n'
+      printf 'outcomes_read_through=0\n'
+      printf 'outcomes_processed_target=%s\n' "$(cat "$FM_HOME/state/drain-processed" 2>/dev/null || echo 0)"
+    } > "$2"
+    ;;
+  *)
+    prev=
+    for a in "$@"; do
+      [ "$prev" != --commit-stage ] || rm -f -- "$a"
+      prev=$a
+    done
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/bin/fm-wake-drain.sh"
+}
+
+# Two Stops of one session: the fake harness keeps one pid (the session lock)
+# across both hook runs, as a real Claude process does, so the second run can
+# commit the acknowledgement the first recorded. $3 runs between them inside
+# the harness (the handling turn's work); outputs land in state/run1.out,
+# state/run1.rc, state/run2.out, state/run2.rc.
+run_autoarm_twice() {  # <dir> <between-script> [second-session-id]
+  local dir=$1 between=$2 second=${3:-sess-autoarm}
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "{\"session_id\":\"sess-autoarm\",\"stop_hook_active\":false}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/run1.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/run1.rc"
+    eval "$1"
+    printf "%s\n" "{\"session_id\":\"$2\",\"stop_hook_active\":true}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/run2.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/run2.rc"
+  ' _ "$between" "$second"
 }
 
 # A Claude home runs the supervision host unless config/supervision-host-off
@@ -1939,6 +2001,405 @@ test_host_crash_is_retried_then_reported() {
 # tool process under the lock-owning session with no Stop payload. Any argument
 # must print help or refuse before anything is armed, since the host or arm it
 # starts would be owned by that short-lived process.
+# --- pre-drained wake and turn-end acknowledgement ----------------------------
+
+test_predrained_banner_records_the_acknowledgement() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-banner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  printf 'stale: fixture-win actionable\nUNREAD STATUS (new since last drain, not re-printed after this presentation):\nt1 note: captain said hello\n' > "$dir/state/drain-present"
+  printf '3\n' > "$dir/state/drain-ack"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a pre-drained actionable close must still exit 2"
+  assert_contains "$out" "WAKE PRESENTATION (this hook already ran bin/fm-wake-drain.sh for you" "the banner must carry the staged presentation heading"
+  assert_contains "$out" "t1 note: captain said hello" "the banner must carry the presentation's lines"
+  assert_contains "$out" "runs automatically when this turn ends" "the banner must say the acknowledgement is the turn end's"
+  assert_contains "$out" "--ack-through 3 --recovery-generation fixture-generation" "the banner must name the recorded acknowledgement"
+  assert_contains "$out" "bin/fm-wake-ack.sh hold" "the banner must name the keep-open command"
+  assert_not_contains "$out" "Run bin/fm-wake-drain.sh first" "a pre-drained banner must not ask main to drain again"
+  grep -q '^--stage ' "$dir/state/drain-calls" || fail "the hook must stage the drain: $(cat "$dir/state/drain-calls")"
+  [ -f "$dir/state/.wake-ack-pending" ] || fail "the hook must record the pending acknowledgement"
+  grep -q '^ack_through=3$' "$dir/state/.wake-ack-pending" || fail "the record must carry the staged sequence: $(cat "$dir/state/.wake-ack-pending")"
+  grep -q '^session_id=sess-autoarm$' "$dir/state/.wake-ack-pending" || fail "the record must bind the payload's session id"
+  [ "$(cat "$dir/state/.watcher-down")" = pending:handling:fixture-generation ] \
+    || fail "the hook must begin handling the staged episode after its rewake commit, got: $(cat "$dir/state/.watcher-down")"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must still record outcome=rewake"
+  pass "auto-arm: a delivered wake carries its staged presentation and records its turn-end acknowledgement"
+}
+
+test_next_stop_runs_the_recorded_acknowledgement() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-commit")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  printf '3\n' > "$dir/state/drain-ack"
+  run_autoarm_twice "$dir" 'rm -f "$FM_HOME/state/task.meta"'
+  [ "$(cat "$dir/state/run1.rc")" = 2 ] || fail "the first Stop must rewake: $(cat "$dir/state/run1.out")"
+  [ "$(cat "$dir/state/run2.rc")" = 0 ] || fail "the second Stop of an idle home must exit 0: $(cat "$dir/state/run2.out")"
+  grep -Fx -- "--ack-through 3 --recovery-generation fixture-generation --commit-stage $dir/state/.wake-ack-pending.receipt" "$dir/state/drain-calls" >/dev/null \
+    || fail "the next Stop must run the recorded acknowledgement with its receipt: $(cat "$dir/state/drain-calls")"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "the record must be removed after the turn-end acknowledgement"
+  [ ! -e "$dir/state/.wake-ack-pending.receipt" ] || fail "the receipt must be gone after the turn-end acknowledgement"
+  grep -q 'committed' "$dir/state/wake-ack.log" || fail "the acknowledgement must be logged: $(cat "$dir/state/wake-ack.log")"
+  pass "auto-arm: the next Stop of the same session runs the recorded acknowledgement before anything else"
+}
+
+test_hold_keeps_the_predrained_wake_open() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-hold")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  run_autoarm_twice "$dir" '"$FM_HOME/bin/fm-wake-ack.sh" hold "one more turn" >/dev/null; rm -f "$FM_HOME/state/task.meta"'
+  [ "$(cat "$dir/state/run1.rc")" = 2 ] || fail "the first Stop must rewake"
+  ! grep -q -- '--ack-through' "$dir/state/drain-calls" || fail "a held wake must not be acknowledged: $(cat "$dir/state/drain-calls")"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "the held record must be dropped, not kept for a later turn"
+  [ ! -e "$dir/state/.wake-ack-hold" ] || fail "the hold must be consumed by the turn end it held"
+  grep -q 'held' "$dir/state/wake-ack.log" || fail "the hold must be logged"
+  pass "auto-arm: bin/fm-wake-ack.sh hold leaves the wake queued and is consumed once"
+}
+
+test_prompt_voids_the_pending_acknowledgement() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-void")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  run_autoarm_twice "$dir" 'printf "%s\n" "{\"session_id\":\"sess-autoarm\",\"prompt\":\"captain typed\"}" | "$FM_HOME/bin/fm-wake-ack.sh" void --claude prompt; rm -f "$FM_HOME/state/task.meta"'
+  [ "$(cat "$dir/state/run1.rc")" = 2 ] || fail "the first Stop must rewake"
+  ! grep -q -- '--ack-through' "$dir/state/drain-calls" || fail "a voided wake must not be acknowledged: $(cat "$dir/state/drain-calls")"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "the voided record must be gone"
+  grep -q 'void' "$dir/state/wake-ack.log" || fail "the void must be logged"
+  pass "auto-arm: a prompt after an interrupted handling turn voids the acknowledgement and leaves the wake queued"
+}
+
+test_rewake_delivery_prompt_keeps_the_pending_acknowledgement() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-delivery")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  printf '3\n' > "$dir/state/drain-ack"
+  run_autoarm_twice "$dir" 'jq -n --arg p "<task-notification>
+<summary>Stop hook feedback</summary>
+</task-notification>
+<system-reminder>
+Stop hook blocking error from command \"Stop\": $(cat "$FM_HOME/state/run1.out")
+</system-reminder>" "{session_id: \"sess-autoarm\", prompt: \$p}" | "$FM_HOME/bin/fm-wake-ack.sh" void --claude prompt; rm -f "$FM_HOME/state/task.meta"'
+  [ "$(cat "$dir/state/run1.rc")" = 2 ] || fail "the first Stop must rewake: $(cat "$dir/state/run1.out")"
+  grep -q '^Wake acknowledgement id: wake-ack-' "$dir/state/run1.out" || fail "the pre-drained banner must print the record's nonce: $(cat "$dir/state/run1.out")"
+  grep -Fx -- "--ack-through 3 --recovery-generation fixture-generation --commit-stage $dir/state/.wake-ack-pending.receipt" "$dir/state/drain-calls" >/dev/null \
+    || fail "the turn end after the rewake's own UserPromptSubmit must still acknowledge: $(cat "$dir/state/drain-calls")"
+  ! grep -q '	void	' "$dir/state/wake-ack.log" || fail "the rewake's own delivery must not void the record: $(cat "$dir/state/wake-ack.log")"
+  pass "auto-arm: the pre-drained wake's own UserPromptSubmit keeps the record and the next Stop commits it"
+}
+
+test_session_change_drops_the_pending_acknowledgement() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-session")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  run_autoarm_twice "$dir" 'rm -f "$FM_HOME/state/task.meta"' sess-other
+  ! grep -q -- '--ack-through' "$dir/state/drain-calls" || fail "another session must not acknowledge the wake: $(cat "$dir/state/drain-calls")"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "a record bound to another session must be dropped"
+  grep -q 'session id changed' "$dir/state/wake-ack.log" || fail "the mismatch must be logged"
+  pass "auto-arm: a Stop from another session drops the record unrun"
+}
+
+test_stage_failure_falls_back_to_the_plain_banner() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-fallback")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  : > "$dir/state/drain-fail"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failed stage must still deliver the wake"
+  assert_contains "$out" "Run bin/fm-wake-drain.sh first" "a failed stage must fall back to the drain-first banner"
+  assert_not_contains "$out" "WAKE PRESENTATION" "a failed stage must not claim a presentation"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "no acknowledgement may be recorded for a presentation that was not delivered"
+  [ ! -e "$dir/state/.wake-ack-pending.receipt" ] || fail "a failed stage must leave no receipt"
+  pass "auto-arm: a staging failure delivers the plain banner and records nothing"
+}
+
+test_empty_plumbing_close_is_absorbed_and_rearmed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/plumbing-empty")
+  : > "$dir/state/task.meta"
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+n=$(wc -l < "$FM_HOME/state/arm-ran" | tr -d ' ')
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$n" -eq 1 ]; then
+  printf 'check: rearm-resurface\n'
+else
+  rm -f "$FM_HOME/state/task.meta"
+  printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+fi
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  out=$(FM_CLAUDE_AUTOARM_ATTEMPTS=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an empty plumbing close must not rewake main"
+  [ -z "$out" ] || fail "an absorbed close must print no banner: $out"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 2 ] || fail "the hook must re-arm in the same process after absorbing the close: $(cat "$dir/state/arm-ran")"
+  grep -q '^--stage ' "$dir/state/drain-calls" || fail "the close must be staged before it is judged empty"
+  grep -q -- '^--ack-through 0 --recovery-generation fixture-generation --commit-stage ' "$dir/state/drain-calls" \
+    || fail "the absorbed close must be acknowledged by the hook: $(cat "$dir/state/drain-calls")"
+  grep -q 'suppressed' "$dir/state/wake-ack.log" || fail "the absorbed close must be logged: $(cat "$dir/state/wake-ack.log" 2>/dev/null)"
+  [ ! -e "$dir/state/.wake-ack-pending" ] || fail "an absorbed close records no pending acknowledgement"
+  [ ! -e "$dir/state/successor-ran" ] || fail "an absorbed close must not start a handling successor"
+  pass "auto-arm: an empty rearm-resurface close is acknowledged and re-armed without waking main"
+}
+
+test_plumbing_close_with_rows_is_delivered() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/plumbing-rows")
+  : > "$dir/state/task.meta"
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'check: inactive-outcome\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  printf '1792000000\t4\tcheck\tinactive-outcome:demo\tcheck: inactive-outcome demo merged PR\n' > "$dir/state/drain-present"
+  printf '4\n' > "$dir/state/drain-ack"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a plumbing close whose presentation has rows must wake main"
+  assert_contains "$out" "check: inactive-outcome" "the banner must carry the close"
+  assert_contains "$out" "inactive-outcome:demo" "the banner must carry the presented row"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 1 ] || fail "a delivered close must not re-arm in the hook"
+  ! grep -q 'suppressed' "$dir/state/wake-ack.log" 2>/dev/null || fail "a delivered close must not be logged as absorbed"
+  [ -f "$dir/state/.wake-ack-pending" ] || fail "a delivered close records its pending acknowledgement"
+  pass "auto-arm: a reconciliation close that presents rows is delivered"
+}
+
+test_signal_with_empty_presentation_is_delivered() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/signal-empty")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a non-plumbing close must wake main even when the drain presents nothing"
+  assert_contains "$out" "stale: fixture-win actionable" "the banner must carry the close"
+  assert_contains "$out" "the drain presented nothing" "the banner must say the presentation was empty"
+  ! grep -q 'suppressed' "$dir/state/wake-ack.log" 2>/dev/null || fail "a signal or stale close is never absorbed"
+  pass "auto-arm: only plumbing closes are absorbed; an empty stale close is delivered"
+}
+
+test_signals_and_decisions_are_never_absorbed() {
+  local dir out status lines present name i=0
+  for name in signal decision mixed open-decision; do
+    i=$((i + 1))
+    present=
+    case "$name" in
+      signal) lines='signal: fixture-task' ;;
+      decision) lines='signal: fixture-task needs-decision [key=fixture-call]' ;;
+      mixed) lines='check: rearm-resurface
+signal: fixture-task' ;;
+      open-decision)
+        lines='check: inactive-outcome'
+        present='OPEN DECISIONS
+  fixture-task needs-decision [key=fixture-call]: pick a path'
+        ;;
+    esac
+    dir=$(make_primary_dir "$TMP_ROOT/never-absorbed-$i")
+    : > "$dir/state/task.meta"
+    write_drain_fixture "$dir"
+    [ -z "$present" ] || printf '%s\n' "$present" > "$dir/state/drain-present"
+    printf '%s\n' "$lines" > "$dir/state/close-lines"
+    cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+cat "$FM_HOME/state/close-lines"
+exit 0
+SH
+    chmod +x "$dir/bin/fm-watch-arm.sh"
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    expect_code 2 "$status" "a $name close must wake main"
+    assert_contains "$out" "$(tail -n 1 "$dir/state/close-lines")" "the $name banner must carry the close"
+    [ -z "$present" ] || assert_contains "$out" "fixture-call" "the $name banner must carry the presented decision"
+    [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 1 ] || fail "a delivered $name close must not re-arm in the hook"
+    ! grep -q 'suppressed' "$dir/state/wake-ack.log" 2>/dev/null || fail "a $name close must never be absorbed"
+  done
+  pass "auto-arm: signals, decisions, and plumbing closes with a decision to present are never absorbed"
+}
+
+test_plumbing_close_near_the_hook_timeout_is_delivered() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/plumbing-budget")
+  : > "$dir/state/task.meta"
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'check: rearm-resurface\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  out=$(FM_CLAUDE_AUTOARM_HOOK_TIMEOUT=600 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a plumbing close with no re-park budget left must be delivered"
+  assert_contains "$out" "check: rearm-resurface" "the banner must carry the close"
+  ! grep -q 'suppressed' "$dir/state/wake-ack.log" 2>/dev/null || fail "no absorption may happen without budget"
+  pass "auto-arm: an empty plumbing close is delivered when the hook cannot re-park inside its timeout"
+}
+
+test_watcher_rearm_after_absorbed_close_is_bounded_to_the_hook_budget() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/plumbing-rearm-bound")
+  : > "$dir/state/task.meta"
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  : > "$FM_HOME/state/successor-ran"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+n=$(wc -l < "$FM_HOME/state/arm-ran" | tr -d ' ')
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$n" -eq 1 ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+trap 'echo TERM >> "$FM_HOME/state/arm-termed"; exit 143' TERM
+while :; do sleep 0.1; done
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  out=$(FM_CLAUDE_AUTOARM_HOOK_TIMEOUT=303 FM_CLAUDE_AUTOARM_SUPPRESS_MIN=0 FM_CLAUDE_AUTOARM_ATTEMPTS=1 \
+    run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a watcher re-arm still open at the hook budget must be delivered as a wake"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 2 ] || fail "the absorbed close must re-arm once: $(cat "$dir/state/arm-ran")"
+  [ -e "$dir/state/arm-termed" ] || fail "the re-arm must be stopped at the hook budget"
+  assert_contains "$out" "check: hook-budget" "the banner must name the budget close"
+  assert_contains "$out" "WAKE PRESENTATION" "the budget close must arrive pre-drained"
+  [ -f "$dir/state/.wake-ack-pending" ] || fail "the budget close records its pending acknowledgement"
+  [ -e "$dir/state/successor-ran" ] || fail "the budget close must start a handling successor"
+  pass "auto-arm: a watcher re-arm after an absorbed close ends inside the hook budget with a delivered wake"
+}
+
+test_host_plumbing_close_is_absorbed_and_reparked_within_budget() {
+  local dir out status bound
+  dir=$(make_primary_dir "$TMP_ROOT/host-plumbing")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  cat > "$dir/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/host-ran"
+n=$(wc -l < "$FM_HOME/state/host-ran" | tr -d ' ')
+printf '%s\n' "${FM_SUPERVISION_HOST_PARK_SECONDS:-unset}" >> "$FM_HOME/state/host-park"
+if [ "$n" -eq 1 ]; then
+  printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+  touch "$FM_HOME/state/.last-watcher-beat"
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+printf 'supervision-host stood down: fixture\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+  out=$(FM_CLAUDE_AUTOARM_HOOK_TIMEOUT=10000 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an absorbed host close followed by a stand-down exits 0"
+  [ -z "$out" ] || fail "an absorbed host close must print nothing: $out"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" = 2 ] || fail "the host must be re-parked in the same hook: $(cat "$dir/state/host-ran")"
+  [ "$(sed -n '1p' "$dir/state/host-park")" = unset ] || fail "the first park must keep the host's own bound: $(cat "$dir/state/host-park")"
+  bound=$(sed -n '2p' "$dir/state/host-park")
+  case "$bound" in ''|*[!0-9]*) fail "the re-park must carry a numeric bound: $(cat "$dir/state/host-park")" ;; esac
+  [ "$bound" -le 9700 ] && [ "$bound" -ge 60 ] || fail "the re-park bound must fit the hook's remaining budget, got $bound"
+  grep -q 'suppressed' "$dir/state/wake-ack.log" || fail "the absorbed host close must be logged"
+  pass "auto-arm: an empty plumbing close on a host home is absorbed and the host re-parks inside the hook's budget"
+}
+
+test_host_cycle_boundary_is_never_absorbed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-boundary-predrained")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  write_drain_fixture "$dir"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary must rewake main even with nothing to present"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the banner must carry the host line"
+  assert_contains "$out" "the drain presented nothing" "the boundary arrives pre-drained"
+  ! grep -q 'suppressed' "$dir/state/wake-ack.log" 2>/dev/null || fail "the cycle boundary is never absorbed"
+  pass "auto-arm: the host's cycle boundary is delivered pre-drained, never absorbed"
+}
+
+test_presentation_is_bounded_in_the_banner() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-bounded")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  : > "$dir/state/drain-present"
+  for i in $(seq 1 40); do
+    printf 'line %s %s\n' "$i" "$(printf 'x%.0s' $(seq 1 300))" >> "$dir/state/drain-present"
+  done
+  out=$(FM_CLAUDE_AUTOARM_PRESENT_BYTES=2000 FM_CLAUDE_AUTOARM_PRESENT_LINE=120 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a bounded presentation still rewakes"
+  assert_contains "$out" "WAKE PRESENTATION CUT:" "an over-budget presentation must say it was cut"
+  assert_contains "$out" "[truncated]" "an over-long line must carry the shared truncation marker"
+  [ "$(printf '%s\n' "$out" | grep -c '^line ')" -lt 40 ] || fail "the byte cap must drop lines past the budget"
+  dir=$(make_primary_dir "$TMP_ROOT/predrain-prefix")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  : > "$dir/state/drain-present"
+  for i in $(seq 1 12); do
+    if [ "$i" -eq 6 ]; then
+      printf 'line %s %s\n' "$i" "$(printf 'x%.0s' $(seq 1 300))" >> "$dir/state/drain-present"
+    else
+      printf 'line %s\n' "$i" >> "$dir/state/drain-present"
+    fi
+  done
+  out=$(FM_CLAUDE_AUTOARM_PRESENT_BYTES=150 FM_CLAUDE_AUTOARM_PRESENT_LINE=400 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a bounded presentation still rewakes"
+  [ "$(printf '%s\n' "$out" | grep '^line ' | cut -d' ' -f2 | tr '\n' ' ')" = "1 2 3 4 5 " ] \
+    || fail "the presentation must be a clean prefix that stops at the first overflowing line: $out"
+  assert_contains "$out" "WAKE PRESENTATION CUT: 7 more line(s)" "every line from the first overflow on must be counted as omitted"
+  pass "auto-arm: the pre-drained presentation is a clean prefix bounded per line and in total, with a cut note"
+}
+
 test_arguments_never_arm() {
   local dir arg rc out before after before_contents after_contents status
   dir=$(make_primary_dir "$TMP_ROOT/help-mode")
@@ -2046,6 +2507,22 @@ test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
 test_host_crash_is_retried_then_reported
+test_predrained_banner_records_the_acknowledgement
+test_next_stop_runs_the_recorded_acknowledgement
+test_hold_keeps_the_predrained_wake_open
+test_prompt_voids_the_pending_acknowledgement
+test_rewake_delivery_prompt_keeps_the_pending_acknowledgement
+test_session_change_drops_the_pending_acknowledgement
+test_stage_failure_falls_back_to_the_plain_banner
+test_empty_plumbing_close_is_absorbed_and_rearmed
+test_plumbing_close_with_rows_is_delivered
+test_signal_with_empty_presentation_is_delivered
+test_signals_and_decisions_are_never_absorbed
+test_plumbing_close_near_the_hook_timeout_is_delivered
+test_watcher_rearm_after_absorbed_close_is_bounded_to_the_hook_budget
+test_host_plumbing_close_is_absorbed_and_reparked_within_budget
+test_host_cycle_boundary_is_never_absorbed
+test_presentation_is_bounded_in_the_banner
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path

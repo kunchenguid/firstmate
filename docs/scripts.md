@@ -126,6 +126,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-quota-choose.sh`     | Choose the first candidate with known positive quota from an ordered harness:model list |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside status, outcome-backstop, decision, divergence, supervision-host outcome, recovery, and supervision checks |
+| `fm-wake-ack.sh`         | Record, hold, void, and commit a Claude primary's pre-drained wake acknowledgement at turn end ([watcher-continuity.md](watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)) |
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-path-lib.sh`         | Fork-free `dirname`/`basename` equivalents with no source-time side effects             |

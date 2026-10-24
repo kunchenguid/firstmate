@@ -100,6 +100,7 @@ Each effective `FM_HOME` contains private operational directories.
 
 - Task metadata, append-only status events, and endpoint signals.
 - Watcher and wake-queue coordination, away-mode state, and generated Relay artifacts.
+- A Claude primary's pending turn-end wake acknowledgement, its staged presentation receipt, and the keep-open hold (`bin/fm-wake-ack.sh`).
 - Inactive terminal-outcome receipts under `state/terminal-outcomes/`.
 - Enabled extension working namespaces under `state/extensions/`.
 - Parent-side remote ledger copies under `state/secondmate-summary-cache/`.

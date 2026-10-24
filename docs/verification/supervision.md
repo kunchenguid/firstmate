@@ -672,6 +672,36 @@ Observed output without the checkpoint distinction:
 not ok - announced recovery checkpoint exit: expected exit 124, got 0
 ```
 
+### Interrupted turns and the turn-end acknowledgement
+
+The pre-drained wake's turn-end acknowledgement ([watcher-continuity.md](../watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)) relies on an interrupted Claude turn firing no `Stop`.
+On 2026-10-17, Claude Code 2.1.302 ran in a throwaway trusted project whose `.claude/settings.json` registered `Stop`, `StopFailure`, and `UserPromptSubmit` hooks that each appended one line to a log.
+A prompt asking for a long reply was submitted, and Escape interrupted the turn mid-stream (the pane printed `Interrupted · What should Claude do instead?`); after 15 seconds a short prompt was submitted.
+The log, with `esc2-sent` written by the probe when it sent the interrupting Escape:
+
+```text
+prompt 1792271581
+esc2-sent 1792271602
+prompt 1792271636
+stop 1792271638
+```
+
+The interrupted turn fired neither `Stop` nor `StopFailure`, and the next prompt's `UserPromptSubmit` arrived before any later `Stop`, which is the order `bin/fm-wake-ack.sh void` depends on.
+With vim editing mode on, the first Escape only leaves insert mode, so the interrupt needs a second one.
+
+### asyncRewake delivery fires UserPromptSubmit
+
+`bin/fm-wake-ack.sh void` must not drop the record whose own rewake is being delivered.
+On 2026-10-17, Claude Code 2.1.302 ran in a scratch project with an `asyncRewake` `Stop` hook that exited 2 with the stderr `PROBE-NONCE-7f3a rewake banner line`, and a `UserPromptSubmit` hook that logged its payload.
+The rewake fired `UserPromptSubmit` in the same second the hook exited, and that payload's `prompt` field was exactly:
+
+```text
+<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\nStop hook blocking error from command \"Stop\": PROBE-NONCE-7f3a rewake banner line\n\n</system-reminder>
+```
+
+A typed prompt's `prompt` field was the typed text.
+So the rewake banner carries the pending record's nonce, and `void` keeps a record whose nonce the prompt contains.
+
 Deterministic entry points:
 
 ```sh
@@ -684,6 +714,8 @@ tests/fm-watch-checkpoint.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
+tests/fm-wake-ack.test.sh
+tests/fm-wake-drain-stage.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 

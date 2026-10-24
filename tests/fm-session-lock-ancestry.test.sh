@@ -794,6 +794,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
+  cp "$ROOT/bin/fm-line-cap-lib.sh" "$dir/bin/fm-line-cap-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   # The fixture arm written here stands in for the watcher arm, so the home opts out
   # of the supervision host a Claude home otherwise runs by default.

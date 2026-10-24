@@ -79,8 +79,14 @@ printf '9999999\n' > "$HOME_DIR/state/.lock"
 # Rapid-death arm fixture: started plus an immediate actionable reason, the
 # exact spent-Stop edge shape. Runs 1-2 close actionable; run 3 closes clean so
 # a misbehaving session can never loop forever.
+# The handling successor the hook starts after an actionable close is not one
+# of the counted cycles.
 cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
 N=$(cat "$FM_HOME/state/arm-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/arm-count"
 echo "arm-run=$N pid=$$" >> "$FM_HOME/state/arm-ran"
 if [ "$N" -ge 3 ]; then
@@ -96,9 +102,12 @@ exit 0
 SH
 # Drain fixture: session start invokes it once, then the model invokes it once
 # per rewake. The third total drain ends the in-flight need after two complete
-# Stop-owned cycles.
+# Stop-owned cycles. The hook's own staged presentation (--stage) is refused
+# so it falls back to the banner that asks the model to drain, and is not
+# counted as one of the model's drains.
 cat > "$PROJECT/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != --stage ] || exit 1
 N=$(cat "$FM_HOME/state/drain-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/drain-count"
 echo "drain-run=$N" >> "$FM_HOME/state/drain-ran"
 if [ "$N" -ge 3 ]; then

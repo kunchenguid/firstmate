@@ -89,6 +89,7 @@ On each Stop, an eligible primary with supervision need admits one home-scoped o
 If a session exits mid-cycle and leaves an orphaned Stop hook, the replacement session's first eligible Stop supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
 [`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+That rewake carries main's drain already run, and the hook acknowledges it at the end of the handling turn; [Pre-drained wakes and the turn-end acknowledgement](#pre-drained-wakes-and-the-turn-end-acknowledgement) owns that contract.
 
 ### Claude session-lock ownership
 
@@ -262,6 +263,66 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+
+## Pre-drained wakes and the turn-end acknowledgement
+
+On a Claude primary the Stop hook delivers main's wake already drained and acknowledges it when the handling turn ends, so a relay or no-op wake costs one model call instead of three.
+Pi, omp, and OpenCode keep the drain-then-acknowledge protocol above, and Cursor's stop hook keeps the banner that asks main to drain and acknowledge itself.
+`bin/fm-claude-stop-autoarm.sh`'s header owns the hook mechanics, `bin/fm-wake-drain.sh`'s header owns the staged presentation and its receipt, and `bin/fm-wake-ack.sh`'s header owns the pending record, the hold, and the exact commands.
+
+### What the staged presentation commits
+
+Before it commits a rewake, the hook runs `bin/fm-wake-drain.sh --stage`, a main-actor presentation that commits nothing a later drain would not present again.
+It claims rows and publishes a missing downtime generation as any drain does, because both are re-presented until acknowledged.
+It does not begin handling the recovery episode, because the rewake commit requires the marker still in downtime; the hook begins handling right after that commit.
+It does not advance the status-presentation cursor behind `UNREAD STATUS` and does not mark branch outcomes read, because Claude drops the exit-2 rewake of a hook it killed at its timeout, so a presentation committed before delivery could be lost.
+Those two commits, and the `BRANCH OUTCOMES` mark-processed, happen only through the acknowledgement that commits the receipt.
+Captain outcomes were already safe, because every drain presents them again until mark-processed.
+
+### Delivery order
+
+1. The staged drain writes its receipt.
+2. The hook commits the rewake generation.
+3. The hook begins handling the episode the receipt names; a moved generation falls back to the plain banner.
+4. The hook records the pending acknowledgement bound to the session id and the session-lock pid.
+5. The banner carries the presentation under its byte and line caps, with a cut note that names the plain drain as the full view; main handles the wake from it and runs the drain again only when the banner says it was cut.
+
+Any failure in that chain falls back to the banner that asks main to drain and acknowledge itself, and the receipt is removed.
+
+### The turn-end acknowledgement
+
+The next Stop of the same session is the end of the handling turn.
+Before that Stop's hook arms the next cycle, it claims the pending record (one atomic rename, so parallel Stop firings never acknowledge twice) and runs the recorded acknowledgement: queue rows through the presented sequence, the recovery episode by its generation, the staged status cursor (never backwards), the branch-outcome read cursor, and the mark-processed target.
+A record whose session id or session-lock pid no longer matches is dropped unrun.
+A step that cannot be applied is reported in `state/wake-ack.log` and the lines it covered are presented again; the safe side of every failure is one more presentation.
+
+### Keeping a wake open
+
+`bin/fm-wake-ack.sh hold` keeps the current wake open past this turn: the turn end drops the pending acknowledgement unrun, the hold is consumed, and the next drain presents the same rows, status lines, and outcomes again.
+
+### Interrupted and errored turns
+
+Claude Code fires no Stop for a turn the captain interrupts: a mid-stream Escape fired neither `Stop` nor `StopFailure` on Claude Code 2.1.302 ([verification](verification/supervision.md#interrupted-turns-and-the-turn-end-acknowledgement)), and a turn that ends in an API error fires `StopFailure`, not `Stop`.
+So neither turn reaches the acknowledging Stop, and the wake stays queued.
+The pending record is then stale, and the tracked `UserPromptSubmit` entry (`bin/fm-wake-ack.sh void`) drops it unrun when the next prompt reaches the session, before any later Stop could run it.
+The pre-drained wake's own delivery is not such a prompt: an `asyncRewake` exit 2 does fire `UserPromptSubmit`, with the hook's stderr as the payload's `prompt` ([verification](verification/supervision.md#asyncrewake-delivery-fires-userpromptsubmit)).
+So each pending record carries a fresh random nonce, the banner prints it, and `void` keeps the record, consuming nothing, when the prompt contains that nonce; any other prompt voids it.
+The same void fires for a steer, a background subagent's return, or a cross-session message that reaches the session during the handling turn; the wake is then presented once more at the next drain, which is the deliberate safe side.
+A session that restarts drops the record on its first Stop, and its session-start digest presents the queue as before.
+
+### Empty plumbing closes
+
+This is a deliberate exception to the rule that main's wakes are not gated, limited to supervision plumbing.
+The hook absorbs a close only when all of these hold:
+
+- Every actionable line of the close is `check: rearm-resurface` or `check: inactive-outcome`.
+- The staged presentation printed nothing at all: no queue row, no `UNREAD STATUS`, `OPEN DECISIONS`, `RECORD DIVERGENCE`, `STATUS OUTCOME BACKSTOP`, or `BRANCH OUTCOMES` line, and no drain notice.
+- The hook still has at least `FM_CLAUDE_AUTOARM_SUPPRESS_MIN` seconds (default 1800) of its registered timeout left.
+
+It then acknowledges the close itself and re-arms in the same process, bounded to the hook's remaining budget.
+A supervision-host re-park ends at that bound with its cycle boundary; a watcher re-arm still open at it is stopped and delivered as an ordinary pre-drained `check: hook-budget` wake, so Claude never kills the hook silently at its timeout.
+A signal, a `needs-decision`, a check with rows, a heartbeat, any `supervision-host:` line, and any presentation with content are delivered unchanged.
+The host's cycle boundary is delivered even when empty: it exists to end the hook before its registered timeout, and nothing inside that hook can outlive it.
 
 ## Per-actor acknowledgement
 
@@ -512,6 +573,11 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
+- The pre-drained banner carrying the staged presentation, the pending acknowledgement recorded and run at the next Stop, the hold consumed unrun, an interrupted turn's record voided by the next prompt while the rewake's own delivery keeps it, a session mismatch dropped unrun, and the plain-banner fallback when staging fails.
+- Empty `check: rearm-resurface` and `check: inactive-outcome` closes acknowledged and re-armed without a rewake, the same closes with rows or near the hook timeout delivered, the re-arm bounded to the hook budget, the host cycle boundary never absorbed, and a signal with an empty presentation delivered.
+
+`tests/fm-wake-drain-stage.test.sh` covers the staged presentation: nothing committed at stage time, the receipt's contents, the commit at acknowledgement, and its monotonic status cursor.
+`tests/fm-wake-ack.test.sh` covers the pending record's commands and exit codes.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
