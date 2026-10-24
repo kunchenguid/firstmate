@@ -8,8 +8,8 @@
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
-#      including newlines, with a doorbell naming the inbox glob, numeric order,
-#      and handled/.
+#      including newlines, with a short constant doorbell naming the inbox
+#      glob, ordered processing, and handled/.
 #   2. Sequencing dedups per worker lifetime: the handled mv retires a record,
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #      The idempotent enqueue (the remote steer leg's primitive) additionally
@@ -185,9 +185,8 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "list \"\$FM_TASK_INBOX\"/*.msg" "doorbell should list all unhandled records through FM_TASK_INBOX"
-  assert_contains "$doorbell" "'t1.inbox' steering inbox" "doorbell should quote and name the inbox"
-  assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
+  assert_contains "$doorbell" "act on \"\$FM_TASK_INBOX\"/*.msg" "doorbell should act on all unhandled records through FM_TASK_INBOX"
+  assert_contains "$doorbell" "in order" "doorbell should require ordered processing"
   assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
@@ -216,8 +215,9 @@ test_doorbell_is_a_shell_noop() {
     ': '*) ;;
     *) fail "the doorbell must start with the shell no-op prefix, got: $doorbell" ;;
   esac
-  assert_contains "$doorbell" "'\\''s space.inbox'" \
-    "the doorbell should escape an embedded single quote in its quoted inbox name"
+  case "$doorbell" in
+    *"s space"*) fail "the doorbell must not carry the inbox name, got: $doorbell" ;;
+  esac
   before=$(ls -R "$state/$task.inbox")
   for sh in sh bash zsh; do
     command -v "$sh" >/dev/null 2>&1 || continue
@@ -240,7 +240,36 @@ test_doorbell_is_a_shell_noop() {
   pass "inbox: a hostile-name doorbell executes as a no-op in bare shells"
 }
 
-test_doorbell_rejects_terminal_controls() {
+# A Claude composer in a short pane shows only its last few wrapped rows (4 in
+# an 18-row pane), and the Herdr composer proof refuses a line whose head
+# scrolled out of view: a 191-character doorbell wrapped to 5 rows in a
+# 57-column pane and never reached the worker. The doorbell must stay short
+# for every task, including the longest task id a spawn accepts (64
+# characters). Claude wraps at word boundaries, so the line must also fit 2
+# rows of a 53-column pane's 51-column composer (2 columns go to the prompt
+# glyph) once word-wrapped, the narrowest geometry verified live.
+test_doorbell_fits_a_short_composer() {
+  local state long rec rec2 doorbell doorbell2 rows
+  state="$TMP_ROOT/short/state"
+  mkdir -p "$state"
+  long=$(printf 'a%.0s' $(seq 1 64))
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" "$long" "please continue")
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
+  [ "${#doorbell}" -le 90 ] \
+    || fail "the doorbell for a 64-character task id is ${#doorbell} characters, over 90: $doorbell"
+  [ "$doorbell" = "$doorbell2" ] \
+    || fail "the doorbell length must not depend on the task id:"$'\n'"$doorbell"$'\n'"$doorbell2"
+  rows=$(printf '%s\n' "$doorbell" | fold -s -w 51 | wc -l)
+  [ "$rows" -le 2 ] \
+    || fail "the doorbell word-wraps to $rows rows in a 51-column composer, over 2:"$'\n'"$(printf '%s\n' "$doorbell" | fold -s -w 51)"
+  pass "inbox: the doorbell stays within 90 characters and 2 composer rows of a 53-column pane"
+}
+
+# An inbox name never reaches the pane: a name carrying terminal controls still
+# rings only the constant line, so no control byte or crafted command is typed.
+test_doorbell_never_types_the_inbox_name() {
   local dir state task rec doorbell control label log marker rc
   dir="$TMP_ROOT/control-path"
   state="$dir/state"
@@ -254,21 +283,20 @@ test_doorbell_rejects_terminal_controls() {
     esac
     task="${control}touch marker; # $label"
     rec=$(inbox_lib "$state" fm_task_inbox_write "$state" "$task" "please continue")
-    doorbell=
-    rc=0
-    doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") || rc=$?
-    [ "$rc" -ne 0 ] || fail "a $label inbox name should make doorbell construction fail"
-    [ -z "$doorbell" ] || fail "a rejected $label inbox name emitted doorbell bytes"
+    doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
     log="$dir/$label.send.log"; : > "$log"
     rc=0
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
       inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
-    [ "$rc" = 2 ] || fail "a rejected $label inbox name should return send-failed status 2, got $rc"
-    [ ! -s "$log" ] || fail "a $label inbox name reached send-keys:"$'\n'"$(cat "$log")"
+    [ "$rc" = 0 ] || fail "a $label inbox name should still ring the constant doorbell, got $rc"
+    grep -qF "$doorbell" "$log" || fail "a $label inbox name did not ring the doorbell:"$'\n'"$(cat "$log")"
+    if grep -q "$control" "$log"; then
+      fail "a $label inbox name reached send-keys:"$'\n'"$(cat "$log")"
+    fi
     [ ! -e "$marker" ] || fail "a $label inbox name executed its crafted command"
-    [ -f "$rec" ] || fail "rejecting a $label inbox name removed the durable record"
+    [ -f "$rec" ] || fail "ringing for a $label inbox name removed the durable record"
   done
-  pass "inbox: terminal-control inbox names are rejected without typing"
+  pass "inbox: terminal-control inbox names never reach the pane"
 }
 
 # fm_task_inbox_ring against a backend whose agent classifies dead or missing:
@@ -694,7 +722,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" "$log" \
+  grep -qF "Firstmate instruction waiting: act on \"\$FM_TASK_INBOX\"/*.msg in order" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
@@ -1195,7 +1223,8 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
-test_doorbell_rejects_terminal_controls
+test_doorbell_fits_a_short_composer
+test_doorbell_never_types_the_inbox_name
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
 test_idempotent_write_dedups_exact_body

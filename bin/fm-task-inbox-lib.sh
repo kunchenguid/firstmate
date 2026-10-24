@@ -326,31 +326,22 @@ EOF
   dd if="$1" bs=1 skip="$body_offset" count="$count" 2>/dev/null
 }
 
-# The constant self-describing doorbell line for the inbox containing a record.
+# The constant self-describing doorbell line every inbox rings.
 # It names the inbox by the literal "$FM_TASK_INBOX", which bin/fm-spawn.sh
 # exports into every launch as the inbox's absolute path, so the worker can
 # resolve it from its own environment even after losing its brief context.
-# The short `<task>.inbox` name follows as the fallback for a worker launched
-# before that export, whose brief carries the full path (bin/fm-dod-lib.sh
-# role contract, bin/fm-brief.sh inbox section). No absolute path is printed,
-# so the line's length never grows with the home's depth: a long line wraps
-# past what a harness composer read can prove, and a Herdr submit then reports
-# it did not reach the pane on every re-ring. The leading `: ` is the POSIX
-# shell no-op, so the same line typed into a pane whose agent has exited (a
-# bare shell) runs nothing; see the dead-pane note in the header. A
-# non-printable inbox name fails without output so terminal controls never
-# reach the pane's line discipline.
-fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs name quoted LC_ALL=C
-  abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  abs=${abs%/handled}
-  name=${abs##*/}
-  case "$name" in
-    ''|*[![:print:]]*) return 1 ;;
-  esac
-  quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
-  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
-    "$quoted"
+# A worker launched before that export finds the full path in its brief
+# (bin/fm-dod-lib.sh role contract, bin/fm-brief.sh inbox section).
+# The line carries no path and no task name, so its length is fixed and stays
+# at most 90 characters, word-wrapping to 2 rows even in a 53-column pane: a
+# Claude composer in a short pane shows only its last few wrapped rows, and a
+# longer line whose head scrolls out of view fails the Herdr composer proof, so
+# the submit reports it did not reach the pane on every re-ring. The leading `: ` is the POSIX shell no-op, so the same line
+# typed into a pane whose agent has exited (a bare shell) runs nothing; see the
+# dead-pane note in the header.
+fm_task_inbox_doorbell_line() {
+  # shellcheck disable=SC2016 # the literal "$FM_TASK_INBOX" is the point
+  printf ': Firstmate instruction waiting: act on "$FM_TASK_INBOX"/*.msg in order, mv to handled/'
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
@@ -371,14 +362,14 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
+# The record path is accepted for the callers' contract only: the line is the
+# same for every record, since the worker drains the whole inbox.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
-  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
-    return 2
-  fi
+  line=$(fm_task_inbox_doorbell_line)
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
