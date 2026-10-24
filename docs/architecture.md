@@ -309,6 +309,13 @@ Rex is experimental and can be selected explicitly or by runtime auto-detection 
 Rex puts one tab per task into Firstmate's own session when Firstmate runs directly inside Rex, and otherwise into one session per home; the immutable block id is the routing authority, and Rex's never-reused ids plus a recorded server endpoint give it the control plane's absence proof alongside Herdr.
 Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
+### Virtual-display launch safety
+
+A virtual display such as Xvfb can turn fail-fast startup into wait-forever behavior because software that would exit without a display may instead open an unrecoverable-error dialog and wait indefinitely once a display exists.
+Process liveness is not progress, so an alive process that has made no bounded startup or operational progress is not evidence that it is working.
+Before selecting a virtual display, determine what the application does on an unrecoverable error when a display exists; if it opens a dialog, any liveness-only launch check is invalid.
+Prefer the application's own no-GUI flag so rejected startup exits non-zero, and require a bounded startup or progress probe whose timeout fails the launch.
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for session-provider-only backends, while Orca creates its own worktrees for `backend=orca`.
