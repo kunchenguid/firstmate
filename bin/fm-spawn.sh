@@ -2387,7 +2387,11 @@ omp_model_validate() { # <omp-bin> <model>
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$model" in */*) ;; *) return 0 ;; esac
   command -v jq >/dev/null 2>&1 || return 0
-  listing=$(OMP_SKIP_SETUP=1 "$bin" models --json 2>/dev/null) || return 0
+  # --no-extensions: the listing must not load the home's tracked primary
+  # extensions. Run from the home as a descendant of the lock-owning primary, the
+  # nested omp would pass their ownership check and overwrite the primary's
+  # extension load markers with its own short-lived pid.
+  listing=$(OMP_SKIP_SETUP=1 "$bin" models --json --no-extensions 2>/dev/null) || return 0
   providers=$(printf '%s' "$listing" | jq -r '.models[]?.provider // empty' 2>/dev/null | sort -u) || return 0
   [ -n "$providers" ] || return 0
   provider=${model%%/*}

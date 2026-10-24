@@ -2952,6 +2952,7 @@ After the rule, the same live Herdr capture read `empty`, a steer's doorbell lan
 | Interrupt | `bin/fm-control.sh <id> interrupt` delivered a single Escape (`verified=agent-alive cancel=unconfirmed`), the composer read `empty`, and omp raised `agent_end` |
 | Exit | `bin/fm-control.sh <id> exit` typed `/quit`; Herdr then reported the pane `dead` |
 | Extension loading | a file named both by `-e` and by `<cwd>/.omp/extensions` loads twice; discovery is top-level and cwd-only |
+| Model listing | on 2026-10-12 with omp 18.7.0 on Linux, `omp models --json` run from the home under a lock-owning ancestor discovered the tracked extensions and rewrote both primary load markers with its own pid; with `--no-extensions` no marker was written and the catalog was the same 727 selectors |
 | Extension tools | the openai-codex model invokes a registered tool by writing `xd://<tool>` through omp's virtual-file bridge |
 
 ### End-to-end
