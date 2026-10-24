@@ -457,6 +457,67 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 
+# An inactive-outcome check for a done child repeats a result main already has
+# when the outcome store holds a captain outcome recorded on the child's
+# current log at or after its last done line, so the attended host takes it,
+# scoped to that child. A failed child, a done line no captain outcome covers,
+# or a notice row keeps the close on main, and so does the Pi watcher's offer.
+test_dispatch_offer_takes_an_inactive_outcome_main_already_has() {
+  local home state out reason='check: inactive-outcome' done_payload
+  home="$TMP_ROOT/dispatch-inactive"
+  state="$home/state"
+  mkdir -p "$state"
+  printf 'project=demo\nwindow=fm-demo\n' > "$state/demo.meta"
+  printf 'project=demo\nwindow=fm-other\n' > "$state/other.meta"
+  printf 'paused [at=1792329000]: running the focused tests\n' > "$state/demo.status"
+  done_payload='inactive terminal outcome awaiting captain presentation: child=demo state=done'
+  append_wake "$state" check inactive-outcome:aa11 "$done_payload"
+
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a done child with no done line must keep the close on main"
+  printf 'done [at=1792330000]: ready in branch fm/demo\n' >> "$state/demo.status"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a done child main never had a captain outcome for must stay main's"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict routine --summary 'still running' >/dev/null \
+    || fail "fixture: could not record a routine outcome"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a routine outcome never reached main, so it covers nothing"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict captain --summary 'ready to land' >/dev/null \
+    || fail "fixture: could not record a captain outcome"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=1" "a done result main already has must be the host's"
+  assert_contains "$out" "rows=1" "the host must claim the inactive-outcome row"
+  assert_contains "$out" "tasks=demo" "the claim must be scoped to the child"
+  assert_contains "$out" "unscoped=0" "the claim must not be unscoped like an away check row"
+  printf 'paused [at=1792331000]: waiting for the landing call\n' >> "$state/demo.status"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=1" "a line after the covered done line must leave the branch to confirm it"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node --input-type=module -e '
+    const dispatch = await import(process.argv[1]);
+    const verdict = dispatch.branchOfferForWake(process.env.FM_HOME + "/state", "check: inactive-outcome", false);
+    process.stdout.write(`eligible=${verdict.eligible ? 1 : 0}\n`);
+  ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts")
+  assert_contains "$out" "eligible=0" "the Pi watcher's offer must keep the close on main"
+
+  printf 'done [at=1792332000]: ready again in branch fm/demo after a rebase\n' >> "$state/demo.status"
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a done line after the captain outcome must stay main's"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict captain --summary 'ready again' >/dev/null \
+    || fail "fixture: could not record the second captain outcome"
+
+  append_wake "$state" check inactive-outcome:bb22 \
+    'inactive terminal outcome awaiting captain presentation: child=other state=failed'
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a failed child is news, so the close must stay main's"
+  : > "$state/.wake-queue"
+  append_wake "$state" check inactive-outcome:aa11 "$done_payload"
+  append_wake "$state" check inactive-reconcile:cc33 'inactive terminal outcome needs parent report: child=demo state=done'
+  out=$(printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer)
+  assert_contains "$out" "eligible=0" "a reconcile notice left for main must keep the close on main"
+  pass "dispatch entry: the host takes an inactive-outcome check only when it repeats a done result main already has"
+}
+
 # --- host loop ----------------------------------------------------------------
 
 
@@ -490,11 +551,13 @@ test_branch_outcomes_only_on_a_host_home_off_pi() {
   assert_absent "$home/state/.branch-outcomes-cursor" "a Pi primary's drain must not advance the store's read cursor"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "[seq 1, recorded 0m ago] demo: PR ready for review" "a Claude home without config/supervision-host must present the captain outcome"
+  assert_re '^\[seq 1, recorded [0-9]+m ago\] demo: PR ready for review$' <(printf '%s\n' "$drained") \
+    "a Claude home without config/supervision-host must present the captain outcome"
 
   : > "$home/config/supervision-host"
   drained=$(FM_HOME="$home" "$fakes/codex" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "[seq 1, recorded 0m ago] demo: PR ready for review" "a Codex home with config/supervision-host must present the captain outcome"
+  assert_re '^\[seq 1, recorded [0-9]+m ago\] demo: PR ready for review$' <(printf '%s\n' "$drained") \
+    "a Codex home with config/supervision-host must present the captain outcome"
   pass "drain: BRANCH OUTCOMES runs on a Claude home by default and on another primary with the file, never with off, and never on Pi"
 }
 
@@ -611,9 +674,13 @@ test_branch_outcomes_present_a_long_away_window_once() {
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null 2>&1 || fail "fixture: could not archive the away posture"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "[seq 33, newest of 3 for this task, recorded 0m ago] alpha: alpha still needs review 30" "a task's repeated captain outcomes must collapse to its newest"
+  # Building the window can cross a minute on a busy host; this case owns
+  # collapse and acknowledgement, not how quickly its fixture is appended.
+  assert_re '^\[seq 33, newest of 3 for this task, recorded [0-9]+m ago\] alpha: alpha still needs review 30$' <(printf '%s\n' "$drained") \
+    "a task's repeated captain outcomes must collapse to its newest"
   [ "$(printf '%s\n' "$drained" | grep -c '] alpha: ')" -eq 1 ] || fail "a task's captain outcomes must take one line: $drained"
-  assert_contains "$drained" "[seq 44, recorded 0m ago] beta: beta ready to merge" "another task's captain outcome must keep its own line"
+  assert_re '^\[seq 44, recorded [0-9]+m ago\] beta: beta ready to merge$' <(printf '%s\n' "$drained") \
+    "another task's captain outcome must keep its own line"
   assert_re '^\([0-9]+ earlier routine outcome\(s\) not shown; bin/fm-branch-outcome.sh list keeps them\)$' <(printf '%s\n' "$drained") \
     "the window's routine overflow must collapse into one count"
   assert_contains "$drained" "routine 40 $pad" "the newest routine outcome must be listed"
@@ -3217,6 +3284,7 @@ test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail
+test_dispatch_offer_takes_an_inactive_outcome_main_already_has
 test_branch_outcomes_only_on_a_host_home_off_pi
 test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
 test_branch_outcomes_collapse_repeated_captain_outcomes_per_task

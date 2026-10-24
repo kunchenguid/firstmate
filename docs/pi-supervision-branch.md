@@ -96,8 +96,9 @@ A successful row grant transfers ownership of exactly the currently branch-eligi
 
 What is never offered, or falls back to main:
 
-- While attended, a check-kind triggering close is never offered, even when other rows are eligible.
+- While attended, a check-kind triggering close stays on main even when other rows are eligible, except for the supervision-host case below.
   Check-kind closes are merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class.
+  On the attended supervision host only, `check: inactive-outcome` is offered when every row `bin/fm-inactive-reconcile.sh` queued repeats a done result main already has: a done child with a captain outcome in the outcome store tied to its current status log and recorded at or after its last `done` line; that row is claimed scoped to the child, and any other such row (a failed child, an uncovered done, a notice) keeps the close on main.
 - When a triggering close has no acceptor (extension absent, branch broken), it keeps today's wake-to-main path.
 - Watcher-failure alarms always go to main, because only main can repair the watcher cycle.
 
@@ -113,11 +114,14 @@ A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the same
 - A `captain-held` declaration surfaced through the no-verb fallback.
 - A pending-reply second-mate escalation.
 
-`scopeForUnreadWake` excludes every marked row from what the branch may claim, as well as second-mate signals classified by the span rule below.
+`scopeForUnreadWake` excludes a marked row from what the branch may claim, except a second-mate row the span rule below explains as an unchanged re-record.
+It also excludes second-mate signals that span classifies as decision-owned.
 
 A second mate's status log is one shared channel carrying many independently keyed decisions, so its signal row is judged by the lines presented since the last drain rather than by the whole log.
 The row is excluded when one of those lines is a decision, blocked, or captain-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
+Two lines that only echo what main already holds stay routine: a decision line that re-records a decision still open under the same key with the same note, and a resolution this home appended itself (main's own `fm-send --resolve-key` close, recorded in `bin/fm-classify-lib.sh`'s home-appends ledger).
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
+A second mate's row the watcher marked `needs-decision:` stays main's unless a cursor-bounded span explains the mark as such an unchanged re-record and holds nothing decision-owned.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
 Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
@@ -184,10 +188,11 @@ A settled provider error, or a settled prompt with no report, releases the grant
 
 #### Report scoping
 
-While a signal or stale prompt is open, `fm_branch_report` accepts only the tasks that prompt's claimed rows resolve to:
+While a prompt is open, `fm_branch_report` accepts only the tasks that prompt's claimed rows resolve to:
 
 - A signal row resolves by its status-log key.
 - A stale row resolves through the task record naming that endpoint.
+- An attended host's eligible inactive-outcome row resolves to the child it names.
 
 A report for any other task id, `fleet` included, is refused before the store is touched.
 That way, a task remembered from an earlier wake cannot become a delivered outcome.
@@ -480,9 +485,8 @@ The branch accepts it without a project only when every branch-ownable row obser
 ### Co-present main-owned rows
 
 A heartbeat is never vetoed or ridden into main by a co-present check row or decision-owned signal/stale row.
-Those rows are main-owned while attended.
-They are excluded from what the branch may claim and left queued for main.
-Main is woken for each on its own watcher cycle, so nothing starves by being left behind.
+[Wake dispatch](#wake-dispatch) owns which of those rows stay main's while attended.
+Main is woken for each main-owned row on its own watcher cycle, so nothing starves by being left behind.
 Under the away-posture record the branch claims them too ("Postures" below).
 
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet.

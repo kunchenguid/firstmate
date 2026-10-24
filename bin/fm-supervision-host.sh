@@ -1090,9 +1090,10 @@ while :; do
   # The away daemon owns triage while its flag exists; the owner stands down.
   # A close with no wake is the arm's own failure or attach result, which the
   # owner judges exactly as it judges the arm's. Exit status 0 in both: a
-  # status above 128 tells the owner the host itself died.
+  # status above 128 tells the owner the host itself died. The log keeps the
+  # arm's own line, so a run of these reads as the arm failure it is.
   if [ -z "$REASON" ]; then
-    log_line "pass-through	a close without a wake"
+    log_line "pass-through	a close without a wake	$(printf '%s\n' "$ARM_TEXT" | grep -m 1 . | tr '\t' ' ')"
     emit
     exit 0
   fi

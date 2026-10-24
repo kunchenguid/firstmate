@@ -69,6 +69,17 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  # The attended host takes these wakes so they stay off the captain's thread;
+  # the verdict rule is what keeps a still-holding wait or an echo from coming
+  # back to main as a captain outcome, while a cleared wait still does.
+  case "$out_a" in
+    *"A stale wake that rechecks a worker's declared external wait asks you to confirm the wait"*"no merge, close, new review, or new CI failure"*"report verdict routine with silent true"*"Report verdict captain when that wait no longer holds or you cannot tell."*) ;;
+    *) fail "branch prompt lost the declared external-wait recheck verdicts" ;;
+  esac
+  case "$out_a" in
+    *"only echoes a decision MAIN already answered"*"a captain hold re-recorded unchanged, and its reply to the restart request to persist its open records are verdict routine; a changed hold or a new decision in the same wake is verdict captain."*) ;;
+    *) fail "branch prompt lost the second-mate echo, re-record, and persist-reply verdicts" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
