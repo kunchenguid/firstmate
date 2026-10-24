@@ -5164,10 +5164,29 @@ EOF
   return 1
 }
 
+# Copy task record $1 to $2 with each given key=value line replacing any prior
+# line for that key. The fresh lines go ahead of the first pr= line, because
+# fm_pr_metadata_identity_parse refuses any other key written after pr=.
+spawn_meta_rewrite_keys() {
+  local meta=$1 tmp=$2 lines
+  shift 2
+  lines=$(printf '%s\n' "$@")
+  FM_SPAWN_META_LINES=$lines awk '
+    BEGIN {
+      n = split(ENVIRON["FM_SPAWN_META_LINES"], fresh, "\n")
+      for (i = 1; i <= n; i++) drop[substr(fresh[i], 1, index(fresh[i], "=") - 1)] = 1
+    }
+    { key = substr($0, 1, index($0, "=") - 1) }
+    key in drop { next }
+    !done && key == "pr" { for (i = 1; i <= n; i++) print fresh[i]; done = 1 }
+    { print }
+    END { if (!done) for (i = 1; i <= n; i++) print fresh[i] }
+  ' "$meta" >"$tmp"
+}
+
 # Bind the discovered session into task metadata (the control verbs' durable
 # address), in the same locked-filter-and-publish shape spawn_record_traceparent
-# uses: an idempotent rewrite that drops any prior polytoken_* binding before
-# appending the fresh one.
+# uses: an idempotent rewrite that replaces any prior polytoken_* binding.
 spawn_record_polytoken_session() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -5178,12 +5197,10 @@ spawn_record_polytoken_session() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential"' "$meta" >"$SPAWN_META_TMP" ||
-    ! {
-      echo "polytoken_session=$POLYTOKEN_SESSION_ID"
-      echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
-      echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
-    } >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_keys "$meta" "$SPAWN_META_TMP" \
+      "polytoken_session=$POLYTOKEN_SESSION_ID" \
+      "polytoken_port=$POLYTOKEN_SESSION_PORT" \
+      "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -6291,11 +6308,13 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  # Preserved keys go last: they can carry the pr=/pr_head= identity tail,
+  # and fm_pr_metadata_identity_parse refuses any other key written after pr=.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -6658,8 +6677,7 @@ spawn_record_traceparent() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_keys "$meta" "$SPAWN_META_TMP" "traceparent=$SPAWN_TRACEPARENT" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
