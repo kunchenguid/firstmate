@@ -1733,7 +1733,7 @@ Backend tool availability uses the adapter's own executable resolver, so bootstr
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
-A herdr, zellij, cmux, paseo, or rex home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
+A herdr, zellij, cmux, paseo, or rex home is therefore never told `tmux` is missing, and the `treehouse` capability upgrade check - the durable lease plus the per-home worktree root - runs only for the backends that actually use treehouse.
 
 **Feature-specific requirements**
 
@@ -1745,7 +1745,7 @@ A herdr, zellij, cmux, paseo, or rex home is therefore never told `tmux` is miss
 `tasks-axi` and `quota-axi` are essential bootstrap tools in every profile.
 An absent required tool with an automated install path reports `MISSING:` with its install command, while a present required tool below its floor or missing a required capability reports `OUTDATED:` with its installed version (or `unparseable`), requirement, and upgrade command; manual-only and presentation-only dependencies retain their dedicated diagnostics, and [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns these exact line formats.
 
-- An absent `treehouse` reports `MISSING:` with its install command, while an installed build without `treehouse get --lease` support reports `OUTDATED:` with the `treehouse update` upgrade.
+- An absent `treehouse` reports `MISSING:` with its install command, while an installed build without `treehouse get --lease` and global `--root` support reports `OUTDATED:` with the `treehouse update` upgrade.
 - An absent `no-mistakes` reports `MISSING:` with its install command, while a version below 1.46.0 or an unparseable version reports `OUTDATED:` with the `no-mistakes update` upgrade.
 - An absent `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and a below-floor or feature-incompatible one reports `OUTDATED:` with its required version and any missing feature-probe capability, while retaining that same `npm install -g tasks-axi` upgrade; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
 - An absent `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
