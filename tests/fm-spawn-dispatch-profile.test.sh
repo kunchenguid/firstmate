@@ -22,11 +22,12 @@ make_spawn_pi_probe() {
 set -u
 if [ "${1:-}" = --help ]; then
   # Mirror real Pi help advertising: 0.82.0 has --approve but not --tui-mode;
-  # 0.50.0 is a synthetic pre-approve probe; current defaults advertise both.
+  # 0.50.0 is a synthetic pre-approve probe; current defaults advertise
+  # --tui-mode and both project trust flags.
   case "${FM_FAKE_PI_VERSION:-0.84.0}" in
   0.50.0) printf '%s\n' 'Pi 0.50.0' 'Options: --help' ;;
   0.82.0) printf '%s\n' 'Pi 0.82.0' 'Options: --help --approve' ;;
-  *) printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode> --approve' ;;
+  *) printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode> --approve, -a --no-approve, -na' ;;
   esac
 fi
 exit 0
@@ -1307,7 +1308,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --no-approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
@@ -1329,7 +1330,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --no-approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
@@ -1453,20 +1454,42 @@ test_pi_seeded_secondmate_preapproves_project_trust() {
 }
 
 test_pi_worker_launch_omits_seeded_home_approve() {
-  local rec id out status launch
-  id=profile-pi-worker-no-approve-z8f
-  rec=$(make_spawn_case profile-pi-worker-no-approve pi "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "pi ship spawn should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular" \
-    "pi worker launch lost its regular TUI probe"
-  assert_not_contains "$launch" "--approve" \
-    "ordinary Pi worker launches must not receive secondmate seeded-home --approve"
-  pass "ordinary Pi worker launches omit --approve"
+  local harness kindflag rec id out status launch version
+  for harness in pi pi-signed; do
+    for kindflag in --ship --scout; do
+      id="profile-${harness}-worker-${kindflag#--}-z8f"
+      rec=$(make_spawn_case "profile-${harness}-worker-${kindflag#--}" "$harness" "$id")
+      read_case_record "$rec"
+      if [ "$kindflag" = --scout ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness ${kindflag#--} spawn should succeed"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" "FM_PI_HARNESS=$harness '$FAKEBIN_DIR/$harness' --tui-mode regular --no-approve" \
+        "$harness ${kindflag#--} launch must ignore project .pi resources so a fresh worktree never stalls on the trust menu"
+      assert_not_contains "$launch" "--approve" \
+        "ordinary Pi worker launches must not receive secondmate seeded-home --approve"
+    done
+  done
+  # A Pi without an advertised --no-approve still launches, without the flag.
+  for version in 0.50.0 0.82.0; do
+    id="profile-pi-worker-probe-${version//./-}-z8f"
+    rec=$(make_spawn_case "profile-pi-worker-probe-${version//./-}" pi "$id")
+    read_case_record "$rec"
+    out=$(FM_TEST_PI_VERSION=$version \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "pi $version worker spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" " --no-approve" \
+      "pi $version worker without advertised --no-approve must omit the flag"
+    assert_not_contains "$launch" " --approve" \
+      "pi $version worker must never receive --approve"
+  done
+  pass "Pi ship and scout launches carry --no-approve when advertised and never --approve"
 }
 
 test_pi_approve_probe_omits_unsupported_flag() {

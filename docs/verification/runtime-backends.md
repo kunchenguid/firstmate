@@ -551,23 +551,24 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
-## Pi seeded-secondmate project trust
+## Pi project trust
 
-[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.
-The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
+[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the Pi project-trust flag contract and compatibility fallback: seeded secondmates get `--approve`, ship and scout workers get `--no-approve`.
+The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes and worker-shaped worktrees; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
 
-Verified 2026-10-02 on pi 0.82.0 through the default-on live guard (disposable `PI_CODING_AGENT_DIR` / `HOME` only; never `~/.pi`):
+Verified 2026-10-11 on pi 1.1.0 through the default-on live guard (disposable `PI_CODING_AGENT_DIR` / `HOME` only; never `~/.pi`):
 
 ```sh
 bash tests/fm-pi-seeded-home-trust-live-e2e.test.sh
 ```
 
 ```
-# live pi version: 0.82.0
+# live pi version: 1.1.0
 ok - fresh seeded Pi secondmate-shaped home stalls on Trust project folder? without --approve
 ok - seeded home with --approve starts past the trust dialog without rewriting trust.json
 ok - unseeded path without --approve still prompts on Trust project folder?
-# all fm-pi-seeded-home-trust-live-e2e checks passed (3)
+ok - worker worktree with --no-approve starts past the trust dialog without running project .pi code or rewriting trust.json
+# all fm-pi-seeded-home-trust-live-e2e checks passed (4)
 ```
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
