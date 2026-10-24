@@ -1133,6 +1133,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # Return codes: 0 the pane is confirmed gone (FM_BACKEND_HERDR_CLOSE_IDLE_REASON
 # says "already gone" when nothing had to be closed), 1 refused with the reason
 # in FM_BACKEND_HERDR_CLOSE_IDLE_REASON.
+# shellcheck disable=SC2034  # callers consume the refusal-reason global
 fm_backend_herdr_close_idle_endpoint() {  # <session> <pane-id> [expected-shell-pid]
   local session=$1 pane_id=$2 expected=${3:-} state shell_pid close_status=0
   FM_BACKEND_HERDR_CLOSE_IDLE_REASON=""
@@ -3282,6 +3283,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # response is unusable on this client (unknown option, unreadable response, or
 # any error other than a timeout), so a caller can fall back rather than read
 # an unsupported verb as "no output".
+# shellcheck disable=SC2034  # callers consume the matched-line global
 fm_backend_herdr_wait_output() {  # <session> <pane-id> <match|regex> <pattern> <timeout-ms>
   local session=$1 pane=$2 mode=$3 pattern=$4 timeout=$5 out rc=0 code
   FM_BACKEND_HERDR_WAIT_OUTPUT_LINE=""
