@@ -46,6 +46,7 @@ ok - devin 3000.11.1 (cc4e349ca55e): /quit and native -r session resume
 `devin --help` on that build still documents a prompt after `--`, `--prompt-file`, `--permission-mode`, `--respect-workspace-trust`, `--model` (`DEVIN_MODEL`), and `-r`/`--resume`.
 That help text still has no effort flag.
 `devin models list` marks `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and prices every other family, including SWE-2 Lightning.
+The same listing prices Claude, GPT, Gemini, and Grok families, and this scout selected none of them.
 
 The scout was `bin/fm-spawn.sh --scout --harness devin --model swe-2-medium --effort low` against a scratch git repository, on a private tmux socket.
 The generated launch pinned `--permission-mode dangerous --respect-workspace-trust false --model 'swe-2-medium'` and named no priced family.
