@@ -466,6 +466,22 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 
+test_relaunch_keeps_the_pr_identity_block_parseable() {
+  local dir out rc
+  dir=$(new_case pr-parse rl20)
+  add_ship_task "$dir" rl20 claude
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/20'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$dir/home/state/rl20.meta"
+
+  out=$(run_control "$dir" rl20 relaunch --note "continuing review work"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed on a task with a PR"$'\n'"$out"
+  bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$dir/home/state/rl20.meta" \
+    || fail "relaunch left task metadata that the PR identity parser rejects: $(tr '\n' '|' < "$dir/home/state/rl20.meta")"
+  pass "fm-control relaunch: a task with a PR stays acceptable to the PR merge watch"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -2973,6 +2989,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
+test_relaunch_keeps_the_pr_identity_block_parseable
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
