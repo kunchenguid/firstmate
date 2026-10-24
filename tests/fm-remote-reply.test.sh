@@ -9,7 +9,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-reply)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-PARENT="$TMP_ROOT/parent"
+# Reach the home through a symlinked ancestor, including spaces in its target.
+mkdir -p "$TMP_ROOT/physical ancestor/parent"
+ln -s "$TMP_ROOT/physical ancestor" "$TMP_ROOT/logical-ancestor"
+PARENT="$TMP_ROOT/logical-ancestor/parent"
 REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
@@ -433,6 +436,32 @@ assert_no_grep 'done [key=retry-document]' "$PARENT/state/ios.status" \
 assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
   "local document storage failure raised a permanent remote refusal"
 rm -f "$retry_destination"
+# Canonicalizing the home must not allow redirected mirror components.
+# Retry the same uncommitted capture against a symlinked base, parent, and an
+# intermediate directory that escapes to a sibling with the base's prefix.
+mirror_base="$PARENT/data/remote-secondmates/ios"
+escape_dir="${mirror_base}-escape"
+mkdir -p "$escape_dir/reply"
+printf 'outside mirror\n' > "$escape_dir/reply/retry.md"
+for redirected in "$mirror_base" "$mirror_base/data/reply" "$mirror_base/data"; do
+  mv "$redirected" "$redirected.saved"
+  if [ "$redirected" = "$mirror_base/data" ]; then
+    ln -s "$escape_dir" "$redirected"
+  else
+    ln -s "$redirected.saved" "$redirected"
+  fi
+  if remote_env "$ADAPTER" handle ios 8 "$RESULT_EIGHT" > "$TMP_ROOT/redirected-document.out" 2>&1; then
+    fail "a symlinked mirror component committed the document delta: $redirected"
+  fi
+  assert_grep 'could not store referenced remote document' "$TMP_ROOT/redirected-document.out" \
+    "a symlinked mirror component was not refused as a local storage failure"
+  [ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$retry_cursor_before" ] \
+    || fail "a symlinked mirror component advanced the cursor"
+  [ "$(cat "$escape_dir/reply/retry.md")" = 'outside mirror' ] \
+    || fail "an escaping mirror component overwrote an outside document"
+  rm -f "$redirected"
+  mv "$redirected.saved" "$redirected"
+done
 remote_env "$ADAPTER" handle ios 8 "$RESULT_EIGHT" >/dev/null \
   || fail "the document delta did not succeed after local storage recovered"
 assert_grep 'data/remote-secondmates/ios/data/reply/retry.md' "$PARENT/state/ios.status" \
