@@ -603,6 +603,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/clean-agent-area/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/away-quiet-supervision/SKILL.md",
       "audience": "agent-runtime"
     },
