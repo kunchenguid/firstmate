@@ -55,6 +55,8 @@
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
+#     harness, model, and effort are copied from meta as strings; missing model
+#     or effort keys remain empty strings.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state. age_seconds is null when the emission time is unknown;
 #     fm-classify-lib.sh owns the optional emission-time field, and only the
@@ -743,8 +745,9 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta original_meta id kind harness model effort mode yolo project worktree home projects spawn_gen branch backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
+  local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -757,6 +760,8 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
+    effort=$(meta_value "$meta" effort)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -859,6 +864,8 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg model "$model" \
+      --arg effort "$effort" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg branch "$branch" \
@@ -892,6 +899,8 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model // ""),
+        effort:($effort // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
         branch:($branch | if . == "" then null else . end),
