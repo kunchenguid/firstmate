@@ -58,6 +58,26 @@ export FM_TEST_SEAM=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Clear the launcher identity, terminal marker, runtime-backend selector, and
+# home/state overrides a suite inherits from the terminal that started it. A
+# session running inside herdr exports HERDR_ENV/HERDR_PANE_ID/HERDR_SOCKET_PATH/...
+# into every child process, bin/fm-spawn.sh exports FM_BACKEND into task panes
+# (and FM_BACKEND outranks config/backend and runtime auto-detection), and a
+# supervisor's own shell may export a home or state override. Spawn and backend
+# fixtures then bind to the host's REAL herdr session instead of the isolated one
+# their case creates: on a herdr-hosted machine several spawn/backend suites
+# failed with `herdr launcher pane '...' belongs to the server at ... not session
+# 'default'`, or recorded a real workspace's pane path as a fixture worktree,
+# while the same suites passed in CI. bin/fm-test-run.sh already clears the
+# overrides and FM_BACKEND per worker; this covers a direct run and the herdr
+# identity, so every suite starts from the environment CI gives it. A case that
+# deliberately exercises a launcher identity, a backend, or a home/state override
+# exports its own value after this point (or inside its own subshell).
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH \
+  HERDR_SESSION HERDR_BIN_PATH HERDR_CONTAINER_RAW TERM_PROGRAM TERM_PROGRAM_VERSION \
+  FM_BACKEND FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+  FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
