@@ -208,9 +208,12 @@
 #   the next spawn's claim replaces it. A fresh spawn that fails and leaves no
 #   task record before its launch is delivered closes the endpoint it opened on
 #   every session-provider backend, returning any slot its `treehouse get`
-#   shell leased; on Herdr that close is the focus-preserving close of a pane
-#   proven to hold only a lone idle shell, and a pane that fails that proof or
-#   is the captain's attended active tab is kept and named in the refusal.
+#   shell leased; on Herdr, outside polytoken, that close is the
+#   focus-preserving close of a pane proven to hold only its own shell chain
+#   (a lone idle shell, or that shell plus the `treehouse get` subshell this
+#   spawn started, whose slot claim is dropped and slot treehouse-returned
+#   first), and a pane holding anything else, an agent above all, or that is
+#   the captain's attended active tab is kept and named in the refusal.
 #   Orca, T3 Code, and the Herdr projection own their own abort cleanup. A
 #   fresh polytoken spawn additionally retakes that lock once to drop its claim
 #   after metadata publication and removes the wiring, task temp root, and
@@ -1605,16 +1608,18 @@ spawn_orca_reclaim_launch_file() {
 
 # spawn_close_fresh_endpoint: close the endpoint a fresh spawn opened once the
 # spawn has failed before delivering its launch. Every session-provider
-# backend closes through its ordinary kill (the window or tab holds at most
-# the shell whose `treehouse get` leases the slot). Herdr instead closes
-# through fm_backend_herdr_close_idle_endpoint under the named-session
-# presentation lock, so a pane that is not provably a lone idle shell, or
+# backend, and a polytoken spawn on Herdr, closes through its ordinary kill
+# (the window or tab holds at most the shell whose `treehouse get` leases the
+# slot). Any other Herdr spawn closes under the named-session presentation
+# lock through fm_backend_herdr_close_idle_endpoint, after
+# spawn_herdr_return_get_slot has handed back the slot its own `treehouse get`
+# leased, so a pane holding anything beyond this spawn's own shell chain, or
 # whose tab is the captain's active tab with a viewer attached, is kept and
 # named rather than closed from under them. Orca, T3 Code, and the Herdr
 # projection never reach here: each owns its own abort cleanup.
 spawn_close_fresh_endpoint() {
   local abort_tab_id='' session pane held=0
-  if [ "$BACKEND" != herdr ]; then
+  if [ "$BACKEND" != herdr ] || [ "${HARNESS:-}" = polytoken ]; then
     [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
     if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
       SPAWN_ENDPOINT_CLOSED=1
@@ -1636,13 +1641,75 @@ spawn_close_fresh_endpoint() {
     fi
     held=1
   fi
-  if fm_backend_herdr_close_idle_endpoint "$session" "$pane"; then
+  if ! spawn_herdr_return_get_slot "$session" "$pane"; then
+    echo "warning: leaving herdr pane $T open after the failed spawn of $ID: $SPAWN_HERDR_RETURN_REASON; inspect window $T" >&2
+  elif fm_backend_herdr_close_idle_endpoint "$session" "$pane"; then
     SPAWN_ENDPOINT_CLOSED=1
   else
     echo "warning: leaving herdr pane $T open after the failed spawn of $ID: ${FM_BACKEND_HERDR_CLOSE_IDLE_REASON:-the close was refused}; inspect window $T" >&2
   fi
   [ "$held" -eq 0 ] || spawn_herdr_presentation_order_lock_release
   return 0
+}
+
+# spawn_herdr_return_get_slot: leave the fresh Herdr pane a lone idle shell
+# before spawn_close_fresh_endpoint closes it. A pane that already is one (the
+# `treehouse get` was never typed, or treehouse refused) needs nothing. A pane
+# holding exactly the chain this spawn's own `treehouse get` left, in the
+# worktree this spawn recorded, first drops this task's slot claim, then has
+# that slot handed back with `treehouse return --force` (which ends the
+# subshell), and must settle back into its original idle shell. Anything else
+# keeps the pane, with the reason in SPAWN_HERDR_RETURN_REASON.
+SPAWN_HERDR_RETURN_REASON=
+spawn_herdr_return_get_slot() { # <session> <pane>
+  local session=$1 pane=$2 seen polls
+  SPAWN_HERDR_RETURN_REASON=
+  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null && return 0
+  if [ -z "${SPAWN_HERDR_GET_SHELL_PID:-}" ] || [ -z "${WT:-}" ] ||
+    ! fm_backend_herdr_pane_treehouse_chain "$session" "$pane" "$SPAWN_HERDR_GET_SHELL_PID"; then
+    SPAWN_HERDR_RETURN_REASON="it holds more than this spawn's own shell and treehouse get subshell"
+    return 1
+  fi
+  seen=$(spawn_current_path "$WT_TARGET" || true)
+  if [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ]; then
+    SPAWN_HERDR_RETURN_REASON="its treehouse get subshell is in '${seen:-unknown}', not this spawn's worktree $WT"
+    return 1
+  fi
+  spawn_release_slot_claim
+  if ! (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
+    SPAWN_HERDR_RETURN_REASON="treehouse return --force $WT failed, so the slot stays leased; run it from $PROJ_ABS"
+    return 1
+  fi
+  polls=$(awk -v s="$SPAWN_HERDR_READY_SECONDS" -v i="$SPAWN_HERDR_READY_INTERVAL" 'BEGIN { printf "%d", (s / i) + 0.5 }')
+  if ! fm_backend_herdr_pane_idle_shell_wait "$session" "$pane" "$polls" "$SPAWN_HERDR_READY_INTERVAL" >/dev/null; then
+    SPAWN_HERDR_RETURN_REASON="treehouse returned $WT but the pane did not settle back into its idle shell within ${SPAWN_HERDR_READY_SECONDS}s"
+    return 1
+  fi
+}
+
+# spawn_release_slot_claim: drop this task's slot claim when the spawn ends
+# with no record. The release is a read-then-remove, so it runs only while the
+# project lock that wrote the claim is still held (aborts before metadata
+# publication); a later abort has already released that lock and leaves the
+# claim for the next spawn's atomic replacement rather than racing it. A
+# polytoken spawn instead retakes that lock once for a later failure whose
+# record was rolled back. The release itself never removes another task's
+# claim.
+spawn_release_slot_claim() {
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
+    fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    SPAWN_SLOT_CLAIMED=0
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+    elif [ "${HARNESS:-}" = polytoken ] && [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] &&
+      fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+    else
+      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
 }
 
 spawn_abort_cleanup() {
@@ -1801,9 +1868,10 @@ spawn_abort_cleanup() {
   # all when treehouse refused), so closing it returns any slot to the pool and
   # leaves no window or tab for a retry to trip over. Once a launch was
   # delivered into an endpoint still open, a worker may be running there, so it
-  # stays for the operator, as the refusal says. On Herdr the close is the
-  # focus-preserving close of a pane proven to hold only a lone idle shell;
-  # anything else keeps the pane and names it.
+  # stays for the operator, as the refusal says. On Herdr, outside polytoken,
+  # the close is the focus-preserving close of a pane proven to hold only this
+  # spawn's own shell chain, whose leased slot is returned first; anything else
+  # keeps the pane and names it.
   if [ "$status" -ne 0 ] && [ "$RELAUNCH" -eq 0 ] &&
     [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "${T:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
@@ -1847,27 +1915,8 @@ spawn_abort_cleanup() {
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
-  # read-then-remove, so it runs only while the project lock that wrote the
-  # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. A polytoken spawn instead retakes
-  # that lock once for a later failure whose record was rolled back. The
-  # release itself never removes another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
-    fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    SPAWN_SLOT_CLAIMED=0
-    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
-    elif [ "${HARNESS:-}" = polytoken ] && [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] &&
-      fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
-      fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
-    else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
-    fi
-  fi
+  # must not leave a claim naming a task no record describes.
+  spawn_release_slot_claim
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
@@ -4204,8 +4253,8 @@ spawn_endpoint_closes_on_abort() {
 spawn_endpoint_hint() {
   if ! spawn_endpoint_closes_on_abort; then
     printf 'inspect window %s' "$T"
-  elif [ "$BACKEND" = herdr ]; then
-    printf 'window %s is closed on exit if it still holds only an idle shell, otherwise inspect it' "$T"
+  elif [ "$BACKEND" = herdr ] && [ "${HARNESS:-}" != polytoken ]; then
+    printf 'window %s is closed on exit, returning any pool slot it held, unless it holds more than the shell this spawn opened; then inspect it' "$T"
   else
     printf 'window %s is closed on exit, returning any pool slot it held' "$T"
   fi

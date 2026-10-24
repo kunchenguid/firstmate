@@ -42,7 +42,12 @@ unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH 
 # shell pid reported after the first `pane run`), FM_FAKE_HERDR_WAIT_UNSUPPORTED
 # (1: wait-output is an unknown verb), FM_FAKE_HERDR_FOREGROUND_REASON and
 # FM_FAKE_HERDR_ACTIVE_TAB (the viewer and its active tab; "task" names the
-# task tab once created).
+# task tab once created), FM_FAKE_HERDR_SUBSHELL (1: `pane run 'treehouse
+# get'` leaves the pane shell -> treehouse -> zsh subshell chain in the
+# foreground until a fake `treehouse return` ends it), and
+# FM_FAKE_HERDR_AGENT_UNDER (1: that subshell also runs a claude process).
+# Errors are written the way real Herdr 0.7.5 writes them: the error JSON on
+# stderr with an empty stdout and exit 1.
 make_herdr_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -157,7 +162,7 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   "pane get "*)
     if is_closed "$3"; then
-      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$3"
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$3" >&2
       exit 1
     fi
     cwd=$(current_cwd)
@@ -168,7 +173,9 @@ case "${1:-} ${2:-} ${3:-}" in
     pane=$4
     pid=$(cat "$D/pid")
     n=$(bump proc-calls)
-    if [ "$n" -le "${FM_FAKE_HERDR_READY_AFTER:-0}" ]; then
+    if [ -e "$D/subshell" ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["zsh"]}]}}}\n' "$pane" "$pid" "$((pid + 1))" "$((pid + 1))"
+    elif [ "$n" -le "${FM_FAKE_HERDR_READY_AFTER:-0}" ]; then
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"]},{"pid":%s,"name":"starship","argv0":"starship","argv":["starship","prompt"]}]}}}\n' "$pane" "$pid" "$pid" "$pid" "$((pid + 50))"
     else
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"]}]}}}\n' "$pane" "$pid" "$pid" "$pid"
@@ -178,6 +185,7 @@ case "${1:-} ${2:-} ${3:-}" in
     if [ "${4:-}" = "treehouse get" ]; then
       bump get-runs >/dev/null
       [ -z "${FM_FAKE_HERDR_PID_AFTER_RUN:-}" ] || printf '%s\n' "$FM_FAKE_HERDR_PID_AFTER_RUN" > "$D/pid"
+      [ "${FM_FAKE_HERDR_SUBSHELL:-0}" != 1 ] || : > "$D/subshell"
     fi
     printf '{"result":{"type":"ok"}}\n'
     ;;
@@ -196,7 +204,7 @@ case "${1:-} ${2:-} ${3:-}" in
     if [ -n "$hit" ]; then
       printf '{"result":{"type":"output_matched","pane_id":"%s","matched_line":"%s"}}\n' "$3" "$hit"
     else
-      printf '{"error":{"code":"timeout","message":"timed out waiting for output match"}}\n'
+      printf '{"error":{"code":"timeout","message":"timed out waiting for output match"}}\n' >&2
       exit 1
     fi
     ;;
@@ -211,7 +219,7 @@ case "${1:-} ${2:-} ${3:-}" in
     printf '\n'
     ;;
   "agent get "*)
-    printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3"
+    printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2
     exit 1
     ;;
   *)
@@ -225,15 +233,31 @@ SH
 #!/usr/bin/env bash
 D="${FM_FAKE_HERDR_DIR:?}"
 pid=$(cat "$D/pid" 2>/dev/null || echo 4194305)
+rows() {
+  printf '1 0 launchd\n%s 1 -zsh\n' "$pid"
+  if [ -e "$D/subshell" ]; then
+    printf '%s %s /usr/local/bin/treehouse\n%s %s zsh\n' "$((pid + 2))" "$pid" "$((pid + 1))" "$((pid + 2))"
+    [ "${FM_FAKE_HERDR_AGENT_UNDER:-0}" != 1 ] || printf '%s %s claude\n' "$((pid + 3))" "$((pid + 1))"
+  fi
+}
 case "$*" in
-  "-axo pid=,ppid=") printf '1 0\n%s 1\n' "$pid" ;;
+  "-axo pid=,ppid=") rows | awk '{ print $1, $2 }' ;;
+  "-axo pid=,ppid=,comm=") rows ;;
   "-p $pid -o stat=") printf 'S\n' ;;
   "-p $pid -o comm=") printf 'zsh\n' ;;
   *) exit 1 ;;
 esac
 SH
   chmod +x "$fakebin/fm-fake-ps"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+D="${FM_FAKE_HERDR_DIR:?}"
+args="treehouse $*"
+printf '%s\n' "${args// /|}" >> "$D/log"
+[ "${1:-}" != return ] || rm -f "$D/subshell"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   fm_test_fake_sleep_noop "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -253,7 +277,6 @@ make_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id" "Exercise the Herdr treehouse-get send path for $id."
   mkdir -p "$case_dir/fake-state"
-  CASE_DIR=$case_dir
   HOME_DIR=$home
   PROJ_DIR=$proj
   WT_DIR=$wt
@@ -265,6 +288,7 @@ make_case() {
 
 run_spawn() {
   local id=$1
+  shift
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -272,7 +296,7 @@ run_spawn() {
     FM_FAKE_HERDR_DIR="$FAKE_STATE" FM_FAKE_HERDR_PROJECT="$PROJ_DIR" \
     FM_FAKE_HERDR_CWD_FILE="$CWD_FILE" FM_HERDR_PS_BIN="$FAKEBIN_DIR/fm-fake-ps" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 get_runs() { cat "$FAKE_STATE/get-runs" 2>/dev/null || echo 0; }
@@ -408,8 +432,95 @@ test_unsupported_wait_output_never_resends() {
   pass "a client without wait-output keeps the plain poll and never resends"
 }
 
+# block_task_tmp <id>: make the per-task temp root a plain file, so the spawn
+# refuses after `treehouse get` entered the worktree and before any launch.
+block_task_tmp() {
+  rm -rf "/tmp/fm-$1"
+  : > "/tmp/fm-$1"
+  BLOCKED_TASK_TMP="/tmp/fm-$1"
+}
+BLOCKED_TASK_TMP=
+trap '[ -z "$BLOCKED_TASK_TMP" ] || rm -f "$BLOCKED_TASK_TMP"' EXIT
+
+# A pre-launch abort after a successful `treehouse get` hands the slot back
+# with `treehouse return --force`, which ends the subshell, and only then
+# closes the pane that settled back into its lone idle shell.
+test_after_get_abort_returns_slot_then_closes() {
+  local id out status pane return_line close_line
+  id=herdr-after-get-z10
+  make_case after-get "$id"
+  printf '%s\n%s\n' "$PROJ_DIR" "$WT_DIR" > "$CWD_FILE"
+  block_task_tmp "$id"
+  out=$(FM_FAKE_HERDR_SUBSHELL=1 run_spawn "$id")
+  status=$?
+  rm -f "/tmp/fm-$id"
+  [ "$status" -ne 0 ] || fail "spawn launched although its task temp root was blocked"$'\n'"$out"
+  assert_contains "$out" "task temp root /tmp/fm-$id already exists" "the spawn did not refuse on the blocked temp root"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pane=$(task_pane)
+  return_line=$(grep -n "^treehouse|return|--force|$WT_DIR\$" "$FAKE_STATE/log" | head -1 | cut -d: -f1)
+  close_line=$(grep -n "^pane|close|$pane|" "$FAKE_STATE/log" | head -1 | cut -d: -f1)
+  [ -n "$return_line" ] || fail "the leased slot $WT_DIR was not treehouse-returned"$'\n'"$out"
+  [ -n "$close_line" ] || fail "the fresh pane $pane was not closed after the slot was returned"$'\n'"$out"
+  [ "$return_line" -lt "$close_line" ] || fail "the pane was closed before its slot was returned"
+  [ "$(wc -l < "$FAKE_STATE/closed" | tr -d ' ')" -eq 1 ] || fail "more than the fresh pane was closed: $(cat "$FAKE_STATE/closed")"
+  assert_not_contains "$out" "leaving herdr pane" "the after-get close was refused"$'\n'"$out"
+  pass "a pre-launch abort after treehouse get returns the slot, then closes the pane"
+}
+
+# An agent process anywhere under the pane keeps it, and its slot, untouched.
+test_after_get_abort_with_agent_keeps_pane() {
+  local id out status pane
+  id=herdr-agent-under-z11
+  make_case agent-under "$id"
+  printf '%s\n%s\n' "$PROJ_DIR" "$WT_DIR" > "$CWD_FILE"
+  block_task_tmp "$id"
+  out=$(FM_FAKE_HERDR_SUBSHELL=1 FM_FAKE_HERDR_AGENT_UNDER=1 run_spawn "$id")
+  status=$?
+  rm -f "/tmp/fm-$id"
+  [ "$status" -ne 0 ] || fail "spawn launched although its task temp root was blocked"$'\n'"$out"
+  pane=$(task_pane)
+  [ ! -s "$FAKE_STATE/closed" ] || fail "a pane with an agent under it was closed: $(cat "$FAKE_STATE/closed")"
+  ! grep -q '^treehouse|return|' "$FAKE_STATE/log" || fail "a slot with an agent in it was treehouse-returned"
+  assert_contains "$out" "leaving herdr pane default:$pane open" "the refusal did not name the kept pane"$'\n'"$out"
+  assert_contains "$out" "holds more than this spawn's own shell" "the refusal did not give the failing condition"$'\n'"$out"
+  assert_contains "$out" "inspect window default:$pane" "the refusal did not print the inspect hint"
+  pass "a pre-launch abort never closes a pane with an agent process under it"
+}
+
+# A polytoken spawn on Herdr keeps its unconditional close through the
+# ordinary task kill, which ends the subshell and with it the slot's lease.
+test_polytoken_after_get_abort_closes_unconditionally() {
+  local id out status pane
+  id=herdr-polytoken-z12
+  make_case polytoken "$id"
+  printf '%s\n%s\n' "$PROJ_DIR" "$WT_DIR" > "$CWD_FILE"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+  block_task_tmp "$id"
+  out=$(FM_FAKE_HERDR_SUBSHELL=1 run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low)
+  status=$?
+  rm -f "/tmp/fm-$id"
+  [ "$status" -ne 0 ] || fail "spawn launched although its task temp root was blocked"$'\n'"$out"
+  assert_contains "$out" "task temp root /tmp/fm-$id already exists" "the polytoken spawn did not refuse on the blocked temp root"$'\n'"$out"
+  pane=$(task_pane)
+  grep -q "^pane|close|$pane|" "$FAKE_STATE/log" || fail "the polytoken pane $pane was not closed"$'\n'"$out"
+  ! grep -q '^treehouse|return|' "$FAKE_STATE/log" || fail "the polytoken close went through the treehouse return path"
+  assert_not_contains "$out" "leaving herdr pane" "the polytoken close was made conditional"$'\n'"$out"
+  pass "a polytoken pre-launch abort on Herdr still closes its pane unconditionally"
+}
+
 test_run_waits_for_readiness
 test_exhausted_pool_fails_fast
+test_after_get_abort_returns_slot_then_closes
+test_after_get_abort_with_agent_keeps_pane
+test_polytoken_after_get_abort_closes_unconditionally
 test_no_echo_same_shell_resends_once
 test_echo_present_never_resends
 test_shell_pid_changed_never_resends

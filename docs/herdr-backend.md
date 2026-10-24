@@ -802,8 +802,11 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
-A spawn refused before its launch is delivered closes the fresh pane it opened, through the same exact-pane focus-preserving close every other retirement uses, when that pane provably holds only a lone idle shell.
-A pane that fails that proof, or whose tab is the captain's attended active tab, is kept and named in the refusal.
+A spawn refused before its launch is delivered closes the fresh pane it opened, through the same exact-pane focus-preserving close every other retirement uses, when that pane provably holds only the spawn's own shell chain.
+That chain is a lone idle shell, or that shell plus the `treehouse get` subshell the spawn started in its recorded worktree.
+In the second case the spawn first drops its slot claim and hands the slot back with `treehouse return --force`, and the pane must settle back into its lone idle shell before it is closed.
+A pane holding anything else, an agent above all, or whose tab is the captain's attended active tab, is kept and named in the refusal.
+A polytoken spawn keeps its unconditional close through the ordinary task kill.
 
 #### Session-start husk sweep
 

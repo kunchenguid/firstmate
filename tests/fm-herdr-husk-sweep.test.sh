@@ -119,7 +119,7 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   "pane get "*)
     if is_closed "$3" || [ -z "$(row "$3" 1)" ]; then
-      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$3"
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$3" >&2
       exit 1
     fi
     printf '{"result":{"pane":'; pane_json "$3"; printf '}}\n'
@@ -137,7 +137,7 @@ case "${1:-} ${2:-} ${3:-}" in
     if [ "$(row "$3" 5)" = live ]; then
       printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n'
     else
-      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3"
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2
       exit 1
     fi
     ;;

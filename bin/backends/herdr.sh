@@ -1166,6 +1166,59 @@ fm_backend_herdr_close_idle_endpoint() {  # <session> <pane-id> [expected-shell-
   return 1
 }
 
+# fm_backend_herdr_pane_treehouse_chain: read-only proof that <pane-id> holds
+# nothing but the chain one interactive `treehouse get` leaves: <shell-pid> is
+# still the pane's top-level shell, the pane positively reads no-agent, the
+# foreground is a recognized shell other than that top-level shell, and every
+# descendant of the top-level shell is a recognized shell or treehouse itself.
+# Any other process under the pane, an agent above all, fails the proof.
+fm_backend_herdr_pane_treehouse_chain() {  # <session> <pane-id> <shell-pid>
+  local session=$1 pane=$2 expected=$3 info ps_bin rows
+  case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" --argjson shell "$expected" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and .result.process_info.shell_pid == $shell
+    and (.result.process_info.foreground_process_group_id | type == "number" and . != $shell)
+    and (.result.process_info.foreground_processes | type == "array" and length > 0)
+    and all(.result.process_info.foreground_processes[];
+      ((.name // "") | ltrimstr("-") | split("/") | last) as $n
+      | .pid != $shell and ($n | IN("sh", "bash", "zsh", "dash", "ksh", "fish")))
+  ' >/dev/null 2>&1 || return 1
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$expected" '
+    {
+      pid[NR] = $1; ppid[NR] = $2
+      line = $0
+      sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+      sub(/^-/, "", line)
+      parts = split(line, path, "/")
+      comm[NR] = path[parts]
+    }
+    END {
+      want[shell] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (n = 1; n <= NR; n++) {
+          if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+        }
+      }
+      for (n = 1; n <= NR; n++) {
+        if (pid[n] == shell) { found++; continue }
+        if (!(pid[n] in want)) continue
+        kids++
+        if (comm[n] !~ /^(sh|bash|zsh|dash|ksh|fish|treehouse)$/) bad++
+      }
+      exit(found == 1 && kids > 0 && bad == 0 ? 0 : 1)
+    }
+  '
+}
+
 # Herdr 0.7.5 workspace-removal focus rules (verified against the installed
 # 0.7.5 binary, its v0.7.5 tag source, and the isolated named lab):
 # - An EXPLICIT close that empties a workspace (API pane.close of its last
@@ -3220,7 +3273,9 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # `herdr pane wait-output <pane> --match TEXT|--regex PATTERN --source recent
 # --timeout MS` (verified on 0.7.5: the pane id precedes the options; a hit
 # exits 0 with `.result.matched_line`, a miss exits 1 with error code
-# `timeout`, and an unknown option exits 2). <mode> is `match` for a literal
+# `timeout` on stderr with an empty stdout, and an unknown option exits 2).
+# Both streams are read, as fm_backend_herdr_pane_presence_state does, because
+# Herdr writes its error JSON to stderr. <mode> is `match` for a literal
 # substring or `regex` for a Rust regular expression.
 # Sets FM_BACKEND_HERDR_WAIT_OUTPUT_LINE to the matched line on a hit.
 # Return codes: 0 matched, 1 no match within the timeout, 2 the verb or its
@@ -3232,7 +3287,7 @@ fm_backend_herdr_wait_output() {  # <session> <pane-id> <match|regex> <pattern> 
   FM_BACKEND_HERDR_WAIT_OUTPUT_LINE=""
   case "$mode" in match|regex) ;; *) return 2 ;; esac
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
-  out=$(fm_backend_herdr_cli "$session" pane wait-output "$pane" "--$mode" "$pattern" --source recent --timeout "$timeout" 2>/dev/null) || rc=$?
+  out=$(fm_backend_herdr_cli "$session" pane wait-output "$pane" "--$mode" "$pattern" --source recent --timeout "$timeout" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '%s' "$out" | jq -e '.result.type == "output_matched"' >/dev/null 2>&1 || return 2
     FM_BACKEND_HERDR_WAIT_OUTPUT_LINE=$(printf '%s' "$out" | jq -r '.result.matched_line // empty' 2>/dev/null)
