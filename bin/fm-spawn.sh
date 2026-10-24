@@ -5436,6 +5436,22 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
+# json_path_literal <path> echoes a valid JSON string literal for <path>.
+# The pi and omp adapter wirings embed a path as a TypeScript string literal,
+# so any unescaped quote, backslash, or control char breaks the file. JSON
+# is the same wire format either way, and either tool produces a byte-for-byte
+# identical literal for the inputs we emit. Perl is the historical encoder;
+# the node fallback is for hosts whose minimal perl has no JSON::PP, where the
+# perl path dies at -MJSON::PP and prints nothing, leaving `const x = ;` in
+# the file. The probe is cheap (perl -MJSON::PP -e 1) and short-circuits on
+# the success path so a working perl still wins.
+json_path_literal() {
+  if perl -MJSON::PP -e 1 2>/dev/null; then
+    perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$1"
+  else
+    node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' -- "$1"
+  fi
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -5866,8 +5882,8 @@ import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const notifyTurnEnd = $busy_notify_turnend;
 const excludeTools = "$EXCLUDE_TOOLS".split(",").filter(Boolean);
-const excludeFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$CONFIG/crew-exclude-tools");
-const statusFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$STATE/$ID.status");
+const excludeFile = $(json_path_literal "$CONFIG/crew-exclude-tools");
+const statusFile = $(json_path_literal "$STATE/$ID.status");
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
