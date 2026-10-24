@@ -146,10 +146,14 @@
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   4. No current run for this crew (pre-validation, uninitialized repository,
-#      proven historical head, or kind=scout): fall back to the recorded
-#      backend's pane busy state, then the resolved status declaration
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      proven historical head, or kind=scout): a crew already declared paused or
+#      parked whose status log AND metadata have both sat unchanged for
+#      FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS (default 86400, 24h) skips the
+#      live probe entirely and reports that last known state with a
+#      not-live-probed marker. Otherwise fall back to the recorded backend's
+#      pane busy state, then the resolved status declaration when its verb maps
+#      to a recognized run-state. Decision-only events such as `resolved` never
+#      become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux, herdr, and rex, which own a
@@ -1300,6 +1304,44 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
+fi
+
+# --- idle-age short-circuit: skip the live probe for a long-parked crew ----
+# A crew already declared paused or parked (map_log_state's verdict on the
+# already-computed LOG_LINE - no new read), whose status log AND metadata have
+# BOTH sat unchanged for FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS (default
+# 86400, 24h), skips every live probe below and reports that last known state
+# with an explicit not-live-probed marker instead. This never fires for a crew
+# that is working, blocked, done, failed, or newly dispatched (no status line
+# yet - LOG_VERB empty): only a paused/parked verdict on a log and meta that
+# have each been idle-enough qualifies, and recent activity on either file
+# disqualifies it immediately. A resumed crew that never appends a new status
+# line stays invisible for up to the threshold - the accepted trade-off named
+# by the sizing report this short-circuit answers.
+FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS=${FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS:-86400}
+case "$FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS" in
+  ''|*[!0-9]*) FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS=86400 ;;
+esac
+if [ -n "$LOG_VERB" ]; then
+  IDLE_LOG_STATE=$(map_log_state "$LOG_LINE")
+  case "$IDLE_LOG_STATE" in
+    paused|parked)
+      IDLE_LOG_MTIME=$(_fm_status_file_mtime "$LOG") || IDLE_LOG_MTIME=
+      IDLE_META_MTIME=$(_fm_status_file_mtime "$META") || IDLE_META_MTIME=
+      case "$IDLE_LOG_MTIME" in ''|*[!0-9]*) IDLE_LOG_MTIME= ;; esac
+      case "$IDLE_META_MTIME" in ''|*[!0-9]*) IDLE_META_MTIME= ;; esac
+      if [ -n "$IDLE_LOG_MTIME" ] && [ -n "$IDLE_META_MTIME" ]; then
+        IDLE_NOW=$(date +%s)
+        IDLE_LOG_AGE=$((IDLE_NOW - IDLE_LOG_MTIME))
+        IDLE_META_AGE=$((IDLE_NOW - IDLE_META_MTIME))
+        if [ "$IDLE_LOG_AGE" -ge "$FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS" ] \
+          && [ "$IDLE_META_AGE" -ge "$FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS" ]; then
+          emit "$IDLE_LOG_STATE" status-log \
+            "$(status_line_note "$LOG_LINE")${SEP}not live-probed (idle ${IDLE_LOG_AGE}s)"
+        fi
+      fi
+      ;;
+  esac
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

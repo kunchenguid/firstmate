@@ -3031,6 +3031,72 @@ test_no_run_idle_pane_paused() {
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
+# The idle-age short-circuit: a crew already declared paused or parked whose
+# status log AND meta have both sat unchanged past the threshold skips the
+# live pane probe entirely, so a pane that answers busy must NOT override the
+# stale declaration - that busy answer proves the probe ran, which proves the
+# short-circuit did not fire. 2020 is far older than the default 24h threshold.
+test_idle_short_circuit_skips_live_probe_when_stale() {
+  reset_fakes
+  local d gen
+  d=$(new_case idle-short-circuit-on)
+  make_repo_on_branch "$d/wt" fm/feat-idle
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-idle.meta" "window=fm:fm-feat-idle" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: holding for the upstream tool release\n' > "$d/state/feat-idle.status"
+  touch -t 202001010000 "$d/state/feat-idle.status" "$d/state/feat-idle.meta"
+  FM_FAKE_AXI_STATUS=""
+  # A real busy-record, not just a rendered-busy pane, so a skipped probe is
+  # proven against the SAME positive signal test_no_run_busy_pane relies on to
+  # read working.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-idle)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-idle busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-idle)
+  assert_contains "$out" "state: paused" "a stale paused crew keeps its declared state despite a busy pane"
+  assert_contains "$out" "source: status-log" "the short-circuit reports through the status-log source"
+  assert_contains "$out" "not live-probed" "the short-circuit names itself so a reader knows no probe ran"
+  assert_contains "$out" "holding for the upstream tool release" "the paused reason survives the short-circuit"
+
+  printf 'needs-decision: pick a rollout order\n' > "$d/state/feat-idle.status"
+  touch -t 202001010000 "$d/state/feat-idle.status" "$d/state/feat-idle.meta"
+  out=$(run_crew_state "$d" feat-idle)
+  assert_contains "$out" "state: parked" "a stale parked crew is also short-circuited"
+  assert_contains "$out" "not live-probed" "the parked short-circuit also names itself"
+  pass "a long-idle paused or parked crew skips the live probe and reports its last known state"
+}
+
+# The inverse cases: a recent pause, a blocked crew, and a raised threshold
+# must all still take the live probe - here, a busy pane flips the report to
+# working, proving the probe actually ran rather than being silently skipped.
+test_idle_short_circuit_never_fires_when_recent_or_ineligible() {
+  reset_fakes
+  local d gen
+  d=$(new_case idle-short-circuit-off)
+  make_repo_on_branch "$d/wt" fm/feat-idle-off
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-idle-off.meta" "window=fm:fm-feat-idle-off" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-idle-off)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-idle-off busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+
+  printf 'paused: holding for review\n' > "$d/state/feat-idle-off.status"
+  local out; out=$(run_crew_state "$d" feat-idle-off)
+  assert_contains "$out" "state: working" "a recently paused crew still takes the live probe"
+
+  printf 'blocked: daemon unreachable\n' > "$d/state/feat-idle-off.status"
+  touch -t 202001010000 "$d/state/feat-idle-off.status" "$d/state/feat-idle-off.meta"
+  out=$(run_crew_state "$d" feat-idle-off)
+  assert_contains "$out" "state: working" "a long-idle BLOCKED crew is never short-circuited"
+
+  printf 'paused: holding for review\n' > "$d/state/feat-idle-off.status"
+  touch -t 202001010000 "$d/state/feat-idle-off.status" "$d/state/feat-idle-off.meta"
+  out=$(FM_CREW_STATE_IDLE_SHORT_CIRCUIT_SECONDS=999999999 run_crew_state "$d" feat-idle-off)
+  assert_contains "$out" "state: working" "a configured threshold above the actual idle age still takes the live probe"
+  pass "a recent pause, a blocked crew, or a raised threshold always takes the live probe"
+}
+
 test_secondmate_open_block_survives_unrelated_append() {
   reset_fakes
   local d out suffix gen
@@ -5929,6 +5995,8 @@ test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
+test_idle_short_circuit_skips_live_probe_when_stale
+test_idle_short_circuit_never_fires_when_recent_or_ineligible
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
 test_gone_window_in_live_session_ignores_stale_status_log
