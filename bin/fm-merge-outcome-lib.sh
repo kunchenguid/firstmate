@@ -70,8 +70,7 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   local kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
   FM_MERGE_OUTCOME_CLEANUP=skipped
   FM_MERGE_OUTCOME_CLEANUP_DETAIL=
-  if [ -e "$home/.fm-secondmate-home" ] || [ -L "$home/.fm-secondmate-home" ] \
-    || [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; then
+  if [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; then
     return 0
   fi
   if fm_parent_channel_destination "$home" "$state" >/dev/null 2>&1; then
