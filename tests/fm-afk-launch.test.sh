@@ -473,6 +473,27 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   rm -rf "$st"
 }
 
+unit_away_guard_refuses_when_holder_summary_fails() {
+  local out rc
+  out=$(bash -c '
+    . "$1/bin/fm-session-lock-lib.sh"
+    fm_session_lock_owned_by_self() { return 1; }
+    fm_session_lock_inspect() {
+      FM_LOCK_INSPECT_STATE=held
+      FM_LOCK_INSPECT_PID=win:123
+    }
+    fm_session_lock_holder_summary() { return 1; }
+    fm_session_lock_may_record "$1/state"
+  ' _ "$ROOT" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && printf '%s' "$out" | grep -F 'another live firstmate session holds the lock (pid win:123, started unknown; age unknown)' >/dev/null; then
+    pass "away write: a held lock is refused even when holder details cannot be produced"
+  else
+    fail "away write: a failed holder summary allowed recording or lost the holder pid (rc=$rc): $out"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 2a: away/quiet mode plumbing (kunchenguid/firstmate#2356). fm_afk_mode
 # is the single owner of reading the mode; these pin its write side
@@ -1895,6 +1916,7 @@ e2e_rex() {
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock
+unit_away_guard_refuses_when_holder_summary_fails
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker

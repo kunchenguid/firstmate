@@ -9,14 +9,7 @@
 # cannot be overtaken by a concurrent writer, and it applies to every writer
 # of this record, not only the launcher's.
 #
-# POSTURE.
-#
-# FM_AFK_CONTRACT_ENTER_GUARD names a command the `enter` path runs under this
-# script's own mutation lock, just before it writes the record. The command
-# receives the resolved entry mode in FM_AFK_CONTRACT_ENTRY_MODE and refuses
-# the write by exiting non-zero. The guard exists so a check that authorises
-# the write is evaluated under the SAME lock as the write itself: a check made
-# outside it can be overtaken by a concurrent writer. Away mode is a posture of the one supervision session, recorded in
+# POSTURE. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While an away record exists
 # the home is afk; the captain's first unmarked message archives it (the return
 # path in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).

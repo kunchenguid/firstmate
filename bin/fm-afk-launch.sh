@@ -173,11 +173,6 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 # The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
-# The session-lock identity owner: the away posture needs this session to hold
-# the fleet lock, and the refusal names the live holder.
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$FM_AFK_LAUNCH_DIR/fm-session-lock-lib.sh"
-
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
 # The fleet-lock check for the away record is owned by the record writer

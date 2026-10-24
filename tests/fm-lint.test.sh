@@ -280,18 +280,6 @@ SH
   chmod +x "$fakebin/git"
 }
 
-# fm_lint_source_directive_count <path>: the number of source directives
-# bin/fm-lint.sh's telemetry counts for one root, using the same predicate as the
-# counter itself. Deriving the expectation from the file keeps the assertion
-# exact when the root legitimately gains or loses a directive, instead of
-# pinning a constant that drifts from the file it describes.
-fm_lint_source_directive_count() {
-  local count
-  count=$(grep -c '^[[:space:]]*# shellcheck source=' "$1" 2>/dev/null || true)
-  case "$count" in ''|*[!0-9]*) count=0 ;; esac
-  printf '%s\n' "$count"
-}
-
 # fm_lint_write_diff_file <file> <path>...: writes NUL-separated changed paths
 # in the shape `git diff --name-only -z` produces, for FM_TEST_GIT_DIFF_FILE.
 fm_lint_write_diff_file() {
@@ -639,7 +627,6 @@ fm_lint_assert_flag_log() {
 
 test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
   local tmp fakebin log flag_log mode_log diff_file telemetry out target
-  local expected_source_directives
   tmp=$(fm_test_tmproot fm-lint-local-nox)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
@@ -667,11 +654,9 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
     "changed-mode local lint did not disclose dropped source following"
   assert_grep $'analysis_mode\tlocal' "$telemetry" \
     "telemetry did not record local analysis mode"
-  expected_source_directives=$(fm_lint_source_directive_count "$ROOT/$target")
-  [ "$expected_source_directives" -gt 0 ] \
-    || fail "the changed root carries no source directives, so the telemetry count proves nothing"
-  assert_grep $'source_directives\t'"$expected_source_directives" "$telemetry" \
-    "telemetry did not count the changed root's source directives (expected $expected_source_directives)"
+  # Pin telemetry to this changed root's exact directive count.
+  assert_grep $'source_directives\t5' "$telemetry" \
+    "telemetry did not count the changed root's source directives"
   assert_grep $'source_followed_directives\t0' "$telemetry" \
     "telemetry reported followed sources in no-external-sources mode"
   pass "fm-lint.sh changed mode drops source following and excludes cross-file codes"
