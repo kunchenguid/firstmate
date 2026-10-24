@@ -7651,8 +7651,93 @@ test_closed_exit_picker_drops_saved_dialog_name() {
   pass "a closed picker drops the saved dialog name, and the stale stays ordinary"
 }
 
+# --- heartbeat: slot audit surfaces a lost slot once per verdict --------------
+#
+# The heartbeat runs bin/fm-slot-audit.sh (stubbed through FM_SLOT_AUDIT_BIN)
+# and wakes firstmate with one `check: slot-audit <task> <verdict>` row per task
+# whose verdict is not ok, then stays quiet while the verdict is unchanged and
+# fires again when it changes.
+write_fake_slot_audit() {  # <fakebin> <verdict-file>
+  cat > "$1/fm-slot-audit-fake.sh" <<SH
+#!/usr/bin/env bash
+verdict=\$(cat '$2' 2>/dev/null || printf ok)
+printf 'slot-audit: parked slot=/pool/3/proj claim=other:claimant worker=outside:/proj pool=in-use verdict=%s\n' "\$verdict"
+printf 'slot-audit: healthy slot=/pool/4/proj claim=mine worker=in-slot pool=in-use verdict=ok\n'
+SH
+  chmod +x "$1/fm-slot-audit-fake.sh"
+}
+
+watch_heartbeat_bg() {  # <state> <fakebin> <out>
+  PATH="$2:$PATH" FM_STATE_OVERRIDE="$1" FM_SLOT_AUDIT_BIN="$2/fm-slot-audit-fake.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$3" &
+}
+
+test_heartbeat_slot_audit_surfaces_once_per_verdict() {
+  local dir state fakebin out pid i
+  dir=$(make_case heartbeat-slot-audit); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  write_fake_slot_audit "$fakebin" "$dir/verdict"
+  printf 'slot-lost\n' > "$dir/verdict"
+
+  watch_heartbeat_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the heartbeat did not surface a slot-lost audit verdict"
+  grep -Fx "check: slot-audit parked slot-lost" "$out" >/dev/null \
+    || fail "the wake reason should name the task and verdict: $(cat "$out")"
+  grep -F "$(printf '\tcheck\tslot-audit:parked\t')" "$state/.wake-queue" >/dev/null \
+    || fail "no slot-audit check row was queued: $(cat "$state/.wake-queue")"
+  ! grep -F "slot-audit:healthy" "$state/.wake-queue" >/dev/null \
+    || fail "an ok verdict was queued"
+  [ "$(cat "$state/.slot-audit-surfaced-parked" 2>/dev/null)" = slot-lost ] \
+    || fail "the surfaced verdict was not recorded for the task"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the slot-audit wake"
+
+  # Same verdict again: absorbed, no second row.
+  : > "$out"
+  watch_heartbeat_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the watcher exited for an unchanged slot-audit verdict: $(cat "$out")"
+  fi
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || fail "the watcher exited on an unchanged verdict: $(cat "$out")"
+  [ ! -s "$out" ] || fail "an unchanged verdict printed a wake reason: $(cat "$out")"
+  ! grep -F "slot-audit:parked" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "an unchanged verdict was queued again: $(cat "$state/.wake-queue")"
+
+  # A changed verdict fires again on the same watcher's next heartbeat (killing
+  # the absorbing watcher would make its successor open with a recovery wake);
+  # an ok verdict then clears the marker.
+  printf 'slot-unprotected,worker-outside-slot\n' > "$dir/verdict"
+  wait_for_exit "$pid" 300 || fail "a changed slot-audit verdict did not surface"
+  grep -Fx "check: slot-audit parked slot-unprotected,worker-outside-slot" "$out" >/dev/null \
+    || fail "the changed verdict should be the wake reason: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second slot-audit wake"
+  printf 'ok\n' > "$dir/verdict"
+  : > "$out"
+  watch_heartbeat_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on an ok verdict: $(cat "$out")"; }
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ ! -e "$state/.slot-audit-surfaced-parked" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.slot-audit-surfaced-parked" ] || fail "an ok verdict left the surfaced marker behind"
+  reap "$pid"
+  pass "the heartbeat surfaces a non-ok slot-audit verdict once, stays quiet while it holds, and re-fires when it changes"
+}
+
 test_exit_picker_stale_names_the_dialog
 test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_stays_quiet
 test_closed_exit_picker_drops_saved_dialog_name
+test_heartbeat_slot_audit_surfaces_once_per_verdict

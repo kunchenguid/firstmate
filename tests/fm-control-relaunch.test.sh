@@ -76,6 +76,7 @@ case "${1:-}" in
         ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
       esac
       printf '%s\n' "$payload" >> "$D/literal"
+      printf 'literal %s\n' "$payload" >> "$D/sequence"
       case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
@@ -88,7 +89,14 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      printf 'key %s\n' "$payload" >> "$D/sequence"
       case "$payload" in
+        # The pane's shell honors a cd: the fresh-slot rebind moves the stopped
+        # endpoint into its new slot before the launch owner checks it.
+        "cd -- '"*"'")
+          moved=${payload#cd -- \'}
+          printf '%s' "${moved%\'}" > "$D/cwd"
+          ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
@@ -2917,6 +2925,166 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items() {
   pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
 }
 
+# --- relaunch --fresh-slot: rebind a task whose slot another task claimed ----
+#
+# A pool stands in for Treehouse's: pool/1/proj is a real worktree of proj that
+# another task's claim now covers (the record still names it), and a fake
+# treehouse whose `get --lease --lease-holder <id>` adds pool/2/proj as a real
+# worktree and prints its path, logging every call. The restored pane sits in
+# the project directory, as a Herdr restore leaves it.
+make_fresh_slot_case() {  # <name> <id> -> case dir
+  local name=$1 id=$2 dir home proj pool
+  dir=$(new_case "$name" "$id")
+  home="$dir/home"
+  proj="$dir/proj"
+  pool="$dir/pool"
+  mkdir -p "$pool/1" "$pool/2" "$home/data/$id"
+  fm_git_worktree "$proj" "$pool/1/proj" "old-$id"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$pool/1/proj" > "$pool/treehouse-state.json"
+  printf 'task=other-claimant\nhome=%s\n' "$dir/other-home" > "$pool/1/.fm-slot-owner"
+  mkdir -p "$pool/1/proj/.lavish/$id/r1"
+  printf 'board\n' > "$pool/1/proj/.lavish/$id.html"
+  printf 'round one\n' > "$pool/1/proj/.lavish/$id/r1/x"
+  printf 'keep\n' > "$pool/1/proj/.lavish/other-task.html"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the fresh-slot rebind for $id.
+
+## Firstmate spec
+Preserve the task while moving it to a fresh slot.
+EOF
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$pool/1/proj"
+    echo "project=$proj"
+    echo "harness=claude"
+    echo "kind=scout"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' fmses > "$dir/fake/session-name"
+  printf '%s' "$proj" > "$dir/fake/cwd"
+  cat > "$dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "\$*" >> '$dir/fake/treehouse.log'
+if [ "\${1:-}" = get ]; then
+  [ -z "\${FM_FAKE_TREEHOUSE_GET_FAIL:-}" ] || { echo 'all 1 worktrees are in use or dirty (max_trees = 1)' >&2; exit 1; }
+  git -C '$proj' worktree add -q --detach '$pool/2/proj' >/dev/null 2>&1 || true
+  printf 'upgrade banner on stderr\n' >&2
+  printf '%s\n' '$pool/2/proj'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse"
+  printf '%s\n' "$dir"
+}
+
+sequence_line_of() {  # <case-dir> <fixed-string> -> line number or empty
+  grep -nF -- "$2" "$1/fake/sequence" | head -n 1 | cut -d: -f1
+}
+
+test_fresh_slot_relaunch_rebinds_the_record_and_leaves_the_old_slot_alone() {
+  local dir out rc=0 id=fs1 cd_line launch_line
+  dir=$(make_fresh_slot_case fresh-slot "$id")
+  cp "$dir/pool/1/.fm-slot-owner" "$dir/old-claim.before"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "your slot was reassigned after a restart") || rc=$?
+  expect_code 0 "$rc" "a fresh-slot relaunch should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched $id harness=claude" "the outcome should name the relaunch"
+  assert_contains "$out" "fresh_slot=$dir/pool/2/proj old_slot=$dir/pool/1/proj (left to its claimant other-claimant)" \
+    "the outcome should name the fresh slot and the old slot's claimant"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/2/proj" ] \
+    || fail "the record was not rebound to the fresh slot: $(meta_field "$dir" "$id" worktree)"
+  assert_grep "task=$id" "$dir/pool/2/.fm-slot-owner" "the fresh slot was not claimed for the task"
+  cmp -s "$dir/old-claim.before" "$dir/pool/1/.fm-slot-owner" || fail "the old slot's claim changed"
+  assert_present "$dir/pool/1/proj/.lavish/$id.html" "the old slot's presentation file was removed"
+  assert_present "$dir/pool/1/proj/.lavish/other-task.html" "another lane's presentation file was touched"
+  [ "$(git -C "$dir/pool/1/proj" rev-parse --abbrev-ref HEAD)" = "old-$id" ] \
+    || fail "the old slot's checkout was changed"
+  assert_present "$dir/pool/2/proj/.lavish/$id.html" "the lane's board was not copied into the fresh slot"
+  assert_present "$dir/pool/2/proj/.lavish/$id/r1/x" "the lane's board directory was not copied into the fresh slot"
+  assert_absent "$dir/pool/2/proj/.lavish/other-task.html" "another lane's presentation file was copied"
+  assert_grep "treehouse get --lease --lease-holder $id" "$dir/fake/treehouse.log" \
+    "the fresh slot was not acquired through a lease held by the task"
+  assert_no_grep "treehouse return" "$dir/fake/treehouse.log" "the rebind returned a slot"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  cd_line=$(sequence_line_of "$dir" "key cd -- '$dir/pool/2/proj'")
+  launch_line=$(sequence_line_of "$dir" "Firstmate operational input waiting: read")
+  [ -n "$cd_line" ] || fail "the endpoint was never moved into the fresh slot: $(cat "$dir/fake/sequence")"
+  [ -n "$launch_line" ] || fail "the replacement was never launched: $(cat "$dir/fake/sequence")"
+  [ "$cd_line" -lt "$launch_line" ] || fail "the launch preceded the move into the fresh slot: $(cat "$dir/fake/sequence")"
+  [ "$(journal_field "$dir" "$id" phase)" = complete ] || fail "the transaction journal should end complete"
+  [ "$(journal_field "$dir" "$id" old_worktree)" = "$dir/pool/1/proj" ] || fail "the journal should record the old slot"
+  [ "$(journal_field "$dir" "$id" new_worktree)" = "$dir/pool/2/proj" ] || fail "the journal should record the fresh slot"
+  pass "fm-control relaunch --fresh-slot: the record moves to a leased, claimed fresh slot and the old slot is left to its claimant"
+}
+
+test_fresh_slot_refuses_before_stopping_when_the_slot_still_reads_as_the_tasks_own() {
+  local dir out rc=0 id=fs2
+  dir=$(make_fresh_slot_case fresh-slot-own "$id")
+  printf 'task=%s\nhome=%s\n' "$id" "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "move me") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--fresh-slot rebound a slot that still reads as the task's own"$'\n'"$out"
+  assert_contains "$out" "still reads as its own" "the refusal should say the slot is not proven lost"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent was stopped before the refusal"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/1/proj" ] || fail "the record changed on a refusal"
+  [ ! -e "$dir/fake/treehouse.log" ] || fail "treehouse was called on a refusal: $(cat "$dir/fake/treehouse.log")"
+  pass "fm-control relaunch --fresh-slot: a slot the task still owns refuses before anything is stopped"
+}
+
+test_fresh_slot_failure_to_acquire_names_the_stopped_state() {
+  local dir out rc=0 id=fs3
+  dir=$(make_fresh_slot_case fresh-slot-pool-full "$id")
+  out=$(FM_FAKE_TREEHOUSE_GET_FAIL=1 run_control "$dir" "$id" relaunch --fresh-slot --note "move me") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--fresh-slot reported success without a slot"$'\n'"$out"
+  assert_contains "$out" "all 1 worktrees are in use or dirty" "treehouse's own refusal should be relayed"
+  assert_contains "$out" "record still names $dir/pool/1/proj" "the refusal should say the record did not move"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/1/proj" ] || fail "the record changed although no slot was acquired"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the old agent should have been stopped before acquisition"
+  [ "$(journal_field "$dir" "$id" phase)" = "failed:rebinding" ] \
+    || fail "the journal should record the failed rebind phase, got '$(journal_field "$dir" "$id" phase)'"
+  pass "fm-control relaunch --fresh-slot: a pool with no slot fails loudly after the stop and keeps the record"
+}
+
+test_fresh_slot_relaunch_is_allowed_on_a_captain_held_item() {
+  local dir out rc=0 id=fs4
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+  dir=$(make_fresh_slot_case fresh-slot-held "$id")
+  seed_backlog "$dir" "$id" in_flight
+  tasks-axi hold "$id" --reason "waiting on the captain" --kind captain --file "$dir/home/data/backlog.md" >/dev/null \
+    || fail "could not hold the fixture item"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "your slot was reassigned") || rc=$?
+  expect_code 0 "$rc" "a fresh-slot relaunch of a captain-held, in-flight item is recovery, not dispatch"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/2/proj" ] || fail "the held item's record was not rebound"
+  [ "$(backlog_state "$dir" "$id")" = in_flight ] \
+    || fail "the relaunch moved the held item to $(backlog_state "$dir" "$id")"
+  tasks-axi show "$id" --file "$dir/home/data/backlog.md" | grep -q '^  held: *yes' \
+    || fail "the relaunch released the captain hold"
+
+  # A closed item stays refused: the relaunch stops the agent and the launch
+  # owner then refuses the dispatch, which the transaction reports as such.
+  rc=0
+  dir=$(make_fresh_slot_case fresh-slot-closed "fs5")
+  seed_backlog "$dir" fs5 in_flight
+  tasks-axi "done" fs5 --file "$dir/home/data/backlog.md" >/dev/null || fail "could not close the fixture item"
+  out=$(run_control "$dir" fs5 relaunch --fresh-slot --note "move me") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--fresh-slot relaunched a closed item"$'\n'"$out"
+  assert_contains "$out" "not dispatchable" "the closed item's refusal should name dispatchability"
+  pass "fm-control relaunch --fresh-slot: a captain-held in-flight item is rebound while a closed item stays refused"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -3054,3 +3222,7 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+test_fresh_slot_relaunch_rebinds_the_record_and_leaves_the_old_slot_alone
+test_fresh_slot_refuses_before_stopping_when_the_slot_still_reads_as_the_tasks_own
+test_fresh_slot_failure_to_acquire_names_the_stopped_state
+test_fresh_slot_relaunch_is_allowed_on_a_captain_held_item

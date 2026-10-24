@@ -6028,4 +6028,55 @@ test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
 
+# --- (n) worker= fact: where the endpoint is relative to its pool slot --------
+#
+# A record that names a Treehouse pool slot carries bin/fm-slot-audit.sh's
+# worker= fact as its own trailing component, read through the backend's cwd
+# probe; a record outside any pool carries none.
+test_worker_fact_follows_the_endpoint_cwd() {
+  reset_fakes
+  local d out proj slot
+  d=$(new_case worker-fact)
+  make_fakebin "$d" >/dev/null
+  proj="$d/project"
+  slot="$d/pool/1/project"
+  mkdir -p "$d/pool/1"
+  git -C "$d" init -q project
+  git -C "$proj" commit -q --allow-empty -m init
+  git -C "$proj" worktree add -q --detach "$slot"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot" > "$d/pool/treehouse-state.json"
+  # The suite's tmux answers display-message with a pane id; the audit's cwd
+  # probe needs pane_current_path, so wrap it and serve $d/cwd for that query.
+  mv "$d/fakebin/tmux" "$d/fakebin/tmux.inner"
+  cat > "$d/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *pane_current_path*) [ ! -f '$d/cwd' ] || cat '$d/cwd'; exit 0 ;;
+esac
+exec '$d/fakebin/tmux.inner' "\$@"
+SH
+  chmod +x "$d/fakebin/tmux"
+  printf 'window=fmses:fm-wf\nendpoint_task_id=wf\nworktree=%s\nproject=%s\nkind=scout\n' "$slot" "$proj" > "$d/state/wf.meta"
+  printf 'paused: waiting on the board review\n' > "$d/state/wf.status"
+
+  printf '%s\n' "$slot" > "$d/cwd"
+  out=$(run_crew_state "$d" wf)
+  assert_contains "$out" " · worker=in-slot" "a worker inside its slot should read worker=in-slot: $out"
+
+  printf '%s\n' "$proj" > "$d/cwd"
+  out=$(run_crew_state "$d" wf)
+  assert_contains "$out" " · worker=outside:$proj" "a worker outside its slot should name where it is: $out"
+
+  rm -f "$d/cwd"
+  out=$(run_crew_state "$d" wf)
+  assert_contains "$out" " · worker=no-endpoint" "an endpoint with no path should read worker=no-endpoint: $out"
+
+  printf 'window=fmses:fm-plain\nendpoint_task_id=plain\nworktree=%s\nproject=%s\nkind=scout\n' "$proj" "$proj" > "$d/state/plain.meta"
+  printf 'paused: waiting\n' > "$d/state/plain.status"
+  out=$(run_crew_state "$d" plain)
+  assert_not_contains "$out" "worker=" "a record outside any pool should carry no worker fact: $out"
+  pass "fm-crew-state: the worker= component follows the endpoint's cwd relative to its pool slot"
+}
+test_worker_fact_follows_the_endpoint_cwd
+
 echo "all fm-crew-state tests passed"

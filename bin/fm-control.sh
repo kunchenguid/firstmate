@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--fresh-slot]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -96,6 +96,27 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              --fresh-slot rebinds a ship or scout whose recorded Treehouse
+#              pool slot another task has since claimed (bin/fm-slot-audit.sh
+#              reads such a record as slot-lost): after the old agent is
+#              stopped it acquires `treehouse get --lease --lease-holder
+#              <task-id>` from the task's project under the shared project
+#              lock, writes the new slot's owner claim, copies the lane's
+#              excluded presentation files (`.lavish/<task-id>*`) from the old
+#              slot when they are readable, rewrites the record's worktree=
+#              under its metadata lock, moves the endpoint's shell into the new
+#              slot, and then runs the ordinary replacement launch there. The
+#              old slot, its claim, and its processes are never touched; the
+#              outcome names the old slot as left to its claimant. A slot
+#              whose claim still names this task or is absent refuses before
+#              anything is stopped, because nothing proves it lost: a plain
+#              relaunch re-enters the recorded copy. A recorded worktree path
+#              that no longer exists is rebound without that check. The leased
+#              slot is returned by the ordinary teardown. The launch is passed
+#              bin/fm-spawn.sh's --held-ok, because the parked, captain-held
+#              lanes are exactly the ones that lose their slot and a relaunch
+#              into a fresh copy of the same task is recovery, not dispatch;
+#              a queued or closed item still refuses there.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -265,6 +286,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+FRESH_SLOT=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -300,6 +322,7 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --fresh-slot) FRESH_SLOT=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -310,7 +333,8 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$FRESH_SLOT" = 0 ] \
+    || die "--harness, --model, --effort, --note, and --fresh-slot apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -935,6 +959,21 @@ relaunch_rollback() {
           ;;
       esac
       ;;
+    rebinding)
+      # The old agent is stopped. A leased slot, if any, is named so it is
+      # neither lost nor silently returned; the record still names the old one.
+      if [ -n "$FRESH_SLOT_NEW_WT" ]; then
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=fresh-slot-leased-record-kept" "new_worktree=$FRESH_SLOT_NEW_WT" || true
+        echo "error: $ID's agent is stopped and a fresh slot $FRESH_SLOT_NEW_WT is leased and claimed for it, but its record still names $FRESH_SLOT_OLD_WT; return that slot ((cd $FRESH_SLOT_PROJECT && treehouse return --force $FRESH_SLOT_NEW_WT)) and re-run the relaunch with --fresh-slot, or rewrite worktree= by hand and relaunch plainly" >&2
+      else
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
+        echo "error: $ID's agent stopped but no fresh slot was acquired; its record still names $FRESH_SLOT_OLD_WT (left to its claimant) and no agent is running" >&2
+      fi
+      ;;
+    rebound)
+      journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
+      echo "error: $ID's record now names its fresh slot $FRESH_SLOT_NEW_WT but no replacement was launched into it; a plain relaunch finishes the move (--fresh-slot is no longer needed)" >&2
+      ;;
     exited|launching)
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
@@ -1077,6 +1116,13 @@ CHECKPOINT_LINES=()
 safe_checkpoint() {
   local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
   CHECKPOINT_LINES=()
+  if [ "$FRESH_SLOT" = 1 ]; then
+    # The recorded slot is another task's now (fresh_slot_preflight), so its
+    # git state is that task's and proves nothing about this one; what the
+    # journal preserves is where the work was recorded and who holds it.
+    CHECKPOINT_LINES=("old_worktree=$FRESH_SLOT_OLD_WT" "old_slot_claimant=${FRESH_SLOT_OLD_CLAIMANT:-none}")
+    return 0
+  fi
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
   wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || die "task $ID's recorded worktree $WT cannot be resolved"
@@ -1170,6 +1216,171 @@ record_note() {
   esac
 }
 
+# --- fresh-slot rebind (header, relaunch --fresh-slot) ----------------------
+#
+# The old slot is another task's now, so every step below reads it at most and
+# never changes it; what moves is this task's record, its presentation files,
+# and its endpoint's shell.
+FRESH_SLOT_PROJECT=
+FRESH_SLOT_OLD_WT=
+FRESH_SLOT_OLD_CLAIMANT=
+FRESH_SLOT_NEW_WT=
+
+# Everything --fresh-slot can refuse before the old agent is touched.
+fresh_slot_preflight() {
+  [ "$FRESH_SLOT" = 1 ] || return 0
+  case "$KIND" in
+    ship|scout) ;;
+    *) die "--fresh-slot applies to a ship or scout task; a $KIND's home is not a pool slot" ;;
+  esac
+  FRESH_SLOT_PROJECT=$(fm_meta_get "$META" project)
+  [ -n "$FRESH_SLOT_PROJECT" ] && [ -d "$FRESH_SLOT_PROJECT" ] \
+    || die "task $ID records no readable project directory, so no fresh pool slot can be acquired for it"
+  command -v treehouse >/dev/null 2>&1 \
+    || die "treehouse is not installed, so no fresh pool slot can be acquired for $ID"
+  [ -n "$WT" ] || die "task $ID has no recorded worktree to rebind"
+  FRESH_SLOT_OLD_WT=$WT
+  FRESH_SLOT_OLD_CLAIMANT=
+  [ -d "$WT" ] || return 0
+  fm_treehouse_pool_slot "$FRESH_SLOT_PROJECT" "$WT" \
+    || die "task $ID's recorded worktree $WT is not a Treehouse pool slot of $FRESH_SLOT_PROJECT; --fresh-slot rebinds pool slots only"
+  fm_treehouse_slot_owner_state "$WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other) FRESH_SLOT_OLD_CLAIMANT=$FM_TREEHOUSE_SLOT_OWNER_ID ;;
+    mine|absent)
+      die "task $ID's recorded slot $WT still reads as its own (claim: $FM_TREEHOUSE_SLOT_OWNER), so nothing proves it lost; a plain relaunch re-enters the recorded copy and teardown returns it - --fresh-slot is for a slot another task has claimed"
+      ;;
+    *)
+      die "the owner claim on task $ID's recorded slot $WT cannot be read; inspect $(fm_treehouse_slot_owner_marker "$WT" 2>/dev/null || printf 'its .fm-slot-owner file') before rebinding"
+      ;;
+  esac
+}
+
+# Acquire a leased slot under the project lock, claim it, carry the lane's
+# presentation files over, and point the record at it. Called only after the
+# old agent is proven stopped; every failure dies with the concrete state and
+# leaves FRESH_SLOT_NEW_WT set once a slot is leased so the rollback names it.
+fresh_slot_rebind() {
+  local lock new_wt new_real old_real err="$JOURNAL.treehouse-err"
+  lock=$(fm_treehouse_project_lock_path "$FRESH_SLOT_PROJECT") \
+    || die "cannot resolve the shared Treehouse project lock for $FRESH_SLOT_PROJECT; the old agent is stopped and $ID's record still names $FRESH_SLOT_OLD_WT"
+  fm_lock_try_acquire "$lock" \
+    || die "another Treehouse slot allocation or return is in progress for $FRESH_SLOT_PROJECT; the old agent is stopped and nothing else changed, so re-run once it finishes"
+  if ! new_wt=$(cd "$FRESH_SLOT_PROJECT" && treehouse get --lease --lease-holder "$ID" 2>"$err"); then
+    fm_lock_release "$lock"
+    die "treehouse get --lease --lease-holder $ID acquired no fresh slot: $(tr '\n' ' ' < "$err" 2>/dev/null); the old agent is stopped and $ID's record still names $FRESH_SLOT_OLD_WT"
+  fi
+  rm -f "$err"
+  new_wt=$(printf '%s\n' "$new_wt" | sed -n '$p')
+  if [ -z "$new_wt" ] || [ ! -d "$new_wt" ] || ! fm_treehouse_pool_slot "$FRESH_SLOT_PROJECT" "$new_wt"; then
+    fm_lock_release "$lock"
+    die "treehouse get --lease printed '${new_wt:-nothing}', which is not a pool slot of $FRESH_SLOT_PROJECT; the old agent is stopped and $ID's record still names $FRESH_SLOT_OLD_WT"
+  fi
+  new_real=$(cd "$new_wt" && pwd -P)
+  old_real=$(cd "$FRESH_SLOT_OLD_WT" 2>/dev/null && pwd -P) || old_real=$FRESH_SLOT_OLD_WT
+  if [ "$new_real" = "$old_real" ]; then
+    fm_lock_release "$lock"
+    die "treehouse handed back $ID's old slot $new_wt, which task ${FRESH_SLOT_OLD_CLAIMANT:-another task} claims; the pool and the claim disagree, so nothing was rebound - inspect the slot (bin/fm-slot-audit.sh --all) before retrying"
+  fi
+  FRESH_SLOT_NEW_WT=$new_wt
+  if ! fm_treehouse_slot_owner_claim "$new_wt" "$ID" "$FM_HOME"; then
+    fm_lock_release "$lock"
+    die "fresh slot $new_wt is leased to $ID but could not be claimed; return it with (cd $FRESH_SLOT_PROJECT && treehouse return --force $new_wt) or write its claim by hand, then re-run"
+  fi
+  fm_lock_release "$lock"
+  fresh_slot_copy_presentation
+  fresh_slot_publish_worktree \
+    || die "fresh slot $new_wt is leased and claimed for $ID, but its record could not be rewritten to it; the record still names $FRESH_SLOT_OLD_WT"
+}
+
+# The lane's excluded presentation files (`.lavish/<task-id>*`) are the one
+# thing a scout keeps in its slot that no branch carries; copy them when the
+# old slot is still readable, and only warn when a copy fails.
+fresh_slot_copy_presentation() {
+  local src="$FRESH_SLOT_OLD_WT/.lavish" entry copied=0
+  [ -d "$src" ] && [ -r "$src" ] && [ -x "$src" ] || return 0
+  for entry in "$src/$ID"*; do
+    [ -e "$entry" ] || continue
+    mkdir -p "$FRESH_SLOT_NEW_WT/.lavish" 2>/dev/null || {
+      echo "warning: could not create $FRESH_SLOT_NEW_WT/.lavish; presentation files stay in $src" >&2
+      return 0
+    }
+    if cp -R "$entry" "$FRESH_SLOT_NEW_WT/.lavish/" 2>/dev/null; then
+      copied=$((copied + 1))
+    else
+      echo "warning: could not copy $entry into $FRESH_SLOT_NEW_WT/.lavish/" >&2
+    fi
+  done
+  [ "$copied" -eq 0 ] || echo "fresh-slot: copied $copied presentation entry(ies) from $src into $FRESH_SLOT_NEW_WT/.lavish/" >&2
+}
+
+# Rewrite worktree= under the record's own metadata lock through the shared
+# publish path, so a concurrent reader sees the old record or the new one.
+fresh_slot_publish_worktree() {
+  local lock tmp line
+  if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$META") || return 1
+  fm_lock_acquire_wait "$lock"
+  tmp=$(mktemp "$STATE/.$ID.meta.rebind.XXXXXX") || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree=*) line="worktree=$FRESH_SLOT_NEW_WT" ;;
+    esac
+    printf '%s\n' "$line" >> "$tmp" || {
+      rm -f "$tmp"
+      fm_lock_release "$lock"
+      return 1
+    }
+  done < "$META" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$META" "task record" "$STATE"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+}
+
+# Move the stopped endpoint's shell into the fresh slot and prove it arrived,
+# so the launch owner's own worktree check finds it there on every backend.
+fresh_slot_enter_endpoint() {
+  local quoted new_real seen i
+  quoted=${FRESH_SLOT_NEW_WT//\'/\'\\\'\'}
+  fm_backend_source "$BACKEND" \
+    || die "the $BACKEND adapter cannot be loaded; $ID's record names $FRESH_SLOT_NEW_WT, and a plain relaunch finishes the move"
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_text_line "$T" "cd -- '$quoted'" ;;
+    herdr) fm_backend_herdr_send_text_line "$T" "cd -- '$quoted'" ;;
+    rex) fm_backend_rex_send_text_line "$T" "cd -- '$quoted'" "$LABEL" ;;
+    *) false ;;
+  esac || die "task $ID's endpoint could not be told to enter its fresh slot $FRESH_SLOT_NEW_WT; its record already names that slot, so a plain relaunch finishes the move"
+  new_real=$(cd "$FRESH_SLOT_NEW_WT" && pwd -P)
+  seen=
+  for i in $(seq 1 20); do
+    case "$BACKEND" in
+      tmux) seen=$(fm_backend_tmux_current_path "$T" 2>/dev/null || true) ;;
+      herdr) seen=$(fm_backend_herdr_current_path "$T" 2>/dev/null || true) ;;
+      rex) seen=$(fm_backend_rex_current_path "$T" "$LABEL" 2>/dev/null || true) ;;
+    esac
+    if [ -n "$seen" ] && [ "$(cd "$seen" 2>/dev/null && pwd -P || printf '%s' "$seen")" = "$new_real" ]; then
+      return 0
+    fi
+    [ "$i" -ge 20 ] || sleep "$POLL"
+  done
+  die "task $ID's endpoint is in '${seen:-unknown}', not its fresh slot $FRESH_SLOT_NEW_WT, after being told to enter it; its record already names that slot, so a plain relaunch finishes the move"
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -1178,6 +1389,7 @@ do_relaunch() {
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"
   resolve_relaunch_profile
+  fresh_slot_preflight
 
   case "$KIND" in
     ship|scout)
@@ -1214,6 +1426,20 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
+  if [ "$FRESH_SLOT" = 1 ]; then
+    # The old agent is proven stopped, so the record may move: lease and claim
+    # a fresh slot, carry the presentation files, publish worktree=, then put
+    # the endpoint's shell there before the launch owner checks it.
+    journal_write rebinding "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+    fresh_slot_rebind
+    WT=$FRESH_SLOT_NEW_WT
+    # Every later phase, the completed journal included, records the slot the
+    # task was moved to beside the one it left.
+    CHECKPOINT_LINES+=("new_worktree=$WT")
+    journal_write rebound "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+    fresh_slot_enter_endpoint
+  fi
+
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
@@ -1221,6 +1447,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$FRESH_SLOT" = 0 ] || spawn_args+=(--held-ok)
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -1254,7 +1481,11 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$FRESH_SLOT" = 1 ]; then
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT fresh_slot=$FRESH_SLOT_NEW_WT old_slot=$FRESH_SLOT_OLD_WT (left to its claimant ${FRESH_SLOT_OLD_CLAIMANT:-none})"
+  else
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------

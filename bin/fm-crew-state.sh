@@ -24,7 +24,10 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>[ · worker=<in-slot|outside:<cwd>|no-endpoint>]
+#
+# The trailing worker= component appears for a record that names a Treehouse
+# pool slot; bin/fm-slot-audit.sh owns that fact (its --no-pool read).
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -220,6 +223,7 @@ SEP=' · '
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -z "${CREW_WORKER_FACT:-}" ] || line="$line${SEP}$CREW_WORKER_FACT"
   printf '%s\n' "$line"
   exit 0
 }
@@ -243,6 +247,21 @@ REMOTE_HOST=$(meta_value remote_host)
 # probe proves nothing for it - the remote arm below reads the true source.
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
+fi
+
+# Where the recorded endpoint actually is relative to its pool slot, carried as
+# its own component on every line below (bin/fm-slot-audit.sh owns the worker=
+# fact and the audit line it is read from; --no-pool skips the pool read this
+# per-heartbeat path does not need). Absent for a record with no pool slot or a
+# remote mate, so a stuck-crewmate read sees a worker that drifted out of its
+# slot without a second command.
+CREW_WORKER_FACT=
+# Only a worktree under a pool state file can be a slot (the same first test
+# bin/fm-wake-lib.sh's fm_treehouse_pool_slot applies), so every other record
+# skips the audit process entirely on this per-signal path.
+if [ -z "$REMOTE_HOST" ] && [ -f "$(dirname "$(dirname "$WT")")/treehouse-state.json" ]; then
+  CREW_WORKER_FACT=$(FM_STATE_OVERRIDE="$STATE" "${FM_SLOT_AUDIT_BIN:-$SCRIPT_DIR/fm-slot-audit.sh}" "$ID" --no-pool 2>/dev/null \
+    | sed -n 's/^slot-audit: .* \(worker=[^ ]*\) pool=.*$/\1/p' | head -n 1) || CREW_WORKER_FACT=
 fi
 
 # --- status log ------------------------------------------------------------

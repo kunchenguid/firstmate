@@ -1509,6 +1509,296 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+# --- the claim decides which record is stale ---------------------------------
+#
+# Two records name one slot and the slot's claim names the task being torn
+# down: that claim was written after the other record, so the other record is
+# the stale one. Teardown proceeds, flags it, and never touches it - unless a
+# process that is not this task's own is inside the slot, which the claim
+# cannot explain and the return would kill.
+
+run_case_flags() {  # <case> <id> <flag>...
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+# A fake tmux that logs like make_case's but also serves the recorded pane's
+# shell pid from <case>/pane-pid when that file exists, and answers the window
+# inventory per <mode>: `absent` lists no window (the endpoint reads missing),
+# `unreadable` fails the inventory without a definitive absence (the endpoint
+# reads unreadable).
+write_slot_tmux() {  # <case> <absent|unreadable>
+  local dir=$1 mode=$2
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message)
+    case "\$*" in
+      *pane_pid*) [ ! -f '$dir/pane-pid' ] || cat '$dir/pane-pid' ;;
+    esac
+    exit 0 ;;
+  list-windows)
+    if [ '$mode' = unreadable ]; then echo 'lost server' >&2; exit 1; fi
+    exit 0 ;;
+esac
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+}
+
+assert_slot_untouched_and_both_records_kept() {  # <case> <id> <other> <description>
+  local dir=$1 id=$2 other=$3 description=$4
+  assert_present "$dir/worktree/sentinel" "$description: the slot was reset"
+  assert_present "$dir/home/state/$id.meta" "$description: the task's own record was removed before refusing"
+  assert_present "$dir/home/state/$other.meta" "$description: the other task's record was removed"
+  assert_present "$dir/pool/1/.fm-slot-owner" "$description: the claim was removed before refusing"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "$description: the slot was returned: $(cat "$dir/runtime.log")"
+  ! grep -Fq "kill-window" "$dir/runtime.log" \
+    || fail "$description: the endpoint was killed before refusing: $(cat "$dir/runtime.log")"
+}
+
+test_claimed_slot_with_stale_other_record_tears_down_and_flags_it() {
+  local dir id=owner-task other=parked-task worker rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case slot-stale-flagged)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/elsewhere"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  cp "$dir/home/state/$other.meta" "$dir/other.meta.before"
+  claim_pool_slot "$dir" "$id"
+  # The displaced task's worker is parked OUTSIDE the slot, as a restored pane
+  # in the project directory would be; nothing of it is inside the slot.
+  ( cd "$dir/elsewhere" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of the slot's claimant refused for a stale record: $(cat "$dir/stderr")"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the claimant did not return its own slot: $(cat "$dir/runtime.log")"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the claimant's spent claim was left behind"
+  assert_absent "$dir/home/state/$id.meta" "the claimant's own record was left behind"
+  assert_present "$dir/home/state/$other.meta" "the stale record was removed"
+  cmp -s "$dir/other.meta.before" "$dir/home/state/$other.meta" \
+    || fail "the stale record's bytes changed"
+  kill -0 "$worker" 2>/dev/null || fail "the stale task's worker was killed"
+  assert_contains "$(cat "$dir/stderr")" "$other" "the warning should name the stale task"
+  assert_contains "$(cat "$dir/stderr")" "stale" "the warning should call the record stale"
+  assert_contains "$(cat "$dir/stderr")" "fresh slot" "the warning should name the fresh-slot relaunch"
+  assert_contains "$(cat "$dir/stderr")" "relaunch --fresh-slot" "the warning should carry the rebind command"
+  grep -F "slot-audit:$other" "$dir/home/state/.wake-queue" | grep -Fq "stale-record" \
+    || fail "no slot-audit stale-record wake was queued for $other: $(cat "$dir/home/state/.wake-queue" 2>/dev/null)"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a claim naming the task being torn down downgrades the other record to a flagged stale record"
+}
+
+test_claimed_slot_with_foreign_process_inside_refuses() {
+  local dir id=owner-task other=parked-task worker rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case slot-stale-foreign)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+  # A process INSIDE the slot that is not this task's recorded endpoint chain.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a slot holding a process that is not the task's own"
+  kill -0 "$worker" 2>/dev/null || fail "the foreign process was killed"
+  assert_slot_untouched_and_both_records_kept "$dir" "$id" "$other" "foreign process inside the claimed slot"
+  assert_contains "$(cat "$dir/stderr")" "$worker" "the refusal should name the foreign process's pid"
+  assert_contains "$(cat "$dir/stderr")" "not even with --force" "the refusal should say --force does not lift it"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a foreign process inside a claimed slot refuses even though the other record is stale"
+}
+
+test_forced_teardown_does_not_override_foreign_process_refusal() {
+  local dir id=owner-task other=parked-task worker rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case slot-stale-foreign-unforced)
+  mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # Both the forced and the unforced run refuse the same way: --force authorizes
+  # discarding this task's own work, never killing another task's process.
+  set +e
+  run_case_flags "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unforced teardown returned a slot holding a foreign process"
+  assert_contains "$(cat "$dir/stderr")" "$worker" "the unforced refusal should name the foreign pid"
+  set +e
+  run_case_flags "$dir" "$id" --force > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force overrode the foreign-process refusal"
+  kill -0 "$worker" 2>/dev/null || fail "--force killed the foreign process"
+  assert_present "$dir/home/state/$id.meta" "--force removed the task record despite refusing"
+  assert_present "$dir/home/state/$other.meta" "--force removed the other record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "--force removed the claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--force returned the slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$worker" "the forced refusal should name the foreign pid"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: --force never overrides the foreign-process refusal on a claimed slot"
+}
+
+# The reverse order of test_stale_record_on_claimed_slot_retires_then_claimant_tears_down:
+# the claimant goes first and flags the stale record; the stale record's own
+# teardown then finds the slot returned and unclaimed with no record to collide
+# against, so it proceeds as an ordinary unclaimed-slot teardown.
+test_claimant_tears_down_first_then_stale_record_retires() {
+  local dir id=stale-task other=live-task
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case slot-claimant-first)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "claimant teardown refused for the stale record beside it: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$other.meta" "claimant teardown left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent claim"
+  assert_present "$dir/home/state/$id.meta" "claimant teardown removed the stale record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "claimant teardown did not return its slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$id" "the claimant's warning should name the stale record"
+  assert_contains "$(cat "$dir/stderr")" "stale" "the claimant's warning should call it stale"
+
+  : > "$dir/runtime.log"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the stale record's own teardown failed after the claimant left: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "the stale record was not retired"
+  assert_not_contains "$(cat "$dir/stderr")" "REFUSED" "the stale record's teardown refused with nothing left to collide against"
+  pass "fm-teardown: the claimant tears down first and flags the stale record, which then retires on its own"
+}
+
+# --- --records-only ---------------------------------------------------------
+
+test_records_only_retires_dead_record_without_touching_slot() {
+  local dir id=stranded-task
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case records-only-dead)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" absent
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+
+  run_case_flags "$dir" "$id" --force --records-only > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "--records-only refused a dead, process-free record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "--records-only left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "--records-only kept the task's own claim on a process-free slot"
+  assert_present "$dir/worktree/sentinel" "--records-only reset the slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--records-only returned the slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stdout")" "records-only: slot $dir/worktree left in place because" \
+    "the teardown line should record the records-only reason"
+  assert_contains "$(cat "$dir/stdout")" "the recorded endpoint reads missing" \
+    "the reason should carry the endpoint state that licensed it"
+  grep -F "slot-audit:$id" "$dir/home/state/.wake-queue" | grep -Fq "records-only" \
+    || fail "no slot-audit records-only wake was queued: $(cat "$dir/home/state/.wake-queue" 2>/dev/null)"
+  pass "fm-teardown --records-only: a dead, process-free record retires, drops its claim, and leaves the slot"
+}
+
+test_records_only_refuses_while_own_chain_runs_in_slot() {
+  local dir id=idle-task worker
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case records-only-own-chain)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" absent
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+  # The task's own pane shell still idles inside the slot: the fake endpoint
+  # reports this sleep as the pane's shell pid.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  printf '%s\n' "$worker" > "$dir/pane-pid"
+
+  set +e
+  run_case_flags "$dir" "$id" --force --records-only > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--records-only retired a record whose own chain still idles in the slot"
+  kill -0 "$worker" 2>/dev/null || fail "--records-only killed the task's own process"
+  assert_present "$dir/home/state/$id.meta" "--records-only removed the record before refusing"
+  assert_present "$dir/pool/1/.fm-slot-owner" "--records-only dropped the claim before refusing"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--records-only returned the slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$worker" "the refusal should name the task's own process"
+  assert_contains "$(cat "$dir/stderr")" "full teardown" "the refusal should point at the full teardown"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown --records-only: a task whose own chain still idles in its slot needs the full teardown"
+}
+
+test_records_only_refuses_without_dead_endpoint_proof() {
+  local dir id=unproven-task rc
+  dir=$(make_case records-only-unproven)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" unreadable
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+
+  set +e
+  run_case_flags "$dir" "$id" --force --records-only > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--records-only retired a record whose endpoint was not proven dead"
+  assert_present "$dir/home/state/$id.meta" "--records-only removed the record before refusing"
+  assert_present "$dir/pool/1/.fm-slot-owner" "--records-only dropped the claim before refusing"
+  assert_present "$dir/worktree/sentinel" "--records-only reset the slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--records-only returned the slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "unreadable" "the refusal should report the endpoint state it read"
+  pass "fm-teardown --records-only: an endpoint not proven dead or agent-less refuses"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1532,6 +1822,13 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
+test_claimed_slot_with_stale_other_record_tears_down_and_flags_it
+test_claimed_slot_with_foreign_process_inside_refuses
+test_forced_teardown_does_not_override_foreign_process_refusal
+test_claimant_tears_down_first_then_stale_record_retires
+test_records_only_retires_dead_record_without_touching_slot
+test_records_only_refuses_while_own_chain_runs_in_slot
+test_records_only_refuses_without_dead_endpoint_proof
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
