@@ -63,6 +63,46 @@ A state-scoped replacement handoff carries every actionable close whose delivery
 A handoff marker never satisfies the extension-ownership tolerance.
 So a running Pi process whose replacement did not load this extension is reported as missing, rather than borrowing stale load evidence from its predecessor.
 
+### Pi home identity across native restore
+
+Pi's native session manager is also the durable identity boundary for the
+Firstmate home. On a fresh persisted Pi session, the primary extensions append
+one `firstmate.pi-home-binding.v1` custom entry containing only the canonical,
+owner-validated `FM_HOME` through Pi's `ExtensionAPI.appendEntry()` surface. On
+`/new` and `/fork`, the new native session seeds
+the same binding from the already-bound process. On `/resume`, reload, or a
+new process restoring an existing session, the entry wins over inherited
+environment values and is resolved before either extension publishes a marker,
+arms the watcher, or invokes a guard subprocess. `FM_STATE_OVERRIDE` and
+`FM_CONFIG_OVERRIDE` must remain inside that canonical home; the resolved
+values are exported to child processes. `FM_ROOT_OVERRIDE` must still identify
+the source checkout that loaded the extension.
+
+If Pi does not expose a persistent session manager and file, only an explicitly
+fresh `new` or `fork` reason may run in ephemeral mode with the selected
+`FM_HOME`; that mode records no binding and cannot safely support restore or
+startup inference. `startup`, `resume`, and reload fail closed until a durable
+Pi session identity is available.
+
+Sessions created before this binding existed have no trustworthy home
+evidence. A restored legacy session, malformed entry, conflicting entry,
+ambiguous session timestamp, unsafe session file, or contradictory override
+therefore fails closed: it does not adopt inherited `FM_HOME`, mutate a sibling
+home, acquire its lock, publish a marker, or arm supervision. The safe
+migration is deliberately native and explicit: start a new Pi session with the
+intended `FM_HOME`, let the ordinary Firstmate session-start path acquire that
+home's lock, and allow the extension to seed the binding through Pi's session
+manager. No custom launcher or Dotfiles shim is required. If the old session
+must be retained, use an attended native Pi migration that starts the new
+session in the selected home; this patch does not infer or copy identity into
+an old session.
+
+This identity fix does not claim prompt-free cold recovery of a stale
+Firstmate lock. The existing guarded session-start path and watcher lock
+machinery remain the owners of lock acquisition/reclamation; proving a native
+Herdr server restart automatically re-acquires a stale lock is a separate
+follow-up (upstream issue #2002).
+
 A main follow-up counts as delivered once Pi accepts it, never once the model reads it.
 The reason is that a follow-up queued while main is streaming joins the running run without a `before_agent_start`.
 The extension header owns how consumption is observed and why it only decides what a replacement replays.

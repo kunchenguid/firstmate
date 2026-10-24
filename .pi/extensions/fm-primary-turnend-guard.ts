@@ -9,6 +9,7 @@ import {
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
+import { resolvePiHome, type PiHomeContext } from "./lib/fm-pi-home-binding.ts";
 
 let guardFollowupActive = false;
 
@@ -17,10 +18,27 @@ type LockOwnership = "owned" | "missing" | "other";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
-const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-const marker = `${state}/.pi-turnend-extension-loaded`;
+let fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+let state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+let config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
+let marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+
+function bindPiHome(ctx: PiHomeContext | undefined, pi: ExtensionAPI, reason?: string): boolean {
+  const result = resolvePiHome(ctx, fmHome, reason, root, pi.appendEntry.bind(pi));
+  if (!result.ok) {
+    console.error(`firstmate: Pi home binding refused: ${result.reason}`);
+    return false;
+  }
+  fmHome = result.home;
+  state = result.state;
+  config = result.config;
+  marker = `${state}/.pi-turnend-extension-loaded`;
+  process.env.FM_HOME = fmHome;
+  process.env.FM_STATE_OVERRIDE = state;
+  process.env.FM_CONFIG_OVERRIDE = config;
+  return true;
+}
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -567,6 +585,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("session_start", (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
+    if (!bindPiHome(ctx, pi, reason)) return;
+    markLoaded();
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
@@ -648,5 +668,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  markLoaded();
+  // The session manager must resolve the durable home before this extension
+  // publishes a marker. This prevents a restored process with inherited
+  // FM_HOME from mutating the wrong sibling home.
 }
