@@ -482,7 +482,10 @@
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
-#   account selection. A present file pins every supported launch of
+#   account selection: an unpinned pi/pi-signed launch explicitly unsets
+#   PI_CODING_AGENT_DIR on its launch line, so it deterministically reads Pi's
+#   default <home>/.pi/agent store whatever the pane daemon exports.
+#   A present file pins every supported launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
 #   refuses before any endpoint, worktree, or record exists when the file is
@@ -5922,12 +5925,12 @@ claude*)
   ;;
 pi | pi-signed)
   # The store is the one the LAUNCH will read: a worker account pin names the
-  # root on the launch line itself, and an unpinned launch line names no root at
-  # all, so that worker reads Pi's default <home>/.pi/agent. The spawning
-  # process's own PI_CODING_AGENT_DIR is not evidence, because a pane is created
-  # by a long-lived tmux/herdr daemon that does not inherit firstmate's
-  # environment. Only the realpath is registered, because Pi keys its store by
-  # the canonical path.
+  # root on the launch line itself, and an unpinned launch line unsets
+  # PI_CODING_AGENT_DIR in its env prefix below, so that worker deterministically
+  # reads Pi's default <home>/.pi/agent. The spawning process's own environment
+  # is not an input, because a pane is created by a long-lived tmux/herdr daemon
+  # that does not inherit firstmate's environment. Only the realpath is
+  # registered, because Pi keys its store by the canonical path.
   if [ "$KIND" != secondmate ]; then
     spawn_pi_trust_args=("$WT" "$PROJ_ABS")
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
@@ -7333,7 +7336,14 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro)
+pi | pi-signed)
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
+  else
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT_DIR $LAUNCH"
+  fi
+  ;;
+claude | codex | opencode | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

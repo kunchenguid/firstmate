@@ -143,9 +143,9 @@ test_absent_pin_keeps_the_launch_unchanged() {
   expect_code 0 "$rc" "an unpinned Pi spawn with an unqualified model should succeed: $out"
   assert_not_contains "$(cat "$CASE/launch.log")" "--provider" "an unpinned Pi launch must not add a provider"
   run_pane
-  assert_grep "PI_CODING_AGENT_DIR=$CASE/ambient-pi" "$CASE/pi-worker" \
-    "an unpinned Pi launch must keep the pane's own Pi root"
-  pass "an absent pin leaves Claude and Pi launches exactly as they were"
+  assert_grep "PI_CODING_AGENT_DIR=unset" "$CASE/pi-worker" \
+    "an unpinned Pi launch must clear the pane's ambient root so it reads the default store"
+  pass "an absent pin leaves Claude launches unchanged and gives Pi its deterministic default store"
 }
 
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials() {
@@ -248,6 +248,10 @@ test_pi_pin_selects_the_root_and_the_declared_provider() {
   launch=$(cat "$CASE/launch.log")
   assert_contains "$launch" "--provider 'openai-codex' --model 'openai-codex/gpt-5.5'" \
     "the launch should confine Pi's model lookup to the declared provider"
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$CASE/pi-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI " \
+    "a pinned Pi launch should name its root ahead of the env prefix and must not shed it"
+  assert_not_contains "$launch" "-u PI_CODING_AGENT_DIR" \
+    "a pinned Pi launch must keep the pinned root"
   # Pi's project trust is keyed per absolute path in the pinned root's own
   # store (bin/fm-pi-trust.sh), so a pinned spawn must register there and never
   # in the invoking process's default root.
@@ -321,7 +325,7 @@ test_a_pin_governs_only_its_own_runner() {
   out=$(spawn_ship "$id-pi" --harness pi --model gpt-5.5); rc=$?
   expect_code 0 "$rc" "a Pi spawn must ignore a Claude pin: $out"
   assert_absent "$CASE/claude-checks" "no Claude sign-in check may run for another runner"
-  pass "a Claude pin leaves codex and Pi launches unchanged"
+  pass "a Claude pin adds no account to codex or Pi launches"
 }
 
 test_raw_claude_command_receives_the_pin() {
