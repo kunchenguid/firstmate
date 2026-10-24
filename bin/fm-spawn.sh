@@ -372,7 +372,9 @@
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment, including the
 #   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
-#   path the steering doorbell names). Raw commands must
+#   path the steering doorbell names) and the GH_REPO export a ship or scout
+#   launch carries when bin/fm-gh-repo.sh names the project's GitHub
+#   repository. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -6637,6 +6639,13 @@ fi
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
+# Pin a ship or scout worker's gh and gh-axi commands to the project's GitHub
+# repository from any directory; bin/fm-gh-repo.sh owns why and how.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  if SPAWN_GH_REPO=$("$SCRIPT_DIR/fm-gh-repo.sh" "$PROJ_ABS" 2>/dev/null); then
+    LAUNCH="export GH_REPO=$(shell_quote "$SPAWN_GH_REPO"); $LAUNCH"
+  fi
+fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
