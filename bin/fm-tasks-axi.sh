@@ -6,13 +6,17 @@
 #
 # Every routine firstmate backlog read or mutation goes through this command
 # rather than a bare `tasks-axi`; `fm-tasks-axi.sh <command> --help` prints
-# tasks-axi's own help. Arguments reach tasks-axi as given, apart from one
-# rewrite that keeps file arguments meaning what the caller meant: a relative
+# tasks-axi's own help. Arguments reach tasks-axi as given, apart from two
+# rewrites. One keeps file arguments meaning what the caller meant: a relative
 # value of `--to` or any `--*-file` flag (`--body-file`, `--relation-file`, ...)
 # is made absolute against the caller's working directory, because tasks-axi
 # starts from the backlog root instead. `--report` stays as given: tasks-axi
 # stores it verbatim as a link, which lifecycle transitions record relative to
-# that same root.
+# that same root. The other gates the optional add flags `--due` and `--why`
+# behind one probe of `tasks-axi add --help`: `--due` additionally passes only
+# for a beads home (a markdown home stores no due), and anything the installed
+# tool does not accept is dropped, so a caller may always state either flag
+# without meeting a tasks-axi that rejects unknown flags.
 #
 # `show` (including `view`) and `list` decode stored captain-hold reasons
 # through bin/fm-hold-reason-lib.sh, which owns the field-only decoding contract.
@@ -94,6 +98,23 @@ absolute_from_caller() {  # <path-value>
   esac
 }
 
+# strip_flag_from_args <flag>: drop the flag and its value from ARGS.
+strip_flag_from_args() {
+  local filtered=() skip_value=0 arg
+  for arg in ${ARGS[@]+"${ARGS[@]}"}; do
+    if [ "$skip_value" = 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      "$1") skip_value=1 ;;
+      "$1"=*) ;;
+      *) filtered+=("$arg") ;;
+    esac
+  done
+  ARGS=("${filtered[@]+"${filtered[@]}"}")
+}
+
 ARGS=()
 path_value_next=0
 for arg in "$@"; do
@@ -141,6 +162,45 @@ if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
   export TASKS_AXI_FILE="$FM_BACKLOG_AXI_FILE"
 else
   unset TASKS_AXI_FILE
+fi
+
+has_due=0
+has_why=0
+for arg in ${ARGS[@]+"${ARGS[@]}"}; do
+  case "$arg" in
+    --due|--due=*) has_due=1 ;;
+    --why|--why=*) has_why=1 ;;
+  esac
+done
+if [ "$has_due" = 1 ] || [ "$has_why" = 1 ]; then
+  opt_help=$(tasks-axi add --help 2>&1 || true)
+  strip_due=0
+  strip_why=0
+  tool_rejects=0
+  if [ "$has_due" = 1 ]; then
+    if [ "$(fm_tasks_axi_backend "$FM_BACKLOG_AXI_ROOT" 2>/dev/null || true)" != beads ]; then
+      strip_due=1
+    fi
+    case "$opt_help" in
+      *--due*) ;;
+      *) strip_due=1; tool_rejects=1 ;;
+    esac
+  fi
+  if [ "$has_why" = 1 ]; then
+    case "$opt_help" in
+      *--why*) ;;
+      *) strip_why=1; tool_rejects=1 ;;
+    esac
+  fi
+  if [ "$tool_rejects" = 1 ]; then
+    printf 'fm-tasks-axi: stripping --due/--why: installed tasks-axi does not accept them (due not applied to row)\n' >&2
+  fi
+  if [ "$strip_due" = 1 ]; then
+    strip_flag_from_args --due
+  fi
+  if [ "$strip_why" = 1 ]; then
+    strip_flag_from_args --why
+  fi
 fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
