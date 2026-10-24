@@ -8,8 +8,6 @@
 # is already in the up-to-date default branch.
 #
 # Covers three fixes:
-#   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
-#     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
@@ -21,10 +19,10 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (legacy delivery contract)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + pushed, unmerged, no PR                 -> REFUSE (safety regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -288,6 +286,35 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as closed without merging (rejected).
+add_gh_pr_closed_unmerged() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,closed" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: closed" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case "$*" in
+      *"state,headRefOid,url"*) echo "error: pull request not found" >&2 ; exit 1 ;;
+      *"-q .state"*) printf '%s\n' 'CLOSED' ; exit 0 ;;
     esac
     ;;
 esac
@@ -899,25 +926,82 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
-  case_dir=$(make_case nm-origin)
+test_no_mistakes_pushed_unmerged_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-unmerged)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
-  # Push the task branch to origin and fetch so the worktree sees it.
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  # Publishing the task branch is not landing it: there is no PR and the
+  # default branch does not contain this change.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
-  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  expect_code 1 "$rc" "nm-pushed-unmerged: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-pushed-unmerged: no REFUSED line in stderr"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "nm-pushed-unmerged: teardown removed the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "nm-pushed-unmerged: teardown closed the backlog item"
+  # Explicit retention of the isolated copy and its unmerged commit (not only
+  # the durable record): a teardown that deleted the worktree would strand the
+  # ship even when the meta file survived.
+  [ -d "$case_dir/wt" ] \
+    || fail "nm-pushed-unmerged: refusal removed the isolated worktree"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null)" = "$head" ] \
+    || fail "nm-pushed-unmerged: refusal moved or deleted the unmerged commit"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-unmerged "$head"
+  pass "no-mistakes worktree with pushed but unmerged work is refused"
+}
+
+test_no_mistakes_pushed_with_open_pr_allowed() {
+  local case_dir rc
+  case_dir=$(make_case nm-pushed-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://github.com/o/r/pull/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
+  pass "pushed work with a recorded open PR is not refused"
+}
+
+test_no_mistakes_pushed_with_closed_unmerged_pr_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-closed-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://github.com/o/r/pull/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_closed_unmerged "$case_dir"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-pushed-closed-pr: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-pushed-closed-pr: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-closed-pr "$head"
+  pass "pushed work with a recorded but closed-unmerged PR is refused"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -1082,7 +1166,7 @@ test_squash_merged_rebased_branch_allows() {
 # Override tea to answer one login for git.example.org and a pull request
 # read through "tea api" with the supplied merged flag and head.
 add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3
+  local case_dir=$1 merged=$2 head=$3 state=${4:-closed}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
@@ -1091,9 +1175,56 @@ if [ "\${1:-} \${2:-}" = "login list" ]; then
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1
-printf '{"state":"closed","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
+printf '{"state":"$state","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
 SH
   chmod +x "$case_dir/fakebin/tea"
+}
+
+test_no_mistakes_pushed_with_open_forgejo_pr_allowed() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-open-forgejo-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://git.example.org/team/repo/pulls/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_axi_error "$case_dir"
+  add_tea_pull_for_head "$case_dir" false "$head" open
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-pushed-open-forgejo-pr: teardown should proceed"
+  pass "pushed work with a recorded open Forgejo PR is not refused"
+}
+
+test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-closed-forgejo-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://git.example.org/team/repo/pulls/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_axi_error "$case_dir"
+  add_tea_pull_for_head "$case_dir" false "$head" closed
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-pushed-closed-forgejo-pr: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-pushed-closed-forgejo-pr: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-closed-forgejo-pr "$head"
+  pass "pushed work with a closed-unmerged Forgejo PR is refused and retained"
 }
 
 # A Forgejo task whose default branch moved on after the squash merge, editing
@@ -5625,7 +5756,11 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_no_mistakes_pushed_unmerged_refuses
+test_no_mistakes_pushed_with_open_pr_allowed
+test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
+test_no_mistakes_pushed_with_open_forgejo_pr_allowed
+test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

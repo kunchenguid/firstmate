@@ -42,14 +42,16 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
+# hard-resets/removes the worktree and kills its processes. For a normal ship task,
+# work whose branch is pushed but has no PR recorded or found, or whose recorded PR
+# is confirmed closed without merging, is refused, while a pushed branch with an
+# open PR (including an upstream-contribution PR from a fork) may be cleaned up.
+# Unpushed work has landed only when its PR is merged and GitHub reports a PR head
+# that contains the current local work, or its content is already present in the
+# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# branch flow, where the branch's own commits live nowhere on a remote yet the
+# change is fully in main. Local-only delivery retains its existing boundary where
+# publishing the branch to a remote is sufficient. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
@@ -1739,6 +1741,27 @@ work_is_landed() {
   content_in_default
 }
 
+# Is the recorded PR confirmed CLOSED without merging (rejected)? Only true
+# when gh positively reports a closed, non-merged state; any other outcome -
+# open, merged, no PR recorded, or a gh lookup error - returns non-zero so the
+# caller falls back to its existing recorded-PR allowance rather than
+# refusing on an inconclusive read.
+pr_is_closed_unmerged() {
+  local target state
+  [ -n "$PR_URL" ] || return 1
+  target=$PR_URL
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_STATE" = closed ] && [ "$FM_PR_RECORD_MERGED" = false ]
+    return
+  fi
+  state=$(cd "$WT" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
+  case "$state" in
+    CLOSED|closed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -2050,6 +2073,7 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -2101,16 +2125,16 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  elif [ "$MODE" != local-only ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || pr_is_closed_unmerged; }; then
+      echo "REFUSED: worktree $WT has work that is not landed." >&2
+      [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
