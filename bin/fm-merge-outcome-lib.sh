@@ -15,11 +15,14 @@
 # the upward write, so the mate can handle its own poll observation.
 # The merge entrypoint and the main watcher may each run the guarded teardown
 # for a finished direct report once the merge outcome is recorded: a main-home
-# kind=ship task whose current state is done and whose recorded PR is exactly
-# the merged one. This library owns that eligibility check, the teardown call,
-# and the resulting notice text; every other lane keeps the plain notice.
-# The merge outcome adds no new transport; a cleanup outcome rides the merge
-# notice this library emits.
+# kind=ship task whose current state is done, whose recorded PR is exactly the
+# merged one, and whose status line records that same PR as its deliverable.
+# This library owns that eligibility check, the teardown call, and the
+# resulting notice text; every other lane keeps the plain notice.
+# The merge outcome adds no new transport; a cleanup that ran rides the merge
+# notice this library emits, appended as "; lane automatically cleaned up",
+# "; automatic cleanup refused: <reason>", or "; automatic cleanup did not
+# complete: <reason>".
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
 # the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
