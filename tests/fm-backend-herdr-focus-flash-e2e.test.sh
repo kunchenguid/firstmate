@@ -374,35 +374,35 @@ case "$FLOOR_VERDICT" in
   *) fail "herdr $LIVE_VERSION (protocol $LIVE_PROTOCOL) could not be classified against the presentation floor" ;;
 esac
 
-# The end-user gate: an unconfigured home must project only at or above the
-# floor, and an explicit opt-in must survive either way.
+# The end-user gate: an unconfigured home must take a non-flat shape only at or
+# above the floor, and an explicit per-task opt-in must survive either way.
 FLOOR_CONFIG="$TMP_ROOT/floor-config"
 FLOOR_STATE="$TMP_ROOT/floor-state"
 mkdir -p "$FLOOR_CONFIG" "$FLOOR_STATE"
-gate_verdict() {  # <config-dir> -> on|off, warnings on stderr
+gate_verdict() {  # <config-dir> -> project|task|flat, warnings on stderr
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
     . "$0/bin/backends/herdr.sh"
-    if fm_backend_herdr_presentation_enabled "$1" "$2"; then printf "on\n"; else printf "off\n"; fi
+    fm_backend_herdr_container_shape "$1" "$2"
   ' "$ROOT" "$1" "$FLOOR_STATE"
 }
 GATE_ERR="$TMP_ROOT/gate.err"
 GATE_DEFAULT=$(gate_verdict "$FLOOR_CONFIG" 2>"$GATE_ERR")
 printf 'on\n' > "$FLOOR_CONFIG/herdr-presentation-spaces"
 GATE_OPT_IN=$(gate_verdict "$FLOOR_CONFIG" 2>/dev/null)
-[ "$GATE_OPT_IN" = on ] \
-  || fail "an explicit opt-in must stay on for herdr $LIVE_VERSION, got '$GATE_OPT_IN'"
+[ "$GATE_OPT_IN" = task ] \
+  || fail "an explicit opt-in must stay on the per-task shape for herdr $LIVE_VERSION, got '$GATE_OPT_IN'"
 if [ "$FLOOR_VERDICT" = 1 ]; then
-  [ "$GATE_DEFAULT" = off ] \
-    || fail "an unconfigured home must not be projected on below-floor herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
+  [ "$GATE_DEFAULT" = flat ] \
+    || fail "an unconfigured home must stay flat on below-floor herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
   grep -q "$LIVE_VERSION" "$GATE_ERR" \
     || fail "the below-floor fallback must name herdr $LIVE_VERSION: $(cat "$GATE_ERR")"
-  pass "version floor: an unconfigured home falls back flat on herdr $LIVE_VERSION and the explicit opt-in still projects"
+  pass "version floor: an unconfigured home falls back flat on herdr $LIVE_VERSION and the explicit per-task opt-in still projects"
 else
-  [ "$GATE_DEFAULT" = on ] \
-    || fail "an unconfigured home must stay projected on herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
+  [ "$GATE_DEFAULT" = project ] \
+    || fail "an unconfigured home must group by project on herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
   [ ! -s "$GATE_ERR" ] \
     || fail "a supported release must warn about nothing: $(cat "$GATE_ERR")"
-  pass "version floor: an unconfigured home stays projected on herdr $LIVE_VERSION and the explicit opt-in agrees"
+  pass "version floor: an unconfigured home groups by project on herdr $LIVE_VERSION and the explicit per-task opt-in agrees"
 fi
 
 printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s default-session-tripwire=armed\n' \

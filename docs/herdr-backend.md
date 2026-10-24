@@ -7,7 +7,7 @@ Herdr is an agent-native terminal backend with native per-pane agent state and p
 Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
-Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
+The default project-grouped task containers have a higher floor of Herdr 0.8.0 for the reason given under [Task container shapes](#task-container-shapes).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -17,8 +17,10 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | --- | --- |
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
-| Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
-| The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| Which container shape a home uses, and the setting that picks it | [Task container shapes](#task-container-shapes) |
+| How tasks are grouped into one workspace per project | [Project workspaces](#project-workspaces) |
+| Where task tabs appear in the flat layout and how to watch them | [Watching and task containers](#watching-and-task-containers) |
+| The one-task workspaces and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Grouping tasks by project with status tags and a sorted agents list | [Project groups](#project-groups) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
@@ -97,7 +99,8 @@ Removing or upgrading the shadowing client is the durable fix.
 
 ## Watching and task containers
 
-The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+This section owns the flat shape, which is also the fallback every other shape degrades to.
+It puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 
 | Home | Workspace label |
@@ -126,7 +129,7 @@ Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET
 A Firstmate or secondmate agent's own commands inherit them.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
 
-With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to.
+In the flat shape, a crewmate or scout is created in the exact workspace that identity currently resolves to.
 That workspace is read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
@@ -164,48 +167,57 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
-## Presentation spaces
+## Task container shapes
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
-This section calls that one-task workspace the projection.
-Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
+Every new crewmate or scout is created in one of three presentation-only container shapes.
+A shape decides only where a task tab appears; the task's own metadata remains the sole endpoint authority in all three.
+
+| Shape | What it looks like | Owner |
+| --- | --- | --- |
+| Project-grouped | One durable workspace per project, holding one task tab per task of that project | [Project workspaces](#project-workspaces) |
+| Per-task | One disposable workspace per task | [Presentation spaces](#presentation-spaces) |
+| Flat | One workspace per home, holding every task tab of that home | [Watching and task containers](#watching-and-task-containers) |
+
+A persistent secondmate agent keeps its own home workspace in every shape, because a mate is not a project's task.
+Only the children a home launches are placed by the selected shape.
 
 ### Setting values
 
-The local gitignored `config/herdr-presentation-spaces` file controls the projection.
+The local gitignored `config/herdr-presentation-spaces` file selects the shape.
 
 | File state | Result |
 | --- | --- |
 | Absent | Leaves the choice to the version floor below (the unconfigured default). |
-| `off` | Opts the home out. |
-| `on` | Forces the projection on, as a deliberate opt-in. |
-| Empty | A deliberate opt-in, the same as `on`. |
+| `project` | Project-grouped. |
+| `on` | Per-task. |
+| Empty | A deliberate opt-in to the per-task shape, the same as `on`. |
+| `off` | Flat. |
 | Any other value | Warns and follows the unconfigured default rather than failing a spawn over a purely visual setting. |
 
 Values are compared with whitespace stripped and case ignored.
 
 The empty file is the historical presence-based opt-in form.
-So every home that had already enabled the projection stays enabled with no migration step.
+So every home that had already enabled the per-task projection stays on it with no migration step.
 No previously enabled home can be turned off by the default or by the floor.
 
-A home that never created the file gains the projection at its next Herdr spawn on a supported release.
+A home that never created the file groups its tasks by project at its next Herdr spawn on a supported release.
 That flip is deliberate.
 It reaches only the Herdr backend, because no other runtime backend has a projection path.
 
 ### Why the default needs Herdr 0.8.0
 
-Projecting each task into its own workspace makes every task cleanup a workspace-emptying removal.
+Both non-flat shapes end in a workspace-emptying removal: the per-task shape on every task cleanup, and the project-grouped shape when a project's last task tab closes.
 That is the only removal shape Herdr's pre-0.8.0 focus defect touches.
 The focus-safe removal plan below can only avoid the defect while the closing pane's shell can be proved lone, childless, and idle.
 
 A persistent child of that shell - a `gitstatusd`, a `zsh-async` worker, or `direnv` - fails that proof permanently and forces the plain explicit close.
-On those releases, that close moves the active workspace for roughly a seventh of a second before the restore backstop pulls it back, once per task cleanup.
+On those releases, that close moves the active workspace for roughly a seventh of a second before the restore backstop pulls it back.
 
-An unconfigured home is therefore projected only on a release at or above the 0.8.0 floor.
+An unconfigured home is therefore grouped by project only on a release at or above the 0.8.0 floor.
 On those releases every workspace-removal primitive preserves focus, and that proof stops being load-bearing.
 
 Below the floor, an unconfigured home uses the ordinary flat per-home layout instead.
-It warns once per home per detected release, naming the running release and the upgrade that restores the projection.
+It warns once per home per detected release, naming the running release and the upgrade that restores grouping.
 That one-warning-per-release record is a `state/.herdr-presentation-floor-<release>` marker.
 Deleting it only makes the same warning appear again.
 An upgrade or downgrade re-announces itself because the release is part of the key.
@@ -220,10 +232,10 @@ The floor reads two sources:
 Both applicable releases must pass.
 When status positively reports no running server, the floor uses only the client, because that client will start it.
 
-The unconfigured default is rechecked after the server is started or adopted, and before any presentation journal or workspace is created.
+The unconfigured default is rechecked after the server is started or adopted, and before any presentation journal or workspace of either non-flat shape is created.
 An unreadable server state or release is treated as unsupported rather than guessed at.
 
-An explicit `on` is honored below the floor, so a home that deliberately opted in is never silently downgraded.
+An explicit `project` or `on` is honored below the floor, so a home that deliberately chose a shape is never silently downgraded.
 That home accepts the documented focus move, and the exact prior-tab restore stays its backstop.
 
 The floor has a single owner, the spawn-time gate.
@@ -240,8 +252,80 @@ The primary's absent file and the secondmate's absent file both mean the same un
 So leaving the file absent converges a secondmate to that same default rather than turning it off.
 Only an explicit primary `off` propagates the opt-out.
 
-A secondmate agent itself always stays in its ordinary parent workspace; only children launched by that home are eligible.
-An unconverged opt-out keeps the default projection in that home until convergence.
+A secondmate agent itself always stays in its ordinary home workspace; only children launched by that home are placed by the selected shape.
+An unconverged opt-out keeps the default shape in that home until convergence.
+
+## Project workspaces
+
+A project-grouped home puts every task of one project in one workspace of its own, labeled with that project's name, and creates it on first need.
+A fleet then reads as a handful of project spaces - `alpha`, `beta`, `firstmate` - each holding its own `fm-<id>` task tabs, instead of one workspace per task.
+Opt-in [project groups](#project-groups) compose with this shape: a task tab still carries its own group and status tags, while the shared project workspace carries none, because a single task's tokens would misname the other tasks beside it.
+
+### Labels and names
+
+| Home | Workspace label |
+| --- | --- |
+| Primary | `└ <project>` |
+| Secondmate | `└ 2ndmate-<secondmate-id>/<project>` |
+
+The project name is the project directory's own basename, with every character outside `[A-Za-z0-9._-]` folded to a dash, dash runs collapsed, leading and trailing dashes and dots dropped, and the whole bounded to 40 characters.
+That keeps spaces, `·`, and `:` out of a project name, so no project can produce a label that imitates a per-task projection child.
+The `└ ` prefix keeps every project label structurally distinct from a home label, so a project named `firstmate` can never be confused with the primary's own flat container.
+Labels remain presentation only, exactly as in every other shape.
+
+### The project record
+
+Herdr enforces no workspace label uniqueness, so the label never decides placement.
+Each home records the exact workspace id it created for one project in one named session as `state/.herdr-project-workspace-<project>-<digest>`, where the digest covers the canonical project path and the session name.
+Two clones sharing a basename, and the same clone addressed in two named sessions, therefore never share a record.
+
+A later task of that project reuses the recorded workspace only when all of these agree:
+
+- The record's project path matches the project being spawned.
+- The record's session matches the session being spawned into.
+- The record's label matches the label this home derives now.
+- The recorded workspace id still names exactly one workspace in that session, still carrying that exact label.
+
+Anything else - a workspace that is gone, relabeled by hand, duplicated, or a record that is missing or malformed - is never adopted.
+The task then mints a fresh workspace and the record rebinds to it, so a label a human happens to reuse can never attract a worker.
+Reuse reports no seeded default tab, so an adopted workspace can never enter the [default-tab prune](#default-tab-prune-safety) path; only the call that created the workspace can prune the tab Herdr seeded it with.
+
+Resolving a record and creating a workspace both run under the one named-session presentation lock, so two concurrent tasks of one project cannot mint two workspaces for it.
+The lock is released as soon as the task tab exists rather than being held across the worktree acquisition.
+On contention the spawn warns once and falls back to the flat layout.
+
+### Cleanup
+
+Cleanup is Herdr's own, through the ordinary task-kill path.
+Teardown closes exactly the task's own recorded pane.
+Closing a project's last task tab empties its workspace, and [ordinary removal and cleanup locking](#ordinary-removal-and-cleanup-locking) removes it through the same focus-safe plan the per-task shape uses, so the focused workspace does not move.
+The next task of that project finds its record stale and mints a fresh workspace.
+Nothing in this shape closes, deletes, moves, or renames a workspace, and no record grants send, capture, task ownership, Treehouse return, or recovery authority.
+
+### Recovery
+
+A relaunch that adopts its recorded endpoint is unaffected; the task stays exactly where it is.
+A reclaim of an endpoint proved gone mints its replacement tab in the project's workspace through the same resolve-verify-or-mint sequence, so a recovered task rejoins its project rather than being stranded in the flat per-home workspace ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+`list-live` orphan discovery still scans only the home-labeled workspace, exactly as it does under the per-task shape.
+
+### Switching shapes
+
+Existing records and live tasks are never migrated or moved.
+A home that switches to project grouping leaves any workspace the per-task shape already created to that shape's own [startup cleanup](#startup-cleanup-of-restored-projections), and a home that switches away leaves its project workspaces in place until their last tabs close.
+While both shapes have live workspaces in one session, per-task ordering can find a project workspace interleaved with its block and skips reordering with a warning rather than rewriting the layout.
+
+### Project tests
+
+| Test | What it covers |
+| --- | --- |
+| `tests/fm-backend-herdr.test.sh` | Reuse across tasks of one project, one workspace per project, refusal to adopt an unrecorded same-labeled workspace, record rebinding after removal or a hand rename, label derivation per home, and name sanitization. |
+| `tests/fm-backend-herdr-project-workspaces-e2e.test.sh` | The same contract end to end against the real binary through the guarded lab path, including last-tab workspace removal with the focused workspace unmoved and a reclaimed endpoint rejoining its project. |
+
+## Presentation spaces
+
+A per-task home places each new crewmate or scout in a disposable one-task workspace.
+This section calls that one-task workspace the projection.
+[Task container shapes](#task-container-shapes) owns the setting, the default, and the version floor that selects it.
 
 ### Presentation journal
 
@@ -549,7 +633,7 @@ For each ship and scout task recorded in the home with Herdr endpoint metadata, 
 | `fm_group_order` | projected workspace | `<group order>.<group>`, the key that [placement](#placement-inside-the-group) compares. |
 
 Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and pane, whose live workspace holds that single pane.
-A flat-layout task tab shares its workspace with other tasks, so it gets pane tokens only.
+A task tab that shares its workspace with other tasks gets pane tokens only: the flat layout, and the [project workspace](#project-workspaces) a project-grouped home reuses for every task of one project.
 
 The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, in this rank order:
 
@@ -972,6 +1056,7 @@ tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-herdr-project-workspaces-e2e.test.sh
 tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh

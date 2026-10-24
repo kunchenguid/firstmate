@@ -1588,14 +1588,14 @@ SH
   printf '%s\n' "$fb"
 }
 
-# fm_backend_herdr_presentation_enabled is the one gate bin/fm-spawn.sh consults
-# before projecting a crewmate or scout, so these cases pin the default-on
-# contract, its explicit opt-out, its explicit opt-in, and the version floor
-# that decides the unconfigured default at that interface.
-presentation_enabled_verdict() {  # <config-dir> <fakebin> [state-dir] [session] -> "on"/"off"
+# fm_backend_herdr_container_shape is the one gate bin/fm-spawn.sh consults for
+# the shape a crewmate or scout is created in, so these cases pin the
+# project-grouped default, the explicit per-task and flat choices, and the
+# version floor that decides the unconfigured default at that interface.
+container_shape_verdict() {  # <config-dir> <fakebin> [state-dir] [session] -> "project"/"task"/"flat"
   HERDR_SESSION="${4:-}" PATH="$2:$PATH" bash -c '
     . "$0/bin/backends/herdr.sh"
-    if fm_backend_herdr_presentation_enabled "$1" "$2"; then printf "on\n"; else printf "off\n"; fi
+    fm_backend_herdr_container_shape "$1" "$2"
   ' "$ROOT" "$1" "${3:-}"
 }
 
@@ -1606,17 +1606,17 @@ AT_FLOOR_VERSION=0.8.0
 BELOW_FLOOR_PROTOCOL=17
 BELOW_FLOOR_VERSION=0.7.5
 
-test_presentation_defaults_on_at_or_above_the_floor() {
+test_container_shape_defaults_to_project_workspaces_at_or_above_the_floor() {
   local dir config fb verdict stderr
   dir="$TMP_ROOT/presentation-default-on"; config="$dir/config"; mkdir -p "$config"
   stderr="$dir/default-on.err"
   fb=$(make_release_fakebin "$dir" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = on ] || fail "an absent presentation config at the floor must resolve on, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = project ] || fail "an absent container config at the floor must group by project, got '$verdict'"
   [ ! -s "$stderr" ] || fail "a supported release must not warn: $(cat "$stderr")"
-  verdict=$(presentation_enabled_verdict "$dir/missing-config-dir" "$fb" 2>/dev/null)
-  [ "$verdict" = on ] || fail "a missing config dir at the floor must resolve on, got '$verdict'"
-  pass "herdr presentation: a home that set nothing gets the projection by default at or above the floor"
+  verdict=$(container_shape_verdict "$dir/missing-config-dir" "$fb" 2>/dev/null)
+  [ "$verdict" = project ] || fail "a missing config dir at the floor must group by project, got '$verdict'"
+  pass "herdr containers: a home that set nothing groups tasks by project at or above the floor"
 }
 
 test_presentation_default_falls_back_below_the_floor() {
@@ -1624,8 +1624,8 @@ test_presentation_default_falls_back_below_the_floor() {
   dir="$TMP_ROOT/presentation-below-floor"; config="$dir/config"; mkdir -p "$config"
   stderr="$dir/below-floor.err"
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = off ] || fail "an unconfigured home below the floor must fall back flat, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = flat ] || fail "an unconfigured home below the floor must fall back flat, got '$verdict'"
   assert_contains "$(cat "$stderr")" "$BELOW_FLOOR_VERSION" \
     "the below-floor warning must name the running release"
   assert_contains "$(cat "$stderr")" "0.8.0" \
@@ -1638,8 +1638,8 @@ test_presentation_unreadable_release_falls_back() {
   dir="$TMP_ROOT/presentation-unreadable"; config="$dir/config"; mkdir -p "$config"
   stderr="$dir/unreadable.err"
   fb=$(make_release_fakebin "$dir" unreadable unreadable)
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = off ] || fail "an unverifiable release must fall back flat, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = flat ] || fail "an unverifiable release must fall back flat, got '$verdict'"
   assert_contains "$(cat "$stderr")" "could not be read" \
     "an unverifiable release must say the floor could not be checked"
   pass "herdr presentation: an unreadable client release falls back flat instead of guessing"
@@ -1654,17 +1654,21 @@ test_presentation_explicit_opt_in_survives_the_floor() {
   # keep meaning a deliberate on - and must not warn, or every migrated home
   # warns on every spawn.
   : > "$config/herdr-presentation-spaces"
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = on ] || fail "a legacy empty opt-in file must resolve on below the floor, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = task ] || fail "a legacy empty opt-in file must resolve to the per-task projection below the floor, got '$verdict'"
   [ ! -s "$stderr" ] || fail "a legacy empty opt-in file must not warn: $(cat "$stderr")"
   printf '\n \n' > "$config/herdr-presentation-spaces"
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = on ] || fail "a whitespace-only opt-in file must resolve on below the floor, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = task ] || fail "a whitespace-only opt-in file must resolve to the per-task projection below the floor, got '$verdict'"
   [ ! -s "$stderr" ] || fail "a whitespace-only opt-in file must not warn: $(cat "$stderr")"
   printf 'on\n' > "$config/herdr-presentation-spaces"
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = on ] || fail "an explicit on must resolve on below the floor, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = task ] || fail "an explicit on must resolve to the per-task projection below the floor, got '$verdict'"
   [ ! -s "$stderr" ] || fail "an explicit opt-in must not warn: $(cat "$stderr")"
+  printf 'project\n' > "$config/herdr-presentation-spaces"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = project ] || fail "an explicit project must group by project below the floor, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "an explicit project must not warn: $(cat "$stderr")"
   pass "herdr presentation: a deliberate opt-in is never silently downgraded below the floor"
 }
 
@@ -1675,8 +1679,8 @@ test_presentation_explicit_off_opts_out() {
   for value in 'off' 'off
 ' '  off  ' 'OFF' 'Off'; do
     printf '%s' "$value" > "$config/herdr-presentation-spaces"
-    verdict=$(presentation_enabled_verdict "$config" "$fb" 2>/dev/null)
-    [ "$verdict" = off ] || fail "the opt-out value '$value' must resolve off, got '$verdict'"
+    verdict=$(container_shape_verdict "$config" "$fb" 2>/dev/null)
+    [ "$verdict" = flat ] || fail "the opt-out value '$value' must resolve to the flat layout, got '$verdict'"
   done
   pass "herdr presentation: an explicit off opts the home out"
 }
@@ -1687,15 +1691,15 @@ test_presentation_unrecognized_value_warns_and_keeps_the_default() {
   stderr="$dir/unrecognized.err"
   printf 'disabled\n' > "$config/herdr-presentation-spaces"
   fb=$(make_release_fakebin "$dir" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = on ] || fail "an unrecognized value at the floor must keep the default on, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = project ] || fail "an unrecognized value at the floor must keep the project-grouped default, got '$verdict'"
   assert_contains "$(cat "$stderr")" 'unrecognized value' \
     "an unrecognized value must warn so a typo is visible"
   # A typo is not a deliberate opt-in, so below the floor it takes the default's
   # flat fallback rather than forcing a focus-unsafe projection.
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
-  [ "$verdict" = off ] || fail "an unrecognized value below the floor must follow the default, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" 2>"$stderr")
+  [ "$verdict" = flat ] || fail "an unrecognized value below the floor must follow the default, got '$verdict'"
   pass "herdr presentation: an unrecognized value warns and follows the default instead of failing a spawn"
 }
 
@@ -1704,13 +1708,13 @@ test_presentation_floor_warning_is_one_per_release() {
   dir="$TMP_ROOT/presentation-floor-dedupe"; config="$dir/config"; state="$dir/state"
   mkdir -p "$config" "$state"
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
-  first=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
-  second=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
+  first=$(container_shape_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
+  second=$(container_shape_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
   [ -n "$first" ] || fail "the first below-floor spawn must warn"
   [ -z "$second" ] || fail "a repeat spawn on the same release must not warn again: $second"
   # A downgrade or an upgrade is a different release, so it is announced again.
   fb=$(make_release_fakebin "$dir/other" 16 0.7.3)
-  third=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
+  third=$(container_shape_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
   assert_contains "$third" '0.7.3' "a changed release must re-announce the floor"
   pass "herdr presentation: the below-floor warning is one per home per release, not one per spawn"
 }
@@ -1722,7 +1726,7 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe() {
   mkdir -p "$config" "$state"
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
   for i in {1..20}; do
-    presentation_enabled_verdict "$config" "$fb" "$state" \
+    container_shape_verdict "$config" "$fb" "$state" \
       >"$dir/concurrent-$i.out" 2>"$dir/concurrent-$i.err" &
     pids+=("$!")
   done
@@ -1738,7 +1742,7 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe() {
   marker="$state/.herdr-presentation-floor-version-0-7-5--protocol-17-"
   outside="$dir/symlink-target"
   ln -s "$outside" "$marker"
-  symlink_warning=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
+  symlink_warning=$(container_shape_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
   [ -z "$symlink_warning" ] \
     || fail "an existing dangling marker symlink must be treated as already claimed: $symlink_warning"
   [ ! -e "$outside" ] \
@@ -1751,7 +1755,7 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe() {
 exit 1
 SH
   chmod +x "$fb/ln"
-  failure_warning=$(presentation_enabled_verdict "$config" "$fb" "$failure_state" 2>&1 >/dev/null)
+  failure_warning=$(container_shape_verdict "$config" "$fb" "$failure_state" 2>&1 >/dev/null)
   [ -n "$failure_warning" ] \
     || fail "a non-collision marker publication failure must not suppress the warning"
   pass "herdr presentation: warning marker publication is atomic, symlink-safe, and fails visible"
@@ -1765,23 +1769,23 @@ test_presentation_running_server_release_is_load_bearing() {
 
   fb=$(make_release_fakebin "$dir/old-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
     true "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" "" stale-session 2>"$stderr")
-  [ "$verdict" = off ] \
+  verdict=$(container_shape_verdict "$config" "$fb" "" stale-session 2>"$stderr")
+  [ "$verdict" = flat ] \
     || fail "an old running server must keep a new client below the presentation floor, got '$verdict'"
   assert_contains "$(cat "$stderr")" "server version $BELOW_FLOOR_VERSION" \
     "the floor warning must name the selected running server release"
 
   fb=$(make_release_fakebin "$dir/new-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
     true "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" "" current-session 2>"$stderr")
-  [ "$verdict" = on ] \
-    || fail "an at-floor client and running server must project, got '$verdict'"
+  verdict=$(container_shape_verdict "$config" "$fb" "" current-session 2>"$stderr")
+  [ "$verdict" = project ] \
+    || fail "an at-floor client and running server must group by project, got '$verdict'"
   [ ! -s "$stderr" ] || fail "an at-floor client and running server must not warn: $(cat "$stderr")"
 
   fb=$(make_release_fakebin "$dir/old-client" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION" \
     true "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" "" current-session 2>"$stderr")
-  [ "$verdict" = off ] \
+  verdict=$(container_shape_verdict "$config" "$fb" "" current-session 2>"$stderr")
+  [ "$verdict" = flat ] \
     || fail "a below-floor client must conservatively block projection despite an at-floor server, got '$verdict'"
   assert_contains "$(cat "$stderr")" "$BELOW_FLOOR_VERSION" \
     "the conservative client/server warning must name the below-floor client"
@@ -1789,15 +1793,15 @@ test_presentation_running_server_release_is_load_bearing() {
   printf 'on\n' > "$config/herdr-presentation-spaces"
   fb=$(make_release_fakebin "$dir/opt-in-old-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
     true "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
-  verdict=$(presentation_enabled_verdict "$config" "$fb" "" stale-session 2>"$stderr")
-  [ "$verdict" = on ] \
+  verdict=$(container_shape_verdict "$config" "$fb" "" stale-session 2>"$stderr")
+  [ "$verdict" = task ] \
     || fail "an explicit opt-in must survive a below-floor running server, got '$verdict'"
   [ ! -s "$stderr" ] || fail "an explicit opt-in below the server floor must not warn: $(cat "$stderr")"
   unlink "$config/herdr-presentation-spaces"
 
   fb=$(make_release_fakebin "$dir/unknown-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" unknown)
-  verdict=$(presentation_enabled_verdict "$config" "$fb" "" unknown-session 2>"$stderr")
-  [ "$verdict" = off ] \
+  verdict=$(container_shape_verdict "$config" "$fb" "" unknown-session 2>"$stderr")
+  [ "$verdict" = flat ] \
     || fail "an unreadable selected-session server state must fail flat instead of substituting the client, got '$verdict'"
   assert_contains "$(cat "$stderr")" "could not be read" \
     "an unreadable selected-session server state must warn"
@@ -1871,7 +1875,37 @@ test_release_floor_verdict_survives_losing_either_signal() {
   pass "herdr presentation floor: either signal alone can carry an above verdict, and each divergence is real"
 }
 
-test_presentation_preference_reports_three_distinct_states() {
+# bin/fm-spawn.sh rechecks the version floor against the live server before
+# creating anything, but ONLY for an unconfigured home: an explicit choice must
+# never be rechecked and downgraded there. It reads that distinction from the
+# gate's out-parameters, which only survive a PLAIN-statement call, so this
+# pins both of them rather than only the echoed shape.
+test_container_shape_publishes_the_create_boundary_out_parameters() {
+  local dir config fb got
+  dir="$TMP_ROOT/container-shape-outparams"; config="$dir/config"; mkdir -p "$config"
+  shape_and_preference() {  # <config-dir> <fakebin> -> "<shape> <preference>"
+    PATH="$2:$PATH" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_container_shape "$1" "" >/dev/null
+      printf "%s %s\n" "$FM_BACKEND_HERDR_CONTAINER_SHAPE" "$FM_BACKEND_HERDR_PRESENTATION_PREFERENCE"
+    ' "$ROOT" "$1" 2>/dev/null
+  }
+  fb=$(make_release_fakebin "$dir" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
+  got=$(shape_and_preference "$config" "$fb")
+  [ "$got" = "project default" ] \
+    || fail "an unconfigured home must report the project shape AND an unconfigured preference, got '$got'"
+  printf 'project\n' > "$config/herdr-presentation-spaces"
+  got=$(shape_and_preference "$config" "$fb")
+  [ "$got" = "project project" ] \
+    || fail "an explicit project must be reported as a deliberate choice, not an unconfigured default, got '$got'"
+  printf 'on\n' > "$config/herdr-presentation-spaces"
+  got=$(shape_and_preference "$config" "$fb")
+  [ "$got" = "task on" ] \
+    || fail "an explicit per-task opt-in must be reported as a deliberate choice, got '$got'"
+  pass "herdr containers: the shape gate publishes both the shape and whether it was a deliberate choice, which is what keeps the create boundary from rechecking an explicit one"
+}
+
+test_presentation_preference_reports_four_distinct_states() {
   local dir config got
   dir="$TMP_ROOT/presentation-preference"; config="$dir/config"; mkdir -p "$config"
   preference() {
@@ -1885,6 +1919,9 @@ test_presentation_preference_reports_three_distinct_states() {
   printf 'off\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = off ] || fail "an explicit off must report off, got '$got'"
+  printf 'PROJECT\n' > "$config/herdr-presentation-spaces"
+  got=$(preference "$config")
+  [ "$got" = project ] || fail "an explicit project must report project, got '$got'"
   printf 'disabled\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = default ] || fail "an unrecognized value must report the default, got '$got'"
@@ -5508,6 +5545,165 @@ EOF
   pass "herdr repeated spawn/teardown: one persistent firstmate workspace reused, zero orphans, default tab pruned, create ran once"
 }
 
+# --- project-grouped task containers (docs/herdr-backend.md "Project workspaces") ---
+#
+# The shape the fleet actually reads as organized: one durable workspace per
+# PROJECT holding one ordinary fm-<id> tab per task. These cases pin the
+# load-bearing invariants - two tasks of one project share one workspace, a
+# different project gets its own, a same-labeled workspace this home did not
+# record is never adopted, and a record whose workspace is gone or relabeled
+# rebinds to a fresh one instead of placing a worker somewhere unverified.
+
+# project_ensure: one fm_backend_herdr_project_container_ensure call against the
+# stateful fake, echoing its raw "<session>:<ws>\t<seeded>" contract.
+project_ensure() {  # <fakebin> <state-file> <log> <state-dir> <project-dir> [<home>]
+  FM_HOME="${6:-}" PATH="$1:$PATH" FM_HERDR_LOG="$3" FM_FAKE_HERDR_STATE="$2" HERDR_SESSION=fmtest \
+    bash -c '
+      [ -n "$FM_HOME" ] || unset FM_HOME
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_project_container_ensure "$1" "$2"
+    ' "$ROOT" "$4" "$5"
+}
+
+project_create_task() {  # <fakebin> <state-file> <log> <container> <label> <cwd> <seeded>
+  PATH="$1:$PATH" FM_HERDR_LOG="$3" FM_FAKE_HERDR_STATE="$2" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" "$3" "$4"' \
+    "$ROOT" "$4" "$5" "$6" "$7"
+}
+
+test_project_container_groups_two_tasks_of_one_project() {
+  local dir log state fb proj raw1 raw2 ws1 ws2 seeded1 seeded2 created label tabs
+  dir="$TMP_ROOT/project-group-share"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  proj="$dir/alpha"; mkdir -p "$proj"
+  raw1=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") \
+    || fail "the first task's project container ensure failed"
+  ws1=${raw1%%$'\t'*}; seeded1=${raw1#*$'\t'}
+  raw2=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") \
+    || fail "the second task's project container ensure failed"
+  ws2=${raw2%%$'\t'*}; seeded2=${raw2#*$'\t'}
+  [ "$ws1" = "$ws2" ] \
+    || fail "two tasks of one project must share one workspace, got '$ws1' and '$ws2'"
+  [ -n "$seeded1" ] \
+    || fail "the call that CREATED the project workspace must report its seeded default tab id"
+  [ -z "$seeded2" ] \
+    || fail "a REUSED project workspace must never report a seeded default tab id, got '$seeded2'"
+  created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log")
+  [ "$created" = 1 ] \
+    || fail "the project workspace must be created once and reused, created $created times"
+  label=$(jq -r --arg id "${ws1#*:}" '.workspaces[]|select(.workspace_id==$id)|.label' "$state")
+  [ "$label" = "└ alpha" ] \
+    || fail "a primary home's project workspace must be labeled by the project name, got '$label'"
+  project_create_task "$fb" "$state" "$log" "$ws1" fm-wwa "$proj" "$seeded1" >/dev/null \
+    || fail "the first task tab could not be created in its project workspace"
+  project_create_task "$fb" "$state" "$log" "$ws2" fm-wwb "$proj" "$seeded2" >/dev/null \
+    || fail "the second task tab could not be created in its project workspace"
+  tabs=$(jq -r --arg id "${ws1#*:}" '[.tabs[]|select(.workspace_id==$id)|.label]|sort|join(",")' "$state")
+  [ "$tabs" = "fm-wwa,fm-wwb" ] \
+    || fail "both task tabs must sit in the one project workspace, got '$tabs'"
+  pass "herdr project containers: two tasks of one project share one reused workspace, created once, with both fm-<id> tabs inside it"
+}
+
+test_project_container_gives_each_project_its_own_workspace() {
+  local dir log state fb proj_a proj_b raw_a raw_b labels total
+  dir="$TMP_ROOT/project-group-distinct"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  proj_a="$dir/beta"; mkdir -p "$proj_a"
+  proj_b="$dir/firstmate"; mkdir -p "$proj_b"
+  raw_a=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj_a") || fail "project A ensure failed"
+  raw_b=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj_b") || fail "project B ensure failed"
+  [ "${raw_a%%$'\t'*}" != "${raw_b%%$'\t'*}" ] \
+    || fail "two different projects must not share one workspace (both got '${raw_a%%$'\t'*}')"
+  total=$(jq -r '.workspaces|length' "$state")
+  [ "$total" = 2 ] || fail "expected exactly one workspace per project, got $total"
+  labels=$(jq -r '[.workspaces[].label]|sort|join("|")' "$state")
+  [ "$labels" = "└ beta|└ firstmate" ] \
+    || fail "each project workspace must carry its own project-name label, got '$labels'"
+  # A project named exactly like this home's own flat container must still be
+  # structurally distinguishable from it, or the flat label lookup breaks.
+  jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state" | grep -qx 0 \
+    || fail "a project named 'firstmate' must never produce a workspace labeled like the home container"
+  pass "herdr project containers: each project gets its own labeled workspace, and a project named like the home never collides with the flat container"
+}
+
+test_project_container_never_adopts_an_unrecorded_same_labeled_workspace() {
+  local dir log state fb proj raw wsid foreign_tabs
+  dir="$TMP_ROOT/project-group-foreign"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  proj="$dir/beta"; mkdir -p "$proj"
+  # A captain-owned workspace that happens to carry the same label, holding a
+  # live tab. Herdr enforces no label uniqueness, so this must not attract a
+  # worker: nothing in this home RECORDED it.
+  jq '.workspaces += [{workspace_id:"wforeign", label:"└ beta"}]
+      | .tabs += [{tab_id:"wforeign:t1", label:"captains-own", workspace_id:"wforeign", pane_id:"wforeign:p1"}]' \
+    "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  raw=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") || fail "project container ensure failed"
+  wsid=${raw#*:}; wsid=${wsid%%$'\t'*}
+  [ "$wsid" != wforeign ] \
+    || fail "an unrecorded same-labeled workspace must never be adopted for placement"
+  foreign_tabs=$(jq -r '[.tabs[]|select(.workspace_id=="wforeign")]|length' "$state")
+  [ "$foreign_tabs" = 1 ] \
+    || fail "the unrecorded same-labeled workspace's own tab must be left untouched, got $foreign_tabs tabs"
+  pass "herdr project containers: placement comes from the recorded workspace id, so a same-labeled workspace this home never recorded is neither adopted nor touched"
+}
+
+test_project_container_rebinds_when_its_recorded_workspace_is_gone_or_relabeled() {
+  local dir log state fb proj raw first second third record
+  dir="$TMP_ROOT/project-group-rebind"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  proj="$dir/beta"; mkdir -p "$proj"
+  raw=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") || fail "first ensure failed"
+  first=${raw%%$'\t'*}
+  record=$(find "$dir" -maxdepth 1 -name '.herdr-project-workspace-beta-*' | head -1)
+  [ -n "$record" ] || fail "the project workspace record was not published"
+  # Herdr removes a project workspace when its last task tab closes, which is
+  # what the recovery path has to survive: the record is stale, so the next
+  # task mints a fresh workspace and rebinds rather than placing a worker in a
+  # workspace that is gone.
+  jq --arg id "${first#*:}" '.workspaces |= [.[]|select(.workspace_id != $id)]' "$state" \
+    > "$state.tmp" && mv "$state.tmp" "$state"
+  raw=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") || fail "ensure after removal failed"
+  second=${raw%%$'\t'*}
+  [ "$second" != "$first" ] || fail "a removed project workspace must not be reported as reused"
+  [ -n "${raw#*$'\t'}" ] || fail "the rebinding call CREATED a workspace, so it must report its seeded tab id"
+  assert_contains "$(cat "$record")" "workspace_id=${second#*:}" \
+    "the record must rebind to the freshly created workspace"
+  # A human rename of the recorded workspace is the same refusal: the id is
+  # live but no longer carries the label this home recorded for it.
+  jq --arg id "${second#*:}" '(.workspaces[]|select(.workspace_id==$id)).label = "renamed by hand"' \
+    "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  raw=$(project_ensure "$fb" "$state" "$log" "$dir" "$proj") || fail "ensure after rename failed"
+  third=${raw%%$'\t'*}
+  [ "$third" != "$second" ] || fail "a relabeled project workspace must not be reused"
+  assert_contains "$(cat "$record")" "workspace_id=${third#*:}" \
+    "the record must rebind after a hand rename"
+  pass "herdr project containers: a record naming a workspace that is gone or relabeled is never adopted - the next task mints a fresh workspace and the record rebinds"
+}
+
+test_project_workspace_label_separates_homes_and_sanitizes_the_name() {
+  local dir label
+  dir="$TMP_ROOT/project-group-labels"; mkdir -p "$dir/primary" "$dir/sm"
+  printf 'sm7\n' > "$dir/sm/.fm-secondmate-home"
+  project_label() {  # <home> <project-dir>
+    FM_HOME="$1" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_project_workspace_label "$(fm_backend_herdr_project_name "$1")"
+    ' "$ROOT" "$2"
+  }
+  label=$(project_label "$dir/primary" /srv/clones/alpha)
+  [ "$label" = "└ alpha" ] \
+    || fail "a primary home must label a project space by the project name, got '$label'"
+  label=$(project_label "$dir/sm" /srv/clones/alpha)
+  [ "$label" = "└ 2ndmate-sm7/alpha" ] \
+    || fail "a secondmate home's project space must stay distinguishable from the primary's, got '$label'"
+  # A name that could otherwise impersonate a presentation child's
+  # "└ <task> · p:<token>" grammar, or break a record filename.
+  label=$(project_label "$dir/primary" '/srv/odd name · p:AAAAAAAAAAAAAAAAAAAAAA/')
+  [ "$label" = "└ odd-name-p-AAAAAAAAAAAAAAAAAAAAAA" ] \
+    || fail "the project name must be sanitized to label-safe characters, got '$label'"
+  pass "herdr project containers: project labels separate the primary from each secondmate and sanitize the project name"
+}
+
 # --- created-vs-adopted default-tab-prune safety (2026-07-02 self-kill fix) -
 #
 # Root cause and fix are documented at
@@ -5994,6 +6190,11 @@ test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
+test_project_container_groups_two_tasks_of_one_project
+test_project_container_gives_each_project_its_own_workspace
+test_project_container_never_adopts_an_unrecorded_same_labeled_workspace
+test_project_container_rebinds_when_its_recorded_workspace_is_gone_or_relabeled
+test_project_workspace_label_separates_homes_and_sanitizes_the_name
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
@@ -6008,7 +6209,7 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
-test_presentation_defaults_on_at_or_above_the_floor
+test_container_shape_defaults_to_project_workspaces_at_or_above_the_floor
 test_presentation_default_falls_back_below_the_floor
 test_presentation_unreadable_release_falls_back
 test_presentation_explicit_opt_in_survives_the_floor
@@ -6019,7 +6220,8 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe
 test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
-test_presentation_preference_reports_three_distinct_states
+test_container_shape_publishes_the_create_boundary_out_parameters
+test_presentation_preference_reports_four_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane

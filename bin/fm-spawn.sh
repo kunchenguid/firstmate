@@ -142,11 +142,22 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
-#   Herdr additionally uses a presentation-only layout by default when the
-#   selected client and running server meet the Herdr 0.8.0 floor. The local
-#   config/herdr-presentation-spaces file can say off to disable it or on to
-#   opt in below that floor; an empty file remains the historical opt-in form.
-#   A clean fresh task first writes state/<id>.herdr-presentation atomically,
+#   Herdr chooses between three presentation-only container shapes through the
+#   local config/herdr-presentation-spaces file: project (one reused workspace
+#   per project, the default when the selected client and running server meet
+#   the Herdr 0.8.0 floor), on (one disposable workspace per task), and off (the
+#   flat per-home layout). An empty file remains the historical per-task opt-in
+#   form, and each explicit value is honored below that floor.
+#   Project grouping places the ordinary fm-<id> task tab in the workspace this
+#   home recorded for that exact project path and named session, creating it on
+#   first need and reusing it for every later task of that project. The record
+#   is the placement authority, never the label: a recorded workspace that is
+#   gone, relabeled, or duplicated is never adopted, and the next task mints a
+#   fresh workspace and rebinds the record. Resolve-or-mint plus the task tab
+#   run under the one session-scoped presentation lock, which is released as
+#   soon as the tab exists; on contention the spawn falls back flat. A reclaim
+#   of a destroyed endpoint rejoins its project's workspace the same way.
+#   A clean per-task projection first writes state/<id>.herdr-presentation atomically,
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
@@ -4335,11 +4346,15 @@ EOF
     # that argument). tmux and every secondmate were already refused, and rex
     # took the branch above, so there is no dispatch left to make.
     #
-    # This deliberately uses the FLAT container shape rather than Herdr's
-    # presentation projection: projection is a presentation-only layout that is
-    # never endpoint or ownership authority, and flat is already the documented
-    # fallback for every recovery it cannot bind exactly
-    # (docs/herdr-backend.md "Presentation spaces").
+    # This deliberately never uses Herdr's ONE-TASK presentation projection:
+    # projection is a presentation-only layout that is never endpoint or
+    # ownership authority, and flat is already the documented fallback for every
+    # recovery it cannot bind exactly (docs/herdr-backend.md "Presentation
+    # spaces"). Project grouping is different in kind and IS used here: its
+    # workspace is durable and resolved from this home's own recorded exact
+    # workspace id, so a reclaimed task rejoins its project's space instead of
+    # being stranded in the flat one (docs/herdr-backend.md "Project
+    # workspaces"). A contended session lock still falls back flat.
     #
     # KNOWN LIMITATION (bead fm-herdr-rebind-leak-20260913): the tab minted
     # below is registered with no abort cleanup, so a later refusal leaves that
@@ -4354,35 +4369,50 @@ EOF
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
-      # container_ensure returns 1 for several unrelated reasons - a failed
-      # version check, a server that will not start, an ambiguous workspace
-      # label, a cross-session launcher identity, a failed workspace create -
-      # and each already printed its own accurate message. Add only what this
-      # layer actually knows, and name the session mismatch solely when there
-      # IS one, rather than asserting a cause this condition cannot establish.
-      #
-      # A seat with NO herdr pane never reaches the cross-session guard at all:
-      # fm_backend_herdr_launcher_identity returns 2 for it and the placement
-      # falls back to the recorded session's labeled container, which is what
-      # makes a plain ssh or cron reclaim work. Its ambient session still reads
-      # `default` (fm_backend_herdr_session's fallback), so the inequality alone
-      # would fire for EVERY named-session task reclaimed from a plain shell and
-      # send the operator chasing a session mismatch that was never the cause.
-      HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
-      if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
+    fm_backend_herdr_container_shape "$CONFIG" "$STATE" "$HERDR_REBIND_SES" >/dev/null
+    HERDR_REBIND_SHAPE=$FM_BACKEND_HERDR_CONTAINER_SHAPE
+    HERDR_REBIND_PLACED=0
+    if [ "$HERDR_REBIND_SHAPE" = project ]; then
+      if spawn_herdr_presentation_order_lock_acquire "$HERDR_REBIND_SES"; then
+        HERDR_CONTAINER_RAW=$(fm_backend_herdr_project_container_ensure \
+          "$STATE" "$PROJ_ABS" "$HERDR_REBIND_SES") || exit 1
+        HERDR_REBIND_PLACED=1
       else
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
+        echo "warning: herdr project grouping could not acquire its session lock while reclaiming $ID; using the ordinary flat layout" >&2
       fi
-      exit 1
-    }
+    fi
+    if [ "$HERDR_REBIND_PLACED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
+        fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+        # container_ensure returns 1 for several unrelated reasons - a failed
+        # version check, a server that will not start, an ambiguous workspace
+        # label, a cross-session launcher identity, a failed workspace create -
+        # and each already printed its own accurate message. Add only what this
+        # layer actually knows, and name the session mismatch solely when there
+        # IS one, rather than asserting a cause this condition cannot establish.
+        #
+        # A seat with NO herdr pane never reaches the cross-session guard at all:
+        # fm_backend_herdr_launcher_identity returns 2 for it and the placement
+        # falls back to the recorded session's labeled container, which is what
+        # makes a plain ssh or cron reclaim work. Its ambient session still reads
+        # `default` (fm_backend_herdr_session's fallback), so the inequality alone
+        # would fire for EVERY named-session task reclaimed from a plain shell and
+        # send the operator chasing a session mismatch that was never the cause.
+        HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
+        if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
+        else
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
+        fi
+        exit 1
+      }
+    fi
     CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
     HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    spawn_herdr_presentation_order_lock_release
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -4434,8 +4464,54 @@ else
       HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    # HERDR_PLACED says an endpoint already exists, so the flat fallback below
+    # is skipped. HERDR_PROJECTED says more: the ONE-TASK projection owns that
+    # endpoint, and its session lock and abort cleanup stay armed until the
+    # launch line is sent. Project grouping creates a durable shared workspace
+    # instead, so it releases the lock as soon as its tab exists rather than
+    # holding a fleet-shared lock across a worktree acquisition.
+    HERDR_PLACED=0
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    # fm_backend_herdr_container_shape owns which of the three container shapes
+    # this home's children are created in (docs/herdr-backend.md "Task container
+    # shapes"). A --secondmate launch keeps its own home workspace in every
+    # shape, exactly as before: a persistent mate is not a project's task.
+    HERDR_SHAPE=flat
+    if [ "$KIND" != secondmate ]; then
+      # A PLAIN statement, never $(...): the gate also publishes the
+      # unconfigured-versus-deliberate distinction the create boundary below
+      # reads, and a command substitution would discard it in its subshell.
+      fm_backend_herdr_container_shape "$CONFIG" "$STATE" >/dev/null
+      HERDR_SHAPE=$FM_BACKEND_HERDR_CONTAINER_SHAPE
+    fi
+    if [ "$HERDR_SHAPE" = project ]; then
+      HERDR_SES=$(fm_backend_herdr_session)
+      if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
+        echo "warning: herdr project grouping could not ensure its session server; using the ordinary flat layout" >&2
+      elif [ "${FM_BACKEND_HERDR_PRESENTATION_PREFERENCE:-default}" = default ] &&
+        ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
+        # An unconfigured home's floor is rechecked against the live server
+        # before anything is created, exactly as the one-task projection does.
+        :
+      elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+        # Resolve-or-mint and the task tab both run under the session lock, so
+        # two concurrent tasks of one project cannot mint two workspaces for it.
+        HERDR_CONTAINER_RAW=$(fm_backend_herdr_project_container_ensure "$STATE" "$PROJ_ABS" "$HERDR_SES") || exit 1
+        CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+        HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+        HERDR_SES=${CONTAINER%%:*}
+        HERDR_WORKSPACE_ID=${CONTAINER#*:}
+        HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+        read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+        spawn_herdr_presentation_order_lock_release
+        HERDR_PLACED=1
+      else
+        echo "warning: herdr project grouping could not acquire its session lock; using the ordinary flat layout" >&2
+      fi
+    fi
+    if [ "$HERDR_SHAPE" = task ]; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -4471,6 +4547,7 @@ else
           set -e
           case "$HERDR_RECLAIM_STATUS" in
           0)
+            HERDR_PLACED=1
             HERDR_PROJECTED=1
             HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
             HERDR_SEEDED_DEFAULT_TAB_ID=""
@@ -4532,6 +4609,7 @@ else
               fi
               exit 1
             fi
+            HERDR_PLACED=1
             HERDR_PROJECTED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
             HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
@@ -4569,7 +4647,7 @@ else
         fi
       fi
     fi
-    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+    if [ "$HERDR_PLACED" -ne 1 ]; then
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace

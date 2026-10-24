@@ -1329,7 +1329,7 @@ No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort,
 The compatibility floor is protocol 14.
 The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
-Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
+The unconfigured non-flat container default has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
 Core read-only probes:
 
@@ -1579,6 +1579,26 @@ ok - real herdr E2E: teardown closes only the worker's own pane and leaves the l
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
 
+### Project-grouped task containers
+
+The default container shape ran on 2026-10-11 against Herdr 0.8.2 on macOS aarch64:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-project-workspaces-e2e.test.sh
+```
+
+Observed guarantees, all six cases passing:
+
+- Two tasks of one project shared one workspace labeled `└ alpha`, each in its own `fm-<id>` tab, with the focused workspace unchanged.
+- A second project received its own workspace labeled `└ beta`.
+- Tearing down one of the two tasks closed exactly its own tab and left the project workspace and its sibling tab in place.
+- Tearing down the project's last task removed the project workspace while the focused workspace stayed exactly where it was.
+- The next task of that project created a fresh workspace and rebound the project record, rather than reusing the id of a workspace that was gone.
+- A reclaim of a destroyed endpoint minted its replacement tab in its project's still-live workspace beside its sibling, and no flat `firstmate` workspace was created.
+
+That command refreshes this record.
+
 ### Per-home and presentation topology
 
 Per-home behavior is owned by:
@@ -1627,7 +1647,7 @@ ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destruc
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
 
-The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enables the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor:
+The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enabled the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor; an absent file now selects project-grouped containers instead, as [Task container shapes](../herdr-backend.md#task-container-shapes) owns:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
@@ -1734,7 +1754,7 @@ A release that changed the foreground-client contract, the window-grid requireme
 
 ### Presentation version floor
 
-Default-on presentation projection is floored at Herdr 0.8.0.
+The unconfigured non-flat container default - project-grouped today, per-task before it - is floored at Herdr 0.8.0.
 The floor's structural signal is the selected running server's protocol number, falling back to the client protocol only when that selected session positively reports no running server, and the release mapping was measured on 2026-08-05 by running each pinned upstream macOS aarch64 release asset's own `status --json` through the guarded lab helper:
 
 | Release | Reported version | Protocol | Carries both upstream focus fixes | Floor verdict |

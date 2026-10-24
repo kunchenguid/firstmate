@@ -586,11 +586,12 @@ pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command seque
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
 
-# A home that configured nothing at all follows the version floor: it is
-# projected on a release at or above it, and takes the ordinary flat layout with
-# one naming warning below it. The only difference from the opted-out spawn
-# above is the removed file, so this case is the floor's live end-user proof on
-# whichever Herdr this lab is running.
+# A home that configured nothing at all follows the version floor: it is grouped
+# by PROJECT on a release at or above it (the unconfigured default, owned by
+# docs/herdr-backend.md "Task container shapes"), and takes the ordinary flat
+# layout with one naming warning below it. The only difference from the
+# opted-out spawn above is the removed file, so this case is the floor's live
+# end-user proof on whichever Herdr this lab is running.
 rm -f "$HOME_DIR/config/herdr-presentation-spaces"
 FLOOR_STATUS=$(lab status --json) || fail 'could not read the lab release for the presentation floor'
 FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.version else .client.version end')
@@ -610,15 +611,20 @@ remember_meta_worktree "$DEFAULT_ON_META" >/dev/null
 DEFAULT_ON_JOURNAL="$HOME_DIR/state/default-on.herdr-presentation"
 DEFAULT_ON_WSID=$(grep '^herdr_workspace_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
 if [ "$FLOOR_VERDICT" = 0 ]; then
-  [ -f "$DEFAULT_ON_JOURNAL" ] \
-    || fail "an unconfigured home did not publish a presentation journal on supported herdr $FLOOR_VERSION"
-  DEFAULT_ON_TOKEN=$(grep '^projection_id=' "$DEFAULT_ON_JOURNAL" | cut -d= -f2-)
+  [ ! -e "$DEFAULT_ON_JOURNAL" ] \
+    || fail "the project-grouped default must publish no presentation journal on herdr $FLOOR_VERSION"
   [ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
-    || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
+    || fail "an unconfigured home reused the flat firstmate workspace instead of its project workspace"
   DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
-  [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
-    || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
-  pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
+  [ "$DEFAULT_ON_LABEL" = "└ $(basename "$PROJECT_DIR")" ] \
+    || fail "the project-grouped default used an unexpected workspace label: $DEFAULT_ON_LABEL"
+  DEFAULT_ON_RECORD=$(find "$HOME_DIR/state" -maxdepth 1 \
+    -name ".herdr-project-workspace-$(basename "$PROJECT_DIR")-*" | head -1)
+  [ -n "$DEFAULT_ON_RECORD" ] \
+    || fail "the project-grouped default published no workspace record"
+  grep -qx "workspace_id=$DEFAULT_ON_WSID" "$DEFAULT_ON_RECORD" \
+    || fail "the project-grouped default did not record the exact workspace it created"
+  pass "real Herdr lab: a home that configured nothing groups its task by project on herdr $FLOOR_VERSION"
 else
   [ ! -e "$DEFAULT_ON_JOURNAL" ] \
     || fail "an unconfigured home published a presentation journal on below-floor herdr $FLOOR_VERSION"
@@ -631,7 +637,7 @@ fi
 teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$TMP_ROOT/default-on-teardown.err" \
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
 if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
-  fail "default-on teardown left its disposable workspace behind"
+  fail "default-on teardown left the project workspace behind after closing its last tab"
 fi
 # The ordering scenarios below read the whole move log cumulatively against the
 # projected workspaces that are still live, so this retired one starts them clean.
