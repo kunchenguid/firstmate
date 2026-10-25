@@ -966,8 +966,8 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force='' rc=0 recorded_server current_server generation target verdict
-  local proof tmp expected='' replay record operation
+  local id=$1 force='' rc=0 recorded_server current_server generation target proof pending='' tmp expected='' replay record operation
+  local pending_record='' pending_target='' pending_backend='' pending_rc='' verdict retirement_backend=''
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -996,66 +996,136 @@ cmd_retire() {
       printf 'seat_retirement=%s\n' "$replay"
       return "$(printf '%s\n' "$replay" | jq -r .exit_code)"
     fi
+    # The pending record is the evidence a retirement owes the primary if it
+    # is interrupted after the home is gone and before the proof is published.
+    # It binds this exact generation and route and never claims destruction.
+    pending="$HOST_HISTORY/$id.retirement.$expected.pending.json"
+    if [ -e "$pending" ] || [ -L "$pending" ]; then
+      [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
+      pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" '
+        select(.schema == "fm-remote-retirement-pending.v1" and .task == $t and .home == $h
+          and .generation == $g and .phase == "pending"
+          and ((.backend == "herdr" and (.target | type == "string" and startswith("fm-remote:")))
+            or (.backend == "rex" and (.target | type == "string" and test("^[0-9a-f-]+:[0-9a-f-]+$"))))
+          and .destroyed == false
+          and (.exit_code == null or .exit_code == 0 or .exit_code == 4))' "$pending") \
+        || die "remote retirement pending history does not match this route"
+      pending_target=$(printf '%s\n' "$pending_record" | jq -r .target)
+      pending_backend=$(printf '%s\n' "$pending_record" | jq -r .backend)
+      pending_rc=$(printf '%s\n' "$pending_record" | jq -r '.exit_code // empty')
+    fi
   fi
   validate_home "$id" yes || rc=$?
   if [ "$rc" -eq 2 ]; then
-    printf 'already-retired: %s\n' "$id"
-    return 0
-  fi
-  [ -z "$force" ] || [ "$force" = --force ] || usage
-  remote_endpoint_require "$id"
-  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
-    recorded_server=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" rex_server)
-    if ! fm_backend_source rex || ! current_server=$(fm_backend_rex_server_endpoint) \
-      || [ "$current_server" != "$recorded_server" ]; then
-      die "cannot prove access to the recorded Rex server '$recorded_server'; restore access to the recorded Rex server on this account, then retry retirement; refusing block close and home deletion"
-    fi
-  fi
-  generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
-  case "$generation" in *[!A-Za-z0-9._-]*) die "remote generation is unsafe" ;; esac
-  [ -z "$expected" ] || [ "$generation" = "$expected" ] \
-    || die "generation-mismatch: refusing to retire a successor"
-  target=$REMOTE_ENDPOINT_TARGET
-  # Keep the endpoint binding fixed through teardown and the final absence read.
-  fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 30 || die "remote retirement lifecycle is busy"
-  SEAT_LIFECYCLE_ID=$id
-  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
-  [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" = "$generation" ] \
-    || die "generation-mismatch: refusing to retire a successor"
-  # Include operations claimed before durable host history was introduced.
-  for record in "$CONTROL_STATE/$id.seat-operation."* "$CONTROL_STATE/$id.seat-reservation."*; do
-    [ -e "$record" ] || [ -L "$record" ] || continue
-    [ -f "$record" ] && [ ! -L "$record" ] || die "remote operation history is unsafe"
-    operation=${record#"$CONTROL_STATE/$id.seat-operation."}
-    [ "$operation" != "$record" ] || operation=${record#"$CONTROL_STATE/$id.seat-reservation."}
-    case "$operation" in ''|*[!A-Za-z0-9.]*) die "remote operation token is unsafe" ;; esac
-    [ ! -e "$HOST_HISTORY/$id.operation.$operation" ] || continue
-    (umask 077; set -C; cat "$record" > "$HOST_HISTORY/$id.operation.$operation") \
-      || die "remote operation history could not be retained before retirement"
-  done
-  FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
-  if [ -n "$force" ]; then
-    FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
-      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force || rc=$?
+    # A missing home is "already retired" only when no pending record binds
+    # this generation. With one, re-prove the endpoint absent (the same
+    # non-vacuous rule the first attempt used) and publish the evidence that
+    # attempt could not. Without this, an interrupted retirement stranded its
+    # counted seat behind an evidence-free success.
+    [ -n "$pending_record" ] || { printf 'already-retired: %s\n' "$id"; return 0; }
+    generation=$expected
+    target=$pending_target
+    retirement_backend=$pending_backend
+    rc=${pending_rc:-0}
+    fm_backend_source "$retirement_backend" || return 1
+    verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target")
+    [ "${verdict%%$'\t'*}" = gone ] || return 1
   else
-    FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
-      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" || rc=$?
+    [ -z "$force" ] || [ "$force" = --force ] || usage
+    remote_endpoint_require "$id"
+    retirement_backend=$REMOTE_ENDPOINT_BACKEND
+    if [ "$retirement_backend" = rex ]; then
+      recorded_server=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" rex_server)
+      if ! fm_backend_source rex || ! current_server=$(fm_backend_rex_server_endpoint) \
+        || [ "$current_server" != "$recorded_server" ]; then
+        die "cannot prove access to the recorded Rex server '$recorded_server'; restore access to the recorded Rex server on this account, then retry retirement; refusing block close and home deletion"
+      fi
+    fi
+    generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
+    case "$generation" in *[!A-Za-z0-9._-]*) die "remote generation is unsafe" ;; esac
+    [ -z "$expected" ] || [ "$generation" = "$expected" ] \
+      || die "generation-mismatch: refusing to retire a successor"
+    target=$REMOTE_ENDPOINT_TARGET
+    # Keep the endpoint binding fixed through teardown and the final absence read.
+    fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 30 || die "remote retirement lifecycle is busy"
+    SEAT_LIFECYCLE_ID=$id
+    trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+    [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" = "$generation" ] \
+      || die "generation-mismatch: refusing to retire a successor"
+    # Include operations claimed before durable host history was introduced.
+    for record in "$CONTROL_STATE/$id.seat-operation."* "$CONTROL_STATE/$id.seat-reservation."*; do
+      [ -e "$record" ] || [ -L "$record" ] || continue
+      [ -f "$record" ] && [ ! -L "$record" ] || die "remote operation history is unsafe"
+      operation=${record#"$CONTROL_STATE/$id.seat-operation."}
+      [ "$operation" != "$record" ] || operation=${record#"$CONTROL_STATE/$id.seat-reservation."}
+      case "$operation" in ''|*[!A-Za-z0-9.]*) die "remote operation token is unsafe" ;; esac
+      [ ! -e "$HOST_HISTORY/$id.operation.$operation" ] || continue
+      (umask 077; set -C; cat "$record" > "$HOST_HISTORY/$id.operation.$operation") \
+        || die "remote operation history could not be retained before retirement"
+    done
+    # Publish destruction intent BEFORE the remote home can be removed. A
+    # write that cannot land refuses the destroy: the ledger never proceeds on
+    # an attempt whose interruption it could not later reconcile.
+    pending="$HOST_HISTORY/$id.retirement.$generation.pending.json"
+    if [ -n "$pending_record" ]; then
+      [ "$pending_target" = "$target" ] || die "remote retirement pending history does not match this endpoint"
+    elif [ -e "$pending" ] || [ -L "$pending" ]; then
+      [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
+      pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$generation" \
+        --arg target "$target" --arg retirement_backend "$retirement_backend" '
+        select(.schema == "fm-remote-retirement-pending.v1" and .task == $t and .home == $h
+          and .generation == $g and .backend == $retirement_backend and .target == $target
+          and .phase == "pending" and .destroyed == false
+          and (.exit_code == null or .exit_code == 0 or .exit_code == 4))' "$pending") \
+        || die "remote retirement pending history does not match this endpoint"
+      pending_rc=$(printf '%s\n' "$pending_record" | jq -r '.exit_code // empty')
+    else
+      tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1
+      if ! printf '{"schema":"fm-remote-retirement-pending.v1","task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"phase":"pending","destroyed":false,"exit_code":null}\n' \
+        "$(json_str "$id")" "$(json_str "$generation")" "$(json_str "$TARGET_HOME")" \
+        "$(json_str "$retirement_backend")" "$(json_str "$target")" > "$tmp" \
+        || ! mv -f -- "$tmp" "$pending"; then
+        rm -f -- "$tmp"
+        return 1
+      fi
+    fi
+    FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
+    if [ -n "$force" ]; then
+      FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+        FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
+        "$SCRIPT_DIR/fm-teardown.sh" "$id" --force || rc=$?
+    else
+      FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+        FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
+        "$SCRIPT_DIR/fm-teardown.sh" "$id" || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 4 ] || return "$rc"
+    # Record the exact successful outcome before the absence read, so a retry
+    # after a failed probe still answers with the code the destroy returned.
+    tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1
+    if ! jq --argjson rc "$rc" '.exit_code = $rc' "$pending" > "$tmp" \
+      || ! mv -f -- "$tmp" "$pending"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    pending_rc=$rc
+    fm_backend_source "$retirement_backend" || return 1
+    verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target" "$REMOTE_ENDPOINT_META")
+    [ "${verdict%%$'\t'*}" = gone ] || return 1
   fi
-  [ "$rc" -eq 0 ] || [ "$rc" -eq 4 ] || return "$rc"
-  fm_backend_source "$REMOTE_ENDPOINT_BACKEND" || return 1
-  verdict=$(fm_control_endpoint_absence_verdict "$REMOTE_ENDPOINT_BACKEND" "$target" "$REMOTE_ENDPOINT_META")
-  [ "${verdict%%$'\t'*}" = gone ] || return 1
   proof="$HOST_HISTORY/$id.retirement.$generation.json"
   tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1
   printf '{"task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"destroyed":true,"exit_code":%s}\n' \
     "$(json_str "$id")" "$(json_str "$generation")" "$(json_str "$TARGET_HOME")" \
-    "$(json_str "$REMOTE_ENDPOINT_BACKEND")" "$(json_str "$target")" "$rc" > "$tmp"
-  mv -f -- "$tmp" "$proof" || return 1
+    "$(json_str "$retirement_backend")" "$(json_str "$target")" "$rc" > "$tmp"
+  if ! mv -f -- "$tmp" "$proof"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ -z "$pending" ] || rm -f -- "$pending" || true
   printf 'seat_retirement=%s\n' "$(cat "$proof")"
   return "$rc"
 }
