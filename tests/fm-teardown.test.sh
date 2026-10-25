@@ -782,7 +782,9 @@ test_lane_vm_record_appends_each_name_once() {
 test_lane_vm_cleanup_without_limactl_is_quiet() {
   local out rc
   set +e
-  out=$(PATH=/nonexistent; . "$ROOT/bin/fm-lane-vm-lib.sh"; fm_lane_vm_cleanup task-x1 "$TMP_ROOT/task-x1.meta" 2>&1)
+  # shellcheck disable=SC2016 # expanded by the child shell
+  out=$(env PATH=/nonexistent /bin/bash -c '. "$1"; fm_lane_vm_cleanup task-x1 "$2"' _ \
+    "$ROOT/bin/fm-lane-vm-lib.sh" "$TMP_ROOT/task-x1.meta" 2>&1)
   rc=$?
   set -e
   expect_code 0 "$rc" "lane-vm-absent: cleanup should succeed"
