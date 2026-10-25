@@ -65,7 +65,7 @@ Tracked files hold shared instructions and tooling; `data/` holds durable privat
 Load `operational-home-layout` when locating, interpreting, or changing Firstmate home, config, data, state, project, or generated runtime paths.
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
-Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory, except for a knowledge class that a home-declared external memory tier under section 6 owns.
+Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, `data/owner-rules.md` as the shared owner-rules surface the session digest prints (one entry per standing owner decision, in his words, with its enforcement point; `bin/fm-owner-rules.sh add` writes one and `audit` finds a quote still trapped in a private note), and `data/learnings.md` as curated home-local knowledge, regardless of harness memory, except for a knowledge class that a home-declared external memory tier under section 6 owns.
 
 ## 3. Session start (run once at every session start)
 
@@ -148,6 +148,7 @@ Route durable knowledge to its most specific owner:
 
 - A home may declare authoritative external memory tiers in a `Memory layering` section of its captain-preference files ([`docs/configuration.md`](docs/configuration.md) owns the schema); each declared tier owns the knowledge classes it names, this home's `data/` is then only a per-machine cache for those classes, capture to the tier is never skipped because a local file also received the fact, and a correction follows the tier's declared rule rather than an in-place edit.
 - When a worker's harness cannot reach a declared tier, firstmate captures on the worker's behalf from its report.
+- A standing owner correction becomes a rule in `data/owner-rules.md` through `bin/fm-owner-rules.sh add`, with his own words, its scope, and the code or contract that enforces it; a correction that stops at one agent's memory is what `bin/fm-owner-rules.sh audit` flags.
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts no declared tier owns belong in curated, home-local `data/learnings.md`.

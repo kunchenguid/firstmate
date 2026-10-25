@@ -148,6 +148,8 @@ trap record_parent_stop_state EXIT
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+# shellcheck source=bin/fm-question-lib.sh
+. "$SCRIPT_DIR/fm-question-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -194,6 +196,33 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# --- the question rule ------------------------------------------------------
+# The owner's rule (data/owner-rules.md): "if you ask questions as well make
+# sure they are posted, posting questions will be stricter way of working", so a
+# reply that ends in a question while no open board card is cited is flagged at
+# this boundary. It is charged once per distinct trailing question (the record
+# in $STATE/.question-flagged), which keeps every harness bounded: the second
+# sighting of the same question, and every reply after it, ends normally.
+question_block() {  # <the trailing line>
+  {
+    printf '●%s\n' '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    printf '●  REPLY ENDS IN A QUESTION THAT IS NOT ON THE BOARD\n'
+    printf '●  He answers on the board, so a question asked only in chat is a violation.\n'
+    printf '●  Post the card first, then cite the key it prints:\n'
+    printf '●    %s/fm-question-card.sh post --ask-ref <ref> --title "<one question>" --why "<why now>" --outcome yes="<what happens next>" --outcome no="<what happens instead>" --recommend yes --default no\n' "$SCRIPT_DIR"
+    printf '●  Trailing line: %s\n' "$1"
+    printf '●%s\n' '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  } >&2
+  exit 2
+}
+
+QUESTION_TEXT=$(fm_question_reply_text "$PAYLOAD")
+if [ -n "$QUESTION_TEXT" ] && fm_question_asks "$QUESTION_TEXT" \
+  && ! fm_question_filed "$QUESTION_TEXT" \
+  && fm_question_first_sighting "$STATE" "$QUESTION_TEXT"; then
+  question_block "$(fm_question_tail "$QUESTION_TEXT")"
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

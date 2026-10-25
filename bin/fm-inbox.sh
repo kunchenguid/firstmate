@@ -128,6 +128,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 die() { printf 'fm-inbox: %s\n' "$*" >&2; exit 1; }
 
+# shellcheck source=bin/fm-question-lib.sh disable=SC1091
+. "$SELF_DIR/fm-question-lib.sh" \
+  || die "the question rule needs $SELF_DIR/fm-question-lib.sh beside this script"
+
 # First non-comment, non-blank line of a config file, or nothing.
 read_setting() {  # <file-name>
   local path="$CONFIG/$1" line
@@ -608,6 +612,7 @@ cmd_reply() {
     body="$*"
   fi
   [ -n "${body//[[:space:]]/}" ] || die "refusing to record an empty reply"
+  fm_question_flag_reply "$body"
   mkdir -p "$REPLIES"
   load_wake_lib || die "the reply sequence needs $FM_ROOT/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$REPLY_SEQ_LOCK" || die "could not claim the reply sequence"

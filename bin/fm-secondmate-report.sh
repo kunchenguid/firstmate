@@ -33,6 +33,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-question-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-question-lib.sh" \
+  || { echo "error: the question rule needs $SCRIPT_DIR/fm-question-lib.sh beside this script" >&2; exit 1; }
 
 fm_secondmate_report_status_blocked_wait() {  # <verb> <text>
   local hook="${FM_ADDONS_DIR:-${CALLER_FM_HOME}/projects/firstmate-addons}/status-wait-check/status-wait-check"
@@ -106,6 +109,7 @@ if [ "$DOC_MODE" = 1 ]; then
   DOC_PATH=$1
   shift
   NOTE=$*
+  fm_question_flag_reply "$NOTE"
   fm_secondmate_report_status_blocked_wait "$VERB" "$NOTE"
   if [ -n "$NOTE" ]; then
     printf -v line '%s [%s]: %s (%s via-helper)' "$VERB" "$token" "$NOTE" "$DOC_PATH"
@@ -114,6 +118,7 @@ if [ "$DOC_MODE" = 1 ]; then
   fi
 else
   NOTE=$*
+  fm_question_flag_reply "$NOTE"
   fm_secondmate_report_status_blocked_wait "$VERB" "$NOTE"
   printf -v line '%s [%s]: %s (via-helper)' "$VERB" "$token" "$NOTE"
 fi

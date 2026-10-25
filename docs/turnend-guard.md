@@ -17,6 +17,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | Question | Start here |
 | --- | --- |
 | What the guard enforces | [Current invariant](#current-invariant) |
+| The question rule at the turn boundary | [Question rule](#question-rule) |
 | Which sessions are in scope and what counts as supervision need | [Primary scope](#primary-scope) and [supervision need](#supervision-need) |
 | How the turn-end check and the mid-turn pull warning judge watcher health | [Strict watcher check at the turn boundary](#strict-watcher-check-at-the-turn-boundary) and [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model) |
 | Away and quiet mode | [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership) |
@@ -51,6 +52,14 @@ A live identity-matched daemon with a fresh beacon then satisfies that boundary 
 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
+
+## Question rule
+
+The owner's standing rule (`data/owner-rules.md`) is that a question to him must exist as a board card, so a chat-only question is a violation.
+At the same boundary, and before the supervision predicate, the guard reads the turn's last assistant text from the hook payload's `transcript_path` and flags it when that text ends in a question while no open card is cited.
+The flag is one exit-2 banner naming `bin/fm-question-card.sh post`, which posts the card through sign-off-axi and prints the key the reply then cites.
+Every open board key comes from sign-off-axi's own `list --json` (`bin/fm-question-lib.sh`), never from a private copy of the board.
+It is charged once per distinct trailing question, recorded in `state/.question-flagged`, so a harness is never wedged in a loop; a payload without a readable transcript is not flagged at all.
 
 ## Guard predicates
 
