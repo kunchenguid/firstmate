@@ -2059,6 +2059,31 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_replays_a_verified_merge_as_a_merge() {
+  local case_dir id out url=https://github.com/example/repo/pull/12
+  id=atomic-heal-verified-b9
+  case_dir=$(make_home heal-pending-verified-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The shape a cleanup records when the forge reported the merge: the link is
+  # the recorded close, and the record carries the moment that merge was read.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-verified\npr_merge_verified_at=2026-07-14T00:00:00Z\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded verified merge at $(row_state "$case_dir" "$id"): $out"
+  assert_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "a replayed close did not record the merge the cleanup had verified"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "the replayed verified merge lost its pull-request link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed verified close left its record behind"
+  pass "session start replays a verified merge as a merge"
+}
+
 test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
   local case_dir id out url=https://github.com/example/repo/pull/7
   id=atomic-heal-unconfirmed-b9
@@ -3179,6 +3204,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_verified_merge_as_a_merge
 test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
