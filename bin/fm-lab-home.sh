@@ -14,7 +14,7 @@
 #
 # A lab home is the stock layout only - state/, data/, config/, projects/ - and
 # callers remove it with ordinary rm -rf when done. Drive it with plain
-# FM_HOME=<dir>; any FM_*_OVERRIDE relocation defeats the allowance.
+# FM_HOME=<dir>; bin/fm-gate-refuse-lib.sh owns permitted supervision overrides.
 # tmux-dir is the single owner of the short private socket directory: callers
 # use TMUX_TMPDIR=<printed-dir> and call teardown from their cleanup trap after
 # killing only the server addressed through that directory.

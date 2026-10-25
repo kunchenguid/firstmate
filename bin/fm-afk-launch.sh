@@ -46,6 +46,8 @@
 # until `/quiet off`. A quiet `start` or `start-native` that fails while no
 # daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
 # daemon to park a present captain's main.
+# On backend=t3code there is no terminal for `start` to create, so only a
+# harness with a tracked native background job can run `start-native` there.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -59,10 +61,10 @@
 # workspace with --no-focus, or a detached tmux session) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
 #
-# Correct supervisor targeting: the daemon finds the captain pane to inject into
-# from its OWN inherited env (discover_supervisor_target). Running it in a
+# Correct supervisor targeting: the daemon finds the captain endpoint to inject
+# into from its OWN inherited env (discover_supervisor_target). Running it in a
 # separate terminal would make it discover its OWN pane, so this captures the
-# captain pane FIRST (from the pane this script runs in) and passes it in as
+# captain endpoint FIRST (from the pane this script runs in) and passes it as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
@@ -98,8 +100,13 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
-# non-visible-launch primitive here yet and refuse loudly.
+# Supported backends: herdr, tmux, and rex for `start`; t3code only through
+# `start-native` (T3 hosts no terminal to create, so the daemon runs as the
+# captain's own tracked background job, which means a Codex captain on t3code
+# has no away mode). Others (zellij, orca, cmux, paseo) have no verified
+# non-visible-launch primitive here yet and refuse loudly. On rex the daemon
+# runs in a dedicated Rex session of its own, so the captain's session gains no
+# tab and keeps its focus.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
@@ -414,10 +421,12 @@ fm_afk_launch_flag_write() {
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
 # field (a herdr workspace id, kept for the record's own documentation) is not
-# needed to close by id, so it is discarded. Returns 1 when no record exists.
+# needed to close by id, so it is discarded; a rex record's third field is the
+# dedicated session id, kept in FM_AFK_REC_EXTRA because closing kills it.
+# Returns 1 when no record exists.
 fm_afk_launch_record_read() {
   local extra record
-  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; extra=""
+  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; FM_AFK_REC_EXTRA=""; extra=""
   [ -f "$FM_AFK_LAUNCH_RECORD" ] || return 1
   record=$(cat "$FM_AFK_LAUNCH_RECORD" 2>/dev/null) || record=""
   IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra \
@@ -427,8 +436,10 @@ fm_afk_launch_record_read() {
     fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
     return 2
   fi
+  FM_AFK_REC_EXTRA=$extra
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
+    rex) [ "${extra%%:*}" = session ] && [ "${FM_AFK_REC_TARGET%%:*}" = "${extra#session:}" ] ;;
     tmux) : ;;
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
@@ -444,10 +455,16 @@ fm_afk_launch_record_validate_if_present() {
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
 # recorded workspace id (herdr) needs no separate close: closing the pane takes
-# its single-tab dedicated workspace with it.
-fm_afk_launch_close_terminal() {  # <backend> <target>
-  local backend=$1 target=$2
+# its single-tab dedicated workspace with it. A rex daemon owns a dedicated
+# session, which is killed by its exact recorded id.
+fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
+  local backend=$1 target=$2 extra=${3:-}
   case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ "${extra%%:*}" = session ] || return 1
+      fm_backend_rex_cli kill "$extra" >/dev/null 2>&1
+      ;;
     herdr)
       fm_backend_source herdr || return 1
       local session=${target%%:*} pane=${target#*:}
@@ -471,6 +488,10 @@ fm_afk_launch_close_terminal() {  # <backend> <target>
 fm_afk_launch_terminal_absent() {  # <backend> <target>
   local backend=$1 target=$2 session pane out result code
   case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ "$(fm_backend_rex_block_presence "$target")" = missing ]
+      ;;
     herdr)
       session=${target%%:*}
       pane=${target#*:}
@@ -496,7 +517,7 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
 
 fm_afk_launch_close_recorded() {
   local close_result=0
-  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || close_result=$?
+  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" "${FM_AFK_REC_EXTRA:-}" || close_result=$?
   if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
     rm -f "$FM_AFK_LAUNCH_RECORD" || return 1
     [ "$close_result" -eq 0 ] || fm_afk_launch_log "terminal close command failed, but exact absence was confirmed"
@@ -509,6 +530,10 @@ fm_afk_launch_close_recorded() {
 fm_afk_launch_terminal_alive() {  # <backend> <target>
   local backend=$1 target=$2 session pane
   case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      fm_backend_rex_target_ready "$target"
+      ;;
     herdr)
       session=${target%%:*}
       pane=${target#*:}
@@ -541,13 +566,14 @@ fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorde
   local backend=$1 target=$2 extra=$3 already_recorded=${4:-0}
   if [ "$already_recorded" -ne 1 ] && ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
     fm_afk_launch_log "failed to persist daemon terminal record; closing $backend:$target"
-    fm_afk_launch_close_terminal "$backend" "$target"
+    fm_afk_launch_close_terminal "$backend" "$target" "$extra"
     return 1
   fi
   if ! fm_afk_launch_wait_ready "$backend" "$target"; then
     fm_afk_launch_log "daemon did not become ready; closing $backend:$target"
     FM_AFK_REC_BACKEND=$backend
     FM_AFK_REC_TARGET=$target
+    FM_AFK_REC_EXTRA=$extra
     fm_afk_launch_close_recorded
     return 1
   fi
@@ -606,11 +632,13 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -676,6 +704,43 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
+# Launch the daemon in a dedicated Rex session of its own (never a tab in the
+# captain's session), recorded by exact ids before the daemon command is typed
+# into its shell, mirroring the herdr create-record-run order.
+fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 out sid bid target cmd label
+  fm_backend_source rex || return 1
+  fm_backend_rex_version_check || { fm_afk_launch_log "rex server not ready"; return 1; }
+  label=${FM_AFK_LAUNCH_LABEL:-"$FM_AFK_LAUNCH_WS_LABEL-$$-${RANDOM:-0}-$(date '+%s')"}
+  out=$(fm_backend_rex_cli new "$label" --cwd "$FM_HOME" --json 2>/dev/null) || {
+    fm_afk_launch_log "rex could not create the daemon session '$label'"
+    return 1
+  }
+  sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
+  bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0] // empty' 2>/dev/null)
+  if ! fm_backend_rex_id_valid session "$sid" || ! fm_backend_rex_id_valid block "$bid"; then
+    fm_afk_launch_log "rex create did not yield exact session/block ids for '$label'"
+    return 1
+  fi
+  target=$(fm_backend_rex_target "$sid" "$bid")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  if ! fm_afk_launch_record_write rex "$target" "$sid"; then
+    fm_afk_launch_log "failed to persist rex daemon terminal record; closing $sid"
+    fm_afk_launch_close_terminal rex "$target" "$sid"
+    return 1
+  fi
+  if ! fm_backend_rex_send_text_line "$target" "$cmd"; then
+    fm_afk_launch_log "failed to run daemon in rex block $target; closing its session"
+    FM_AFK_REC_BACKEND=rex
+    FM_AFK_REC_TARGET=$target
+    FM_AFK_REC_EXTRA=$sid
+    fm_afk_launch_close_recorded || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return 1
+  fm_afk_launch_log "daemon launched in dedicated rex session $sid (block $target), supervising $captain_target"
+}
+
 # Launch the daemon in a detached tmux session (never a split-window in the
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
@@ -705,13 +770,17 @@ fm_afk_launch_start() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
-  # Capture the captain pane FIRST, before creating anything.
+  # Capture the captain endpoint FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
     return 1; }
+  if [ "$captain_backend" = t3code ]; then
+    fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
+    return 1
+  fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -730,7 +799,8 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -756,8 +826,9 @@ fm_afk_launch_start() {
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
       tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      rex)   fm_afk_launch_create_rex "$captain_target" "$captain_backend"; result=$? ;;
       *)
-        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, rex)"
         result=1
         ;;
     esac
@@ -787,7 +858,8 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi

@@ -44,6 +44,7 @@ make_case() {
   cat > "$d/fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FAKE_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_NM_LOG"
+[ -z "${FAKE_NM_HOME_LOG:-}" ] || printf '%s|%s\n' "$*" "${NM_HOME-<unset>}" >> "$FAKE_NM_HOME_LOG"
 [ "$*" = axi ] || exit 1
 if [ -n "${FAKE_NM_REPO:-}" ]; then
   printf 'bin: no-mistakes\nrepo: %s\ncurrent_branch: fm/task\n' "$FAKE_NM_REPO"
@@ -325,6 +326,128 @@ test_state_db_without_nm_home_or_home_uses_the_account_home() {
   pass 'the state database resolves under the account home when NM_HOME and HOME are unset'
 }
 
+# write_resolver <case-dir> <home-to-print> [exit-code]: install a
+# site resolver at <case-dir>/resolver that logs each worktree argument to
+# <case-dir>/resolver-calls, prints <home-to-print> verbatim, and exits with
+# [exit-code] (default 0), and point the case home's config/nm-home-resolver
+# at it.
+write_resolver() {
+  local d=$1
+  cat > "$d/resolver" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> '$d/resolver-calls'
+printf '%b' '$2'
+exit ${3:-0}
+SH
+  chmod +x "$d/resolver"
+  printf '%s\n' "$d/resolver" > "$d/home/config/nm-home-resolver"
+}
+
+# spend_ambient <case-dir> <record>: run the script like spend, but with
+# NM_HOME unset and HOME pointing at an empty account directory, so the
+# ambient default home is <case-dir>/account/.no-mistakes.
+spend_ambient() {
+  local d=$1
+  mkdir -p "$d/account"
+  env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_CONFIG_OVERRIDE -u NM_HOME \
+    HOME="$d/account" FM_HOME="$d/home" \
+    FAKE_NM_REPO="${FAKE_NM_REPO-$d/project}" FAKE_NM_HOME_LOG="$d/nm-homes" PATH="$d/fakebin:$PATH" \
+    "$SPEND" "$2" "${3:-task}"
+}
+
+test_home_resolver_finds_a_workspace_home_when_nm_home_is_unset() {
+  local d out
+  d=$(make_case resolver)
+  seed_db "$d" current <<EOF
+repo r1 $d/project
+run first r1 fm/task completed 100
+inv first review cold ok 100 10 20 30 40 10 20 30
+EOF
+  write_resolver "$d" "$d/nm\\n"
+  spend_ambient "$d" record >/dev/null || fail "record failed with a configured resolver"
+  out=$(tail -1 "$d/home/data/pipeline-spend.jsonl")
+  assert_equals '"no-mistakes-state"' "$(field "$out" .source)" 'the resolved home state database is read'
+  assert_equals '["first"]' "$(field "$out" '[.runs[].id]')" 'the run in the resolved home is attributed'
+  assert_equals "$d/wt" "$(sort -u "$d/resolver-calls")" 'the resolver is called with the task copy path'
+  assert_equals "axi|$d/nm" "$(cat "$d/nm-homes")" 'the overview read runs with the resolved NM_HOME'
+  assert_absent "$d/account/.no-mistakes" 'the ambient default home was read or created'
+  pass 'a configured resolver supplies the no-mistakes home for reads when NM_HOME is unset'
+}
+
+test_explicit_nm_home_wins_over_the_resolver() {
+  local d out
+  d=$(make_case resolver-explicit)
+  seed_db "$d" current <<EOF
+repo r1 $d/project
+run first r1 fm/task completed 100
+EOF
+  mkdir -p "$d/elsewhere"
+  write_resolver "$d" "$d/elsewhere\\n"
+  FAKE_NM_HOME_LOG="$d/nm-homes" recorded "$d" >/dev/null || fail "record failed with an explicit NM_HOME"
+  out=$(tail -1 "$d/home/data/pipeline-spend.jsonl")
+  assert_equals '["first"]' "$(field "$out" '[.runs[].id]')" 'the explicit home is read'
+  assert_absent "$d/resolver-calls" 'the resolver was called despite an explicit NM_HOME'
+  pass 'an explicit NM_HOME always wins and the resolver is not called'
+}
+
+test_unusable_resolver_answers_keep_the_ambient_home() {
+  local d answer label
+  # No config file: the ambient default home, exactly as without the hook.
+  d=$(make_case resolver-absent)
+  spend_ambient "$d" record >/dev/null || fail "record failed without a resolver"
+  assert_equals "axi|<unset>" "$(cat "$d/nm-homes")" 'without a resolver NM_HOME stays unset'
+  # A config file that names no absolute executable.
+  d=$(make_case resolver-relative-command)
+  printf 'resolver\n' > "$d/home/config/nm-home-resolver"
+  spend_ambient "$d" record >/dev/null || fail "record failed with a relative resolver path"
+  assert_equals "axi|<unset>" "$(cat "$d/nm-homes")" 'a relative resolver path is not run'
+  for answer in relative empty missing two-lines failed; do
+    d=$(make_case "resolver-$answer")
+    case "$answer" in
+      relative) write_resolver "$d" "nm\\n"; label='a relative home' ;;
+      empty) write_resolver "$d" ''; label='no output' ;;
+      missing) write_resolver "$d" "$d/no-such-home\\n"; label='a home that does not exist' ;;
+      two-lines) write_resolver "$d" "$d/nm\\n$d/nm\\n"; label='more than one line' ;;
+      failed) write_resolver "$d" "$d/nm\\n" 3; label='a failing resolver' ;;
+    esac
+    spend_ambient "$d" record >/dev/null || fail "record failed for $label"
+    assert_present "$d/resolver-calls" "the resolver was not called for $label"
+    assert_equals "axi|<unset>" "$(cat "$d/nm-homes")" "$label must not redirect the read"
+    assert_absent "$d/no-such-home" "$label created a home"
+  done
+  pass 'an absent or unusable resolver leaves every read on the ambient home'
+}
+
+# The resolver redirects only host reads and the run-targeted abort; a call
+# that would start or drive a run keeps the ambient home.
+test_home_resolver_scope_is_host_reads_and_run_abort() {
+  local d got
+  d=$(make_case resolver-scope)
+  write_resolver "$d" "$d/nm\\n"
+  # shellcheck disable=SC2016 # $1 and $2 expand in the child shell
+  env -u NM_HOME -u FM_CONFIG_OVERRIDE FM_HOME="$d/home" FAKE_NM_HOME_LOG="$d/nm-homes" PATH="$d/fakebin:$PATH" \
+    bash -c '. "$1/bin/fm-nm-run-lib.sh"
+      for args in "axi" "axi status" "axi status --run r1" "axi logs --step ci --run r1 --full" \
+                  "runs --limit 5" "daemon status" "axi abort --run r1" \
+                  "axi run --intent x" "axi respond --action approve" "axi abort" "daemon start"; do
+        fm_nm_run "$2" 5 $args >/dev/null
+      done; fm_nm_state_db "$2"' _ "$ROOT" "$d/wt" > "$d/state-db"
+  got=$(cat "$d/nm-homes")
+  assert_equals "axi|$d/nm
+axi status|$d/nm
+axi status --run r1|$d/nm
+axi logs --step ci --run r1 --full|$d/nm
+runs --limit 5|$d/nm
+daemon status|$d/nm
+axi abort --run r1|$d/nm
+axi run --intent x|<unset>
+axi respond --action approve|<unset>
+axi abort|<unset>
+daemon start|<unset>" "$got" 'only host reads and the run-targeted abort use the resolved home'
+  assert_equals "$d/nm/state.sqlite" "$(cat "$d/state-db")" 'the state database follows the resolved home'
+  pass 'the resolver applies to host reads and axi abort --run only'
+}
+
 test_refusals() {
   local d rc
   d=$(make_case refusals)
@@ -352,4 +475,8 @@ test_older_state_without_delta_columns_counts_only_provable_rounds
 test_record_appends_once_per_task_incarnation
 test_disabled_record_does_not_read_or_create_spend_data
 test_state_db_without_nm_home_or_home_uses_the_account_home
+test_home_resolver_finds_a_workspace_home_when_nm_home_is_unset
+test_explicit_nm_home_wins_over_the_resolver
+test_unusable_resolver_answers_keep_the_ambient_home
+test_home_resolver_scope_is_host_reads_and_run_abort
 test_refusals

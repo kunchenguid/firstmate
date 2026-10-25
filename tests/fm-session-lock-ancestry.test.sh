@@ -427,6 +427,355 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
 }
 
+# --- Cygwin / Git-for-Windows layer ------------------------------------------
+#
+# Both of this platform's departures are reproduced here rather than assumed, so
+# these run identically on Linux and macOS CI: its ps rejects -o outright, and
+# every shell it reports has its parent link severed at 1 because the real parent
+# is a Windows process Cygwin cannot see.
+
+# A fakebin whose ps behaves like Cygwin's and whose uname reports MINGW.
+# The Windows-side table is supplied per case through FM_TEST_WIN_TABLE, in the
+# same column order the real `ps -W` prints.
+cygwin_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0-26200'
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  # Cygwin's ps has no -o option at all; it fails the whole invocation.
+  [ "$a" = "-o" ] && { echo "ps: unknown option -- o" >&2; exit 1; }
+done
+mode=p full=0 pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -W) mode=W; shift ;;
+    -f) full=1; shift ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$mode" = W ]; then
+  [ -z "${FM_TEST_WIN_PS_FAIL:-}" ] || { echo "ps: cannot read the Windows process table" >&2; exit 1; }
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  exit 0
+fi
+# The Cygwin-side table. 700 is an MSYS-native harness; everything else is an
+# ordinary shell whose parent link is severed exactly as the real ps reports it.
+case "$pid" in
+  700) comm='/opt/claude/versions/2.1.220'; ppid=1 ;;
+  *)   comm='/usr/bin/bash'; ppid=${FM_TEST_CYG_PPID:-1} ;;
+esac
+if [ "$full" = 1 ]; then
+  printf '%s\n' '     UID     PID    PPID  TTY        STIME COMMAND'
+  printf 'u %s %s ? 00:00:00 %s\n' "$pid" "$ppid" "$comm"
+else
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  printf '%s %s %s 9999 ? 0 00:00:00 %s\n' "$pid" "$ppid" "$pid" "$comm"
+fi
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# WINPID 7204 is the session harness. 4321 is an ordinary desktop process, and
+# 5150 is the path-shaped lookalike that must never read as a harness.
+WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe
+  4199454       0       0       5150  ?              0 22:24:48 C:\tools\claude-notes\helper.exe'
+
+test_windows_session_is_identified_from_its_published_pid() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-published"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the session was not identified at all on a severed Cygwin parent link"
+  [ "$got" = 'win:7204' ] || fail "expected the tagged Windows session pid win:7204, got '$got'"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a live Windows-side session was classified as a dead lock owner"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the session holding the lock did not recognize itself as the owner"
+  pass "session-lock: a Windows session is identified from its published pid across the severed parent link"
+}
+
+test_windows_published_pid_is_confirmed_before_it_is_trusted() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-unconfirmed"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A published pid is a claim. Each of these shapes must be discarded rather
+  # than bound: a process that is gone, one that is not a harness at all, and a
+  # path that merely contains the harness name inside a longer component.
+  for claimed in 9999 4321 5150; do
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID="$claimed" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "published pid $claimed was bound as this session's harness without confirmation"
+    fi
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" "fm_harness_pid_alive win:$claimed"; then
+      fail "published pid $claimed passed the harness-liveness predicate"
+    fi
+  done
+  pass "session-lock: a published Windows pid is confirmed against the process table before it is trusted"
+}
+
+test_windows_pid_is_never_resolved_as_a_cygwin_pid() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-namespace"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # 700 is a harness in the CYGWIN table and absent from the Windows one. The
+  # two namespaces overlap numerically, so resolving a tagged pid through the
+  # local table would bind a home to whatever unrelated process holds that
+  # number - which is exactly what the tag exists to prevent.
+  FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    || fail "fixture is vacuous: pid 700 must be a live harness in the Cygwin table"
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:700'; then
+    fail "a tagged Windows pid was resolved against the Cygwin process table"
+  fi
+  pass "session-lock: a tagged Windows pid is never resolved against the Cygwin process table"
+}
+
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock() {
+  local dir fakebin identity
+  dir="$TMP_ROOT/win-identity-gates"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # The identity a session writes into the lock is read back by gates spread
+  # across several scripts - startup-completion recording and its clear/compact
+  # validation, the deferred network sweeps, and the Stop auto-arm. Each one
+  # asks only "is this value a usable identity", and each answered that with its
+  # own numeric test, so introducing a second identity shape made every one of
+  # them silently read a valid holder as malformed. The visible cost was a
+  # completion record that was never written, which reads as "startup never
+  # finished" and repeats the whole sequence on every clear or compact. One
+  # predicate owns the question so a third shape can never split them again.
+  identity=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "fixture is vacuous: no identity was published to gate on"
+  lib_eval "$fakebin" "fm_session_pid_valid '$identity'" \
+    || fail "the identity '$identity' this session publishes is rejected by the gates that read it back"
+
+  # A local pid stays equally valid: the Windows shape is additional, not a
+  # replacement, and the same predicate serves both platforms.
+  lib_eval "$fakebin" 'fm_session_pid_valid 700' \
+    || fail "an ordinary local pid was rejected as an invalid lock identity"
+
+  # Still fail closed on the shapes a torn or hand-edited lock produces, and on
+  # a bare tag carrying no pid at all.
+  for bad in '' 'win:' 'win:abc' 'win:7abc' 'win:7 x' 'win:-1' 'abc' '70 0' '-1'; do
+    if lib_eval "$fakebin" "fm_session_pid_valid '$bad'"; then
+      fail "the malformed lock value '$bad' was accepted as a usable identity"
+    fi
+  done
+  pass "session-lock: a published identity is accepted by every gate that reads the lock"
+}
+
+test_windows_tagged_holder_is_a_live_foreign_owner() {
+  local dir fakebin table got
+  dir="$TMP_ROOT/win-foreign-owner"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+  # A second live session, 7300, reads the home held by the live session 7204.
+  table="$WIN_TABLE
+  4201600       0       0       7300  ?              0 22:30:00 C:\Users\u\.local\bin\claude.exe"
+
+  got=$(FM_TEST_WIN_TABLE="$table" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7300 foreign_owner "$fakebin" "$dir/state") \
+    || fail "a live tagged lock holder was not seen as a foreign owner by a second session"
+  [ "$got" = 'win:7204' ] || fail "expected foreign owner win:7204, got '$got'"
+  if FM_TEST_WIN_TABLE="$table" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 foreign_owner "$fakebin" "$dir/state" >/dev/null; then
+    fail "the tagged lock holder read its own lock as foreign"
+  fi
+
+  got=$(FM_TEST_WIN_TABLE="$table" lib_eval "$fakebin" \
+    "fm_session_lock_inspect '$dir/state'; printf '%s %s %s' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_PID\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"")
+  [ "$got" = 'held win:7204 true' ] || fail "a live tagged holder was not inspected as held: '$got'"
+
+  # A holder that is not a harness, or whose table cannot be read, is never a
+  # live foreign owner. Inspection then matches the local-pid contract: a holder
+  # absent from a readable table is stale, a live non-harness is unknown with no
+  # live harness, and an unreadable table stays fully unknown.
+  for gone in 9999 4321; do
+    printf 'win:%s\n' "$gone" > "$dir/state/.lock"
+    if FM_TEST_WIN_TABLE="$table" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7300 foreign_owner "$fakebin" "$dir/state" >/dev/null; then
+      fail "an unverifiable tagged holder win:$gone was reported as a live foreign owner"
+    fi
+  done
+  printf 'win:9999\n' > "$dir/state/.lock"
+  got=$(FM_TEST_WIN_TABLE="$table" lib_eval "$fakebin" \
+    "fm_session_lock_inspect '$dir/state'; printf '%s %s' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"")
+  [ "$got" = 'stale false' ] || fail "a tagged holder absent from the Windows table was classified as '$got', not stale"
+  printf 'win:4321\n' > "$dir/state/.lock"
+  got=$(FM_TEST_WIN_TABLE="$table" lib_eval "$fakebin" \
+    "fm_session_lock_inspect '$dir/state'; printf '%s %s' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"")
+  [ "$got" = 'unknown false' ] || fail "a live non-harness tagged holder was classified as '$got'"
+  printf 'win:9999\n' > "$dir/state/.lock"
+  got=$(FM_TEST_WIN_PS_FAIL=1 FM_TEST_WIN_TABLE="$table" lib_eval "$fakebin" \
+    "fm_session_lock_inspect '$dir/state'; printf '%s %s' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"")
+  [ "$got" = 'unknown unknown' ] || fail "a tagged holder behind an unreadable Windows table was classified as '$got'"
+  pass "session-lock: a live tagged lock holder is a live foreign owner to a second Windows session"
+}
+
+test_windows_published_pid_needs_its_claude_session_id() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-session-id"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # CLAUDE_PID is inherited by every process a Claude pane starts, so on its
+  # own it names a live Claude without proving this process belongs to it.
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+    fail "a published Claude pid without its session id was bound as this session's harness"
+  fi
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_session_lock_trusted_session_id') \
+    || fail "the session id published with a confirmed Windows Claude pid was not trusted"
+  [ "$got" = S1 ] || fail "expected the trusted session id S1, got '$got'"
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "no anchor pid was resolved for a Windows session with its id"
+  [ "$got" = 'win:7204' ] || fail "a trusted Windows session anchored '$got', expected the tagged pid win:7204"
+  pass "session-lock: a published Windows Claude pid is accepted only with its session id"
+}
+
+test_windows_clear_rekeys_the_lock_under_the_same_pid() {
+  local dir fakebin home out
+  dir="$TMP_ROOT/win-clear-rekey"
+  fakebin=$(cygwin_fakebin "$dir")
+  home="$dir/home"
+  mkdir -p "$home/state"
+
+  win_lock() {  # <session-id>
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID PATH="$fakebin:$PATH" \
+      FM_TEST_WIN_TABLE="$WIN_TABLE" FM_HOME="$home" \
+      CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID="$1" "$ROOT/bin/fm-lock.sh" 2>&1
+  }
+  out=$(win_lock S1) || fail "the Windows session could not acquire its lock: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "the lock names '$(cat "$home/state/.lock")', not win:7204"
+  [ "$(cat "$home/state/.lock-session" 2>/dev/null)" = S1 ] \
+    || fail "the Windows session did not record its session id beside the lock"
+
+  # /clear keeps the Claude process, so CLAUDE_PID stays while the session id
+  # changes. As on POSIX the session keeps its lock and the sidecar is re-keyed.
+  out=$(win_lock S2) || fail "the Windows session was refused its own lock after /clear: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "the /clear re-key rewrote the lock to '$(cat "$home/state/.lock")'"
+  [ "$(cat "$home/state/.lock-session")" = S2 ] || fail "the /clear re-key did not record the new session id"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=7204 owned "$fakebin" "$home/state" \
+    || fail "the Windows session did not own its lock after /clear"
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=7204 foreign_owner "$fakebin" "$home/state" >/dev/null; then
+    fail "the Windows session read its own lock as foreign after /clear"
+  fi
+  pass "session-lock: a Windows /clear keeps the lock and re-keys its session id"
+}
+
+test_tagged_lock_is_inert_off_windows() {
+  local dir fakebin state got value
+  dir="$TMP_ROOT/win-tag-off-windows"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+SH
+  # Answers ps -W as if a live Windows harness held the lock, so only the
+  # platform gate can keep the tag from being honored.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf 'win:7204\n' > "$state/.lock"
+
+  for value in 'win:7204' 'win:7abc'; do
+    if lib_eval "$fakebin" "fm_session_pid_valid '$value'"; then
+      fail "the Windows-tagged value '$value' was accepted off Windows"
+    fi
+  done
+  if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'"; then
+    fail "a Windows-tagged lock was owned off Windows"
+  fi
+  if foreign_owner "$fakebin" "$state" >/dev/null; then
+    fail "a Windows-tagged lock was reported as a live foreign owner off Windows"
+  fi
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
+  [ "$got" = unknown ] || fail "a Windows-tagged lock off Windows was classified as '$got', not unknown"
+  pass "session-lock: a Windows-tagged lock stays inert off Windows"
+}
+
+test_windows_task_lease_follows_a_tagged_lock_holder() {
+  local dir fakebin home out status table
+  local -x PI_CODING_AGENT=true
+  dir="$TMP_ROOT/win-lease"
+  fakebin=$(cygwin_fakebin "$dir")
+  home="$dir/home"
+  mkdir -p "$home/state"
+  printf 'win:7204\n' > "$home/state/.lock"
+
+  # The supervising actor's lease names the tagged session that holds the lock,
+  # so it stays live while that session does and the other actor is refused.
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u FM_LEASE_HOLDER_PID PATH="$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch || fail "branch lease claim failed under a tagged lock"
+  out=$(cut -f2 "$home/state/.lease-task-1")
+  [ "$out" = 'win:7204' ] || fail "the lease recorded holder '$out', not the tagged lock holder win:7204"
+  out=$(env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u FM_LEASE_HOLDER_PID PATH="$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
+    "$ROOT/bin/fm-lease.sh" claim task-1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "the other actor's claim over a live tagged lease exited $status, not 6: $out"
+
+  # Once the tagged holder is gone from the Windows table, the lease is stale.
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u FM_LEASE_HOLDER_PID PATH="$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE='' FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
+    "$ROOT/bin/fm-lease.sh" claim task-1 || fail "a lease whose tagged holder exited still blocked the other actor"
+
+  # A caller-supplied tagged holder naming a live harness is taken whole ahead
+  # of the lock holder, never as its digits; a dead one falls back to the lock.
+  table="$WIN_TABLE
+  4201600       0       0       7300  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe"
+  rm -f "$home/state/.lease-task-1"
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID PATH="$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE="$table" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    FM_LEASE_HOLDER_PID=win:7300 \
+    "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch || fail "branch lease claim failed with a tagged FM_LEASE_HOLDER_PID"
+  out=$(cut -f2 "$home/state/.lease-task-1")
+  [ "$out" = 'win:7300' ] || fail "a caller-supplied tagged holder was recorded as '$out', not win:7300"
+  rm -f "$home/state/.lease-task-1"
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID PATH="$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    FM_LEASE_HOLDER_PID=win:7300 \
+    "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch || fail "branch lease claim failed with a dead tagged FM_LEASE_HOLDER_PID"
+  out=$(cut -f2 "$home/state/.lease-task-1")
+  [ "$out" = 'win:7204' ] || fail "a dead caller-supplied tagged holder was recorded as '$out', not the lock holder win:7204"
+  pass "session-lock: a task lease follows a live tagged lock holder and goes stale when it exits"
+}
+
+test_cygwin_ps_without_o_still_resolves_a_local_harness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-local"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # An MSYS-native harness lives in the same process table as this shell, so it
+  # must resolve through the ordinary walk and stay an untagged pid. This is
+  # what proves the walk survives a ps with no -o option at all.
+  got=$(FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a harness in the local process table was not resolved when ps rejected -o"
+  [ "$got" = 700 ] || fail "expected the untagged local harness pid 700, got '$got'"
+  pass "session-lock: a harness in the local process table resolves untagged when ps has no -o option"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -439,6 +788,9 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
+  # fixture that ever verifies an executable does not source a missing file.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
@@ -703,12 +1055,14 @@ arm_count() {  # <dir>
 }
 
 # The recycled chain must still be treated as the owner: arm, no diagnostic,
-# lock accepted, line 1 untouched while the recorded pid lives, sidecar bytes
-# untouched. An owned actionable close records two arm invocations - the
-# foreground arm plus the handling successor the hook starts before the rewake -
-# so the cumulative <expected-arms> grows by two for every owned phase.
-expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
-  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5
+# lock accepted, line 1 naming <expected-lock-pid>, and the sidecar either
+# byte-identical to the one the owner wrote or, when <expected-session-id> is
+# given, re-keyed to that id. An owned actionable close records two arm
+# invocations - the foreground arm plus the handling successor the hook starts
+# before the rewake - so the cumulative <expected-arms> grows by two for every
+# owned phase.
+expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label> [<expected-session-id>]
+  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5 session_id=${6:-}
   expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not rewake"
   [ "$(arm_count "$dir")" = "$arms" ] || fail "$label: expected $arms arm(s), got $(arm_count "$dir")"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "$label: no rewake claim was recorded, got: $(epoch_outcome "$dir")"
@@ -719,8 +1073,13 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$lock_pid" ] \
     || fail "$label: lock line 1 is $(phase_value "$dir" "$n" lock-after), expected $lock_pid"
-  cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
-    || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  if [ -n "$session_id" ]; then
+    [ "$(phase_value "$dir" "$n" session-after)" = "$session_id" ] \
+      || fail "$label: the session sidecar names $(phase_value "$dir" "$n" session-after), expected $session_id"
+  else
+    cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
+      || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  fi
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
@@ -776,38 +1135,37 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
-  # Phase 2: the same session id over the broken chain - the reported drift.
-  fire_phase "$dir" 2 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  # Phases 2-4: before the spare proves anything, a different id, the right id
+  # from a CLAUDE_PID outside the run, and no id at all are each a non-owner
+  # over the broken chain.
+  fire_phase "$dir" 2 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
   if grep -qx "$frontend" "$dir/state/phase-2/ancestry"; then
-    fail "the recycled chain still reached the front-end, so this phase proves nothing"
+    fail "the recycled chain still reached the front-end, so these phases prove nothing"
   fi
   grep -qx "$spare" "$dir/state/phase-2/ancestry" || fail "the hook's ancestry lost its own spare"
-  expect_phase_owned "$dir" 2 4 "$frontend" "recycled chain, same session"
+  expect_phase_foreign "$dir" 2 2 "$frontend" "recycled chain, different session"
+  fire_phase "$dir" 3 "export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$frontend"
+  expect_phase_foreign "$dir" 3 2 "$frontend" "recycled chain, untrusted id"
+  fire_phase "$dir" 4 ''
+  expect_phase_foreign "$dir" 4 2 "$frontend" "recycled chain, no id"
 
-  # Phases 3-5: a different id, the right id from a CLAUDE_PID outside the run,
-  # and no id at all are each a non-owner over the same broken chain.
-  fire_phase "$dir" 3 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
-  expect_phase_foreign "$dir" 3 4 "$frontend" "recycled chain, different session"
-  fire_phase "$dir" 4 "export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$frontend"
-  expect_phase_foreign "$dir" 4 4 "$frontend" "recycled chain, untrusted id"
-  fire_phase "$dir" 5 ''
-  expect_phase_foreign "$dir" 5 4 "$frontend" "recycled chain, no id"
-
-  # Phase 6: the front-end exits; the same session reclaims its dead anchor
-  # onto the spare - the model-loop process - not onto the outermost pty-host.
-  : > "$dir/state/stop-frontend"
-  i=0
-  while [ "$i" -lt 200 ] && kill -0 "$frontend" 2>/dev/null; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  kill -0 "$frontend" 2>/dev/null && fail "the front-end did not exit"
-  fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_phase_owned "$dir" 6 6 "$spare" "dead front-end, same session"
+  # Phase 5: the same session id over the broken chain - the reported drift. The
+  # confirmation re-anchors line 1 from the live non-ancestor front-end onto the
+  # spare - the model-loop process - not onto the outermost pty-host.
+  fire_phase "$dir" 5 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 5 4 "$spare" "recycled chain, same session"
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
+  kill -0 "$frontend" 2>/dev/null || fail "the front-end exited, so the re-anchor was not over a live owner"
 
+  # Phase 6: /clear - the same spare under a new id while the front-end that
+  # first recorded the lock is still alive. Ancestry still proves ownership and
+  # the sidecar is re-keyed.
+  fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 6 6 "$spare" "same process after a session-id change" S2
+
+  : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
-  pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain"
+  pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
@@ -1099,6 +1457,113 @@ test_verified_reclaim_keeps_new_sidecar() {
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"
 }
 
+# A re-anchor moves leases recorded against the old live line 1 onto the new
+# anchor, so the other supervision actor still cannot claim a held task.
+test_reanchor_keeps_task_leases_live() {
+  local dir front_pid model_pid lease_rc
+  dir="$TMP_ROOT/reanchor-leases"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'branch\t%s\t100\n' "$front_pid" > "$dir/state/.lease-t1"
+  printf 'main\t%s\t200\n' "$front_pid" > "$dir/state/.lease-t2"
+  printf 'branch\t%s\t300\n' "$$" > "$dir/state/.lease-t3"
+  cp "$dir/state/.lease-t3" "$dir/state/lease-t3-before"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.lease-t1")" = "$(printf 'branch\t%s\t100' "$model_pid")" ] \
+    || fail "the branch lease was not moved to the new anchor: $(cat "$dir/state/.lease-t1")"
+  [ "$(cat "$dir/state/.lease-t2")" = "$(printf 'main\t%s\t200' "$model_pid")" ] \
+    || fail "the main lease was not moved to the new anchor: $(cat "$dir/state/.lease-t2")"
+  cmp -s "$dir/state/lease-t3-before" "$dir/state/.lease-t3" \
+    || fail "a lease recorded against another pid changed: $(cat "$dir/state/.lease-t3")"
+  env -u FM_SUPERVISION_ACTOR -u FM_LEASE_HOLDER_PID FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" claim t1 > "$dir/state/main-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "main claimed the branch's task after the re-anchor: $(cat "$dir/state/main-claim.out")"
+  env -u FM_SUPERVISION_ACTOR FM_HOME="$dir" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$model_pid" \
+    "$ROOT/bin/fm-lease.sh" claim t2 > "$dir/state/branch-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "the branch claimed main's task after the re-anchor: $(cat "$dir/state/branch-claim.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor keeps both supervision actors' task leases live"
+}
+
+autoarm_midturn_healthy() {  # <state-dir>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$0"; fm_autoarm_midturn_healthy "$FM_STATE_OVERRIDE" 300' "$ROOT/bin/fm-wake-lib.sh"
+}
+
+# A re-anchor during a rewake handling turn that has outrun grace moves the
+# auto-arm ledger's session_pid with line 1 and keeps the ledger's other bytes
+# and mtime, so the mid-turn guard still sees healthy supervision.
+test_reanchor_keeps_autoarm_midturn_healthy() {
+  local dir front_pid model_pid
+  dir="$TMP_ROOT/reanchor-autoarm"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1\n' \
+    "$front_pid" > "$dir/state/.claude-autoarm-epoch"
+  printf 'acked:handling:g1\n' > "$dir/state/.watcher-down"
+  touch -t 201901010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-mtime"
+  autoarm_midturn_healthy "$dir/state" || fail "the rewake fixture is not healthy before the re-anchor, so this case proves nothing"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.claude-autoarm-epoch")" = "$(printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1' "$model_pid")" ] \
+    || fail "the rewake was not moved to the new anchor intact: $(cat "$dir/state/.claude-autoarm-epoch")"
+  if [ "$dir/state/.claude-autoarm-epoch" -nt "$dir/state/epoch-mtime" ] \
+    || [ "$dir/state/.claude-autoarm-epoch" -ot "$dir/state/epoch-mtime" ]; then
+    fail "the rewake move changed the ledger mtime"
+  fi
+  autoarm_midturn_healthy "$dir/state" \
+    || fail "the mid-turn guard rejects the rewake after the re-anchor: $(cat "$dir/state/reanchor.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1106,6 +1571,16 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+test_windows_session_is_identified_from_its_published_pid
+test_windows_published_pid_is_confirmed_before_it_is_trusted
+test_windows_pid_is_never_resolved_as_a_cygwin_pid
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
+test_windows_tagged_holder_is_a_live_foreign_owner
+test_windows_published_pid_needs_its_claude_session_id
+test_windows_clear_rekeys_the_lock_under_the_same_pid
+test_tagged_lock_is_inert_off_windows
+test_windows_task_lease_follows_a_tagged_lock_holder
+test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
@@ -1115,3 +1590,5 @@ test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar
 test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
+test_reanchor_keeps_task_leases_live
+test_reanchor_keeps_autoarm_midturn_healthy

@@ -210,6 +210,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - Pi's `lockOwnership()`.
 
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+On Windows/Git Bash, a lock holding a tagged `win:<pid>` identity is outside this process table, so the wrapper instead asks the library's `fm_session_lock_owned_by_self`, whose Windows process-boundary bridge owns that identity.
 
 ### Exit codes
 
@@ -238,6 +239,9 @@ Claude is a run-tier harness.
 `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout.
 The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
+Claude caps one hook output string at 10,000 characters.
+Above the cap the model receives a preview of the first 2,000 characters plus the path of a saved file, and is not asked to read that file.
+A context re-emit therefore prints a short `RE-EMIT CUE` first, which tells the model to read the saved file.
 
 ### Codex exec
 
@@ -311,14 +315,14 @@ The `.opencode/plugins/fm-primary-sessionstart-nudge.js` plugin does three thing
 
 - It listens for `session.created`.
 - It runs once per session id.
-- It calls `client.session.promptAsync` only when the wrapper prints a nudge.
+- It calls `ctx.session.prompt` only when the wrapper prints a nudge.
 
 Interactive TUI delivery is supported.
 Headless `opencode run` is intentionally fail-open, because the process can exit before the queued turn.
 That early exit is also why OpenCode cannot use the run tier.
 
 The OpenCode nudge runs only on `session.created`.
-The watcher-arm and turn-end plugins run later, on `session.idle`.
+The watcher-arm and turn-end plugins run later, on the terminal `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events in OpenCode 2, or `session.idle` in OpenCode 1.
 The guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
 ### Grok

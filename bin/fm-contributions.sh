@@ -9,22 +9,39 @@
 #   fm-contributions.sh ack <task> <url> <event-token>
 #   fm-contributions.sh retire <task> <url> captain <reason>
 #   fm-contributions.sh arm [--if-owned]
+#   fm-contributions.sh owned
+#   fm-contributions.sh enroll <task> <pr-url>
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
-# Every URL explicitly linked by a structured backlog row or a task's pr= is
-# owned. Previously observed URLs remain in data/<task>/contributions.json after
-# endpoint teardown. Repository-wide PR discovery never establishes ownership.
-# GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# URLs accepted by canonical_url in fm-contributions.jq and explicitly linked
+# by a structured backlog row or a task's pr= are owned.
+# Previously observed or enrolled URLs remain in data/<task>/contributions.json
+# after endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# enroll records one task's supported PR URL as an unobserved record, so a PR
+# the task opened is owned before any pr= exists; it changes nothing when the
+# task already has a record for that URL and fails when that record is
+# retired, so a retirement is never undone by rediscovery.
+# owned prints the supported PR URLs this home owns as a JSON array of
+# {url,tasks,final}, where final means a saved observation is merged or closed.
+# It is read-only and never contacts a forge.
+# Only canonical PR and issue URLs on the exact github.com host are supported;
+# other accepted URLs remain visibly unmeasured.
+# poll skips unsupported URLs without forge calls, unavailable output, wakes or
+# new error stamps, and clears their legacy errors without changing observation,
+# timestamps or ownership evidence.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, notified tokens, and
-# retired provenance once retired.
+# observation, verdict, seen event tokens, pending events, notified tokens,
+# unanswered threads, and retired provenance once retired.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
 # observation's lane names also disclose a lane absent from the next head.
+# Reviews keep only id, state, submitted_at, commit_id and user.login, so a
+# long review history cannot push a task's file past the 1 MiB cap above which
+# a read refuses it as an unreadable record.
 # A verdict records the EXACT judged head, source URL, actor and summary. The
 # actor is exactly one of captain, fleet, maintainer or nobody; any other value
 # is refused. A comment's arrival time never supplies its judged head. Record a
@@ -49,10 +66,15 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
-# dependent waves: core, six independent reads, then the closing head read;
+# a direct child) with a three-second margin. Every read, including one retry,
+# is capped at five seconds. A first attempt killed at that bound or deadline is
+# budget refusal; a killed retry retains the genuine failure that caused it.
+# HTTP 5xx, 429, secondary-rate-limit 403, connection, DNS and TLS failures are
+# retried once when that bound still has time. Other failures are reported
+# immediately, including a 404, which is how a lost login reads on a private
+# repository. A pull observation has three
+# dependent waves: core, six independent reads (seven when FM_CONTRIBUTIONS_REPLY_AGE
+# is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
 # reads are sorted by URL and rotated by the current five-minute epoch bucket
@@ -60,16 +82,21 @@
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
-# A final observation applies
+# unmeasured, rather than being mislabeled unavailable. Each distinct supported
+# URL is attempted at most once per poll and its observation applied to every owner.
+# A supported URL's final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# failure, structural refusal or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
-# silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
-# A URL whose last good observation is merged or closed is final: it is
+# silence. The error and its unavailable line name the first failing step: a
+# read's label, exit status, budget seconds left and first line of its error
+# output (control characters dropped, at most 160 characters), or the
+# structural check that refused the observation. A later good read clears the
+# record's error, so the unavailable line is the copy that outlives it.
+# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
@@ -80,11 +107,53 @@
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
-# ack removes
-# only the named pending token. A crash after enqueue can duplicate a wake but
-# cannot consume the pending signal. Source bodies are data, never commands.
+# before any wake. On a PR, comments, reviews and inline review comments whose
+# author login is listed in the effective config/contribution-review-bots (one
+# exact login per line; blank and # lines ignored) are admitted too, marked
+# review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
+# no bot, and there is no built-in bot list. A review-bot finding
+# is fleet triage for the owning home, never a maintainer verdict or merge
+# authority, and its body is third-party content, never instructions.
+# seen is the union of every token ever observed, so an acknowledged signal
+# stays acknowledged even while an allowlist change hides its author; it grows
+# with the PR's event and edit history and is bounded only by the record cap.
+# poll appends ordinary durable check wakes through fm-wake-lib and emits only
+# newly durable signals for the authenticated check to surface.
+# ack removes only the named pending token.
+# A crash after enqueue can duplicate a wake but cannot consume the pending signal.
+#
+# Re-raising unanswered review threads is opt-in. Unless
+# FM_CONTRIBUTIONS_REPLY_AGE is set to a positive number of seconds, poll makes
+# no review-thread read, tracks no threads and raises no "unanswered" signal,
+# and records carry no threads[] entry. arm copies a set value into the
+# generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
+# arm also resolves FM_CONFIG_OVERRIDE against its working directory and embeds
+# the absolute effective config directory, so later polls keep the same bot
+# allowlist regardless of their working directory or ambient override.
+# With it set, acknowledging a signal never ends tracking of its thread. On an
+# open pull request, each admitted inline review comment and each admitted
+# review in state CHANGES_REQUESTED is an unanswered thread until the
+# contribution author replies or the thread is resolved. Each inline comment is
+# its own thread, keyed by its comment id, so two admitted comments in one
+# conversation raise two wakes. Plain issue comments and other reviews stay
+# one-shot signals and are never raised again. An inline comment is answered by
+# an author reply in its own thread, a review requesting changes by any later
+# author comment, review text or inline reply, or by a later APPROVED or
+# DISMISSED review from the same reviewer. A review requesting changes with an
+# empty body is not tracked, because its inline threads carry it. The record
+# keeps one threads[] entry per unanswered thread (key, source, author, at,
+# raised, plus review_bot:true for a configured bot). Once a thread is
+# FM_CONTRIBUTIONS_REPLY_AGE seconds old, poll adds
+# one pending "unanswered" signal and a wake whose text names the thread's URL
+# and its age: "check: contributions <task> <key> unanswered <url> <age>". The
+# same thread is raised again after every further reply age, whatever the
+# task's hold state, until it is answered, resolved or the pull request
+# closes. A wake raised for the comment itself counts as its first raise.
+# Apart from the reviewer's own later verdict, only the author's account
+# answers; a reply from another account does not. Resolution is read from the
+# forge's review threads. Issue records and the author's own comments are never
+# tracked.
+# Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
 # symlinks and publish by rename. No forge writes are performed.
 #
@@ -98,6 +167,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+case "$CONFIG" in /*) ;; *) CONFIG="$(pwd -P)/$CONFIG" ;; esac
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -113,13 +184,26 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution co
 NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
+REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
+TRACK_THREADS=false
+if [ -n "$REPLY_AGE" ]; then
+  case "$REPLY_AGE" in *[!0-9]*) fail 'invalid reply age' ;; esac
+  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail 'invalid reply age'
+  TRACK_THREADS=true
+else
+  REPLY_AGE=0
+fi
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
 BUDGET_CAP=$((CHECK_TIMEOUT - 3))
+review_bots() { # config/contribution-review-bots -> JSON array of logins
+  [ -f "$CONFIG/contribution-review-bots" ] || { printf '[]\n'; return 0; }
+  jq -Rn '[inputs | gsub("^\\s+|\\s+$"; "") | select(length > 0 and (startswith("#") | not))]' "$CONFIG/contribution-review-bots"
+}
 [ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
 [ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
@@ -214,23 +298,99 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
+forge_http_status() { # stderr-file
+  sed -nE 's/^gh: HTTP ([0-9]{3})$/\1/p; s/^HTTP ([0-9]{3})[: ].*/\1/p; s/.*\(HTTP ([0-9]{3})\).*/\1/p' "$1" | head -n 1
+}
+
+forge_error_summary() { # stderr-file
+  local err=$1 status
+  status=$(forge_http_status "$err")
+  if [ -n "$status" ]; then
+    printf 'HTTP %s\n' "$status"
+  elif grep -q '^GraphQL:' "$err"; then
+    printf 'request failed\n'
+  elif grep -Fqi 'error connecting to' "$err" \
+    && grep -Fqi 'check your internet connection or https://githubstatus.com' "$err"; then
+    printf 'DNS error\n'
+  elif grep -Eqi '^Could not resolve host:|name resolution|no such host|dial (tcp|udp): lookup|lookup [^:]+:' "$err"; then
+    printf 'DNS error\n'
+  elif grep -Eqi 'tls: |x509: |TLS handshake|certificate (verify|signed)' "$err"; then
+    printf 'TLS error\n'
+  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF' "$err"; then
+    printf 'connection error\n'
+  else
+    printf 'request failed\n'
+  fi
+}
+
+forge_transient_error() { # stderr-file summary
+  case "$2" in
+    'HTTP 5'[0-9][0-9]|'HTTP 429'|'connection error'|'DNS error'|'TLS error') return 0 ;;
+    'HTTP 403') grep -Eqi 'secondary[- ]rate[- ]limit' "$1" && return 0 ;;
+  esac
+  return 1
+}
+
+forge_bound_result() { # failed-rc failed-why fallback-rc
+  FORGE_BOUND_RC=$3
+  if [ "$1" -ne 0 ]; then
+    : > "$TMP/forge-unavailable"
+    printf '%s\n' "$2" >> "$TMP/why"
+    FORGE_BOUND_RC=$1
+  else
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
   fi
-  return "$rc"
+}
+
+forge() {
+  local remaining rc=0 failed_rc=0 failed_why='' now read_deadline
+  local forge_err=${FORGE_ERR:-$TMP/forge.err} out summary why
+  out=$(mktemp "$TMP/forge-output.XXXXXX")
+  now=$(date +%s)
+  read_deadline=$((now + 5))
+  [ "$read_deadline" -le "$DEADLINE" ] || read_deadline=$DEADLINE
+  while :; do
+    now=$(date +%s)
+    remaining=$((read_deadline - now))
+    if [ "$remaining" -le 0 ]; then
+      forge_bound_result "$failed_rc" "$failed_why" 1
+      rm -f -- "$out"
+      return "$FORGE_BOUND_RC"
+    fi
+    rc=0
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      cat "$out"
+      rm -f -- "$out"
+      return 0
+    fi
+    # A kill at the read bound or the deadline is budget refusal. If the retry
+    # times out, retain the genuine forge failure that caused that retry.
+    if [ "$rc" -eq 124 ]; then
+      forge_bound_result "$failed_rc" "$failed_why" "$rc"
+      rm -f -- "$out"
+      return "$FORGE_BOUND_RC"
+    fi
+    # Keep the failing read's own words; the retry and cleanup discard its error file.
+    why=$(printf '%s read exited %s with %ss of budget left: %s' "$(basename "$forge_err" .err)" "$rc" \
+      "$((DEADLINE - $(date +%s)))" "$(sed -n '/[^[:space:]]/{p;q;}' "$forge_err" | tr -d '\000-\037\177' | cut -c1-160)")
+    summary=$(forge_error_summary "$forge_err")
+    if [ "$failed_rc" -ne 0 ] || ! forge_transient_error "$forge_err" "$summary"; then
+      : > "$TMP/forge-unavailable"
+      printf '%s\n' "$why" >> "$TMP/why"
+      rm -f -- "$out"
+      return "$rc"
+    fi
+    failed_rc=$rc
+    failed_why=$why
+  done
+}
+
+unobserved() { # why: a structural check, not a forge read, refused the observation
+  printf '%s\n' "$1" >> "$TMP/why"
+  return 1
 }
 
 wait_forges() { # background forge pids from one independent read wave
@@ -249,12 +409,14 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why"
   BUDGET_EXHAUSTED=0
-  forge api "$endpoint" > "$TMP/core.json" || return 1
-  jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
+  FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return 1
+  jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null \
+    || unobserved 'core read returned an unexpected shape' || return 1
   if [ "$kind" = pull ]; then
-    head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+    head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") \
+      || unobserved 'core read named no head commit' || return 1
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
@@ -267,30 +429,64 @@ observe() { # canonical GitHub URL -> normalized JSON
     local statuses_pid=$!
     FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
-    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
-    after=$(jq -er .headRefOid "$TMP/after.json")
-    [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
+    local -a pids=("$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid")
+    printf '[]\n' > "$TMP/threads.json"
+    if [ "$TRACK_THREADS" = true ]; then
+      FORGE_ERR="$TMP/threads.err" forge api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
+        -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}' \
+        > "$TMP/threads.json" &
+      pids+=("$!")
+    fi
+    wait_forges "${pids[@]}" || return 1
+    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null \
+      || unobserved 'comment pages returned an unexpected shape' || return 1
+    jq -e 'type == "array" and all(.[]; (.data.repository.pullRequest.reviewThreads.nodes | type) == "array")' "$TMP/threads.json" >/dev/null \
+      || unobserved 'review thread pages returned an unexpected shape' || return 1
+    FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    after=$(jq -er '.headRefOid | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/after.json") \
+      || unobserved 'head read named no head commit' || return 1
+    [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" \
+      --argjson track "$TRACK_THREADS" --argjson bots "$(review_bots)" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
+      | ($comments[0] | add // []) as $issue_comments
+      | ($inline[0] | add // []) as $inline_comments
+      | [$threads[0][] | .data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved) | .comments.nodes[0].databaseId] as $resolved
+      # Replies by the contribution author, as timestamps: a review requesting
+      # changes is answered by any later author comment, review body or inline reply.
+      | ([$issue_comments[] | select(.user.login == $c.user.login) | .created_at]
+        + [$inline_comments[] | select(.user.login == $c.user.login) | .created_at]
+        + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
           can_merge:($repo[0].permissions.push // false),
           review_decision:($after[0].reviewDecision // ""),
-          reviews:$reviews,
+          reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
           checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
             + [ $statuses[0][] | .[] | {name:.context,id,started_at:.created_at,
               status:(if .state == "pending" then "in_progress" else "completed" end),
               conclusion:(if .state == "pending" then null else .state end)} ]),
-          events:((($comments[0] | add // [] | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline[0] | add // [] | map(. + {_signal:"review-comment"})))
-            | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+          events:((($issue_comments | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline_comments | map(. + {_signal:"review-comment"})))
+            | map(select(.user.login != $c.user.login
+                and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login | IN($bots[]))))
+              | (.created_at // .submitted_at // "") as $at | (.in_reply_to_id // .id) as $root | . as $e
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
+                 author:.user.login,body:(.body // "" | .[:500])}
+                 + (if (.user.login | IN($bots[])) then {review_bot:true} else {} end)
+                 + (if $track then {at:$at,
+                   # A resolved inline thread counts as answered.
+                   unanswered:(if ._signal == "review-comment" then
+                       ($resolved | index($root)) == null
+                       and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
+                     elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then
+                       (any($replied_at[]; . >= $at) | not)
+                       and (any($reviews[]; .user.login == $e.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $e.id) | not)
+                     else false end)} else {} end)))}' > "$TMP/observation.json" \
+      || unobserved 'observation could not be assembled' || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
@@ -298,7 +494,8 @@ observe() { # canonical GitHub URL -> normalized JSON
     FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
+    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null \
+      || unobserved 'comment pages returned an unexpected shape' || return 1
     jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
@@ -307,26 +504,31 @@ observe() { # canonical GitHub URL -> normalized JSON
             | {token:("comment:" + (.id|tostring) + ":" + (.updated_at // "")),type:"comment",source:.html_url,
                head:null,author:.user.login,body:(.body // "" | .[:500])})
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
-             | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" || return 1
+             | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" \
+      || unobserved 'observation could not be assembled' || return 1
   fi
   jq_lib -ne --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" '
     {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
       kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
-    | valid_record' >/dev/null
+    | valid_record' >/dev/null || unobserved 'observation failed validation'
 }
 
 publish_pending() { # task canonical-url record-file
-  local task=$1 url=$2 record=$3 token key count emitted status
+  local task=$1 url=$2 record=$3 token key count emitted status type source age reason
   count=$(jq '.pending | length' "$record")
   [ "$count" -gt 0 ] || return 0
-  while IFS= read -r token; do
+  while IFS=$'\t' read -r token type source age; do
     [ -n "$token" ] || continue
     key=$(printf '%s\n%s\n' "$url" "$token" | shasum -a 256 | awk '{print $1}')
     emitted=0
     status=0
+    reason="check: contributions $task $key"
+    case "$type:$source" in
+      unanswered:https://github.com/*) reason="$reason unanswered $source $age" ;;
+    esac
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
     if ! fm_wake_queued_keys_locked check | grep -Fx "contribution-$key" >/dev/null; then
-      fm_wake_append_locked check "contribution-$key" "check: contributions $task $key" || status=1
+      fm_wake_append_locked check "contribution-$key" "$reason" || status=1
       [ "$status" -ne 0 ] || emitted=1
     fi
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
@@ -334,8 +536,9 @@ publish_pending() { # task canonical-url record-file
     jq --arg token "$token" '.notified = ((.notified // []) + [$token] | unique)' "$record" > "$TMP/notified.json"
     mv "$TMP/notified.json" "$record"
     write_record "$task" "$record"
-    [ "$emitted" -eq 0 ] || printf 'contribution-wake: check: contributions %s %s\n' "$task" "$key"
-  done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
+    [ "$emitted" -eq 0 ] || printf 'contribution-wake: %s\n' "$reason"
+  done < <(jq -r '. as $r | .pending[] | select(.token as $t | ($r.notified // [] | index($t)) == null)
+    | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
 }
 
 settle_final() { # canonical-url task... : copy the URL's final observation to every owner
@@ -355,22 +558,40 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
-        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}' > "$TMP/row.json"
+        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}
+        | .pending |= map(select(.type != "unanswered"))
+        | if has("notified") then .notified |= map(select(startswith("unanswered:") | not)) else . end
+        | if has("threads") then .threads = [] else . end' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
 }
 
+clear_unsupported_errors() {
+  local task url
+  while IFS=$'\t' read -r task url; do
+    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+      $saved[0][] | select(.task == $task) | .records[] | select(.url == $url)
+      | .error=null' > "$TMP/row.json"
+    write_record "$task" "$TMP/row.json"
+  done < <(jq_lib -nr --slurpfile saved "$TMP/saved.json" '$saved[0][] | .task as $task | .records[]
+    | select((.url | supported_url | not) and .error != null)
+    | [$task,.url] | @tsv')
+}
+
 poll() {
-  local task url old kind error observed
+  local task url old kind error observed why
   local -a row
   acquire
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
+  clear_unsupported_errors
+  # Only supported URLs enter final settlement and the forge-read rotation.
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0])
+    known($input[0];$saved[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
     | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
@@ -397,11 +618,13 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
+    why='no failing step recorded'
+    [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         .error == null)' "${row[@]:1}" >/dev/null; then
-      printf 'contributions: observation unavailable for %s\n' "$url"
+      printf 'contributions: observation unavailable for %s - %s\n' "$url" "$why"
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
@@ -411,17 +634,31 @@ poll() {
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
-        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+        jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
+          --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
+          | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
+          # An acknowledgement removes the signal, not the thread: a thread
+          # with no author reply or resolution is raised again after reply_age.
+          | (if $track and $o.state == "open" then tracked_threads($old.threads; $o.events; $arrived | map(.token); $now) else [] end) as $tracked
+          | due_threads($tracked; $epoch; $reply_age) as $due
+          | ($tracked | map(.key)) as $live
+          | ($due | map(.key)) as $due_keys
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
-            seen:($events | map(.token)),
-            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+            seen:((($old.seen // []) + ($events | map(.token))) | unique),
+            pending:((($old.pending // []) + $arrived
+                | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
+              + [$due[] | reraise_event(.; $epoch; $now)] | unique_by(.token))}
+          | (.pending | map(.token)) as $held
+          | if has("notified") then .notified |= map(select((startswith("unanswered:") | not) or IN($held[]))) else . end
+          | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end]
+            else del(.threads) end' > "$TMP/row.json"
       else
-        error='forge observation unavailable or changed during read'
+        error="forge observation unavailable: $why"
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
@@ -447,9 +684,13 @@ arm() {
   shim=('#!/usr/bin/env bash'
     "export FM_HOME=$(printf '%q' "$FM_HOME")"
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")"
-    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
+    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")"
+    "export FM_CONFIG_OVERRIDE=$(printf '%q' "$CONFIG")")
   if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
+  fi
+  if [ -n "${FM_CONTRIBUTIONS_REPLY_AGE:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_REPLY_AGE=$(printf '%q' "$FM_CONTRIBUTIONS_REPLY_AGE")")
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
@@ -466,6 +707,30 @@ case "${1:-}" in
     ;;
   poll) poll ;;
   arm) arm "${2:-}" ;;
+  owned)
+    get_input; read_saved
+    [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); ownership is unverified"
+    jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+      [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
+      | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
+      | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique),final:(.[0].url | IN($final[]))})'
+    ;;
+  enroll)
+    [ "$#" -eq 3 ] || fail 'enroll needs a task and a PR URL'
+    task=$2; url=$3
+    fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
+    jq_lib -ne --arg url "$url" '$url | supported_url and contains("/pull/")' >/dev/null \
+      || fail 'enroll needs a canonical github.com PR URL'
+    acquire; read_saved
+    [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); enrollment is unverified"
+    if jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url and .retired != null)' "$TMP/saved.json" >/dev/null; then
+      fail 'contribution is retired for this task; enrollment refused'
+    fi
+    if ! jq -e --arg task "$task" --arg url "$url" 'any(.[] | select(.task == $task) | .records[]; .url == $url)' "$TMP/saved.json" >/dev/null; then
+      jq -n --arg url "$url" '{url:$url,kind:"pr",checked_at:null,error:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    fi
+    ;;
   pending)
     read_saved
     [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); pending signals are unverified"

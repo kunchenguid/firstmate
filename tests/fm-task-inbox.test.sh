@@ -143,7 +143,7 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 }
 
 test_write_is_durable_and_exact() {
-  local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 text
+  local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 last_byte text
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
   text=$'line one\nline two with  spaces\n/slash body\n\n'
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
@@ -162,6 +162,9 @@ test_write_is_durable_and_exact() {
     || fail "record body did not preserve trailing and blank-line bytes"
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "no trailing newline") \
     || fail "second inbox write failed"
+  last_byte=$(LC_ALL=C tail -c 1 "$rec2" | od -An -t x1 | tr -d '[:space:]')
+  [ "$last_byte" = 0a ] \
+    || fail "a newly written record must end with a newline, got final byte $last_byte"
   expected2="$state/expected-no-newline.body"
   actual2="$state/actual-no-newline.body"
   printf '%s' "no trailing newline" > "$expected2"
@@ -169,6 +172,15 @@ test_write_is_durable_and_exact() {
     || fail "second record body could not be read"
   cmp -s "$expected2" "$actual2" \
     || fail "record body added a trailing newline"
+  printf 'schema=fm-task-inbox.v1\nat=2020-01-01T00:00:00Z\n--\nlegacy record without terminator' \
+    > "$state/legacy.msg"
+  expected="$state/expected-legacy.body"
+  actual="$state/actual-legacy.body"
+  printf '%s' 'legacy record without terminator' > "$expected"
+  inbox_lib "$state" fm_task_inbox_body "$state/legacy.msg" > "$actual" \
+    || fail "a legacy record without a final newline could not be read"
+  cmp -s "$expected" "$actual" \
+    || fail "legacy record body was not preserved byte-exact"
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \

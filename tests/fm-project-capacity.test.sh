@@ -77,6 +77,7 @@ make_case() {  # <name> [task-id...]
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FAKE_CALL_LOG"
+window_file="$FM_FAKE_CALL_LOG.window"
 case "$*" in
   *"#{pane_current_path}"*)
     # A spawn that is told to hold waits here, after its capacity check and
@@ -94,7 +95,31 @@ case "$*" in
     exit 0
     ;;
 esac
-case "${1:-}" in display-message) printf 'firstmate\n' ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file" ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    grep -Fqx -- "$name" "$window_file" 2>/dev/null || printf '%s\n' "$name" >> "$window_file"
+    ;;
+  kill-window)
+    target=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -t ] && target=$arg
+      previous=$arg
+    done
+    target=${target##*:}
+    target=${target#=}
+    grep -Fvx -- "$target" "$window_file" 2>/dev/null > "$window_file.tmp" || true
+    mv "$window_file.tmp" "$window_file"
+    ;;
+esac
 exit 0
 SH
   cat > "$fakebin/treehouse" <<'SH'

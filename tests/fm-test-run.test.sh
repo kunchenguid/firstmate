@@ -1196,7 +1196,8 @@ test_portable_serial_packing_budget_boundary() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   # Preserve the real inventory and packing policy without executing suites.
-  # Only the fixture's measured timing input changes at the boundary.
+  # Give every inventory member a fixture hint so an unmeasured real script
+  # cannot take the default weight and join the at-budget shard.
   while IFS= read -r script; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
   done < <("$RUNNER" --list --all)
@@ -1208,11 +1209,30 @@ test_portable_serial_packing_budget_boundary() {
 from pathlib import Path
 import re, sys
 runner = Path(sys.argv[1])
-runner.write_text(re.sub(
-    r"(?m)^tests/fm-watch-triage\.test\.sh [0-9]+$",
-    f"tests/fm-watch-triage.test.sh {sys.argv[2]}",
-    runner.read_text(),
-))
+weight = sys.argv[2]
+text = runner.read_text()
+scripts = sorted(
+    f"tests/{path.name}" for path in (runner.parent.parent / "tests").glob("*.test.sh")
+)
+if "tests/fm-watch-triage.test.sh" not in scripts:
+    sys.exit("fixture inventory lost tests/fm-watch-triage.test.sh")
+# Longest real serial member stays at the budget boundary; every other script
+# gets 1ms so longest-processing-time packing cannot fill that shard.
+lines = [
+    f"{script} {weight if script == 'tests/fm-watch-triage.test.sh' else '1'}"
+    for script in scripts
+]
+table = "\n".join(lines)
+new, n = re.subn(
+    r"(portable_serial_weight_hints\(\) \{\n  cat <<'EOF'\n).*?(\nEOF\n)",
+    lambda match: match.group(1) + table + match.group(2),
+    text,
+    count=1,
+    flags=re.S,
+)
+if n != 1:
+    sys.exit("serial hint table not found")
+runner.write_text(new)
 PY
     out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
     if [ "$weight" -eq 1200000 ]; then
@@ -1424,6 +1444,39 @@ test_changed_shared_fixture_selects_its_readers() {
 
   rm -rf "$tmp"
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
+}
+
+# Suites outside backend-dispatch source the T3 fake and the T3 adapter, so a
+# change to either selects the suites that read them as well.
+test_changed_t3_sources_select_their_readers() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-t3.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$repo/bin/backends"
+  : >"$repo/bin/backends/t3code.sh"
+  : >"$repo/tests/t3-fake-lib.sh"
+  printf '#!/usr/bin/env bash\n# tests/lib.sh\n. tests/t3-fake-lib.sh\n' >"$repo/tests/fm-secondmate-restart.test.sh"
+  chmod +x "$repo/tests/fm-secondmate-restart.test.sh"
+  printf '# bin/backends/t3code.sh\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm t3
+
+  printf '\n' >>"$repo/tests/t3-fake-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-secondmate-restart.test.sh" \
+    "a changed T3 fake selects the suite that sources it"
+  git -C "$repo" checkout -q -- tests/t3-fake-lib.sh
+
+  printf '\n' >>"$repo/bin/backends/t3code.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" \
+    "a changed T3 adapter still selects backend-dispatch"
+  assert_contains "$listed" "tests/fm-daemon.test.sh" \
+    "a changed T3 adapter selects the curated family of a script that consumes it"
+
+  rm -rf "$tmp"
+  pass "a changed T3 fake or adapter selects the suites that read it beyond backend-dispatch"
 }
 
 # Workers are handed scripts in order, so the slowest script must start first or
@@ -1860,6 +1913,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
+test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
