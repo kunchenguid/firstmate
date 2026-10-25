@@ -22,13 +22,13 @@ The recorded array stays the original match.
 Later edits to the dispatch file do not replace it.
 Turning the setting off stops further switches.
 
-When the latest status line pauses on a rate limit, a usage limit, or exhausted credits, run `bin/fm-midtask-fallback.sh consider <task-id>`.
+When `bin/fm-procevent-quota.sh` reports `exhausted_now` for a live task, run `bin/fm-midtask-fallback.sh consider <task-id> --snapshot <quota-json>`.
+Pass the quota document already captured for that check.
 Run that consider before `stuck-crewmate-recovery` relaunches the same profile.
-Do the same when `bin/fm-procevent-quota.sh` reports `exhausted_now` for that live task.
-Pass `--snapshot` with the quota document already captured for that check.
-Pass `--pane-text-file` only when pane text was already captured.
+Status line text is not a signal.
+Pass `--pane-text-file` only when pane text was already captured and a limit-message adapter exists.
 Do not launch a harness to read a limit message.
 The script relaunches through `bin/fm-control.sh` and keeps the local copy.
+Relay the printed outcome to the captain.
 No eligible next profile is a decision.
 It is not a relaunch of the same profile.
-The watcher also runs consider once per status change when the task record says the fallback is on.

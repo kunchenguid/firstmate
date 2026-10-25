@@ -1938,7 +1938,6 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 Absent and `false` keep dispatch-time selection only.
 `true` opts every array in the file in, and refuses a candidate whose effort is lower than the effort recorded for the task.
 `{"allow_lower_reasoning_class": true}` opts in and allows that lower effort.
-`{"allow_lower_reasoning_class": false}` opts in and keeps the same effort rule as `true`.
 Any other value is invalid.
 One file-wide key covers rule arrays and the default array.
 A per-rule key cannot attach to `default` without a second field.
@@ -1949,7 +1948,9 @@ Bind the matched array after spawn.
 Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
 No eligible candidate stays on the current profile and is reported for a decision.
 A completed switch is stored on the task record and reported as an outcome.
-Vendor limit text stays in a version-pinned adapter under `bin/limit-messages/`.
+Consider switches when a quota snapshot marks the current profile `exhausted_now`, or when a version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` matches captured pane text. No adapter ships.
+Status line text is never a signal.
+Consider prints the outcome on stdout, and firstmate relays it to the captain.
 This path does not re-rank the array.
 `quota-array-dispatch` remains the dispatch-time ranker.
 Profile `floor` values stay dispatch-time checks.
