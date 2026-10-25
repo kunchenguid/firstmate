@@ -355,7 +355,6 @@ sed -n 's/^midtask_switch_failed=//p' "$CASE/state/$ID.meta" | tail -n 1 | jq -e
   || fail "failed relaunch did not record the candidate"
 grep -q '^midtask_switch=' "$CASE/state/$ID.meta" && fail "failed relaunch recorded a completed switch" || true
 assert_kept "failed relaunch"
-printf 'paused [at=200]: rate limit again\n' >> "$CASE/state/$ID.status"
 CONTROL_RC=0
 out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
 rc=$?
@@ -364,6 +363,38 @@ rc=$?
 assert_kept "retry after failure"
 [ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "later no-candidate stall was not reported"
 ok "failed relaunch is not retried"
+
+# A blocked report after a needs-decision report is still written.
+begin decision-then-blocked
+write_pair true high
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex exhausted_now 0
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+CONTROL_RC=1
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+rc=$?
+[ "$rc" -eq 1 ] || fail "failed relaunch after a decision exited $rc"
+grep -Eq '^needs-decision .*key=midtask-fallback' "$CASE/state/$ID.status" || fail "missing decision report"
+grep -Eq '^blocked .*key=midtask-fallback' "$CASE/state/$ID.status" || fail "blocked report was suppressed"
+ok "blocked and needs-decision reports do not suppress each other"
+
+# A finished or waiting task is not relaunched on exhausted_now.
+for verb in done "needs-decision" blocked failed; do
+  begin "finished-$verb"
+  write_rules true
+  write_meta
+  invoke bind "$ID" --rule 0 >/dev/null
+  printf '%s [at=100]: PR is up, waiting for review\n' "$verb" > "$CASE/state/$ID.status"
+  quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+  out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "$verb task exited $rc: $out"
+  assert_no_control "$verb task"
+done
+ok "a finished or waiting task is not relaunched"
 
 # The same recorded switch does not relaunch again while the pause line remains last.
 begin idempotent
