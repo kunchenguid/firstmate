@@ -707,10 +707,15 @@ fm_backlog_title_split_pr_links() {  # <title>
 # read. Links passed as further arguments are recorded too, so a close replaying
 # a recorded link names it even when it never reached the title. Sets
 # FM_BACKLOG_DOWNGRADE_NOTE to empty when there is no link to record.
-fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
-  local data=$1 id=$2 reason=$3 out title prose url collected='' skip seen command_status
-  local -a links=() uniq=()
-  shift 3
+# Read this row's title and body into FM_BACKLOG_ROW_TITLE and
+# FM_BACKLOG_ROW_BODY, decoded, so a caller can decide what a change needs before
+# it changes anything.
+FM_BACKLOG_ROW_TITLE=
+FM_BACKLOG_ROW_BODY=
+fm_backlog_row_title_body() {  # <data-dir> <id>
+  local data=$1 id=$2 out command_status title body
+  FM_BACKLOG_ROW_TITLE=
+  FM_BACKLOG_ROW_BODY=
   data=$(fm_backlog_data_absolute "$data") || return 1
   out=$(fm_backlog_row_show "$data" "$id" --full)
   command_status=$?
@@ -722,37 +727,49 @@ fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
     return "$command_status"
   fi
   title=$(printf '%s\n' "$out" | sed -n 's/^  title: //p' | head -1)
-  for url in "$@"; do
-    [ -z "$url" ] || links+=("$url")
-  done
+  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1)
   if [ -n "$title" ]; then
     title=$(fm_backlog_shown_value "$title") || {
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task title of $id"
       return 1
     }
-    fm_backlog_title_split_pr_links "$title"
-    prose=$FM_BACKLOG_TITLE_PROSE
+  fi
+  body=$(fm_backlog_shown_value "$body") || {
+    FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+    return 1
+  }
+  [ "$body" != "-" ] || body=
+  FM_BACKLOG_ROW_TITLE=$title
+  FM_BACKLOG_ROW_BODY=$body
+}
+
+# Set the note that keeps this row's unverified pull request links in the body.
+# It reads the row but changes nothing, so a caller can record the note durably
+# before it takes the link off the title. A note an interrupted earlier attempt
+# already wrote is reused, so a retry rebuilds the same record from the body
+# instead of losing the URL with the title it no longer carries.
+fm_backlog_pr_link_note() {  # <data-dir> <id> <reason> [url...]
+  local data=$1 id=$2 reason=$3 url collected='' skip seen recorded
+  local -a links=() uniq=()
+  shift 3
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  fm_backlog_row_title_body "$data" "$id" || return 1
+  for url in "$@"; do
+    [ -z "$url" ] || links+=("$url")
+  done
+  if [ -n "$FM_BACKLOG_ROW_TITLE" ]; then
+    fm_backlog_title_split_pr_links "$FM_BACKLOG_ROW_TITLE"
     while IFS= read -r url; do
       [ -z "$url" ] || links+=("$url")
     done <<EOF
 $FM_BACKLOG_TITLE_PR_LINKS
 EOF
-    if [ -n "$FM_BACKLOG_TITLE_PR_LINKS" ]; then
-      # A title made of nothing but that link would normalize to an empty title,
-      # which tasks-axi refuses, so the task's own id stands in.
-      [ -n "$prose" ] || prose=$id
-      if ! fm_backlog_mutate "$data" update "$id" --title "$prose"; then
-        # tasks-axi refuses a title whose tail is a canonical tag, which is what
-        # a row that carried its tags before an appended link becomes once that
-        # link is removed. A terminator ends the sentence instead of the tag, so
-        # the rewrite still lands and the title keeps no pull request URL.
-        fm_backlog_mutate "$data" update "$id" --title "$prose." || return 1
-      fi
-    fi
   fi
   FM_BACKLOG_DOWNGRADE_LINKS=
   FM_BACKLOG_DOWNGRADE_NOTE=
-  [ "${#links[@]}" -gt 0 ] || return 0
+  recorded=$(printf '%s\n' "$FM_BACKLOG_ROW_BODY" \
+    | sed -n '/^Historical record: /p' | head -1)
+  [ "${#links[@]}" -gt 0 ] || { FM_BACKLOG_DOWNGRADE_NOTE=$recorded; return 0; }
   for url in "${links[@]}"; do
     skip=0
     for seen in "${uniq[@]+"${uniq[@]}"}"; do
@@ -763,10 +780,73 @@ EOF
     collected=${collected:+$collected, }$url
     FM_BACKLOG_DOWNGRADE_LINKS=${FM_BACKLOG_DOWNGRADE_LINKS:+$FM_BACKLOG_DOWNGRADE_LINKS$'\n'}$url
   done
-  [ -n "$collected" ] || return 0
+  [ -n "$collected" ] || { FM_BACKLOG_DOWNGRADE_NOTE=$recorded; return 0; }
   # No parentheses in this prose: the pending-close record percent-encodes a note
   # value and refuses one whose bytes fall outside the set it can rebuild.
   FM_BACKLOG_DOWNGRADE_NOTE="Historical record: $collected - the merge was not verified in this run: $reason."
+}
+
+# Take every canonical pull request link off this row's title, leaving the prose
+# and any canonical tags intact. No flag or configuration overrides tasks-axi's
+# renderer, which writes "merged" for any closed row whose title carries such a
+# link, so this is how a row that records no verified merge stops claiming one.
+fm_backlog_pr_title_strip() {  # <data-dir> <id>
+  local data=$1 id=$2 prose
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  fm_backlog_row_title_body "$data" "$id" || return 1
+  [ -n "$FM_BACKLOG_ROW_TITLE" ] || return 0
+  fm_backlog_title_split_pr_links "$FM_BACKLOG_ROW_TITLE"
+  [ -n "$FM_BACKLOG_TITLE_PR_LINKS" ] || return 0
+  prose=$FM_BACKLOG_TITLE_PROSE
+  # A title made of nothing but that link would normalize to an empty title,
+  # which tasks-axi refuses, so the task's own id stands in.
+  [ -n "$prose" ] || prose=$id
+  if ! fm_backlog_mutate "$data" update "$id" --title "$prose"; then
+    # tasks-axi refuses a title whose tail is a canonical tag, which is what a row
+    # that carried its tags before an appended link becomes once that link is
+    # removed. A terminator ends the sentence instead of the tag, so the rewrite
+    # still lands and the title keeps no pull request URL.
+    fm_backlog_mutate "$data" update "$id" --title "$prose." || return 1
+  fi
+}
+
+# Record <line> as one body line of this row, leaving an identical line alone so a
+# retry converges instead of duplicating it.
+fm_backlog_body_append_line() {  # <data-dir> <id> <line>
+  local data=$1 id=$2 line=$3 new_body tmp
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  fm_backlog_row_title_body "$data" "$id" || return 1
+  case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
+    *$'\n'"$line"$'\n'*) return 0 ;;
+  esac
+  new_body=$line
+  [ -z "$FM_BACKLOG_ROW_BODY" ] || new_body=$(printf '%s\n\n%s' "$FM_BACKLOG_ROW_BODY" "$line")
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-body-line.XXXXXX") || {
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion note for $id"
+    return 1
+  }
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion note for $id"
+    return 1
+  fi
+  if ! fm_backlog_mutate "$data" update "$id" --body-file "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
+# Take this row's unverified pull request links off the title and set the note
+# that keeps them in the body: the shape every close that records no verified
+# merge uses. Callers that must survive an interruption record the note first and
+# call fm_backlog_pr_title_strip after it.
+fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
+  local data=$1 id=$2 reason=$3
+  shift 3
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  fm_backlog_pr_link_note "$data" "$id" "$reason" "$@" || return 1
+  fm_backlog_pr_title_strip "$data" "$id"
 }
 
 # The durable merge-verification record for one task: `state/<id>.pr-merge`.
