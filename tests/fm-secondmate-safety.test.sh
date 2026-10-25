@@ -2114,8 +2114,9 @@ EOF
 }
 
 # The same two child records, but the slot's claim names live-child: the claim
-# proves stale-child's record stale, so the forced teardown proceeds and flags
-# stale-child with a slot-audit wake instead of refusing.
+# proves stale-child's record stale, so the forced teardown proceeds instead of
+# refusing, and since it removes stale-child with the rest of the home, it
+# queues no wake telling anyone to relaunch it.
 test_secondmate_force_teardown_flags_stale_child_record_on_claimed_slot() {
   local home subhome childproj childwt fakebin log err rc
   command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
@@ -2166,11 +2167,11 @@ EOF
     || fail "forced secondmate teardown refused a claimed child slot beside a stale record (rc=$rc): $(cat "$err")"
   assert_not_contains "$(cat "$err")" "REFUSED" "the stale child record should be flagged, not refused"
   assert_not_contains "$(cat "$err")" "could not mark" "the stale child record should be marked before its home is removed"
-  grep -F 'stale-child' "$err" | grep -Fq 'stale' \
-    || fail "forced secondmate teardown did not warn about the stale child record: $(cat "$err")"
-  grep -F 'slot-audit:stale-child' "$home/state/.wake-queue" | grep -Fq 'live-child' \
-    || fail "no slot-audit wake names the stale child record and its claimant: $(cat "$home/state/.wake-queue" 2>/dev/null)"
-  pass "forced secondmate teardown flags a descendant's stale record on a slot its sibling claims"
+  [ ! -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown left the stale child record"
+  ! grep -Fq 'slot-audit:stale-child' "$home/state/.wake-queue" 2>/dev/null \
+    || fail "a slot-audit wake was queued for a child record this teardown removed: $(cat "$home/state/.wake-queue")"
+  assert_not_contains "$(cat "$err")" "stale-child needs a fresh slot" "no fresh-slot advice for a removed child record"
+  pass "forced secondmate teardown proceeds past a sibling's stale record on a claimed child slot without flagging a record it removes"
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {

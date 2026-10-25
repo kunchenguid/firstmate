@@ -130,7 +130,9 @@
 # as the scan proves it and so before any slot is returned, because the return
 # drops the claim that proved them stale and the fresh-slot relaunch needs that
 # proof to outlive it. A forced secondmate teardown runs the same scan on each
-# descendant's slot, with that descendant as the claimant. Before proceeding,
+# descendant's slot, with that descendant as the claimant; a stale record that is
+# itself one of the descendants this teardown removes is passed over. Before
+# proceeding,
 # require_no_foreign_processes_in_slot lists every process whose cwd is inside
 # the slot, subtracts the claimant's own recorded endpoint chain (the pane shell
 # bin/fm-backend.sh resolves for that record's backend, plus its descendants),
@@ -2601,8 +2603,10 @@ require_exclusive_worktree_slot_record() {  # <meta> <id> <state> <worktree> <ba
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
         if [ "$owner" = mine ]; then
-          stale+=("$other_id")
-          stale_metas+=("$other")
+          teardown_record_is_descendant "$other" || {
+            stale+=("$other_id")
+            stale_metas+=("$other")
+          }
           break
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
@@ -2620,6 +2624,17 @@ require_exclusive_worktree_slot_record() {  # <meta> <id> <state> <worktree> <ba
   for other_id in "${stale[@]}"; do
     teardown_warn_stale_slot_record "$other_id" "$record_id" "$slot"
   done
+}
+
+# A record this forced teardown removes with its descendants: proven stale or
+# not, it gets no marker, warning, or wake, and its metadata lock is already
+# this teardown's.
+teardown_record_is_descendant() {  # <meta>
+  local i
+  for i in ${DESCENDANT_TASK_IDS[@]+"${!DESCENDANT_TASK_IDS[@]}"}; do
+    [ "$1" -ef "${DESCENDANT_TASK_STATES[$i]}/${DESCENDANT_TASK_IDS[$i]}.meta" ] && return 0
+  done
+  return 1
 }
 
 teardown_warn_stale_slot_record() {  # <stale-id> <owner-id> <slot>
