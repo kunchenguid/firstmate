@@ -230,6 +230,25 @@ test_sync_retracts_stale_records_as_one_live_snapshot() {
   pass "record export sync publishes the exact current allowlist as one live snapshot"
 }
 
+test_sync_refuses_unknown_managed_artifacts_before_publication() {
+  local home export_root rc=0
+  home=$(make_home sync-unknown-managed)
+  export_root="$TMP_ROOT/export-sync-unknown-managed"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'old snapshot\n' > "$home/data/projects.md"
+  run_export "$home" sync > "$home/initial.out" 2> "$home/initial.err" \
+    || fail "unknown-artifact setup sync failed: $(cat "$home/initial.err")"
+  printf 'intruder\n' > "$export_root/.live-generations/unknown"
+  printf 'new snapshot\n' > "$home/data/projects.md"
+  run_export "$home" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "sync accepted an unknown artifact in its managed generation tree"
+  assert_grep 'old snapshot' "$export_root/live/data/projects.md" \
+    "sync published a new snapshot before refusing an unknown managed artifact"
+  assert_grep 'intruder' "$export_root/.live-generations/unknown" \
+    "sync changed an unknown managed artifact"
+  pass "record export refuses unknown managed artifacts before publishing a snapshot"
+}
+
 test_sync_detects_destination_parent_replacement() {
   local home export_root outside pid rc=0 wait_count=0 stage= live_target prior_snapshot
   home=$(make_home sync-destination-race)
@@ -399,45 +418,66 @@ test_archive_retry_accepts_sources_already_retired_after_commit() {
 }
 
 test_archive_refuses_a_corrupt_committed_manifest() {
-  local home export_root manifest rc=0
-  home=$(make_home archive-corrupt-manifest)
-  export_root="$TMP_ROOT/export-archive-corrupt-manifest"
-  printf '%s\n' "$export_root" > "$home/config/record-export-root"
-  write_archive_fixture "$home" committed-generation
-  run_export "$home" archive-task task-a > "$home/first.out" 2> "$home/first.err" || rc=$?
-  expect_code 0 "$rc" "initial archive for corrupt manifest case"
-  manifest="$export_root/archive/task-a/committed-generation/manifest.v1.json"
-  sed 's/"task": "task-a"/"task": "another-task"/' "$manifest" > "$home/manifest.tmp"
-  mv "$home/manifest.tmp" "$manifest"
-  rc=0
-  run_export "$home" archive-task task-a > "$home/retry.out" 2> "$home/retry.err" || rc=$?
-  [ "$rc" -ne 0 ] || fail "archive retry accepted a corrupt committed manifest"
-  assert_present "$home/state/task-a.meta" "corrupt manifest retry removed live metadata"
+  local home export_root manifest rc case_name
+  for case_name in wrong-task trailing-garbage duplicate-key wrong-type extra-root extra-entry; do
+    home=$(make_home "archive-corrupt-manifest-$case_name")
+    export_root="$TMP_ROOT/export-archive-corrupt-manifest-$case_name"
+    printf '%s\n' "$export_root" > "$home/config/record-export-root"
+    write_archive_fixture "$home" committed-generation
+    rc=0
+    run_export "$home" archive-task task-a > "$home/first.out" 2> "$home/first.err" || rc=$?
+    expect_code 0 "$rc" "initial archive for $case_name manifest case"
+    manifest="$export_root/archive/task-a/committed-generation/manifest.v1.json"
+    case "$case_name" in
+      wrong-task) sed 's/"task": "task-a"/"task": "another-task"/' "$manifest" > "$home/manifest.tmp" ;;
+      trailing-garbage) cp "$manifest" "$home/manifest.tmp"; printf 'not-json\n' >> "$home/manifest.tmp" ;;
+      duplicate-key) sed '/"captured_at":/a\  "captured_at": "2000-01-01T00:00:00Z",' "$manifest" > "$home/manifest.tmp" ;;
+      wrong-type) sed 's/"captured_at": "[^"]*"/"captured_at": 1/' "$manifest" > "$home/manifest.tmp" ;;
+      extra-root) sed '/"complete": true/a\  "unexpected": true,' "$manifest" > "$home/manifest.tmp" ;;
+      extra-entry) sed '0,/"sha256": "[^"]*"/s//& , "unexpected": true/' "$manifest" > "$home/manifest.tmp" ;;
+    esac
+    mv "$home/manifest.tmp" "$manifest"
+    rc=0
+    run_export "$home" archive-task task-a > "$home/retry.out" 2> "$home/retry.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "archive retry accepted a $case_name committed manifest"
+    assert_present "$home/state/task-a.meta" "$case_name manifest retry removed live metadata"
+  done
   pass "teardown archive rejects a corrupt committed manifest"
 }
 
 test_archive_detects_a_source_change_during_capture() {
-  local home export_root archive rc=0
+  local home export_root archive outside archive_pid worker_pid rc=0 wait_count=0 stage=
   home=$(make_home archive-source-race)
   export_root="$TMP_ROOT/export-archive-source-race"
+  outside="$TMP_ROOT/outside-archive-source-race"
   archive="$export_root/archive/task-a/racing-generation"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
   write_archive_fixture "$home" racing-generation
-  mkdir -p "$home/fakebin"
-  cat > "$home/fakebin/cp" <<'SH'
-#!/usr/bin/env bash
-/bin/cp "$@" || exit $?
-case "$2" in
-  */task-a.status) printf 'late append\n' >> "$2" ;;
-esac
-SH
-  chmod +x "$home/fakebin/cp"
-  PATH="$home/fakebin:$PATH" run_export "$home" archive-task task-a \
-    > "$home/stdout" 2> "$home/stderr" || rc=$?
+  mkdir -p "$outside"
+  printf 'outside sentinel\n' > "$outside/sentinel"
+  dd if=/dev/zero of="$home/state/task-a.status" bs=1048576 count=64 status=none
+  run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" &
+  archive_pid=$!
+  while kill -0 "$archive_pid" 2>/dev/null; do
+    stage=$(find "$export_root/archive/task-a" -maxdepth 1 -name '.archive-stage-*' -print -quit 2>/dev/null || true)
+    [ -z "$stage" ] || break
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 500 ] || break
+    sleep 0.01
+  done
+  [ -n "$stage" ] || { wait "$archive_pid" || true; fail "archive source-race fixture never observed staging"; }
+  worker_pid=$(ps -eo pid=,args= | awk -v pattern="$ROOT/bin/fm-record-export.py archive-task task-a" \
+    'index($0, pattern) { print $1; exit }')
+  [ -n "$worker_pid" ] || { wait "$archive_pid" || true; fail "archive source-race fixture could not identify the filesystem worker"; }
+  kill -STOP "$worker_pid"
+  rm "$home/state/task-a.status"
+  ln -s "$outside/sentinel" "$home/state/task-a.status"
+  kill -CONT "$worker_pid"
+  wait "$archive_pid" || rc=$?
   [ "$rc" -ne 0 ] || fail "archive committed while a source changed during capture"
   assert_absent "$archive/manifest.v1.json" "source race committed a manifest"
   assert_present "$home/state/task-a.meta" "source race removed live metadata"
-  assert_grep 'late append' "$home/state/task-a.status" "source-race fixture did not mutate the source"
+  assert_grep 'outside sentinel' "$outside/sentinel" "source race changed the replacement target"
   pass "teardown archive refuses to commit when a source changes during capture"
 }
 
@@ -447,6 +487,8 @@ test_archive_repairs_only_an_uncommitted_same_generation() {
   export_root="$TMP_ROOT/export-archive-partial"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
   write_archive_fixture "$home" partial-generation
+  run_export "$home" sync > "$home/sync.out" 2> "$home/sync.err" \
+    || fail "partial generation setup could not initialize its root: $(cat "$home/sync.err")"
   archive="$export_root/archive/task-a/partial-generation"
   mkdir -p "$archive"
   printf 'stale partial bytes\n' > "$archive/meta"
@@ -455,6 +497,67 @@ test_archive_repairs_only_an_uncommitted_same_generation() {
   cmp -s "$home/state/task-a.meta" "$archive/meta" || fail "retry did not repair the uncommitted same generation"
   assert_present "$archive/manifest.v1.json" "retry did not commit the repaired generation"
   pass "teardown archive safely repairs an uncommitted same-generation attempt"
+}
+
+test_archive_retry_removes_stale_files_from_a_partial_generation() {
+  local home export_root archive rc=0
+  home=$(make_home archive-partial-stale)
+  export_root="$TMP_ROOT/export-archive-partial-stale"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  run_export "$home" sync > "$home/sync.out" 2> "$home/sync.err" \
+    || fail "partial retry setup could not initialize its root: $(cat "$home/sync.err")"
+  write_archive_fixture "$home" partial-stale-generation
+  mv "$home/state/task-a.inbox/001.msg" "$home/state/task-a.inbox/handled/001.msg"
+  archive="$export_root/archive/task-a/partial-stale-generation"
+  mkdir -p "$archive/inbox"
+  printf 'stale pending bytes\n' > "$archive/inbox/001.msg"
+  run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" || rc=$?
+  expect_code 0 "$rc" "partial stale generation retry: $(cat "$home/stderr")"
+  assert_absent "$archive/inbox/001.msg" "partial retry committed an unmanifested stale pending message"
+  assert_grep 'pending captain text' "$archive/inbox/handled/001.msg" \
+    "partial retry omitted the message's current handled path"
+  jq -e '[.files[].archive] | index("inbox/001.msg") == null and index("inbox/handled/001.msg") != null' \
+    "$archive/manifest.v1.json" >/dev/null || fail "partial retry manifest did not match the repaired generation"
+  pass "teardown archive retry publishes a fresh generation without stale partial files"
+}
+
+test_archive_waits_for_the_task_lock_before_enumerating_sources() {
+  local home export_root archive lock holder_pid archive_pid rc=0 wait_count=0
+  home=$(make_home archive-source-lock)
+  export_root="$TMP_ROOT/export-archive-source-lock"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" locked-generation
+  lock="$home/state/.meta-task-a.lock"
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.02; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/lock-held" "$home/lock-release" &
+  holder_pid=$!
+  while [ ! -e "$home/lock-held" ]; do
+    kill -0 "$holder_pid" 2>/dev/null || fail "archive lock fixture exited before acquiring the task lock"
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 250 ] || fail "archive lock fixture never acquired the task lock"
+    sleep 0.02
+  done
+
+  run_export "$home" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" &
+  archive_pid=$!
+  sleep 0.2
+  kill -0 "$archive_pid" 2>/dev/null || fail "archive bypassed the task metadata lock"
+  printf 'late locked message\n' > "$home/state/task-a.inbox/003.msg"
+  touch "$home/lock-release"
+  wait "$holder_pid" || fail "archive lock fixture could not release the task lock"
+  wait "$archive_pid" || rc=$?
+  expect_code 0 "$rc" "archive after task-lock release: $(cat "$home/archive.err")"
+  archive="$export_root/archive/task-a/locked-generation"
+  assert_grep 'late locked message' "$archive/inbox/003.msg" \
+    "archive enumerated its source set before acquiring the task lock"
+  jq -e 'any(.files[]; .archive == "inbox/003.msg")' "$archive/manifest.v1.json" >/dev/null \
+    || fail "archive manifest omitted a source published before the task lock was released"
+  pass "teardown archive holds the task producer lock through source enumeration and commit"
 }
 
 test_archive_allows_missing_optional_records() {
@@ -483,6 +586,12 @@ test_archive_refuses_unsafe_sources_and_destinations() {
     printf 'outside sentinel\n' > "$outside/sentinel"
     printf '%s\n' "$export_root" > "$home/config/record-export-root"
     write_archive_fixture "$home" safe-generation
+    case "$case_name" in
+      destination-link|unknown-partial)
+        run_export "$home" sync > "$home/setup.out" 2> "$home/setup.err" \
+          || fail "unsafe $case_name setup could not initialize its root: $(cat "$home/setup.err")"
+        ;;
+    esac
     case "$case_name" in
       missing-gen) grep -v '^spawn_gen=' "$home/state/task-a.meta" > "$home/state/meta.tmp"; mv "$home/state/meta.tmp" "$home/state/task-a.meta" ;;
       duplicate-gen) printf 'spawn_gen=other\n' >> "$home/state/task-a.meta" ;;
@@ -514,27 +623,39 @@ test_archive_retention_prunes_only_old_committed_generations() {
   export_root="$TMP_ROOT/export-archive-retention"
   archive_root="$export_root/archive"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  run_export "$home" sync > "$home/sync.out" 2> "$home/sync.err" \
+    || fail "retention setup could not initialize its root: $(cat "$home/sync.err")"
+  printf 'spawn_gen=old-generation\n' > "$home/state/old-task.meta"
+  run_export "$home" archive-task old-task > "$home/old.out" 2> "$home/old.err" \
+    || fail "retention setup could not create a valid old generation: $(cat "$home/old.err")"
+  touch -t 200001010000 "$archive_root/old-task/old-generation/manifest.v1.json"
   write_archive_fixture "$home" current-generation
-  mkdir -p "$archive_root/old-task/old-generation" \
-    "$archive_root/current-task/current-generation" \
+  mkdir -p "$archive_root/current-task/current-generation" \
     "$archive_root/incomplete-task/incomplete-generation" \
-    "$archive_root/unknown-task/unknown-generation"
-  printf '{}\n' > "$archive_root/old-task/old-generation/manifest.v1.json"
+    "$archive_root/invalid-task/invalid-generation" \
+    "$archive_root/unknown-task/unknown-generation" \
+    "$archive_root/unreadable-task"
   printf '{}\n' > "$archive_root/current-task/current-generation/manifest.v1.json"
   printf 'partial\n' > "$archive_root/incomplete-task/incomplete-generation/meta"
+  printf '{}\n' > "$archive_root/invalid-task/invalid-generation/manifest.v1.json"
   printf '{}\n' > "$archive_root/unknown-task/unknown-generation/manifest.v1.json"
   printf 'unknown\n' > "$archive_root/unknown-task/unknown-generation/extra"
-  touch -t 200001010000 "$archive_root/old-task/old-generation/manifest.v1.json" \
-    "$archive_root/incomplete-task/incomplete-generation/meta" \
+  touch -t 200001010000 "$archive_root/incomplete-task/incomplete-generation/meta" \
+    "$archive_root/invalid-task/invalid-generation/manifest.v1.json" \
     "$archive_root/unknown-task/unknown-generation/manifest.v1.json"
+  chmod 000 "$archive_root/unreadable-task"
   run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" || rc=$?
+  chmod 0750 "$archive_root/unreadable-task"
   expect_code 0 "$rc" "archive retention"
   assert_absent "$archive_root/old-task/old-generation" "retention kept an expired committed generation"
   assert_present "$archive_root/current-task/current-generation" "retention removed a current generation"
   assert_present "$archive_root/incomplete-task/incomplete-generation" "retention removed an incomplete generation"
+  assert_present "$archive_root/invalid-task/invalid-generation" "retention removed an invalid old manifest"
   assert_present "$archive_root/unknown-task/unknown-generation" "retention removed a generation with unknown artifacts"
   assert_grep 'warning: refusing to prune unsafe record export archive' "$home/stderr" \
     "unsafe retention candidate did not warn"
+  assert_grep 'warning: could not scan record export archive' "$home/stderr" \
+    "unreadable retention subtree did not warn"
   pass "record export retention mirrors 30 completed days and prunes only owned committed generations"
 }
 
@@ -574,6 +695,7 @@ test_sync_accepts_an_absolute_export_root_with_spaces
 test_sync_refuses_malformed_config_and_unsafe_paths
 test_sync_requires_a_dedicated_disjoint_single_home_root
 test_sync_retracts_stale_records_as_one_live_snapshot
+test_sync_refuses_unknown_managed_artifacts_before_publication
 test_sync_detects_destination_parent_replacement
 test_archive_commits_manifest_last_with_integrity_metadata
 test_archive_is_off_before_any_state_read_when_config_is_absent
@@ -582,6 +704,8 @@ test_archive_retry_accepts_sources_already_retired_after_commit
 test_archive_refuses_a_corrupt_committed_manifest
 test_archive_detects_a_source_change_during_capture
 test_archive_repairs_only_an_uncommitted_same_generation
+test_archive_retry_removes_stale_files_from_a_partial_generation
+test_archive_waits_for_the_task_lock_before_enumerating_sources
 test_archive_allows_missing_optional_records
 test_archive_refuses_unsafe_sources_and_destinations
 test_archive_retention_prunes_only_old_committed_generations

@@ -18,6 +18,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable
 
 
@@ -28,6 +29,9 @@ SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 INBOX_MESSAGE = re.compile(r"^[0-9]+\.msg$")
 GENERATION_NAME = re.compile(r"^g[0-9]+\.[0-9]+\.[a-f0-9]+$")
 STAGE_NAME = re.compile(r"^\.stage-[0-9]+-[a-f0-9]+$")
+ARCHIVE_STAGE_NAME = re.compile(r"^\.archive-stage-[0-9]+-[a-f0-9]+$")
+UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -504,6 +508,539 @@ def remove_tree_at(parent_fd: int, name: str) -> None:
     os.fsync(parent_fd)
 
 
+def live_directory_allowed(relative: str) -> bool:
+    if relative in {"data", "state"}:
+        return True
+    parts = relative.split("/")
+    if len(parts) == 2 and parts[0] == "data":
+        return bool(SAFE_COMPONENT.fullmatch(parts[1]))
+    if len(parts) == 2 and parts[0] == "state" and parts[1].endswith(".inbox"):
+        return bool(SAFE_COMPONENT.fullmatch(parts[1][: -len(".inbox")]))
+    if len(parts) == 3 and parts[0] == "state" and parts[1].endswith(".inbox") \
+            and parts[2] == "handled":
+        return bool(SAFE_COMPONENT.fullmatch(parts[1][: -len(".inbox")]))
+    return False
+
+
+def live_file_allowed(relative: str) -> bool:
+    if relative in {"data/projects.md", "data/backlog.md", "data/done-archive.md", "state/fleet-ledger.jsonl"}:
+        return True
+    parts = relative.split("/")
+    if len(parts) == 3 and parts[0] == "data" and SAFE_COMPONENT.fullmatch(parts[1]):
+        return parts[2] in {"brief.md", "report.md"} \
+            or (parts[2].startswith("status") and parts[2].endswith(".log") and SAFE_COMPONENT.fullmatch(parts[2]))
+    if len(parts) == 2 and parts[0] == "state":
+        if parts[1].endswith(".meta"):
+            return bool(SAFE_COMPONENT.fullmatch(parts[1][: -len(".meta")]))
+        if parts[1].endswith(".status"):
+            return bool(SAFE_COMPONENT.fullmatch(parts[1][: -len(".status")]))
+    if len(parts) in {3, 4} and parts[0] == "state" and parts[1].endswith(".inbox"):
+        task = parts[1][: -len(".inbox")]
+        message = parts[-1]
+        handled_shape = len(parts) == 3 or (len(parts) == 4 and parts[2] == "handled")
+        return bool(SAFE_COMPONENT.fullmatch(task) and handled_shape and INBOX_MESSAGE.fullmatch(message))
+    return False
+
+
+def validate_live_generation(generations_fd: int, name: str) -> None:
+    generation_fd = open_directory_at(generations_fd, name, f"record export live generation {name}")
+    try:
+        def walk(directory_fd: int, prefix: str) -> None:
+            for child in os.listdir(directory_fd):
+                relative = f"{prefix}/{child}" if prefix else child
+                info = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    if not live_directory_allowed(relative):
+                        fail(f"unknown record export live directory: {relative}")
+                    child_fd = open_directory_at(directory_fd, child, f"record export live directory {relative}")
+                    try:
+                        walk(child_fd, relative)
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISREG(info.st_mode):
+                    if not live_file_allowed(relative):
+                        fail(f"unknown record export live file: {relative}")
+                else:
+                    fail(f"unsafe record export live artifact: {relative}")
+
+        walk(generation_fd, "")
+    finally:
+        os.close(generation_fd)
+
+
+def digest_fd(fd: int) -> tuple[int, str]:
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            return size, digest.hexdigest()
+        size += len(chunk)
+        digest.update(chunk)
+
+
+@dataclass
+class ArchiveSource:
+    source_relative: str
+    archive_relative: str
+    fd: int
+    initial: os.stat_result
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def add_archive_source(
+    sources: list[ArchiveSource],
+    parent_fd: int,
+    name: str,
+    source_relative: str,
+    archive_relative: str,
+    label: str,
+    required: bool = False,
+) -> None:
+    try:
+        fd, info = open_regular_at(parent_fd, name, label)
+    except FileNotFoundError:
+        if required:
+            fail(f"required record export archive source is missing: {source_relative}")
+        return
+    sources.append(ArchiveSource(source_relative, archive_relative, fd, info))
+
+
+def collect_archive_sources(state_fd: int, task: str) -> list[ArchiveSource]:
+    sources: list[ArchiveSource] = []
+    add_archive_source(
+        sources,
+        state_fd,
+        f"{task}.meta",
+        f"state/{task}.meta",
+        "meta",
+        f"state/{task}.meta",
+        required=True,
+    )
+    add_archive_source(
+        sources,
+        state_fd,
+        f"{task}.status",
+        f"state/{task}.status",
+        "status",
+        f"state/{task}.status",
+    )
+    inbox_name = f"{task}.inbox"
+    try:
+        inbox_info = os.stat(inbox_name, dir_fd=state_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return sources
+    if not stat.S_ISDIR(inbox_info.st_mode):
+        fail(f"state/{inbox_name} is not a real directory")
+    inbox_fd = open_directory_at(state_fd, inbox_name, f"state/{inbox_name}")
+    try:
+        for name in sorted(os.listdir(inbox_fd)):
+            if INBOX_MESSAGE.fullmatch(name):
+                add_archive_source(
+                    sources,
+                    inbox_fd,
+                    name,
+                    f"state/{inbox_name}/{name}",
+                    f"inbox/{name}",
+                    f"state/{inbox_name}/{name}",
+                )
+        try:
+            handled_info = os.stat("handled", dir_fd=inbox_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return sources
+        if not stat.S_ISDIR(handled_info.st_mode):
+            fail(f"state/{inbox_name}/handled is not a real directory")
+        handled_fd = open_directory_at(inbox_fd, "handled", f"state/{inbox_name}/handled")
+        try:
+            for name in sorted(os.listdir(handled_fd)):
+                if INBOX_MESSAGE.fullmatch(name):
+                    add_archive_source(
+                        sources,
+                        handled_fd,
+                        name,
+                        f"state/{inbox_name}/handled/{name}",
+                        f"inbox/handled/{name}",
+                        f"state/{inbox_name}/handled/{name}",
+                    )
+        finally:
+            os.close(handled_fd)
+    finally:
+        os.close(inbox_fd)
+    return sources
+
+
+def metadata_spawn_generation(metadata_fd: int) -> str:
+    os.lseek(metadata_fd, 0, os.SEEK_SET)
+    try:
+        text = read_all(metadata_fd).decode("utf-8")
+    except UnicodeDecodeError:
+        fail("task metadata is not valid UTF-8")
+    values = [line.partition("=")[2] for line in text.splitlines() if line.partition("=")[0] == "spawn_gen"]
+    if len(values) != 1:
+        fail("task metadata must contain exactly one spawn_gen for record export")
+    safe_component(values[0], "spawn_gen for record export archive")
+    return values[0]
+
+
+def copy_archive_source(source: ArchiveSource, stage_fd: int) -> dict[str, object]:
+    parts = source.archive_relative.split("/")
+    for part in parts:
+        safe_component(part, "record export archive path")
+    parent_fd = ensure_relative_directory(stage_fd, parts[:-1])
+    destination_fd = -1
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        destination_fd = os.open(
+            parts[-1],
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o640,
+            dir_fd=parent_fd,
+        )
+        os.lseek(source.fd, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(source.fd, 1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+            write_all(destination_fd, chunk)
+        os.fchmod(destination_fd, 0o640)
+        os.fsync(destination_fd)
+        if stable_identity(source.initial) != stable_identity(os.fstat(source.fd)):
+            fail(f"record export source changed during archive capture: {source.source_relative}")
+        verify_size, verify_digest = digest_fd(source.fd)
+        if size != verify_size or digest.hexdigest() != verify_digest:
+            fail(f"record export source changed during archive capture: {source.source_relative}")
+        return {
+            "source": source.source_relative,
+            "archive": source.archive_relative,
+            "bytes": size,
+            "sha256": digest.hexdigest(),
+        }
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        os.fsync(parent_fd)
+        os.close(parent_fd)
+
+
+def archive_path_mapping(task: str, archive_relative: str) -> str | None:
+    if archive_relative == "meta":
+        return f"state/{task}.meta"
+    if archive_relative == "status":
+        return f"state/{task}.status"
+    if re.fullmatch(r"inbox/[0-9]+\.msg", archive_relative):
+        return f"state/{task}.inbox/{archive_relative.removeprefix('inbox/')}"
+    if re.fullmatch(r"inbox/handled/[0-9]+\.msg", archive_relative):
+        return f"state/{task}.inbox/handled/{archive_relative.removeprefix('inbox/handled/')}"
+    return None
+
+
+def validate_manifest_shape(value: object, task: str, spawn_gen: str) -> list[dict[str, object]]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "schema_version", "task", "spawn_gen", "captured_at", "complete", "files"
+    }:
+        fail("record export archive manifest has unknown or missing fields")
+    if value["schema"] != "firstmate-record-export-archive.v1" \
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1 \
+            or value["task"] != task or value["spawn_gen"] != spawn_gen \
+            or type(value["captured_at"]) is not str or not UTC_TIMESTAMP.fullmatch(value["captured_at"]) \
+            or type(value["complete"]) is not bool or value["complete"] is not True \
+            or type(value["files"]) is not list:
+        fail("record export archive manifest has invalid field values")
+    entries: list[dict[str, object]] = []
+    seen_source: set[str] = set()
+    seen_archive: set[str] = set()
+    for raw in value["files"]:
+        if not isinstance(raw, dict) or set(raw) != {"source", "archive", "bytes", "sha256"}:
+            fail("record export archive manifest file entry has unknown or missing fields")
+        source = raw["source"]
+        archive = raw["archive"]
+        byte_count = raw["bytes"]
+        digest = raw["sha256"]
+        if type(source) is not str or type(archive) is not str \
+                or type(byte_count) is not int or byte_count < 0 \
+                or type(digest) is not str or not SHA256.fullmatch(digest):
+            fail("record export archive manifest file entry has invalid field values")
+        if archive_path_mapping(task, archive) != source:
+            fail("record export archive manifest contains an invalid source mapping")
+        if source in seen_source or archive in seen_archive:
+            fail("record export archive manifest contains duplicate file entries")
+        seen_source.add(source)
+        seen_archive.add(archive)
+        entries.append(raw)
+    if not entries or entries[0]["archive"] != "meta" or "meta" not in seen_archive:
+        fail("record export archive manifest omits mandatory metadata")
+    return entries
+
+
+def walk_generation_files(generation_fd: int) -> dict[str, tuple[int, str]]:
+    found: dict[str, tuple[int, str]] = {}
+
+    def walk(directory_fd: int, prefix: str) -> None:
+        for name in sorted(os.listdir(directory_fd)):
+            relative = f"{prefix}/{name}" if prefix else name
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                if relative not in {"inbox", "inbox/handled"}:
+                    fail(f"unknown record export archive directory: {relative}")
+                child_fd = open_directory_at(directory_fd, name, f"record export archive directory {relative}")
+                try:
+                    walk(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                if relative == "manifest.v1.json":
+                    continue
+                if archive_path_mapping("TASK", relative) is None:
+                    fail(f"unknown record export archive file: {relative}")
+                fd, _ = open_regular_at(directory_fd, name, f"record export archive file {relative}")
+                try:
+                    found[relative] = digest_fd(fd)
+                finally:
+                    os.close(fd)
+            else:
+                fail(f"unsafe record export archive artifact: {relative}")
+
+    walk(generation_fd, "")
+    return found
+
+
+def load_and_validate_manifest(generation_fd: int, task: str, spawn_gen: str) -> list[dict[str, object]]:
+    try:
+        manifest_fd, _ = open_regular_at(
+            generation_fd, "manifest.v1.json", "record export archive manifest"
+        )
+    except FileNotFoundError:
+        fail("record export archive manifest is missing")
+    try:
+        value = parse_json(read_all(manifest_fd), "record export archive manifest")
+    finally:
+        os.close(manifest_fd)
+    entries = validate_manifest_shape(value, task, spawn_gen)
+    actual = walk_generation_files(generation_fd)
+    expected = {entry["archive"]: (entry["bytes"], entry["sha256"]) for entry in entries}
+    if actual != expected:
+        fail("record export archive manifest does not match its generation files")
+    return entries
+
+
+def validate_committed_against_sources(
+    entries: list[dict[str, object]], sources: list[ArchiveSource]
+) -> None:
+    by_source = {entry["source"]: entry for entry in entries}
+    for source in sources:
+        entry = by_source.get(source.source_relative)
+        if entry is None or entry["archive"] != source.archive_relative:
+            fail("committed archive differs from current sources")
+        size, digest = digest_fd(source.fd)
+        if entry["bytes"] != size or entry["sha256"] != digest:
+            fail("committed archive differs from current sources")
+
+
+def revalidate_archive_sources(state_fd: int, task: str, sources: list[ArchiveSource], entries: list[dict[str, object]]) -> None:
+    current = collect_archive_sources(state_fd, task)
+    try:
+        original_keys = [(item.source_relative, item.archive_relative) for item in sources]
+        current_keys = [(item.source_relative, item.archive_relative) for item in current]
+        if original_keys != current_keys:
+            fail("record export source set changed during archive capture")
+        entry_by_source = {entry["source"]: entry for entry in entries}
+        for original, reopened in zip(sources, current):
+            if fd_identity(original.fd) != fd_identity(reopened.fd) \
+                    or stable_identity(original.initial) != stable_identity(os.fstat(original.fd)):
+                fail("record export source changed during archive capture")
+            size, digest = digest_fd(original.fd)
+            entry = entry_by_source[original.source_relative]
+            if entry["bytes"] != size or entry["sha256"] != digest:
+                fail("record export source changed during archive capture")
+    finally:
+        for source in current:
+            source.close()
+
+
+def write_archive_manifest(
+    stage_fd: int, task: str, spawn_gen: str, entries: list[dict[str, object]]
+) -> None:
+    document = {
+        "schema": "firstmate-record-export-archive.v1",
+        "schema_version": 1,
+        "task": task,
+        "spawn_gen": spawn_gen,
+        "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "complete": True,
+        "files": entries,
+    }
+    data = (json.dumps(document, indent=2, separators=(",", ": ")) + "\n").encode("utf-8")
+    fd = os.open(
+        "manifest.v1.json",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        0o640,
+        dir_fd=stage_fd,
+    )
+    try:
+        write_all(fd, data)
+        os.fchmod(fd, 0o640)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.fsync(stage_fd)
+
+
+def prune_archives(archive_fd: int) -> None:
+    cutoff = time.time() - 30 * 24 * 60 * 60
+    try:
+        tasks = os.listdir(archive_fd)
+    except OSError as exc:
+        print(f"warning: could not scan record export archive: archive: {exc.strerror}", file=sys.stderr)
+        return
+    for task in tasks:
+        if not SAFE_COMPONENT.fullmatch(task):
+            print(f"warning: refusing to prune unsafe record export archive: archive/{task}", file=sys.stderr)
+            continue
+        try:
+            task_fd = open_directory_at(archive_fd, task, f"record export archive task {task}")
+        except (ExportError, OSError) as exc:
+            print(f"warning: could not scan record export archive: archive/{task}: {exc}", file=sys.stderr)
+            continue
+        try:
+            try:
+                generations = os.listdir(task_fd)
+            except OSError as exc:
+                print(f"warning: could not scan record export archive: archive/{task}: {exc.strerror}", file=sys.stderr)
+                continue
+            for spawn_gen in generations:
+                if not SAFE_COMPONENT.fullmatch(spawn_gen):
+                    if not ARCHIVE_STAGE_NAME.fullmatch(spawn_gen):
+                        print(
+                            f"warning: refusing to prune unsafe record export archive: archive/{task}/{spawn_gen}",
+                            file=sys.stderr,
+                        )
+                    continue
+                try:
+                    generation_fd = open_directory_at(
+                        task_fd, spawn_gen, f"record export archive generation {task}/{spawn_gen}"
+                    )
+                except (ExportError, OSError) as exc:
+                    print(
+                        f"warning: could not scan record export archive: archive/{task}/{spawn_gen}: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                try:
+                    try:
+                        manifest_info = os.stat(
+                            "manifest.v1.json", dir_fd=generation_fd, follow_symlinks=False
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if not stat.S_ISREG(manifest_info.st_mode) or manifest_info.st_mtime >= cutoff:
+                        continue
+                    try:
+                        load_and_validate_manifest(generation_fd, task, spawn_gen)
+                    except ExportError:
+                        print(
+                            f"warning: refusing to prune unsafe record export archive: archive/{task}/{spawn_gen}",
+                            file=sys.stderr,
+                        )
+                        continue
+                finally:
+                    os.close(generation_fd)
+                try:
+                    remove_tree_at(task_fd, spawn_gen)
+                except (ExportError, OSError) as exc:
+                    print(
+                        f"warning: could not prune record export archive: archive/{task}/{spawn_gen}: {exc}",
+                        file=sys.stderr,
+                    )
+        finally:
+            os.close(task_fd)
+
+
+def archive_task(home: str, config: str, data: str, state: str, task: str) -> None:
+    safe_component(task, "task id for record export archive")
+    configured_root = read_config(config)
+    if configured_root is None:
+        return
+    state_fd = open_absolute_directory(state, "state root")
+    root_fd = -1
+    sources: list[ArchiveSource] = []
+    try:
+        sources = collect_archive_sources(state_fd, task)
+        spawn_gen = metadata_spawn_generation(sources[0].fd)
+        root_fd = open_export_root(
+            configured_root,
+            home,
+            (("home", home), ("config", config), ("data", data), ("state", state)),
+        )
+        archive_fd = ensure_directory_at(root_fd, "archive", "record export archive root")
+        try:
+            task_fd = ensure_directory_at(archive_fd, task, "record export archive task")
+            try:
+                try:
+                    existing_fd = open_directory_at(
+                        task_fd, spawn_gen, f"record export archive generation {task}/{spawn_gen}"
+                    )
+                except ExportError:
+                    try:
+                        os.stat(spawn_gen, dir_fd=task_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        existing_fd = -1
+                    else:
+                        raise
+                if existing_fd >= 0:
+                    try:
+                        if "manifest.v1.json" in os.listdir(existing_fd):
+                            entries = load_and_validate_manifest(existing_fd, task, spawn_gen)
+                            validate_committed_against_sources(entries, sources)
+                            prune_archives(archive_fd)
+                            return
+                        walk_generation_files(existing_fd)
+                    finally:
+                        os.close(existing_fd)
+
+                stage_name = f".archive-stage-{os.getpid()}-{uuid.uuid4().hex}"
+                os.mkdir(stage_name, 0o750, dir_fd=task_fd)
+                stage_fd = open_directory_at(task_fd, stage_name, "record export archive staging generation")
+                try:
+                    entries = [copy_archive_source(source, stage_fd) for source in sources]
+                    write_archive_manifest(stage_fd, task, spawn_gen, entries)
+                    revalidate_archive_sources(state_fd, task, sources, entries)
+                    current_task = os.stat(task, dir_fd=archive_fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(current_task.st_mode) \
+                            or stat_identity(current_task) != fd_identity(task_fd):
+                        fail("record export archive task directory changed before publication")
+                    if existing_fd >= 0:
+                        remove_tree_at(task_fd, spawn_gen)
+                    os.rename(stage_name, spawn_gen, src_dir_fd=task_fd, dst_dir_fd=task_fd)
+                    os.fsync(task_fd)
+                    os.fsync(archive_fd)
+                    os.fsync(root_fd)
+                except Exception:
+                    try:
+                        remove_tree_at(task_fd, stage_name)
+                    except (FileNotFoundError, ExportError, OSError):
+                        pass
+                    raise
+                finally:
+                    os.close(stage_fd)
+            finally:
+                os.close(task_fd)
+            prune_archives(archive_fd)
+        finally:
+            os.close(archive_fd)
+    finally:
+        for source in sources:
+            source.close()
+        if root_fd >= 0:
+            os.close(root_fd)
+        os.close(state_fd)
+
+
 def sync_records(home: str, config: str, data: str, state: str) -> None:
     configured_root = read_config(config)
     if configured_root is None:
@@ -521,6 +1058,10 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
         sources = collect_data_sources(data_fd) + collect_state_sources(state_fd)
         generations_fd = ensure_directory_at(root_fd, LIVE_GENERATIONS, "record export live generations")
         try:
+            for existing in os.listdir(generations_fd):
+                if not (GENERATION_NAME.fullmatch(existing) or STAGE_NAME.fullmatch(existing)):
+                    fail(f"unknown record export live generation artifact: {existing}")
+                validate_live_generation(generations_fd, existing)
             stage_name = f".stage-{os.getpid()}-{uuid.uuid4().hex}"
             os.mkdir(stage_name, 0o750, dir_fd=generations_fd)
             stage_fd = open_directory_at(generations_fd, stage_name, "record export live staging generation")
@@ -578,8 +1119,8 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if argv != ["sync"]:
-        print("usage: fm-record-export.py sync", file=sys.stderr)
+    if not argv or argv[0] not in {"sync", "archive-task"}:
+        print("usage: fm-record-export.py sync | archive-task <task-id>", file=sys.stderr)
         return 2
     script_dir = os.path.dirname(os.path.realpath(__file__))
     root = os.environ.get("FM_ROOT_OVERRIDE", os.path.dirname(script_dir))
@@ -587,7 +1128,13 @@ def main(argv: list[str]) -> int:
     config = os.environ.get("FM_CONFIG_OVERRIDE", os.path.join(home, "config"))
     data = os.environ.get("FM_DATA_OVERRIDE", os.path.join(home, "data"))
     state = os.environ.get("FM_STATE_OVERRIDE", os.path.join(home, "state"))
-    sync_records(home, config, data, state)
+    if argv == ["sync"]:
+        sync_records(home, config, data, state)
+    elif len(argv) == 2 and argv[0] == "archive-task":
+        archive_task(home, config, data, state, argv[1])
+    else:
+        print("usage: fm-record-export.py sync | archive-task <task-id>", file=sys.stderr)
+        return 2
     return 0
 
 
