@@ -29,6 +29,7 @@ SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 INBOX_MESSAGE = re.compile(r"^[0-9]+\.msg$")
 GENERATION_NAME = re.compile(r"^g[0-9]+\.[0-9]+\.[a-f0-9]+$")
 STAGE_NAME = re.compile(r"^\.stage-[0-9]+-[a-f0-9]+$")
+LIVE_POINTER_NAME = re.compile(r"^\.live-next-[0-9]+-[a-f0-9]+$")
 ARCHIVE_STAGE_NAME = re.compile(r"^\.archive-stage-[0-9]+-[a-f0-9]+$")
 UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -276,6 +277,16 @@ def validate_root_marker(root_fd: int, home: str) -> None:
 def validate_root_entries(root_fd: int) -> None:
     allowed = {ROOT_MARKER, LIVE_GENERATIONS, "live", "archive"}
     for name in os.listdir(root_fd):
+        if LIVE_POINTER_NAME.fullmatch(name):
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISLNK(info.st_mode):
+                fail("record export stale live pointer is unsafe")
+            target = os.readlink(name, dir_fd=root_fd)
+            if not re.fullmatch(r"\.live-generations/" + GENERATION_NAME.pattern[1:-1], target):
+                fail("record export stale live pointer has an unsafe target")
+            os.unlink(name, dir_fd=root_fd)
+            os.fsync(root_fd)
+            continue
         if name not in allowed:
             fail(f"unknown artifact in dedicated record export root: {name}")
         info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
@@ -313,7 +324,6 @@ def open_export_root(root: str, home: str, protected: Iterable[tuple[str, str]])
     finally:
         os.close(parent_fd)
     try:
-        os.fchmod(root_fd, 0o750)
         if created:
             fd = os.open(
                 ROOT_MARKER,
@@ -330,6 +340,8 @@ def open_export_root(root: str, home: str, protected: Iterable[tuple[str, str]])
             os.fsync(root_fd)
         validate_root_marker(root_fd, home)
         validate_root_entries(root_fd)
+        os.fchmod(root_fd, 0o750)
+        os.fsync(root_fd)
         return root_fd
     except Exception:
         os.close(root_fd)
@@ -1059,6 +1071,16 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
         generations_fd = ensure_directory_at(root_fd, LIVE_GENERATIONS, "record export live generations")
         try:
             for existing in os.listdir(generations_fd):
+                if LIVE_POINTER_NAME.fullmatch(existing):
+                    info = os.stat(existing, dir_fd=generations_fd, follow_symlinks=False)
+                    if not stat.S_ISLNK(info.st_mode):
+                        fail("record export stale live pointer is unsafe")
+                    target = os.readlink(existing, dir_fd=generations_fd)
+                    if not re.fullmatch(r"\.live-generations/" + GENERATION_NAME.pattern[1:-1], target):
+                        fail("record export stale live pointer has an unsafe target")
+                    os.unlink(existing, dir_fd=generations_fd)
+                    os.fsync(generations_fd)
+                    continue
                 if not (GENERATION_NAME.fullmatch(existing) or STAGE_NAME.fullmatch(existing)):
                     fail(f"unknown record export live generation artifact: {existing}")
                 validate_live_generation(generations_fd, existing)
@@ -1088,13 +1110,14 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
             os.rename(stage_name, generation_name, src_dir_fd=generations_fd, dst_dir_fd=generations_fd)
             os.fsync(generations_fd)
             pointer_name = f".live-next-{os.getpid()}-{uuid.uuid4().hex}"
-            os.symlink(f"{LIVE_GENERATIONS}/{generation_name}", pointer_name, dir_fd=root_fd)
+            os.symlink(f"{LIVE_GENERATIONS}/{generation_name}", pointer_name, dir_fd=generations_fd)
             try:
-                os.replace(pointer_name, "live", src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                os.replace(pointer_name, "live", src_dir_fd=generations_fd, dst_dir_fd=root_fd)
+                os.fsync(generations_fd)
                 os.fsync(root_fd)
             finally:
                 try:
-                    os.unlink(pointer_name, dir_fd=root_fd)
+                    os.unlink(pointer_name, dir_fd=generations_fd)
                 except FileNotFoundError:
                     pass
 

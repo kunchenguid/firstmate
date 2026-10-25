@@ -206,6 +206,49 @@ test_sync_requires_a_dedicated_disjoint_single_home_root() {
   pass "record export requires a dedicated root disjoint from and owned by exactly one home"
 }
 
+test_sync_does_not_mutate_an_unowned_root_before_rejecting_it() {
+  local home export_root rc=0
+  home=$(make_home root-unowned-mode)
+  export_root="$TMP_ROOT/export-root-unowned-mode"
+  mkdir -p "$export_root"
+  chmod 0777 "$export_root"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'projects\n' > "$home/data/projects.md"
+
+  run_export "$home" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "sync accepted an unowned export root"
+  [ "$(mode_of "$export_root")" = 777 ] \
+    || fail "sync changed the mode of an unowned export root before rejecting it"
+  pass "record export rejects an unowned root without changing its mode"
+}
+
+test_live_publication_staging_cannot_wedge_archives_or_sync() {
+  local home export_root live_target rc=0 legacy_stage internal_stage
+  home=$(make_home live-staging-recovery)
+  export_root="$TMP_ROOT/export-live-staging-recovery"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'projects\n' > "$home/data/projects.md"
+  run_export "$home" sync > "$home/initial.out" 2> "$home/initial.err" \
+    || fail "live staging setup sync failed: $(cat "$home/initial.err")"
+  live_target=$(readlink "$export_root/live")
+
+  mkdir -p "$home/state/task-a.inbox"
+  printf 'spawn_gen=live-staging-generation\n' > "$home/state/task-a.meta"
+  printf 'pending\n' > "$home/state/task-a.inbox/001.msg"
+  legacy_stage="$export_root/.live-next-1234-0123456789abcdef0123456789abcdef"
+  ln -s "$live_target" "$legacy_stage"
+  run_export "$home" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" || rc=$?
+  expect_code 0 "$rc" "archive after interrupted live publication: $(cat "$home/archive.err")"
+  assert_absent "$legacy_stage" "archive left a stale root publication link behind"
+
+  internal_stage="$export_root/.live-generations/.live-next-1234-0123456789abcdef0123456789abcdef"
+  ln -s "$live_target" "$internal_stage"
+  run_export "$home" sync > "$home/sync.out" 2> "$home/sync.err" || rc=$?
+  expect_code 0 "$rc" "sync after interrupted live publication: $(cat "$home/sync.err")"
+  assert_absent "$internal_stage" "sync left a stale internal publication link behind"
+  pass "interrupted live publication staging cannot wedge archive or sync"
+}
+
 test_sync_retracts_stale_records_as_one_live_snapshot() {
   local home export_root first_generation rc=0
   home=$(make_home sync-converges)
@@ -731,6 +774,8 @@ test_sync_replaces_files_atomically
 test_sync_accepts_an_absolute_export_root_with_spaces
 test_sync_refuses_malformed_config_and_unsafe_paths
 test_sync_requires_a_dedicated_disjoint_single_home_root
+test_sync_does_not_mutate_an_unowned_root_before_rejecting_it
+test_live_publication_staging_cannot_wedge_archives_or_sync
 test_sync_retracts_stale_records_as_one_live_snapshot
 test_sync_refuses_unknown_managed_artifacts_before_publication
 test_sync_detects_destination_parent_replacement
