@@ -654,7 +654,12 @@ cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   'status --json') printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n' ;;
-  'pane get') printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "$3" "$FM_HOME" ;;
+  'pane get')
+    if [ -n "${FM_TEST_ENDPOINT_ABSENT:-}" ] && [ -f "$FM_TEST_ENDPOINT_ABSENT" ]; then
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    else
+      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "$3" "$FM_HOME"
+    fi ;;
   'agent get')
     case "$(cat "$FM_TEST_HERDR_STATE")" in
       alive) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
@@ -942,5 +947,156 @@ for VERB in launch relaunch disposition; do
   ' || fail "host $VERB did not adopt and preserve its verified owner's episode"
 done
 pass "unpooled host launch, relaunch, and disposition serialize and adopt without releasing their owner's episode"
+
+# --- host retirement publishes durable evidence before it removes the home ---
+# The real entrypoint runs with only the destruction boundary replaced, so the
+# order between the pending record, the home removal, and the completed proof
+# is observed rather than assumed.
+RETIRE_ROOT="$TMP/retirement-code"
+RETIRE_BIN="$RETIRE_ROOT/bin"
+RETIRE_HISTORY="$HOST_ROOT/state/remote-secondmate-history"
+mkdir -p "$RETIRE_BIN" "$RETIRE_HISTORY"
+for retirement_script in "$ROOT"/bin/*.sh; do
+  [ "${retirement_script##*/}" = fm-teardown.sh ] && continue
+  ln -sfn "$retirement_script" "$RETIRE_BIN/${retirement_script##*/}"
+done
+ln -sfn "$ROOT/bin/backends" "$RETIRE_BIN/backends"
+cat > "$RETIRE_BIN/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+# Test double for the single destruction boundary. A retirement may not reach
+# it before publishing the pending record for this exact generation.
+[ -f "$FM_TEST_RETIRE_PENDING" ] && [ ! -L "$FM_TEST_RETIRE_PENDING" ] || {
+  printf 'pending retirement record was not published before destruction\n' >&2
+  exit 9
+}
+touch "$FM_TEST_RETIRE_INVOKED" || exit 1
+rm -rf -- "$FM_TEST_RETIRE_HOME" || exit 1
+[ -z "${FM_TEST_RETIRE_KEEP_ENDPOINT:-}" ] || exit 0
+touch "$FM_TEST_RETIRE_ABSENT" || exit 1
+[ "${FM_TEST_RETIRE_CRASH_AFTER_REMOVE:-0}" != 1 ] || exit 1
+exit "${FM_TEST_RETIRE_EXIT:-0}"
+SH
+chmod +x "$RETIRE_BIN/fm-teardown.sh"
+
+retirement_reset() {  # <id> <generation> <tag>
+  RETIRE_ID=$1
+  RETIRE_GEN=$2
+  RETIRE_HOME="$TMP/retirement-home-$3"
+  RETIRE_ABSENT="$TMP/retirement-endpoint-absent-$3"
+  RETIRE_INVOKED="$TMP/retirement-teardown-invoked-$3"
+  RETIRE_PENDING="$RETIRE_HISTORY/$RETIRE_ID.retirement.$RETIRE_GEN.pending.json"
+  RETIRE_PROOF="$RETIRE_HISTORY/$RETIRE_ID.retirement.$RETIRE_GEN.json"
+  rm -rf -- "$RETIRE_HOME"
+  rm -f -- "$RETIRE_ABSENT" "$RETIRE_INVOKED" "$RETIRE_PENDING" "$RETIRE_PROOF"
+  mkdir -p "$RETIRE_HOME/state/parent-route" "$RETIRE_HOME/data" "$RETIRE_HOME/config" "$RETIRE_HOME/bin"
+  printf '%s\n' "$RETIRE_ID" > "$RETIRE_HOME/.fm-secondmate-home"
+  : > "$RETIRE_HOME/AGENTS.md"
+  fm_write_meta "$RETIRE_HOME/state/parent-route/$RETIRE_ID.meta" \
+    kind=secondmate harness=claude backend=herdr window=fm-remote:w1:p1 \
+    endpoint_task_id="$RETIRE_ID" herdr_session=fm-remote herdr_workspace_id=w1 \
+    herdr_tab_id=w1:t1 herdr_pane_id=w1:p1 "worktree=$RETIRE_HOME" \
+    "project=$RETIRE_ROOT" "home=$RETIRE_HOME" "spawn_gen=$RETIRE_GEN" model=pool-model-a
+}
+
+host_retirement() {  # <args...>
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$RETIRE_HOME" FM_ROOT_OVERRIDE="$HOST_ROOT" PATH="$FAKEBIN:$PATH" \
+    FM_TEST_HERDR_STATE="$TMP/herdr-state" FM_TEST_ENDPOINT_ABSENT="$RETIRE_ABSENT" \
+    FM_TEST_RETIRE_HOME="$RETIRE_HOME" FM_TEST_RETIRE_PENDING="$RETIRE_PENDING" \
+    FM_TEST_RETIRE_INVOKED="$RETIRE_INVOKED" FM_TEST_RETIRE_ABSENT="$RETIRE_ABSENT" \
+    FM_TEST_RETIRE_CRASH_AFTER_REMOVE="${FM_TEST_RETIRE_CRASH_AFTER_REMOVE:-0}" \
+    FM_TEST_RETIRE_KEEP_ENDPOINT="${FM_TEST_RETIRE_KEEP_ENDPOINT:-}" \
+    FM_TEST_RETIRE_EXIT="${FM_TEST_RETIRE_EXIT:-0}" \
+    "$RETIRE_BIN/fm-remote-secondmate-control.sh" "$@" 2>&1
+}
+
+retirement_pending_mode() {
+  if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
+# An interruption after the home is removed and before the proof is published
+# leaves the pending record as the only surviving evidence.
+retirement_reset retire-interrupted retirement.generation1 interrupted
+OUT=$(FM_TEST_RETIRE_CRASH_AFTER_REMOVE=1 host_retirement retire "$RETIRE_ID" --force \
+  --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 1 "$RC" "an interrupted retirement after home removal: $OUT"
+printf '%s\n' "$OUT" > "$TMP/retirement-interrupted.out"
+assert_absent "$RETIRE_HOME" "the destruction boundary never removed the remote home"
+[ -f "$RETIRE_INVOKED" ] || fail "the retirement never reached destruction"
+assert_absent "$RETIRE_PROOF" "an interrupted retirement published completed destruction evidence"
+assert_no_grep 'seat_retirement=' "$TMP/retirement-interrupted.out" \
+  "an unconfirmed retirement exposed completed destruction evidence"
+[ -f "$RETIRE_PENDING" ] && [ ! -L "$RETIRE_PENDING" ] \
+  || fail "the interrupted retirement left no pending retry evidence"
+jq -e --arg id "$RETIRE_ID" --arg g "$RETIRE_GEN" --arg h "$RETIRE_HOME" '
+  .schema == "fm-remote-retirement-pending.v1" and .task == $id and .generation == $g
+  and .home == $h and .backend == "herdr" and (.target | type == "string" and startswith("fm-remote:"))
+  and .phase == "pending" and .destroyed == false
+  and (.exit_code == null or .exit_code == 0 or .exit_code == 4)
+' "$RETIRE_PENDING" >/dev/null || fail "the pending record claimed completion or had the wrong route"
+assert_equals 600 "$(retirement_pending_mode "$RETIRE_PENDING")" \
+  "the pending retirement record was not mode 0600"
+OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 0 "$RC" "the expected-generation retry after interrupted retirement: $OUT"
+printf '%s\n' "$OUT" > "$TMP/retirement-retry.out"
+assert_contains "$OUT" "seat_retirement=" "the retry did not emit completed destruction evidence"
+jq -e --arg id "$RETIRE_ID" --arg g "$RETIRE_GEN" --arg h "$RETIRE_HOME" '
+  .task == $id and .generation == $g and .home == $h and .backend == "herdr"
+  and (.target | type == "string" and startswith("fm-remote:")) and .destroyed == true and .exit_code == 0
+' "$RETIRE_PROOF" >/dev/null || fail "the retry did not publish the matching completed proof"
+RETIRE_LINE=$(sed -n '/^seat_retirement=/p' "$TMP/retirement-retry.out")
+assert_equals "seat_retirement=$(cat "$RETIRE_PROOF")" "$RETIRE_LINE" \
+  "the retry output did not preserve the final proof file verbatim"
+assert_absent "$RETIRE_PENDING" "completed retirement retained its pending record"
+OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 0 "$RC" "completed retirement replay: $OUT"
+assert_equals "$RETIRE_LINE" "$(printf '%s\n' "$OUT" | sed -n '/^seat_retirement=/p')" \
+  "completed retirement replay changed the proof"
+
+# A destruction whose final absence read does not prove the endpoint gone keeps
+# the pending record, publishes nothing, and refuses again on retry until the
+# endpoint is actually gone.
+retirement_reset retire-unconfirmed retirement.generation2 unconfirmed
+OUT=$(FM_TEST_RETIRE_KEEP_ENDPOINT=1 host_retirement retire "$RETIRE_ID" --force \
+  --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 1 "$RC" "a retirement whose absence read did not prove the endpoint gone: $OUT"
+assert_absent "$RETIRE_HOME" "the fixture did not remove the home"
+assert_absent "$RETIRE_PROOF" "an unproven endpoint published completed destruction evidence"
+[ -f "$RETIRE_PENDING" ] || fail "a failed absence read dropped the pending evidence"
+OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 1 "$RC" "a second retirement without a proven absence: $OUT"
+assert_absent "$RETIRE_PROOF" "a still-present endpoint published completed destruction evidence"
+touch "$RETIRE_ABSENT"
+OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 0 "$RC" "retirement retry once the endpoint was proven gone: $OUT"
+jq -e --arg id "$RETIRE_ID" --arg g "$RETIRE_GEN" '.task == $id and .generation == $g and .destroyed == true' \
+  "$RETIRE_PROOF" >/dev/null || fail "the proven retry did not publish completion"
+assert_absent "$RETIRE_PENDING" "the proven retry retained its pending record"
+
+# A pending record that cannot be published refuses the destroy itself.
+retirement_reset retire-unpublishable retirement.generation3 unpublishable
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'skip: a root test runner ignores the unwritable history directory\n'
+else
+  chmod 500 "$RETIRE_HISTORY"
+  OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+  chmod 700 "$RETIRE_HISTORY"
+  expect_code 1 "$RC" "a retirement whose pending record could not be published: $OUT"
+  [ -d "$RETIRE_HOME" ] || fail "a retirement with unpublishable evidence deleted the remote home"
+  assert_absent "$RETIRE_INVOKED" "a retirement with unpublishable evidence reached destruction"
+  assert_absent "$RETIRE_PENDING" "the failed publish left a pending record"
+  assert_absent "$RETIRE_PROOF" "the failed publish left completed evidence"
+fi
+
+# A lost-slot destroy still publishes its own exit code as evidence.
+retirement_reset retire-four retirement.generation4 four
+OUT=$(FM_TEST_RETIRE_EXIT=4 host_retirement retire "$RETIRE_ID" --force \
+  --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 4 "$RC" "a completed retirement with a lost-slot exit: $OUT"
+jq -e --arg id "$RETIRE_ID" --arg g "$RETIRE_GEN" '
+  .task == $id and .generation == $g and .destroyed == true and .exit_code == 4
+' "$RETIRE_PROOF" >/dev/null || fail "the lost-slot retirement proof did not keep exit 4"
+assert_absent "$RETIRE_PENDING" "the lost-slot retirement retained its pending record"
+pass "host retirement publishes pending evidence before destruction and finishes interrupted retries"
 
 echo "ALL TESTS PASSED"
