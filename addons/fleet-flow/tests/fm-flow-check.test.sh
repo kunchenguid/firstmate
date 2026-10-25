@@ -21,7 +21,12 @@ EOF
 cat > "$main/bin/fm-crew-state.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "$1" >> "$FM_HOME/probed"
-echo "state: $(cat "$FM_HOME/crew/$1") · source: status-log · fixture"
+line=$(cat "$FM_HOME/crew/$1" 2>/dev/null) || line=''
+# A crew file holding a whole emitted line is the real shape (a kept copy): print it verbatim.
+case "$line" in
+  state:*) printf '%s\n' "$line" ;;
+  *) echo "state: ${line:-} · source: fixture · fixture" ;;
+esac
 EOF
 chmod +x "$main/bin/"*.sh
 lane() {  # <task> <status line> [crew state]
@@ -139,5 +144,35 @@ out=$(run)
 expect 'only the park with no resume condition is STALLED' '1' "$(grep -c 'STALLED' <<<"$out")"
 expect 'the stalled line names it' 1 "$(grep -cE '^flow: p-bare parked 20\.0h STALLED' <<<"$out")"
 expect 'parked lanes raise no wait line' '' "$(grep -E 'past its clock' <<<"$out" || true)"
+
+# Kept copies of stopped lanes (retro fix 4): the owner keeps the record, worktree and status of a lane that stopped,
+# so the copy stays inspectable and cleanable, but it occupies no working slot - crew-state proves its backend target
+# gone. `open` still lists it; only `counted` leaves it out. Four live lanes with three kept copies accept a start,
+# six live lanes still fill the hard cap and refuse a seventh, and a live working lane still counts.
+home=$d/kept/8/firstmate
+mkdir -p "$home/state" "$home/data" "$home/crew"
+echo 1 > "$home/ready-count"
+kept() {  # <task> <verb> <age seconds>: record, status and worktree stay; the worker is gone
+  printf 'kind=ship\n' > "$home/state/$1.meta"
+  printf '%s [at=%s]: kept copy of a stopped lane, branch fm/%s kept\n' "$2" "$((now - $3))" "$1" > "$home/state/$1.status"
+  printf 'state: unknown · source: none · backend target gone: default:w2RB:p9Z\n' > "$home/crew/$1"
+}
+printf 'muxr 4\n' > "$main/config/lane-caps"
+lane live-work "working [at=$((now - 60))]: building" working
+for t in live-1 live-2 live-3; do lane $t "paused [at=$((now - 600))]: waiting on quota reset" paused; done
+kept copy-1 working "$((30 * h))"
+kept copy-2 paused "$((30 * h))"
+kept copy-3 working "$((30 * h))"
+row=$(run --summary)
+expect 'kept copies stay listed as open records' 7 "$(cut -f2 <<<"$row")"
+expect 'kept copies occupy no working slot' 4 "$(cut -f8 <<<"$row")"
+expect 'a live working lane still counts as working' 1 "$(cut -f3 <<<"$row")"
+rc=0; out=$(run --can-start) || rc=$?
+expect 'four live lanes with three kept copies accept a start' '0 ' "$rc $out"
+for t in live-4 live-5; do lane $t "paused [at=$((now - 600))]: waiting on quota reset" paused; done
+row=$(run --summary)
+expect 'six live lanes plus three kept copies count six' 6 "$(cut -f8 <<<"$row")"
+rc=0; out=$(run --can-start) || rc=$?
+expect 'six live lanes refuse a seventh start' '1 6 open lanes, hard cap 6: land or close a waiting lane first' "$rc $out"
 
 [ "$fail" -eq 0 ] && echo "PASS: fm-flow-check lane slots" || { echo "FAIL: fm-flow-check lane slots"; exit 1; }

@@ -11,8 +11,12 @@
 # Captain-held = a captain-hold key in the status file, or an open backlog line with hold-kind captain (data/backlog.md);
 # captain-held lanes raise no wait or red line.
 # Lane = live state/<task>.meta with kind=ship|scout. Lane age starts at the birth of data/<task>/.
-# A lane in a long external wait (see FREE_AFTER) keeps its record but stops counting toward the cap:
+# A lane in a long external wait, held gate or kept copy of a stopped lane (see FREE_AFTER) keeps its record, worktree
+# and status for inspection and cleanup but stops counting toward the cap:
 # counted = open lanes that count; dry = 1 when ready = 0 and working < cap.
+# Kept copy of a stopped lane = a lane whose last event is past FREE_AFTER and whose bin/fm-crew-state.sh read answers
+# anything but working, so it is no live lane; a lane read as working, a record inside the window, and an unanswered or
+# unreadable probe all keep counting.
 # Parked lane = last status verb `parked`. It leaves the open count, the cap and every wait line.
 #   parked [key=lane-cap] ...        parked for the lane cap: it counts as ready work in its home's queue, keeps its branch,
 #                                    and --resume names it for the next free slot, oldest first; no steer is needed.
@@ -120,10 +124,14 @@ for L in parked:
     L['cap'] = bool(re.search(r'\[key=lane-cap\]', L['last']))
     L['stalled'] = not L['cap'] and not RESUME_ON.search(L['last'])
 open_n = len(lanes)
-# A lane whose last event is a paused, blocked or failed wait stamped more than 4 h ago, and still that wait in
-# bin/fm-crew-state.sh (so validating and own busy work stay working), stops counting toward the cap; a ready item
-# takes its slot. An unstamped wait or an unreadable state keeps counting.
+# A lane whose last event is stamped more than 4 h ago, and whose bin/fm-crew-state.sh read answers with anything but
+# working, is no live lane: a long external wait, a held gate, or a kept copy of a lane that stopped (its record,
+# worktree and status stay for inspection and cleanup). It stops counting toward the cap, so a ready item takes its
+# slot. A lane read as working keeps counting with the lanes still inside the window, and so does an unstamped record,
+# an unanswered or unreadable probe.
 FREE_AFTER = 4 * 3600
+# The one shape bin/fm-crew-state.sh answers in: `state: <verdict> · source: ...`. No answer keeps a lane counting.
+ANSWERED = re.compile(r'state: ([a-z][a-z-]*) ·')
 
 def crew_state(t):
     try:
@@ -133,20 +141,25 @@ def crew_state(t):
         return None
 
 # A paused lane is probed at any age: its own no-mistakes run can execute under a paused stamp (the brief's own-run wait),
-# and crew-state reads that run-step as working. Blocked and failed lanes are probed only past FREE_AFTER, to free slots.
+# and crew-state reads that run-step as working. Every other lane is probed once its last event is past FREE_AFTER,
+# because that is when its record can be a kept copy or a long wait rather than a live lane.
 probes = {L['t']: crew_state(L['t']) for L in lanes if not L['captain'] and (L['verb'] == 'paused' or
-          (L['verb'] in ('blocked', 'failed') and L['at'] and NOW - L['at'] > FREE_AFTER))}
+          (L['at'] and NOW - L['at'] > FREE_AFTER))}
 deadline = time.time() + 15
 for L in lanes:
     p, out = probes.get(L['t']), ''
     if p:
         try: out = p.communicate(timeout=max(0.1, deadline - time.time()))[0]
         except subprocess.TimeoutExpired: p.kill(); p.wait()
-    L['free'] = bool(re.match(r'state: (paused|blocked|failed) ', out)) and bool(L['at']) and NOW - L['at'] > FREE_AFTER
-    L['busy'] = L['verb'] in ('working', 'resolved') or (L['verb'] == 'paused' and bool(re.match(r'state: working ', out)))
+    read = ANSWERED.match(out)
+    L['inert'] = bool(read) and read.group(1) != 'working' and bool(L['at']) and NOW - L['at'] > FREE_AFTER
+    L['free'] = L['inert']
+    L['busy'] = not L['inert'] and (L['verb'] in ('working', 'resolved') or
+                                     (L['verb'] == 'paused' and bool(re.match(r'state: working ', out))))
 count_n = open_n - sum(L['free'] for L in lanes)
 # Busy lanes count toward the cap: working, resolved, and a paused lane whose run crew-state reads as working.
-# Waiting, parked and captain-held lanes do not. HARD bounds the open lanes that count, so waits under FREE_AFTER cannot pile up.
+# Waiting, parked, inert (kept-copy) and captain-held lanes do not. HARD bounds the open lanes that count, so waits
+# under FREE_AFTER cannot pile up.
 active_n = sum(L['busy'] and not L['captain'] for L in lanes)
 HARD = CAP + 2
 
