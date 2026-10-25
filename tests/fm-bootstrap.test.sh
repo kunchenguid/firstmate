@@ -397,6 +397,11 @@ missing agent in a flow list^agent: [codex, "claude"]  # fallback order^@LINE@ c
 missing agent in a block list^agent:\n  - codex\n  # comment\n  - grok\nci_timeout: 1h^@LINE@ grok, but grok is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 missing agent in an unindented block list^agent:\n- codex\n# comment\n\n- claude\nci_timeout: 1h\nother_list:\n- not-an-agent^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 installed unindented block list is silent^agent:\n- codex\nci_timeout: 1h\nother_list:\n- not-an-agent^
+commented unindented block header^agent: # fallback order\n- codex\n- claude^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+commented indented block header^agent:   # fallback order\n  - codex\n  - claude^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+commented installed block header^agent: # fallback order\n- codex^
+commented scalar remains installed^agent: codex # chosen agent^
+commented acpx path uses the default^agent: acp:gemini\nacpx_path: # default executable^
 scalar auto is never checked^agent: auto^
 rovodev resolves through acli^agent: rovodev^@LINE@ rovodev, but acli is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 acp targets need the configured acpx^agent: acp:gemini\nacpx_path: /nonexistent/acpx^@LINE@ acp:gemini, but /nonexistent/acpx is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)

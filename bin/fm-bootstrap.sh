@@ -1700,7 +1700,7 @@ detect_no_mistakes_agents() {
   for config in "$nm_home/config.yaml" "$FM_ROOT/.no-mistakes.yaml"; do
     [ -f "$config" ] && [ -r "$config" ] || continue
     acpx=$(LC_ALL=C awk '/^acpx_path:/ {
-        v = $0; sub(/^acpx_path:[[:space:]]*/, "", v); sub(/[[:space:]]+#.*$/, "", v)
+        v = $0; sub(/[[:space:]]+#.*$/, "", v); sub(/^acpx_path:[[:space:]]*/, "", v)
         gsub(/^["'"'"']|["'"'"']$/, "", v); print v; exit }' "$config" 2>/dev/null)
     while IFS= read -r agent; do
       [ -n "$agent" ] || continue
@@ -1719,7 +1719,7 @@ detect_no_mistakes_agents() {
         return x
       }
       /^agent:/ {
-        v = $0; sub(/^agent:[[:space:]]*/, "", v); sub(/[[:space:]]+#.*$/, "", v)
+        v = $0; sub(/[[:space:]]+#.*$/, "", v); sub(/^agent:[[:space:]]*/, "", v)
         if (v != "") {
           gsub(/[][]/, "", v)
           n = split(v, parts, ",")
