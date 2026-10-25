@@ -55,13 +55,21 @@ case " $RECORDED " in
   *" $VM "*) exit 0 ;;
 esac
 META_TMP=$(mktemp "$(dirname "$META")/.fm-lane-vm-meta.XXXXXX")
+LANE_VMS_LINE="lane_vms=${RECORDED:+$RECORDED }$VM"
+LANE_VMS_WRITTEN=0
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    lane_vms=*) ;;
-    *) printf '%s\n' "$line" >> "$META_TMP" ;;
+    lane_vms=*) continue ;;
+    pr=*)
+      if [ "$LANE_VMS_WRITTEN" = 0 ]; then
+        printf '%s\n' "$LANE_VMS_LINE" >> "$META_TMP"
+        LANE_VMS_WRITTEN=1
+      fi
+      ;;
   esac
+  printf '%s\n' "$line" >> "$META_TMP"
 done < "$META"
-printf 'lane_vms=%s\n' "${RECORDED:+$RECORDED }$VM" >> "$META_TMP"
+[ "$LANE_VMS_WRITTEN" = 1 ] || printf '%s\n' "$LANE_VMS_LINE" >> "$META_TMP"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 META_TMP=

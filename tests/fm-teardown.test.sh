@@ -803,6 +803,23 @@ test_lane_vm_record_appends_each_name_once() {
   pass "lane VM record adds each owned name once and refuses names not owned by the task"
 }
 
+test_lane_vm_record_keeps_the_pr_record_last() {
+  local dir meta head
+  dir="$TMP_ROOT/lane-vm-record-pr"
+  mkdir -p "$dir"
+  meta="$dir/task-x1.meta"
+  head=$(printf 'a%.0s' $(seq 40))
+  printf '%s\n' "kind=ship" "pr=https://github.com/example/repo/pull/7" "pr_head=$head" > "$meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-api
+  assert_equals "kind=ship"$'\n'"lane_vms=task-x1-it task-x1-api"$'\n'"pr=https://github.com/example/repo/pull/7"$'\n'"pr_head=$head" \
+    "$(cat "$meta")" "lane-vm-record-pr: meta lines"
+  # shellcheck disable=SC2016 # expanded by the child shell
+  /bin/bash -c '. "$1"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT/bin/fm-pr-lib.sh" "$meta" \
+    || fail "lane-vm-record-pr: the PR record no longer parses after recording a VM"
+  pass "lane VM record keeps the PR record last and parseable"
+}
+
 test_lane_vm_cleanup_without_limactl_is_quiet() {
   local out rc
   set +e
@@ -6038,4 +6055,5 @@ test_scout_teardown_deletes_its_own_lane_vms
 test_forced_teardown_deletes_its_own_lane_vms
 test_teardown_without_the_flag_deletes_no_lane_vm
 test_lane_vm_record_appends_each_name_once
+test_lane_vm_record_keeps_the_pr_record_last
 test_lane_vm_cleanup_without_limactl_is_quiet
