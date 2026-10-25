@@ -1372,6 +1372,12 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   [ "$ship_rule" = "$scout_rule" ] \
     || fail "ship and scout shared-infrastructure rules have drifted apart"
 
+  # Both scaffolds carry the no-attribution rule, as the emitted brief text.
+  assert_grep "8. Never add agent attribution of any kind" "$home/data/brief-pool-no-mistakes/brief.md" \
+    "ship brief lost the no-agent-attribution rule"
+  assert_grep "8. Never add agent attribution of any kind" "$brief" \
+    "scout brief lost the no-agent-attribution rule"
+
   # The daemon half of the rule survived the fold.
   assert_grep "no-mistakes" "$brief" "scout brief lost the shared no-mistakes daemon rule"
   # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.

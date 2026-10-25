@@ -22,7 +22,12 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "ATTRIBUTION: claude user settings still attribute commits/PRs; fix: <command>".
+#          ATTRIBUTION is detect-only and appears only when this session's own
+#          harness is claude, the home does not keep config/keep-ai-trailers, and
+#          $CLAUDE_CONFIG_DIR (default ~/.claude)/settings.json parses but sets
+#          neither attribution commit and pr to "" nor includeCoAuthoredBy false.
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1446,6 +1451,7 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_claude_user_attribution
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,
@@ -1476,6 +1482,21 @@ detect_code_root_backlog_fork() {
 # been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts have
 # failed since whenever it last was. No new record, no new state, no retry
 # policy - just the existing evidence, surfaced.
+detect_claude_user_attribution() {
+  local settings dir
+  [ "$(fm_config_source_present "$CONFIG/keep-ai-trailers" 2>/dev/null)" = 0 ] || return 0
+  [ "$("$SCRIPT_DIR/fm-harness.sh" own 2>/dev/null)" = claude ] || return 0
+  dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  settings="$dir/settings.json"
+  if [ -s "$settings" ]; then
+    # An unreadable or unparseable file cannot be judged, so stay silent.
+    jq -e . "$settings" >/dev/null 2>&1 || return 0
+    jq -e '((.attribution.commit // null) == "" and (.attribution.pr // null) == "") or .includeCoAuthoredBy == false' \
+      "$settings" >/dev/null 2>&1 && return 0
+  fi
+  echo "ATTRIBUTION: claude user settings still attribute commits/PRs; fix: mkdir -p '$dir' && { [ -s '$settings' ] || echo '{}' > '$settings'; } && jq '. + {attribution:{commit:\"\",pr:\"\",sessionUrl:false},includeCoAuthoredBy:false}' '$settings' > '$settings.tmp' && mv '$settings.tmp' '$settings'"
+}
+
 detect_home_summary_publication() {
   local log="$STATE/.home-summary-refresh.log" ledger="$STATE/home-summary.json"
   local since='' counted failures last threshold

@@ -247,6 +247,8 @@ test_claude_hooks_semantic_lifecycle() {
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
+  jq -e '.attribution.commit == "" and .attribution.pr == "" and .includeCoAuthoredBy == false' "$settings" >/dev/null \
+    || fail "claude worker settings must switch commit/PR attribution off (attribution and includeCoAuthoredBy)"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
@@ -270,6 +272,21 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(classify claude "$id" "$state")
   [ "$out" = "idle claude-hook" ] || fail "SessionEnd must classify idle, got '$out'"
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
+}
+
+test_claude_keep_ai_trailers_leaves_attribution_alone() {
+  local rec id=busy-cl-3 out settings
+  rec=$(make_spawn_case claude-keep-trailers claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/config"
+  : >"$HOME_DIR/config/keep-ai-trailers"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn with keep-ai-trailers should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON under keep-ai-trailers"
+  jq -e 'has("attribution") or has("includeCoAuthoredBy") | not' "$settings" >/dev/null \
+    || fail "config/keep-ai-trailers must leave attribution settings out of the worker settings"
+  pass "claude worker settings omit the attribution-off keys when config/keep-ai-trailers is present"
 }
 
 test_claude_hooks_stale_incarnation_harmless() {
@@ -428,6 +445,7 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
+test_claude_keep_ai_trailers_leaves_attribution_alone
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless

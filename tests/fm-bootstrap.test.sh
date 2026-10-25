@@ -28,6 +28,12 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
+# Keep the machine's own Claude user settings out of every case below: a test
+# run inside a claude session would otherwise print the ATTRIBUTION line.
+QUIET_CLAUDE_DIR="$TMP_ROOT/claude-attribution-off"
+mkdir -p "$QUIET_CLAUDE_DIR"
+printf '%s\n' '{"attribution":{"commit":"","pr":""}}' > "$QUIET_CLAUDE_DIR/settings.json"
+export CLAUDE_CONFIG_DIR="$QUIET_CLAUDE_DIR"
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
@@ -316,6 +322,49 @@ manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSI
 manual backlog backend suppresses tasks-axi availability^1^0.2.6^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
+}
+
+test_claude_user_attribution_diagnostic() {
+  local case_dir fakebin cfg out
+  case_dir="$TMP_ROOT/claude-attribution"
+  mkdir -p "$case_dir/home/config" "$case_dir/cfg"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cfg="$case_dir/cfg"
+  run() {  # <CLAUDECODE value or empty>
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      CLAUDE_CONFIG_DIR="$cfg" CLAUDECODE="$1" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  printf '%s\n' '{"theme":"dark"}' > "$cfg/settings.json"
+  out=$(run 1)
+  case "$out" in
+    'ATTRIBUTION: claude user settings still attribute commits/PRs; fix: '*) ;;
+    *) fail "claude primary with attributing user settings must print ATTRIBUTION, got: $out" ;;
+  esac
+
+  # The printed fix, run verbatim, must turn the diagnostic off and keep other keys.
+  sh -c "${out#*fix: }" || fail "printed ATTRIBUTION fix command failed"
+  jq -e '.theme == "dark" and .attribution.commit == "" and .attribution.pr == "" and .includeCoAuthoredBy == false' \
+    "$cfg/settings.json" >/dev/null || fail "ATTRIBUTION fix did not write attribution-off and keep other keys"
+  out=$(run 1)
+  [ -z "$out" ] || fail "ATTRIBUTION must be silent once attribution is off, got: $out"
+
+  rm -f "$cfg/settings.json"
+  out=$(run 1)
+  case "$out" in ATTRIBUTION:*) ;; *) fail "missing user settings must print ATTRIBUTION, got: $out" ;; esac
+  sh -c "${out#*fix: }" || fail "printed ATTRIBUTION fix failed on absent settings"
+  out=$(run 1)
+  [ -z "$out" ] || fail "ATTRIBUTION must be silent after the fix creates settings, got: $out"
+
+  printf '%s\n' '{"includeCoAuthoredBy":false}' > "$cfg/settings.json"
+  out=$(run 1)
+  [ -z "$out" ] || fail "deprecated includeCoAuthoredBy=false alone counts as off, got: $out"
+
+  printf '%s\n' '{"theme":"dark"}' > "$cfg/settings.json"
+  out=$(FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=codex run 1)
+  [ -z "$out" ] || fail "a non-claude primary must never get the ATTRIBUTION line, got: $out"
+  pass "bootstrap prints a self-healing ATTRIBUTION diagnostic only for a claude primary with attribution on"
 }
 
 test_no_mistakes_min_version() {
@@ -1247,6 +1296,7 @@ test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
+test_claude_user_attribution_diagnostic
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
