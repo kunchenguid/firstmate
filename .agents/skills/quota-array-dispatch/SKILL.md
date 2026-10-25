@@ -79,11 +79,8 @@ A provider-level `all_models`, `all_products`, or `included_quota` scope bounds 
 `bin/fm-quota-axi-lib.sh`'s single-provider table maps harness `devin` to quota-axi provider `devin`, and the typed resolver ranks that provider on `included_quota`.
 That scope is the included plan window.
 `devin models list` marks SWE-2 High, Medium, and Max as Free, and those are the models this window covers.
-A Devin profile names one of those native SWE ids.
-A Claude model is a `claude` candidate, a GPT model is a `codex` candidate, and a Grok model is a `grok` candidate.
-[Model and effort](../harness-adapters/references/common/model-and-effort.md) owns that harness split.
+[Model and effort](../harness-adapters/references/common/model-and-effort.md) owns native-harness preference and when an exhausted native Claude or Codex window may use harness `devin`.
 A catalog line with a token price is pay-per-token and sits outside `included_quota`.
-Do not put that priced model on a Devin profile meant to spend the included window.
 quota-axi publishes no separate pay-per-token scope for that CLI.
 Devin's separate `credits` balance is that pay-per-token purse, not the included window, and is never read as `included_quota` headroom.
 The frozen helper map has no Devin row, so `fm-quota-choose.sh` still refuses a `devin:` candidate.
