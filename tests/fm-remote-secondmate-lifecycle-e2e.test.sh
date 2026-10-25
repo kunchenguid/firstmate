@@ -1562,13 +1562,18 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
+# Use a wall-clock deadline because each poll forks kill(1); the watcher can
+# legitimately run through its bounded relaunch allowance on a loaded runner.
 watch_deadline=$((SECONDS + watch_relaunch_timeout + 30))
 while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_deadline" ]; do
-  sleep 0.1
+  sleep 0.02
 done
-if kill -0 "$watch_pid" 2>/dev/null; then
+watch_still_alive=no
+kill -0 "$watch_pid" 2>/dev/null && watch_still_alive=yes
+if [ "$watch_still_alive" = yes ]; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within its ${watch_relaunch_timeout}s relaunch bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  wait "$watch_pid" 2>/dev/null || true
+  fail "the watcher did not exit on its auto-relaunch wake within its ${watch_relaunch_timeout}s relaunch bound: stdout: $(cat "$TMP_ROOT/watch-liveness.out" 2>/dev/null); stderr: $(cat "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
