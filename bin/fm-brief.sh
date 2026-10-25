@@ -769,6 +769,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
+   Register disposable temporary directories outside the Firstmate home, repository, state and data directories with \`FM_HOME='$FM_HOME' FM_STATE_OVERRIDE='$STATE' FM_DATA_OVERRIDE='$DATA' '$FM_ROOT/bin/fm-scratch.sh' register $ID <dir>\` so cleanup reaps them; keep retained evidence under \`$DATA/$ID/\` unregistered.
    Leave the worktree clean before reporting done.
    Never use git stash: all worktrees of a repo share one stash; commit work in progress on your own branch instead.
 3. $FORGE_RULE_LINE

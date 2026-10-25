@@ -3117,10 +3117,24 @@ test_retained_row_artifacts_survive_captain_answers() {
   pass "release and scout report retention distinguish deliveries from rejected merge answers"
 }
 
-# Retention happens after destructive cleanup, through the same pending record
-# an ordinary close stages first. A cleanup that fails part-way therefore leaves
-# the row exactly as it was, and the next session start finishes the retention
-# instead of closing the captain's question.
+# Kill teardown without its EXIT trap so pending-record consumers exercise the
+# crash window. Retained data requires a teardown retry before startup may close
+# the task; the record still supplies artifacts to answers received in between.
+interrupt_teardown_during_treehouse_return() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+teardown_pid=$(ps -o ppid= -p "$PPID" | tr -d ' ')
+case "$teardown_pid" in ''|*[!0-9]*) exit 1 ;; esac
+kill -KILL "$teardown_pid"
+kill -TERM "$$"
+SH
+  chmod +x "$home/fakebin/treehouse"
+}
+
+# An interruption preserves the row and its task ownership. Startup cannot
+# discard that ownership while retained-data process cleanup is outstanding;
+# retrying teardown finishes retention instead of closing the captain's question.
 test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   local home id wt show rc bootstrap
   home=$(make_home teardown-held-interrupted)
@@ -3139,11 +3153,7 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
     || fail "could not hold the cleanup-failure fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the cleanup-failure fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  interrupt_teardown_during_treehouse_return "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3166,19 +3176,22 @@ SH
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
-    || fail "session start could not replay the interrupted retention: $bootstrap"
-  assert_contains "$bootstrap" "kept the captain call for $id open" \
-    "session start did not report the retained captain call"
-  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
-  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
-  show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
-  assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
-  assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
-  assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_present "$home/state/$id.meta" "startup discarded task ownership before cleanup retry"
+  assert_present "$home/state/$id.backlog-close" "startup discarded the pending cleanup record"
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force 2>&1) \
+    || fail "teardown retry failed: $bootstrap"
+  assert_absent "$home/state/$id.meta" "teardown retry left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "teardown retry left the pending record behind"
+  show=$(tasks_in "$home" show "$id" --full) || fail "teardown retry erased the captain call"
+  assert_not_contains "$show" "state: done" "teardown retry closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "teardown retry did not return the captain call to the queue"
+  assert_contains "$show" "hold_kind: captain" "teardown retry dropped the captain hold"
   assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
-    "session start did not record the finished work's deliverable"
-  pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
+    "teardown retry did not record the finished work's deliverable"
+  pass "an interrupted cleanup keeps the captain call recoverable and teardown retry retains it"
 }
 
 test_answer_before_cleanup_replay_preserves_the_retained_report() {
@@ -3198,11 +3211,7 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
     >/dev/null || fail "could not hold the answer-before-replay fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the answer-before-replay fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  interrupt_teardown_during_treehouse_return "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3222,10 +3231,15 @@ SH
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
-    || fail "session start could not replay cleanup after the answer: $bootstrap"
-  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
-  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_present "$home/state/$id.meta" "startup discarded task ownership before cleanup retry"
+  assert_present "$home/state/$id.backlog-close" "startup discarded the pending cleanup record"
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force 2>&1) \
+    || fail "teardown retry failed: $bootstrap"
+  assert_absent "$home/state/$id.meta" "teardown retry left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "teardown retry left the pending record behind"
   json=$(run_bearings "$home") || fail "Bearings failed after the answer-before-replay lifecycle"
   printf '%s' "$json" | jq -e \
     --arg id "$id" --arg report "data/$id/report.md" \
@@ -3264,11 +3278,7 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  interrupt_teardown_during_treehouse_return "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3309,11 +3319,7 @@ test_unusable_pending_close_record_names_its_reason() {
     >/dev/null || fail "could not hold the unusable pending-close fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the unusable pending-close fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  interrupt_teardown_during_treehouse_return "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3378,11 +3384,7 @@ EOF
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated answer-before-replay fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  interrupt_teardown_during_treehouse_return "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3409,10 +3411,9 @@ SH
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
-    || fail "session start could not replay relocated cleanup after the answer: $bootstrap"
-  assert_absent "$home/state/$id.meta" "session start left the relocated task record behind"
-  assert_absent "$home/state/$id.backlog-close" "session start left the relocated pending record behind"
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_present "$home/state/$id.meta" "startup discarded task ownership before cleanup retry"
+  assert_present "$home/state/$id.backlog-close" "startup discarded the pending cleanup record"
   json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
     || fail "Bearings failed after the relocated answer-before-replay lifecycle"

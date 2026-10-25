@@ -3566,6 +3566,10 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  mkdir -p "$case_dir/scratch/proof"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-scratch.sh" register task-x1 "$case_dir/scratch/proof" >/dev/null \
+    || fail "scratch registration failed"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   local rc=0
@@ -3585,6 +3589,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
     "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
+  assert_present "$case_dir/state/task-x1.scratch" "early refusal lost scratch registry"
+  assert_absent "$case_dir/state/task-x1.backlog-close" "early refusal left a replayable close"
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
@@ -3868,6 +3874,372 @@ land_shippable_commit() {
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+}
+
+# Retro 4: task scratch directories and detached proof processes outlived their
+# tasks. A task registers its scratch through bin/fm-scratch.sh; teardown reaps
+# exactly those literal paths (and processes working inside them) once landing
+# is proven, even though the session that created them is long gone.
+test_registered_scratch_is_reaped_after_launching_session_is_gone() {
+  local case_dir rc pid scratch sibling
+  case_dir=$(make_case registered-scratch-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  scratch="$case_dir/scratch/proof-run"
+  sibling="$case_dir/scratch/proof-run-other"
+  mkdir -p "$scratch/deep" "$sibling" "$case_dir/data/task-x1"
+  printf 'x\n' > "$scratch/deep/file"
+  printf 'keep\n' > "$sibling/file"
+  printf 'evidence\n' > "$case_dir/data/task-x1/report.md"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-scratch.sh" register task-x1 "$scratch" > /dev/null \
+    || fail "registered-scratch-reap: register refused a plain scratch directory"
+  # The launching session is gone: a detached proof process outlives the
+  # subshell that started it, parented to init, with its cwd in the scratch dir.
+  ( cd "$scratch/deep" && setsid sleep 301 < /dev/null > /dev/null 2>&1 & )
+  sleep 0.5
+  pid=$(pgrep -f '^sleep 301$' -n -u "$(id -u)" 2>/dev/null || true)
+  [ -n "$pid" ] && [ "$(readlink "/proc/$pid/cwd" 2>/dev/null)" = "$scratch/deep" ] \
+    || { [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null; fail "registered-scratch-reap: setup process did not start in the scratch dir"; }
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "registered-scratch-reap: detached process in registered scratch survived teardown"
+  fi
+  expect_code 0 "$rc" "registered-scratch-reap: teardown should succeed: $(cat "$case_dir/stderr")"
+  [ ! -e "$scratch" ] || fail "registered-scratch-reap: registered scratch directory survived teardown"
+  [ -f "$sibling/file" ] || fail "registered-scratch-reap: an unregistered sibling directory was reaped"
+  [ -f "$case_dir/data/task-x1/report.md" ] || fail "registered-scratch-reap: task evidence was reaped"
+  [ ! -e "$case_dir/state/task-x1.scratch" ] || fail "registered-scratch-reap: teardown left the scratch record"
+  pass "teardown reaps exactly the registered scratch directories and their detached processes, keeping evidence and unregistered siblings"
+}
+
+test_registered_scratch_cleanup_paths() {
+  local route failure case_dir home state data task scratch pid rc test_path
+  for route in direct child; do
+    for failure in none removal no-lsof worktree-scan scratch-scan list-search list-parent list-read; do
+      case_dir=$(make_case "scratch-$route-$failure")
+      if [ "$route" = child ]; then
+        write_meta "$case_dir" local-only secondmate
+        configure_secondmate_with_tmux_children "$case_dir"
+        home="$case_dir/secondmate-home"
+        state="$home/state"; data="$home/data"; task="child-a"
+      else
+        write_meta "$case_dir" local-only ship
+        seed_backlog_in_flight "$case_dir"
+        home="$ROOT"; state="$case_dir/state"; data="$case_dir/data"; task="task-x1"
+      fi
+      scratch="$case_dir/scratch/proof"
+      mkdir -p "$scratch"
+      printf 'proof bytes\n' > "$scratch/file"
+      case "$failure" in
+        list-*)
+          mkdir -p "$case_dir/another-proof"
+          FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+            "$ROOT/bin/fm-scratch.sh" register "$task" "$case_dir/another-proof" >/dev/null || fail "sibling registration failed"
+          ;;
+      esac
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        "$ROOT/bin/fm-scratch.sh" register "$task" "$scratch" >/dev/null \
+        || fail "scratch-$route-$failure: registration failed"
+      pid=
+      if [ "$failure" = none ] || [ "$failure" = no-lsof ] \
+         || [ "$failure" = worktree-scan ] || [ "$failure" = scratch-scan ]; then
+        setsid bash -c "cd \"\$1\"; exec sleep 307" _ "$scratch" &
+        pid=$!
+        sleep 0.5
+        kill -0 "$pid" 2>/dev/null || fail "scratch-$route-$failure: proof process did not start"
+      fi
+      if [ "$failure" = removal ]; then
+        cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" != "$FM_BLOCKED_SCRATCH" ] || exit 1
+done
+exec "$FM_REAL_RM" "$@"
+SH
+        chmod +x "$case_dir/fakebin/rm"
+      fi
+      if [ "$failure" = worktree-scan ] || [ "$failure" = scratch-scan ]; then
+        cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_SCRATCH_SCAN_COUNT" ] || count=$(cat "$FM_SCRATCH_SCAN_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_SCRATCH_SCAN_COUNT"
+[ "$count" -lt "$FM_SCRATCH_SCAN_LIMIT" ]
+SH
+        chmod +x "$case_dir/fakebin/lsof"
+      fi
+      case "$failure" in
+        list-search) chmod 600 "$scratch" ;;
+        list-parent) chmod 600 "$case_dir/scratch" ;;
+        list-read) chmod 000 "$state/$task.scratch" ;;
+      esac
+      local scan_limit=1
+      [ "$failure:$route" != scratch-scan:direct ] || scan_limit=2
+      test_path=$PATH
+      [ "$failure" != no-lsof ] || test_path=$(make_path_without_lsof "$case_dir")
+      rc=0
+      FM_BLOCKED_SCRATCH="$scratch" FM_REAL_RM="$(command -v rm)" \
+        FM_SCRATCH_SCAN_COUNT="$case_dir/scan-count" FM_SCRATCH_SCAN_LIMIT="$scan_limit" \
+        FM_TEARDOWN_TEST_PATH="$test_path" \
+        run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      case "$failure" in
+        list-search) chmod 700 "$scratch" ;;
+        list-parent) chmod 700 "$case_dir/scratch" ;;
+        list-read) chmod 600 "$state/$task.scratch" ;;
+      esac
+      if [ "$failure" = none ]; then
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          fail "scratch-$route: detached process survived"
+        fi
+        wait "$pid" 2>/dev/null || true
+        expect_code 0 "$rc" "scratch-$route: cleanup failed: $(cat "$case_dir/stderr")"
+        assert_absent "$scratch" "scratch-$route: scratch survived"
+        assert_absent "$state/$task.scratch" "scratch-$route: registry survived"
+      else
+        if [ -n "$pid" ]; then
+          if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            fail "scratch-$route-$failure: unverified proof process was killed"
+          fi
+          kill -KILL "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+        fi
+        expect_code 1 "$rc" "scratch-$route-$failure: cleanup should refuse"
+        assert_present "$scratch/file" "scratch-$route-$failure: scratch was removed"
+        case "$failure" in
+          list-*) assert_present "$case_dir/another-proof" "listing failure reaped a partial result" ;;
+        esac
+        assert_present "$state/$task.scratch" "scratch-$route-$failure: registry was removed"
+        assert_present "$state/$task.meta" "scratch-$route-$failure: retry record was removed"
+        assert_absent "$state/$task.backlog-close" "scratch-$route-$failure: pending close could erase retry record"
+        bash -c '. "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$2" "$2/$3.backlog-close" "$4"' \
+          _ "$ROOT" "$state" "$task" "$data" || fail "scratch-$route-$failure: startup replay failed"
+        assert_present "$state/$task.meta" "scratch-$route-$failure: startup replay erased retry record"
+        assert_present "$case_dir/state/task-x1.meta" "scratch-$route-$failure: parent record was removed"
+        if [ "$failure" = removal ] || [ "$failure" = no-lsof ] \
+           || [ "$failure" = worktree-scan ] || [ "$failure" = scratch-scan ] \
+           || [[ "$failure" = list-* ]]; then
+          case "$failure" in
+            worktree-scan|scratch-scan) rm "$case_dir/fakebin/lsof" ;;
+          esac
+          [ "$failure" != removal ] || rm "$case_dir/fakebin/rm"
+          rc=0
+          run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+          expect_code 0 "$rc" "scratch-$route-$failure: retry failed: $(cat "$case_dir/retry.stderr")"
+          assert_absent "$scratch" "scratch-$route-$failure: retry left scratch"
+          case "$failure" in
+            list-*) assert_absent "$case_dir/another-proof" "retry left sibling scratch" ;;
+          esac
+        fi
+      fi
+    done
+  done
+  pass "direct and descendant scratch cleanup reap detached proofs and retain retry records on every refusal"
+}
+
+test_retained_task_data_processes_are_reaped() {
+  local route failure case_dir data task pid rc test_path
+  for route in direct child; do
+    for failure in none no-lsof; do
+      case_dir=$(make_case "retained-data-$route-$failure")
+      if [ "$route" = child ]; then
+        write_meta "$case_dir" local-only secondmate
+        configure_secondmate_with_tmux_children "$case_dir"
+        data="$case_dir/secondmate-home/data"; task="child-a"
+      else
+        write_meta "$case_dir" local-only ship
+        seed_backlog_in_flight "$case_dir"
+        data="$case_dir/data"; task="task-x1"
+      fi
+      mkdir -p "$data/$task/proof"
+      printf 'retain evidence\n' > "$data/$task/proof/result"
+      printf 'retain sibling\n' > "$data/sibling-evidence"
+      setsid bash -c "cd \"\$1\"; exec sleep 311" _ "$data/$task/proof" &
+      pid=$!
+      sleep 0.5
+      test_path=$PATH
+      [ "$failure" != no-lsof ] || test_path=$(make_path_without_lsof "$case_dir")
+      rc=0
+      FM_TEARDOWN_TEST_PATH="$test_path" run_teardown "$case_dir" --force \
+        > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$failure" = no-lsof ]; then
+        kill -0 "$pid" 2>/dev/null || fail "retained-data: unverified process was killed"
+        expect_code 1 "$rc" "retained-data: missing scanner should refuse"
+        assert_present "$case_dir/state/task-x1.meta" "retained-data: lost parent retry record"
+        if [ "$route" = child ]; then
+          assert_present "$case_dir/secondmate-home/state/$task.meta" "retained-data: lost child retry record"
+        fi
+        rc=0
+        run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+      fi
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        fail "retained-data: detached proof survived cleanup"
+      fi
+      wait "$pid" 2>/dev/null || true
+      expect_code 0 "$rc" "retained-data: cleanup failed: $(cat "$case_dir/stderr")"
+      if [ "$route" = direct ]; then
+        assert_present "$data/$task/proof/result" "retained-data: cleanup erased evidence"
+        assert_present "$data/sibling-evidence" "retained-data: cleanup erased sibling evidence"
+      fi
+    done
+  done
+  pass "direct and descendant cleanup reap retained-data proofs, retain direct evidence, and refuse without a scanner"
+}
+
+test_hard_interruption_preserves_scratch_ownership_on_replay() {
+  local case_dir scratch pid cleanup_pid rc mode location=${1:-scratch}
+  case_dir=$(make_case "hard-interruption-$location")
+  write_meta "$case_dir" local-only ship
+  seed_backlog_in_flight "$case_dir"
+  scratch="$case_dir/scratch/proof"
+  [ "$location" != data ] || scratch="$case_dir/data/task-x1/proof"
+  mkdir -p "$scratch"
+  if [ "$location" = scratch ]; then
+    FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-scratch.sh" register task-x1 "$scratch" >/dev/null \
+      || fail "hard-interruption: scratch registration failed"
+  fi
+  setsid bash -c "cd \"\$1\"; exec sleep 309" _ "$scratch" &
+  pid=$!
+  sleep 0.5
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+kill -KILL "$FM_TEARDOWN_KILL_PID"
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:$PATH" \
+    bash -c 'export FM_TEARDOWN_KILL_PID=$$; exec "$@"' _ "$TEARDOWN" task-x1 --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  cleanup_pid=$!
+  rc=0
+  wait "$cleanup_pid" 2>/dev/null || rc=$?
+  expect_code 137 "$rc" "hard-interruption: cleanup was not killed during scan"
+  assert_present "$case_dir/state/task-x1.backlog-close" "hard-interruption: no pending close was written"
+  for mode in close retain; do
+    rc=0
+    bash -c '
+      . "$1/bin/fm-backlog-transition-lib.sh"
+      if [ "$3" = retain ]; then
+        gen=$(sed -n "s/^spawn_gen=//p" "$2/state/task-x1.meta")
+        fm_backlog_close_marker_write "$2/state" task-x1 "$2/data" "$gen" --retain --note "local main" || exit 2
+      fi
+      fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data"
+    ' _ "$ROOT" "$case_dir" "$mode" || rc=$?
+    expect_code 1 "$rc" "hard-interruption: $mode replay should wait for scratch cleanup"
+    assert_present "$case_dir/state/task-x1.meta" "hard-interruption: $mode replay erased ownership"
+    if [ "$location" = scratch ]; then
+      assert_present "$case_dir/state/task-x1.scratch" "hard-interruption: $mode replay erased scratch registry"
+    fi
+    assert_present "$scratch" "hard-interruption: $mode replay erased scratch"
+    assert_equals in_flight "$(backlog_row_state "$case_dir")" "hard-interruption: replay closed backlog"
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "hard-interruption: proof did not survive setup"
+  fi
+  rm "$case_dir/fakebin/lsof"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "hard-interruption: proof survived retry"
+  fi
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$rc" "hard-interruption: retry failed: $(cat "$case_dir/retry.stderr")"
+  if [ "$location" = scratch ]; then
+    assert_absent "$scratch" "hard-interruption: retry left scratch"
+  else
+    assert_present "$scratch" "hard-interruption: retry erased retained data"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "hard-interruption: retry left task record"
+  pass "hard interruption preserves scratch ownership across close and retain replay until retry reaps proofs"
+}
+
+test_scratch_registration_excludes_retained_material() {
+  local case_dir home state data dir rc
+  case_dir=$(make_case scratch-protected-material)
+  write_meta "$case_dir" local-only ship
+  home="$case_dir/home"; state="$case_dir/state"; data="$case_dir/data"
+  mkdir -p "$home/sub" "$data/task-x1/proof" "$case_dir/scratch/proof"
+  printf 'keep\n' > "$data/task-x1/proof/file"
+  ln -s "$data" "$case_dir/evidence-alias"
+  for dir in "$home" "$home/sub" "$state" "$data" "$data/task-x1/proof" \
+      "$case_dir" "$ROOT" "$ROOT/bin" "$case_dir/evidence-alias/task-x1/proof"; do
+    if FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        "$ROOT/bin/fm-scratch.sh" register task-x1 "$dir" >/dev/null 2>&1; then
+      fail "protected-material: registered $dir"
+    fi
+  done
+  assert_absent "$state/task-x1.scratch" "protected-material: refusals created registry"
+  printf '%s\n' "$data/task-x1/proof" "$case_dir/scratch/proof" > "$state/task-x1.scratch"
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "protected-material: legacy registry blocked cleanup: $(cat "$case_dir/stderr")"
+  assert_present "$data/task-x1/proof/file" "protected-material: retained evidence was reaped"
+  assert_absent "$case_dir/scratch/proof" "protected-material: disposable scratch survived"
+  pass "registration and legacy listing exclude protected material, including canonical aliases"
+}
+
+test_registered_scratch_survives_a_refused_teardown() {
+  local case_dir rc scratch
+  case_dir=$(make_case registered-scratch-refused)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  scratch="$case_dir/scratch/proof-run"
+  mkdir -p "$scratch"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-scratch.sh" register task-x1 "$scratch" > /dev/null \
+    || fail "registered-scratch-refused: register refused a plain scratch directory"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "registered-scratch-refused: unlanded work must still refuse"
+  [ -d "$scratch" ] && [ -f "$case_dir/state/task-x1.scratch" ] \
+    || fail "registered-scratch-refused: a refused teardown reaped the scratch or its record"
+  pass "a refused teardown leaves registered scratch and its record in place"
+}
+
+test_scratch_register_and_reap_refuse_unsafe_paths() {
+  local case_dir rc
+  case_dir=$(make_case scratch-unsafe-paths)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/scratch/real" "$case_dir/home-like"
+  ln -s "$case_dir/scratch/real" "$case_dir/scratch/link"
+  for bad in "relative/dir" "$case_dir/scratch/*" "$case_dir/scratch/link" "$case_dir/scratch/real/../real" "$HOME" "/" "/tmp/does-not-exist-$$"; do
+    if FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+        "$ROOT/bin/fm-scratch.sh" register task-x1 "$bad" > /dev/null 2>&1; then
+      fail "scratch-unsafe-paths: register accepted $bad"
+    fi
+  done
+  # A hand-written record cannot widen a delete: the unsafe lines are skipped and
+  # the one safe line is still reaped.
+  printf '%s\n' "$case_dir/scratch/*" "$HOME" "$case_dir/scratch/link" "$case_dir/missing" "$case_dir/scratch/real" \
+    > "$case_dir/state/task-x1.scratch"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "scratch-unsafe-paths: teardown should succeed: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/scratch/real" ] || fail "scratch-unsafe-paths: the safe recorded directory was not reaped"
+  [ -d "$HOME" ] || fail "scratch-unsafe-paths: HOME was touched"
+  pass "unsafe scratch paths are refused at registration and skipped at reap"
 }
 
 # Cleanup keeps the task's no-mistakes pipeline spend in this home's records
@@ -4495,6 +4867,10 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  mkdir -p "$case_dir/scratch/proof"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-scratch.sh" register task-x1 "$case_dir/scratch/proof" >/dev/null \
+    || fail "scratch registration failed"
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
@@ -4522,6 +4898,8 @@ EOF
     "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
   kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
   kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$case_dir/state/task-x1.scratch" "early refusal lost scratch registry"
+  assert_absent "$case_dir/state/task-x1.backlog-close" "early refusal left a replayable close"
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
 }
 
@@ -5242,6 +5620,14 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_registered_scratch_is_reaped_after_launching_session_is_gone
+test_retained_task_data_processes_are_reaped
+test_hard_interruption_preserves_scratch_ownership_on_replay
+test_hard_interruption_preserves_scratch_ownership_on_replay data
+test_scratch_registration_excludes_retained_material
+test_registered_scratch_cleanup_paths
+test_registered_scratch_survives_a_refused_teardown
+test_scratch_register_and_reap_refuse_unsafe_paths
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

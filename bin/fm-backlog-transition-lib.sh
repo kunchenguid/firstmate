@@ -46,6 +46,9 @@
 # that record before destructive cleanup, so it never publishes or acts on a close
 # replay would reject. The validator pins the data path to this home's configured
 # root before any recovery mutation, then re-runs exactly that close.
+# While matching task metadata still exists, a scratch registry (including a
+# symlink) or data/<id>/ directory blocks replay before metadata removal: rerun
+# teardown to finish process and scratch cleanup instead of losing ownership.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -1166,6 +1169,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
+    fi
+    if [ -e "$state/$id.scratch" ] || [ -L "$state/$id.scratch" ] || [ -d "$data/$id" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="task scratch or retained-data process cleanup remains outstanding for $id; rerun teardown before replaying its backlog close"
+      return 1
     fi
     fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
       "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \

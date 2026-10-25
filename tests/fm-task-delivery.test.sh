@@ -1708,6 +1708,46 @@ test_receipt_hooks_run_with_the_addon() {
   pass "receipt hooks: promotion records one requirement and ship briefs carry it with the add-on"
 }
 
+test_fresh_and_promoted_ships_register_disposable_scratch() {
+  local home id route prompt scratch command out
+  home="$TMP_ROOT/scratch-instructions/home"
+  mkdir -p "$home/state"
+  for route in fresh promoted; do
+    id="scratch-$route"
+    if [ "$route" = fresh ]; then
+      FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode local-only >/dev/null \
+        || fail "fresh scratch brief failed"
+      prompt="$home/data/$id/brief.md"
+    else
+      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+      FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null \
+        || fail "scratch scout brief failed"
+      fill_brief_subsections "$home/data/$id/brief.md" "Implement the fix." "Preserve task evidence."
+      out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1) \
+        || fail "scratch promotion failed: $out"
+      prompt="$home/data/$id/ship-instructions.md"
+    fi
+    scratch="$TMP_ROOT/scratch-instructions/proof-$route"
+    mkdir -p "$scratch"
+    command=$(python3 - "$prompt" <<'PYCODE'
+import re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+commands = [s for s in re.findall(r'`([^`]+)`', text) if 'fm-scratch.sh' in s and ' register ' in s]
+assert len(commands) == 1, commands
+print(commands[0].replace('<dir>', '"$1"'))
+PYCODE
+    ) || fail "$route: generated instructions omitted the registration command"
+    bash -c "$command" _ "$scratch" >/dev/null || fail "$route: emitted registration command failed"
+    assert_equals "$scratch" "$(FM_HOME="$home" "$ROOT/bin/fm-scratch.sh" list "$id")" \
+      "$route: emitted command registered scratch in the wrong home"
+    if bash -c "$command" _ "$home/data/$id" >/dev/null 2>&1; then
+      fail "$route: emitted command accepted retained evidence"
+    fi
+  done
+  pass "fresh and promoted ship instructions supply an executable scratch registration contract"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -1736,3 +1776,5 @@ test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 test_receipt_hooks_run_with_the_addon
 echo "# all fm-task-delivery tests passed"
+
+test_fresh_and_promoted_ships_register_disposable_scratch

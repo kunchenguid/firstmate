@@ -20,7 +20,9 @@
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
+# is retried by the next session start. Scratch and retained-data cleanup can
+# instead require a teardown retry before replay, as specified by the recovery
+# contract in bin/fm-backlog-transition-lib.sh. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
 # data/backlog.md; those cases print the manual follow-up. A configured
 # non-markdown adapter remains active without a markdown file; any active
@@ -270,19 +272,24 @@
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
-#     started under the worktree (or its per-task tasktmp) does not receive the
+#     started under a task-owned directory does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
 #     process group, so it survives reparented to init (observed 2026-08-03:
 #     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
-#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
+#     whose CURRENT WORKING DIRECTORY is under a supplied task-owned
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches.
+#     Direct cleanup supplies the worktree and tasktmp roots, then registered
+#     scratch and data/<id>/; descendant cleanup supplies registered scratch
+#     and data/<id>/. Registered paths are validated by bin/fm-scratch.sh
+#     before their processes are reaped and the directories removed.
+#     Direct cleanup retains data/<id>/ evidence; retiring a secondmate removes
+#     its home after child cleanup. Scratch or retained-data roots require lsof;
+#     failed inspection, scanning or scratch removal preserves task ownership
+#     for a teardown retry. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -465,6 +472,10 @@ DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
+  if [ "$META_LOCK_HELD" = 1 ] \
+     && { [ -e "$STATE/$ID.scratch" ] || [ -L "$STATE/$ID.scratch" ] || [ -d "${DATA:-$FM_HOME/data}/$ID" ]; }; then
+    fm_backlog_close_marker_clear "$STATE" "$ID" || status=1
+  fi
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -2334,12 +2345,13 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
+# Reap processes rooted (by cwd) under the caller's task-owned directories;
+# the header's Fix 2 contract owns root selection and directory retention. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# scan error refuses before destructive teardown. Scratch and retained-data
+# callers require lsof before entering this helper.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
@@ -3307,6 +3319,40 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+teardown_reap_registered_scratch() {
+  local FM_HOME=$1 STATE=$2 DATA=$3 ID=$4 dir listing kept=0
+  local -a scratch roots
+  scratch=()
+  listing=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-scratch.sh" list "$ID") || return 1
+  while IFS= read -r dir; do
+    [ -z "$dir" ] || scratch+=("$dir")
+  done <<EOF
+$listing
+EOF
+  roots=(${scratch[@]+"${scratch[@]}"})
+  [ ! -d "$DATA/$ID" ] || roots+=("$DATA/$ID")
+  if [ "${#roots[@]}" -gt 0 ]; then
+    if ! command -v lsof >/dev/null 2>&1; then
+      echo "REFUSED: lsof is required to verify detached processes in task scratch and retained data for $ID; preserving scratch and task records for retry" >&2
+      return 1
+    fi
+    reap_task_worktree_processes "task scratch and retained data" "${roots[@]}" || return 1
+  fi
+  for dir in ${scratch[@]+"${scratch[@]}"}; do
+    case "$dir" in
+      "$STATE"|"$STATE"/*|"$DATA"|"$DATA"/*) kept=1; echo "warning: not reaping registered scratch directory $dir for $ID: it is inside this home's state or data" >&2; continue ;;
+    esac
+    if safe_rm_rf "$dir" "registered scratch"; then
+      echo "teardown: reaped registered scratch directory $dir for $ID" >&2
+    else
+      kept=1
+      echo "warning: registered scratch directory $dir for $ID was not removed" >&2
+    fi
+  done
+  [ "$kept" = 0 ] || return 1
+  rm -f "$STATE/$ID.scratch"
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
   sub_state="$home/state"
@@ -3351,6 +3397,12 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
+    fi
+    if [ "$child_kind" != secondmate ]; then
+      teardown_reap_registered_scratch "$home" "$sub_state" "$home/data" "$child_id" || {
+        fm_backlog_close_marker_clear "$sub_state" "$child_id" || return 1
+        return 1
+      }
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -3769,7 +3821,8 @@ fi
 # close is confirmed, before any branch deletion or copy return. Otherwise
 # killing the pane shell steals focus before the close can snapshot it.
 if [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" || exit 1
+  teardown_reap_registered_scratch "$FM_HOME" "$STATE" "$DATA" "$ID" || exit 1
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

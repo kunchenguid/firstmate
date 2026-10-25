@@ -479,7 +479,7 @@ if [ "\${1:-}" = return ] && [ ! -f "$case_dir/teardown-interrupted" ]; then
   : > "$case_dir/teardown-interrupted"
   teardown_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
   case "\$teardown_pid" in ''|*[!0-9]*) exit 1 ;; esac
-  kill -TERM "\$teardown_pid"
+  kill -KILL "\$teardown_pid"
   kill -TERM "\$\$"
 fi
 exit 0
@@ -1831,13 +1831,16 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
     || fail "interrupted cleanup changed the backlog before recovery"
 
   out=$(run_bootstrap "$case_dir")
+  assert_present "$home/state/$id.meta" "restart discarded ownership before cleanup retry"
+  assert_present "$marker" "restart discarded the pending cleanup record"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "restart closed the task before retained-data cleanup: $out"
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown retry failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "restart left interrupted cleanup In flight: $out"
-  assert_absent "$marker" "restart retained the recovered close marker"
-  assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "restart silently hid potentially incomplete physical cleanup"
-  pass "restart recovers closes recorded before destructive cleanup"
+    || fail "teardown retry left interrupted cleanup In flight: $out"
+  assert_absent "$marker" "teardown retry retained the recovered close marker"
+  assert_absent "$home/state/$id.meta" "teardown retry retained the interrupted task record"
+  pass "teardown retry recovers closes recorded before destructive cleanup"
 }
 
 test_completion_refuses_a_close_target_symlinked_to_a_directory() {

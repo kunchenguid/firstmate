@@ -81,6 +81,7 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-scratch.sh" "$fake/bin/fm-scratch.sh"
   # fm-dod-lib.sh (and the fm-brief-heading-lib.sh it sources): teardown uses
   # its PR-outside-origin check to prove a cross-repo lane.
   ln -s "$ROOT/bin/fm-dod-lib.sh" "$fake/bin/fm-dod-lib.sh"
@@ -191,6 +192,7 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-scratch.sh" "$fake/bin/fm-scratch.sh"
   # fm-dod-lib.sh (and the fm-brief-heading-lib.sh it sources): teardown uses
   # its PR-outside-origin check to prove a cross-repo lane.
   ln -s "$ROOT/bin/fm-dod-lib.sh" "$fake/bin/fm-dod-lib.sh"

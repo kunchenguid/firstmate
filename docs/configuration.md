@@ -90,6 +90,7 @@ Each effective `FM_HOME` contains private operational directories.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
+- Per-task scratch-directory records under `state/<id>.scratch` ([`bin/fm-scratch.sh`](../bin/fm-scratch.sh) owns registration and validation; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns cleanup).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 - [Host memory guard records](#host-memory-guard-confighost-memory).
 

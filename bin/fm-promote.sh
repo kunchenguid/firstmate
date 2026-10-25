@@ -301,6 +301,7 @@ Any earlier "Never push" or scout-only delivery language in this file is superse
 This replaces the scout rule limiting outside-worktree writes to the report and status file.
 Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
 Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
+Register disposable temporary directories outside the Firstmate home, repository, state and data directories with \`FM_HOME='$FM_HOME' FM_STATE_OVERRIDE='$STATE' FM_DATA_OVERRIDE='$DATA' '$FM_ROOT/bin/fm-scratch.sh' register $ID <dir>\` so cleanup reaps them; keep retained evidence under \`$DATA/$ID/\` unregistered.
 Leave the worktree clean before reporting done.
 The mode-specific Definition of done below is the current delivery contract.
 
