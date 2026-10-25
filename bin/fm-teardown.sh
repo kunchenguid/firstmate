@@ -3818,7 +3818,7 @@ fi
 # The task is finished, landed or discarded, so its own Lima lane VMs
 # (bin/fm-lane-vm-lib.sh) are spent.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  fm_lane_vm_cleanup "$ID" "$STATE" "$SECONDMATE_REG"
+  fm_lane_vm_cleanup "$ID" "$META"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

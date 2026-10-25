@@ -445,6 +445,7 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+LANE_VM_RECORD="$(shell_quote "$FM_ROOT/bin/fm-lane-vm-record.sh") $(shell_quote "$STATE/$ID.meta")"
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -704,7 +705,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-   Name any Lima VM you create \`$ID\` or \`$ID-<suffix>\` (no branch prefix), so cleanup can find and delete it.
+   Record every Lima VM you create, right after creating it, so cleanup deletes it: \`$LANE_VM_RECORD <vm-name>\`
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
@@ -782,7 +783,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-   Name any Lima VM you create \`$ID\` or \`$ID-<suffix>\` (no branch prefix), so cleanup can find and delete it.
+   Record every Lima VM you create, right after creating it, so cleanup deletes it: \`$LANE_VM_RECORD <vm-name>\`
 3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
