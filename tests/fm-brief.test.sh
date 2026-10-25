@@ -715,8 +715,10 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
 # The worker's opening turn must not end at an announcement: the first
 # instruction after the identity line tells it to append its status line and
 # then begin work, and points at rule 4 rather than duplicating the command.
+# It is the brief's only "first action", so the ship Setup steps cannot claim
+# a competing one.
 test_crewmate_scaffolds_open_with_status_then_work() {
-  local home id brief second
+  local home id brief second next count
   home="$TMP_ROOT/opening-home"
   mkdir -p "$home/data"
   for kind in ship scout; do
@@ -728,11 +730,15 @@ test_crewmate_scaffolds_open_with_status_then_work() {
     fi
     brief="$home/data/$id/brief.md"
     second=$(sed -n 2p "$brief")
+    next='then begin the first unit of work'
+    [ "$kind" = ship ] && next='then run the numbered Setup steps and begin the first unit of work'
     # shellcheck disable=SC2016 # The backticks are literal brief text.
     case "$second" in
-      *'our first action is to append a `working:` status line with the rule 4 command under Rules, then begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.') ;;
+      *"our first action is to append a \`working:\` status line with the rule 4 command under Rules, $next in the same turn; ending this opening turn with no work product is a stall, not a finish.") ;;
       *) fail "$kind scaffold does not open with the status-then-work instruction (got: $second)" ;;
     esac
+    count=$(grep -ci 'first action' "$brief")
+    [ "$count" = 1 ] || fail "$kind scaffold names $count first actions, want only the opening line"
     assert_grep "4. Report status by appending one line:" "$brief" \
       "$kind scaffold lost the rule 4 status protocol the opening points to"
   done
@@ -1577,7 +1583,7 @@ test_branch_prefix_command_is_shell_safe() {
     || fail "a ref-format-valid metacharacter prefix should scaffold safely"
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016 # The sed expression intentionally contains literal backticks.
-  command=$(sed -n 's/^1\. First action: create your branch: `\(.*\)`$/\1/p' "$brief")
+  command=$(sed -n 's/^1\. Create your branch: `\(.*\)`$/\1/p' "$brief")
   [ -n "$command" ] || fail "generated brief exposed no branch-creation command"
   repo="$TMP_ROOT/branch-prefix-shell-safe-repo"
   git init -q "$repo" || fail "could not initialize shell-safety fixture repository"

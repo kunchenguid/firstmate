@@ -762,7 +762,7 @@ DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CO
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-Once the Setup isolation check passes, your first action is to append a \`working:\` status line with the rule 4 command under Rules, then begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.
+Once the Setup isolation check passes, your first action is to append a \`working:\` status line with the rule 4 command under Rules, then run the numbered Setup steps and begin the first unit of work in the same turn; ending this opening turn with no work product is a stall, not a finish.
 
 $TASK_SECTION
 
@@ -775,7 +775,7 @@ $SETUP_BASE
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
+1. Create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
 
 # Rules
 $RULE1
