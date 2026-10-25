@@ -113,19 +113,21 @@ The lines a mission writes for you are just as short: `working`, `paused` with w
     │ backend sends / status records │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │ task 1 │   │ task 2 │  ... │ task N │   tmux windows, herdr or zellij tabs, cmux workspaces, Orca terminals
- │operator│   │operator│      │operator│   one autonomous agent each
+ │ task 1 │   │ task 2 │  ... │ task N │
+ │operator│   │operator│      │operator│
  └───┬────┘   └───┬────┘      └───┬────┘
+     │            │               │
      ▼            ▼               ▼
-  treehouse worktree, Orca worktree, or an isolated secondmate home
+  one disposable git worktree per operator
+  (treehouse, Orca, or an isolated secondmate home)
      │
      ├─ mission: project mode ► PR or local merge ► cleanup
      │
-     └─ recon: report at data/<id>/report.md ► decision inventory ► findings
+     └─ recon: report at data/<id>/report.md ► findings
 ```
 
 You chat with the Overwatch.
-It routes each request to an operator in its own session endpoint and git worktree, supervises the squad with a zero-token event-driven watcher, and brings you finished pull requests, approved local merges, or recon reports.
+It routes each request to an operator in its own session endpoint and git worktree, in tmux windows, herdr or zellij tabs, cmux workspaces, or Orca terminals, supervises the squad with a zero-token event-driven watcher, and brings you finished pull requests, approved local merges, or recon reports.
 Opt-in secondmates extend the same shape to persistent mates in their own isolated homes on this machine or another host, dispatch profiles steer which harness handles which mission, and opt-in Relay answers public mentions in the same lifecycle.
 The full architecture is in [`docs/architecture.md`](docs/architecture.md).
 
