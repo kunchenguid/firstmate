@@ -112,7 +112,7 @@ fm_trace_context_valid() {  # <traceparent>
 # checks turn a masked pipeline failure into a clean omission upstream.
 fm_trace_context_hex() {  # <byte-count>
   local bytes=$1 hex
-  hex=$(LC_ALL=C od -An -v -tx1 -N "$bytes" /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  hex=$(LC_ALL=C /usr/bin/od -An -v -tx1 -N "$bytes" /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   case "$hex" in
     '' | *[!0-9a-f]*) return 1 ;;
   esac

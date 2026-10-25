@@ -259,7 +259,7 @@ fm_operational_record_write() {  # <state-dir> <kind> <body> <doorbell-var>
   case "$abs" in
     *"'"*|*[![:print:]]*) return 1 ;;
   esac
-  nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  nonce=$(/usr/bin/od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "$nonce" in ''|*[!0-9a-f]*) return 1 ;; esac
   name="$(date +%s)-$nonce.msg"
   tmp=$(mktemp "$dir/.record.XXXXXX" 2>/dev/null) || return 1

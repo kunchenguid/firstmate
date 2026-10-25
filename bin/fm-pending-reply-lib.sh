@@ -207,7 +207,7 @@ fm_pending_reply_text_has_corr() {  # <text> <corr_id>
 # than <max> characters, else -1. Counts lead bytes from od output, so the
 # verdict is the same under every caller locale and never splits a character.
 fm_pending_reply_char_cut() {  # <text> <max> <keep>
-  printf '%s' "$1" | LC_ALL=C od -An -v -tu1 | awk -v max="$2" -v keep="$3" '
+  printf '%s' "$1" | LC_ALL=C /usr/bin/od -An -v -tu1 | awk -v max="$2" -v keep="$3" '
     { for (i = 1; i <= NF; i++) {
         if ($i < 128 || $i >= 192) { chars++; if (chars == keep + 1) cut = n }
         n++
@@ -239,7 +239,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 fm_pending_reply_sighting_encode() {  # <path> <line-number>
   local path=$1 line_no=$2 encoded
   case "$line_no" in ''|*[!0-9]*) return 1 ;; esac
-  encoded=$(printf '%s' "$path" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  encoded=$(printf '%s' "$path" | LC_ALL=C /usr/bin/od -An -v -tx1 | tr -d ' \n') || return 1
   [ -n "$encoded" ] || return 1
   printf 'hex:%s:%s' "$encoded" "$line_no"
 }

@@ -1689,7 +1689,7 @@ status_observed_signature() {
   if [ -r "$f" ]; then access=readable; else access=unreadable; fi
   encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \
     "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
-    | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+    | LC_ALL=C /usr/bin/od -An -v -tx1 | tr -d ' \n') || return 1
   printf 'r1:%s' "$encoded"
 }
 
@@ -1726,7 +1726,11 @@ status_presentation_marker_commit() {
   case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
   current=$(_fm_open_decisions_file_ident "$file") || return 1
   [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
+  # The report-only path refuses an unparseable signature; the full commit
+  # must too, or a broken encoder's output lands in the marker and permanently
+  # poisons every later parse of it.
   reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
+  _status_presentation_signature_valid "$reported" || return 1
   classified="${endpoint}@${ident}"
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
