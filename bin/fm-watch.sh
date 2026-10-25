@@ -2317,6 +2317,25 @@ scan_signals() {
   return 0
 }
 
+# Merge the pre-grace signal scan with its post-grace re-scan into ONE batch. A
+# file the re-scan reports again supersedes its earlier observation (last write
+# wins, the same rule the marker commits below and the drain's own same-key
+# collapse follow), because the re-scan exists precisely to coalesce one crew's
+# two writes into one reported event. Without this the batch names that file
+# twice and EVERY consumer writes one durable row per occurrence - so a single
+# coalesced lane event lands in the wake queue as two rows, inflating its depth
+# and inviting a repeated wake for work already reported.
+signal_batch_merge() {  # <pre-grace-rows> <re-scan-rows>
+  printf '%s\n%s\n' "$1" "$2" | awk -F '\t' '
+    NF >= 3 {
+      if (!($3 in seen)) order[++count] = $3
+      seen[$3] = 1
+      line[$3] = $0
+    }
+    END { for (i = 1; i <= count; i++) print line[order[i]] }
+  '
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -3508,7 +3527,10 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # Sequential assignments, never sibling substitutions on one command: a
+    # CHLD trap makes two $() arguments a bash 5.2 parse-error landmine.
+    rescan=$(scan_signals)
+    pending=$(signal_batch_merge "$pending" "$rescan")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see

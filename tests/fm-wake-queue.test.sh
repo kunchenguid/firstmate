@@ -88,6 +88,40 @@ test_signal_catchup_without_running_watcher() {
   pass "signal written while no watcher runs is caught on next run"
 }
 
+test_signal_grace_rescan_queues_one_row() {
+  local dir state fakebin out status_file rows presented watcher i
+  dir=$(make_case signal-grace-merge)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  # The grace re-scan exists so a crew's own follow-up write (its turn-end hook,
+  # seconds after the status write) is reported once instead of costing two
+  # firstmate turns. One coalesced event must therefore append exactly ONE
+  # durable row; a batch that names the file twice writes the same lane event
+  # into the queue more than once, which is what inflates its depth.
+  printf 'blocked: first\n' > "$status_file"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=4 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$dir/watch.err" &
+  watcher=$!
+  # Keep writing through the whole grace window, so the re-scan always observes a
+  # newer signature than the scan that opened the batch, whatever the startup
+  # jitter on a loaded machine.
+  i=0
+  while [ "$i" -lt 15 ]; do
+    printf 'done: second %s\n' "$i" >> "$status_file"
+    sleep 0.2
+    i=$((i + 1))
+  done
+  wait_for_exit "$watcher" 60 || fail "watcher did not exit for the coalesced signal"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the coalesced signal"
+  rows=$(awk -F '\t' -v key=task.status '$3 == "signal" && $4 == key' "$state/.wake-queue" | wc -l)
+  [ "$rows" -eq 1 ] || fail "expected 1 queued row for the coalesced signal, got $rows"
+  presented=$(grep -c '^signal: ' "$out")
+  [ "$presented" -eq 1 ] || fail "expected the coalesced signal reported once, got $presented"
+  pass "a signal coalesced across the grace re-scan queues exactly one row"
+}
+
 test_stale_enqueue_before_suppressor() {
   local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale)
@@ -3648,6 +3682,7 @@ test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
+test_signal_grace_rescan_queues_one_row
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
