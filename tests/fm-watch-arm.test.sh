@@ -1331,7 +1331,7 @@ test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
     exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
       -u HERDR_SOCKET_PATH -u HERDR_SESSION -u FM_BACKEND_HERDR_BIN \
       PATH="$dir/fakebin:$PATH" TMPDIR="$dir/tmp" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-      FM_POLL=12 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_POLL=40 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
       FM_BUSY_TURN_MAX_SECS=999999 FM_STALE_ESCALATE_SECS=999999 \
       FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$dir/quiet-reader" \
       FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_WATCH_PREDECESSOR_ARM_PID="$pred" \
@@ -1348,26 +1348,28 @@ test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
   acknowledged=$(cat "$state/.watcher-down")
   case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
   # Land the take-over a second into a fresh event wait (each begins with the
-  # socket lookup), well inside its 12s budget.
+  # socket lookup), well inside its 40s budget. The budget must outlast the
+  # arm's stop bound even when a loaded host stretches that bound, or a held
+  # TERM is released in time and the case cannot catch the bug.
   before=$(grep -c '^session list' "$dir/herdr.log" 2>/dev/null) || before=0
   i=0
-  while [ "$i" -lt 400 ]; do
+  while [ "$i" -lt 1000 ]; do
     [ "$(grep -c '^session list' "$dir/herdr.log" 2>/dev/null)" -gt "$before" ] && break
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$i" -lt 400 ] || fail "fixture: the successor never entered its event wait: $(cat "$dir/herdr.log" 2>/dev/null)"
+  [ "$i" -lt 1000 ] || fail "fixture: the successor never entered its event wait: $(cat "$dir/herdr.log" 2>/dev/null)"
   sleep 1
   event_arm "" --take-over "$owner" > "$armout" &
   ARM_PID=$!
   i=0
-  while [ "$i" -lt 160 ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
+  while [ "$i" -lt 400 ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
     is_live_non_zombie "$ARM_PID" || break
     sleep 0.05
     i=$((i + 1))
   done
   grep -q '^watcher: started pid=' "$armout" \
-    || fail "the take-over did not own a fresh cycle within 8s of a stop during the event wait: $(cat "$armout")"
+    || fail "the take-over did not own a fresh cycle within 20s of a stop during the event wait: $(cat "$armout")"
   ! is_live_non_zombie "$watcher" || fail "the take-over left the watcher it stopped running"
   grep -q "^arm_pid=$ARM_PID	watcher_pid=$watcher	.*reason=taken-over	" "$state/.watch-cycle-exits.log" \
     || fail "the take-over did not confirm its stop: $(cat "$state/.watch-cycle-exits.log")"
