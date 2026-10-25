@@ -64,13 +64,21 @@ So there is no app, no server and no account: the repository is the product.
 
 ## Why Juggernaut
 
-| Doing it by hand today | With Juggernaut |
-| --- | --- |
-| You keep several terminals open and remember what each one was doing | You talk to one agent, and it holds the whole fleet's state on disk |
-| Every session edits your checkout, so parallel work collides | Each mission gets its own disposable git worktree and its own operator |
-| You notice a dead run when you get back to that tab | A zero-token watcher wakes the Overwatch only when something needs a person |
-| You re-read diffs to decide what is safe to merge | Work lands through the mode you set per project, and only a green, in-scope result reaches the merge |
-| A restart or a closed laptop loses the thread | State, decisions and promises live in durable records, so the next session reconciles and resumes |
+- **One interface instead of a wall of tabs.**
+  Today you keep several terminals open and remember what each one was doing.
+  Here you talk to one agent that holds the whole fleet's state on disk.
+- **Isolated work instead of collisions.**
+  Today every session edits your checkout, so parallel work fights itself.
+  Here each mission gets its own disposable git worktree and its own operator.
+- **Watching that costs nothing.**
+  Today you find a dead run when you return to that tab.
+  Here a zero-token watcher wakes the Overwatch only when something needs a person.
+- **Landing that is already checked.**
+  Today you re-read diffs to decide what is safe to merge.
+  Here work lands through the mode you set per project, and only a green, in-scope result reaches the merge.
+- **A restart that changes nothing.**
+  Today a closed laptop loses the thread.
+  Here state, decisions and promises live in durable records, so the next session reconciles and resumes.
 
 ## What one clone gives you
 
