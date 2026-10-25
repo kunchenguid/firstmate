@@ -2186,16 +2186,50 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   start_item "$case_dir" "$id"
   tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\npr_merge_verified_at=2026-07-14T00:00:00Z\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "replaying a completion link changed the closed row: $out"
-  assert_grep 'https://github.com/example/repo/pull/13' "$(backlog_of "$case_dir")" \
-    "recovery discarded the recorded link because the item was already Done"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/13"' >/dev/null \
+    || fail "recovery discarded a verified completion link because the item was already Done: $out"
+  assert_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "the backfilled verified link did not record the merge"
   assert_absent "$marker" "recovery retained an applied completion-link marker"
-  pass "recovery backfills recorded links onto already Done items"
+  pass "recovery backfills a verified recorded link onto an already Done item"
+}
+
+test_recovery_downgrades_an_unverified_recorded_link_on_a_live_row() {
+  local case_dir id marker out url=https://github.com/example/repo/pull/14
+  id=atomic-heal-live-unverified-b10
+  case_dir=$(make_home heal-live-unverified)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-heal-live"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  # A record staged before the merge check existed: it carries the link and no
+  # verified-merge fact, so the replay may not close the row as a merge.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-live\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left an unverified recorded close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "an unverified recorded link closed the row as a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F 'links: none' >/dev/null \
+    || fail "the unverified recorded link stayed a structured link on the closed row"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "Historical record: $url" >/dev/null \
+    || fail "the downgraded close did not keep the recorded link in a body note"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F 'the merge was not verified in this run' >/dev/null \
+    || fail "the downgraded close did not say why the merge is unconfirmed"
+  assert_absent "$marker" "a replayed downgraded close left its record behind"
+  pass "recovery downgrades an unverified recorded link on a live row"
 }
 
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
@@ -3235,6 +3269,7 @@ test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
+test_recovery_downgrades_an_unverified_recorded_link_on_a_live_row
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
