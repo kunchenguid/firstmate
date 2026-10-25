@@ -213,6 +213,20 @@ invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
 [ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "stall after a resume was not reported"
 ok "no eligible candidate does not relaunch and reports the decision"
 
+# An array row without effort matches the concrete effort on the task record.
+begin unset-effort
+jq -n '{mid_task_fallback:true, rules:[{when:"work", use:[
+  {harness:"claude", model:"claude-sonnet-5"},
+  {harness:"codex", model:"gpt-5.5"}]}]}' > "$CASE/config/crew-dispatch.json"
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+rc=$?
+[ "$rc" -eq 0 ] || fail "unset effort exited $rc: $out"
+[ "$out" = "relaunched: codex gpt-5.5 default" ] || fail "unset effort said: $out"
+ok "an unset array effort matches the recorded effort"
+
 # Limit text on a status line is not a signal, with or without a snapshot.
 begin ordinary
 write_rules true
