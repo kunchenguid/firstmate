@@ -394,6 +394,18 @@ for verb in done "needs-decision" blocked failed; do
   [ "$rc" -eq 0 ] || fail "$verb task exited $rc: $out"
   assert_no_control "$verb task"
 done
+for shape in 'done: PR ready\n  waiting on review' 'done corr=0123456789abcdef: PR ready'; do
+  begin finished-shape
+  write_rules true
+  write_meta
+  invoke bind "$ID" --rule 0 >/dev/null
+  printf "$shape\n" > "$CASE/state/$ID.status"
+  quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+  out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "finished shape exited $rc: $out"
+  assert_no_control "finished shape: $shape"
+done
 ok "a finished or waiting task is not relaunched"
 
 # The same recorded switch does not relaunch again while the pause line remains last.
