@@ -530,6 +530,58 @@ fm_backlog_pr_note_label() {  # <url>
     esac )
 }
 
+# The pending-close record is a line-oriented file holding one `arg=` line per
+# flag, and a `--note` value is prose that lands in the task body, so without one
+# shared encoding the reader could not tell the value's own spaces from the
+# record's structure. The writer encodes every `--note` value and every reader
+# decodes it, so a replay reproduces the note byte for byte. The accepted byte
+# set is the one firstmate's own notes use - a sentence over letters, digits, and
+# the punctuation below - and validation requires that re-encoding the decoded
+# value reproduces the recorded text, so a value outside it is refused rather
+# than silently altered.
+FM_BACKLOG_NOTE_MAX=300
+fm_backlog_note_encode() {  # <text>
+  local text=$1 out='' ch encoded i=0
+  [ -n "$text" ] || return 1
+  [ "${#text}" -le "$FM_BACKLOG_NOTE_MAX" ] || return 1
+  case "$text" in -*) return 1 ;; esac
+  while [ "$i" -lt "${#text}" ]; do
+    ch=${text:$i:1}
+    case "$ch" in
+      ' ') encoded=%20 ;;
+      [A-Za-z0-9]) encoded=$ch ;;
+      "/"|":"|"?"|"&"|"="|"_"|"."|"+"|"@"|","|"-") encoded=$ch ;;
+      *) return 1 ;;
+    esac
+    out=$out$encoded
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+fm_backlog_note_decode() {  # <encoded-note>
+  local encoded=$1 out=''
+  [ -n "$encoded" ] || return 1
+  [ "${#encoded}" -le $((FM_BACKLOG_NOTE_MAX * 3)) ] || return 1
+  while [ -n "$encoded" ]; do
+    case "$encoded" in
+      *%*)
+        out=$out${encoded%%%*}
+        encoded=${encoded#*%}
+        case "$encoded" in
+          20*) out="$out "; encoded=${encoded#20} ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *)
+        out=$out$encoded
+        encoded=
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2 arg label previous_arg=''
   local -a done_args=()
@@ -983,7 +1035,14 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        # A note is accepted only when the decoder reconstructs a value the
+        # encoder would emit from it again, so the recorded prose the replay
+        # writes back is exactly the prose that was staged.
+        --note)
+          arg_value=$(fm_backlog_note_decode "${args[1]}") \
+            && [ -n "$arg_value" ] \
+            && [ "$(fm_backlog_note_encode "$arg_value")" = "${args[1]}" ]
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1060,7 +1119,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
 # instead of a close; the remaining flags are the same completion links either
 # transition records.
 fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
-  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
+  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg='' serialized
   local mode=close serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $3"
@@ -1081,8 +1140,12 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    if [ "$previous_arg" = --note ]; then
+      serialized=$(fm_backlog_note_encode "$arg") || {
+        FM_BACKLOG_TRANSITION_ERROR="unrecordable note text for the pending-close record"
+        return 1
+      }
+      serialized_args+=("$serialized")
     else
       serialized_args+=("$arg")
     fi
@@ -1158,7 +1221,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    args[1]=$(fm_backlog_note_decode "${args[1]}") || {
+      FM_BACKLOG_TRANSITION_ERROR="unreadable note text in pending-close record $marker"
+      return 1
+    }
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
