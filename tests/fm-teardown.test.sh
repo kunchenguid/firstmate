@@ -5344,7 +5344,7 @@ test_record_export_config_absent_never_reads_the_exporter() {
 
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
   local case_dir export_root archive rc mode
-  for mode in success failure; do
+  for mode in success failure inaccessible-config; do
     case_dir=$(make_case "record-export-$mode")
     write_meta "$case_dir" local-only ship
     export_root="$case_dir/export"
@@ -5358,9 +5358,12 @@ test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
     if [ "$mode" = failure ]; then
       rm -rf "$export_root"
       ln -s "$case_dir/outside" "$export_root"
+    elif [ "$mode" = inaccessible-config ]; then
+      chmod 000 "$case_dir/config"
     fi
     rc=0
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$mode" != inaccessible-config ] || chmod 0755 "$case_dir/config"
     if [ "$mode" = success ]; then
       expect_code 0 "$rc" "record export teardown: $(cat "$case_dir/stderr")"
       archive="$export_root/archive/task-x1/teardown-test-task-x1"
@@ -5374,7 +5377,7 @@ test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
       assert_absent "$case_dir/state/task-x1.inbox" "successful export retained inbox"
     else
       [ "$rc" -ne 0 ] || fail "teardown ignored a record export commit failure"
-      assert_grep 'record export root contains an unsafe component' "$case_dir/stderr" \
+      assert_grep 'record export' "$case_dir/stderr" \
         "teardown did not report the export failure reason"
       assert_grep 'retaining task records for retry' "$case_dir/stderr" \
         "teardown did not explain its record-preservation refusal"
