@@ -382,7 +382,7 @@ grep -Eq '^blocked .*key=midtask-fallback' "$CASE/state/$ID.status" || fail "blo
 ok "blocked and needs-decision reports do not suppress each other"
 
 # A finished or waiting task is not relaunched on exhausted_now.
-for verb in done "needs-decision" blocked failed; do
+for verb in "done" "needs-decision" blocked failed; do
   begin "finished-$verb"
   write_rules true
   write_meta
@@ -399,7 +399,7 @@ for shape in 'done: PR ready\n  waiting on review' 'done corr=0123456789abcdef: 
   write_rules true
   write_meta
   invoke bind "$ID" --rule 0 >/dev/null
-  printf "$shape\n" > "$CASE/state/$ID.status"
+  printf '%b\n' "$shape" > "$CASE/state/$ID.status"
   quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
   out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
   rc=$?
