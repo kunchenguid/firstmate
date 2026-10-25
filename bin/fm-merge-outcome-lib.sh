@@ -41,11 +41,11 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
-# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers after a merge outcome is recorded.
 FM_MERGE_OUTCOME_CLEANUP=skipped
-# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers after a merge outcome is recorded.
 FM_MERGE_OUTCOME_CLEANUP_DETAIL=
-# shellcheck disable=SC2034 # Public result consumed by the watcher after a poll result.
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers after a merge outcome is recorded.
 FM_MERGE_OUTCOME_NOTICE=
 
 fm_merge_outcome_current_state() {  # <home> <state> <task-id>

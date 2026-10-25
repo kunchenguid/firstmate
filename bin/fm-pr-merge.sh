@@ -182,7 +182,8 @@
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
 # no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
 # destination, normal-case deduplication, at-least-once recovery, and the
-# automatic cleanup a finished direct report receives.
+# automatic cleanup a finished direct report receives; when that cleanup runs,
+# this script prints its notice text so the caller sees the same result supervision receives.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
 set -eu
