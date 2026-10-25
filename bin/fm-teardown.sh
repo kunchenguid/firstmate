@@ -1167,7 +1167,6 @@ remote_secondmate_teardown() {
   if [ "$FORCE" != --force ]; then
     secondmate_unresolved_pending_replies_refuse || return 1
   fi
-  teardown_export_records "$STATE" "$ID" || return 1
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
     return 1
@@ -1190,6 +1189,7 @@ remote_secondmate_teardown() {
   if [ "$rc" -eq "$TEARDOWN_LOST_SLOT_EXIT" ]; then
     printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' >&2 || true
   fi
+  teardown_export_records "$STATE" "$ID" || return 1
   remote_recovery_paths_validate recheck || {
     echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
     return 1
@@ -3430,7 +3430,6 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
-    teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -3473,6 +3472,7 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3792,8 +3792,6 @@ else
   fi
 fi
 
-teardown_export_records "$STATE" "$ID" || exit 1
-
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -4008,6 +4006,7 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 fi
+teardown_export_records "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
