@@ -35,10 +35,13 @@ DARWIN=no
 
 # A shadowed GNU stat does not interpret `-f <fmt>` as BSD-format output.
 # We fail the tokens used in our helpers so callers cannot accidentally use the
-# shadowed stat instead of /usr/bin/stat.
+# shadowed stat instead of /usr/bin/stat. The fake is Darwin-only: on Linux the
+# helpers legitimately call bare `stat -c`, which must keep reaching the real
+# GNU stat, so shadowing stat there would only break the fixture itself.
 FAKE_STAT="$TMP_ROOT/fakebin/stat"
 mkdir -p "$(dirname "$FAKE_STAT")"
 
+if [ "$DARWIN" = yes ]; then
 cat > "$FAKE_STAT" <<'FAKESTAT'
 #!/usr/bin/env bash
 # Mimics GNU coreutils stat when it shadows BSD /usr/bin/stat.
@@ -63,6 +66,7 @@ printf 'GNU stat: unknown invocation: %s\n' "$*" >&2
 exit 1
 FAKESTAT
 chmod +x "$FAKE_STAT"
+fi
 
 # --- fake od that mimics the observed ~/.local/bin/od desktop-app shim --------
 
@@ -83,7 +87,8 @@ exit 2
 FAKEOD
 chmod +x "$FAKE_OD"
 
-# Prepend fakebin so the fakes shadow /usr/bin/stat and /usr/bin/od
+# Prepend fakebin so the fakes shadow /usr/bin/od everywhere, and
+# /usr/bin/stat on Darwin where the stat fake is installed.
 ORIGINAL_PATH="$PATH"
 export PATH="$TMP_ROOT/fakebin:$ORIGINAL_PATH"
 
