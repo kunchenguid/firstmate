@@ -25,6 +25,9 @@ case "$1 $2" in
     printf 'diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -0,0 +1,%s @@\n' "$path" "$path" "$path" "$path" "$n"
     for ((i=1; i<=n; i++)); do printf '+fixture-line-%s\n' "$i"; done
     ;;
+  'api repos/owner/repo/pulls/'*)
+    echo 1  # one changed file: the PR fits one page, so done-done's own lint measures it
+    ;;
   'api repos/owner/repo') : ;;
   *) echo "unexpected gh call: $*" >&2; exit 2 ;;
 esac

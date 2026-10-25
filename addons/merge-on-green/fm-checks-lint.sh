@@ -8,10 +8,17 @@
 # passes (file the proof gap as a task). proof names the repo's verify-<app> skill (or "no verify skill" when
 # the repo has none); a real repro names systematic-debugging (captain 6 Oct). Bot PRs pass. 1,000+ added non-generated lines fail (deletions, moved lines and a fork PR's merged-in upstream lines do not count;
 # a cross-repo move names its source in the PR body: "moved-from: <owner>/<repo>@<ref> <dst-prefix>=<src-prefix>", same owner only).
-# One gh call per run (up to five when the size check needs the diffs to exclude moved and upstream lines, plus one per cross-repo moved file). Each run appends a row to $FM_HOME/data/checks-gate.log. A FAIL for a task of this home
+# A file git resolves as a rename at 50% similarity or more (the pull-files API's renamed + previous_filename, or
+# that body mapping) is counted as moved: its added lines are excused up to the lines it still shares with its
+# previous content, and only the added lines past that budget stay new code (a 408-file import keeps its path rewrites).
+# A PR over gh's 100-file view cap and over its 300-file diff cap is still measured: every page of the
+# pull-files API counts the added lines, and the diff comes from the compare API (else a local checkout).
+# An API or diff failure keeps the full count, so it can never turn a big PR into a PASS.
+# One gh call per run (plus one per 100 files past the 100-file view cap, the compare/upstream diffs and one or two per moved file). Each run appends a row to $FM_HOME/data/checks-gate.log. A FAIL for a task of this home
 # also publishes a FAIL completion receipt (receipts/bin/fm-run-receipt.sh in firstmate-addons), so bin/fm-pr-merge.sh and fm-merge-local.sh
 # refuse the merge (bin/fm-dod-lib.sh fm_dod_receipt_accept) until the worker re-lints to PASS and republishes PASS.
 import os, re, sys, json, time, hashlib, subprocess, tempfile
+from collections import Counter
 
 if len(sys.argv) < 3 or not os.environ.get('FM_HOME'):
     sys.exit('usage: FM_HOME=<home> fm-checks-lint.sh <PR URL | report file> <evidence folder>')
@@ -20,6 +27,105 @@ home = os.environ['FM_HOME']; LOG = f'{home}/data/checks-gate.log'; HASHES = f'{
 GEN = re.compile(r'(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|[^/]*\.lock)$'+ r'|(^|/)packages/accounts/src/pi/|(^|/)packages/accounts/src/routes\.json$|(^|/)vendor/|(^|/)dist/|(^|/)(LICENSE|LICENSES|NOTICE|COPYING)[^/]*$')  # third-party, legal text and committed build output (dist/) are not reviewable code
 
 task, ROOT = '', os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # task is set below
+
+def gh_api(*a):  # errors=replace: the move rule also fetches binary files, which must not crash the count
+    return subprocess.run(['gh', 'api', *a], capture_output=True, text=True, errors='replace', timeout=60)
+
+def all_files(nwo):
+    """Every changed file of a PR whose gh-pr-view list (100 max) is full: paginated pull-files API, else None."""
+    out, page = [], 1
+    while True:
+        r = gh_api(f'repos/{nwo[1]}/pulls/{nwo[2]}/files?per_page=100&page={page}')
+        try:
+            batch = json.loads(r.stdout) if r.returncode == 0 else None
+        except ValueError:
+            batch = None
+        if not isinstance(batch, list):
+            return None
+        out += [{'path': f.get('path') or f.get('filename', ''), 'additions': f.get('additions', 0),
+                 'status': f.get('status', ''), 'previous_filename': f.get('previous_filename')} for f in batch]
+        if len(batch) < 100 or len(out) >= 3000:  # short page, or GitHub's own 3000-file cap
+            return out
+        page += 1
+
+def diff_entries(diff):
+    """Added and deleted non-generated lines per path of a unified diff; '' holds lines before any file header."""
+    ents = {'': {'add': Counter(), 'rm': Counter(), 'whole': False}}
+    cur, gen = ents[''], False
+    for l in diff.splitlines():
+        if l.startswith('+++ '):
+            path = l[6:] if l.startswith('+++ b/') else l[4:]
+            gen = bool(GEN.search(path))
+            cur = ents.setdefault(path, {'add': Counter(), 'rm': Counter(), 'whole': False})
+        elif gen or l.startswith('--- '):
+            continue
+        elif l.startswith('@@'):
+            cur['whole'] = cur['whole'] or l.startswith('@@ -0,0 ')  # whole file added: the new content is right here
+        elif len(l) > 1 and l[0] in '+-' and l[1:].strip():
+            cur['add' if l[0] == '+' else 'rm'][l[1:].strip()] += 1
+    return ents
+
+def net(ents):  # added minus deleted non-generated lines of a parsed diff
+    add, rm = Counter(), Counter()
+    for e in ents.values():
+        add += e['add']; rm += e['rm']
+    return add - rm
+
+def contents(repo, path, ref):
+    """One file's text, or '' when the API cannot serve it (a binary sibling must not crash the count)."""
+    r = gh_api('-H', 'Accept: application/vnd.github.raw', f'repos/{repo}/contents/{path}?ref={ref}')
+    return r.stdout if r.returncode == 0 else ''
+
+def moved_pairs(nwo, files, body, base, head):
+    """Files git resolves as renames: path -> (repo, previous path, previous ref, new ref). Same owner only."""
+    if not nwo:
+        return {}
+    mv = re.search(r'^\s*moved-from\s*:\s*([\w.-]+)/([\w.-]+)@(\S+)\s+(.+)$', body, re.M)
+    rules = [r.split('=', 1) for r in mv[4].split() if '=' in r] if mv and mv[1] == nwo[1].split('/')[0] else []
+    named = files if any('status' in f for f in files) else (all_files(nwo) or [])  # gh pr view carries no rename
+    pairs = {}
+    for f in named:
+        p = f.get('path') or ''
+        if not p or GEN.search(p):
+            continue
+        if f.get('status') == 'renamed' and f.get('previous_filename'):  # same repo: git already says it is a move
+            pairs[p] = (nwo[1], f['previous_filename'], base, head)
+        else:
+            for dst, sp in rules:  # cross-repo move: the body names the source file
+                if p.startswith(dst):
+                    pairs[p] = (f'{mv[1]}/{mv[2]}', sp + p[len(dst):], mv[3], head)
+                    break
+    return pairs
+
+def cancel_moved(n, ents, pairs):
+    """A moved file's added lines are moved, not new code: cancel up to the lines it still shares with its
+    previous content (the similarity budget) and keep counting whatever the rewrite added past that budget."""
+    for path, (repo, prev, ref, newref) in pairs.items():
+        e = ents.get(path) or {}
+        if not e.get('add'):
+            continue
+        old = Counter(l.strip() for l in contents(repo, prev, ref).splitlines() if l.strip())
+        new = e['add'] if e['whole'] else Counter(l.strip() for l in contents(repo, path, newref).splitlines() if l.strip())
+        matched = sum((old & new).values())
+        if not matched or 100 * matched // max(sum(old.values()), sum(new.values())) < 50:
+            continue  # no previous content, or below the 50% rename threshold: this is a rewrite, not a move
+        budget = matched
+        for line, c in e['add'].items():
+            take = min(n.get(line, 0), c, budget)
+            n[line] -= take; budget -= take
+    return n
+
+def pr_diff(nwo, base, head, dirs):
+    """Whole-PR diff: compare API (gh pr diff refuses above 300 files), else a checkout holding both commits."""
+    if nwo and base and head not in ('', '-'):
+        r = gh_api('-H', 'Accept: application/vnd.github.diff', f'repos/{nwo[1]}/compare/{base}...{head}')
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout
+        for d in dirs:
+            g = subprocess.run(['git', '-C', d, 'diff', '--no-color', f'{base}...{head}'], capture_output=True, text=True, timeout=120)
+            if g.returncode == 0 and g.stdout.strip():
+                return g.stdout
+    return ''
 
 def lane_task(home, src, ev, fallback=''):
     """Lane id from state/<task>.meta (pr=) or $FM_HOME/data/<task>, not the PR branch name."""
@@ -76,41 +182,30 @@ else:
     task = lane_task(home, src, ev, pr.get('headRefName', '').rsplit('/', 1)[-1])
     if re.match(r'(dependabot|renovate)(\[bot\])?$', author) or author in ('app/dependabot', 'app/renovate'):
         done(True, 'bot', head)
+    nwo = re.match(r'https://github\.com/([^/]+/[^/]+)/pull/(\d+)', src)
+    if nwo and len(files) >= 100:  # view list is capped at 100, so a bigger PR needs every page (Juggernaut PR 133: 408 files)
+        files = all_files(nwo) or files
     # Added lines only: deletions are cheap to review and 'delete before you add' must not be penalised.
     size = sum(f.get('additions', 0) for f in files if not GEN.search(f.get('path', '')))
     if size >= 1000:  # moved lines are not new code (7 Oct, PR 18 helper move): an added line that matches a deleted one cancels
-        d = subprocess.run(['gh', 'pr', 'diff', src], capture_output=True, text=True, timeout=60)
-        if d.returncode == 0:
-            from collections import Counter
-            def net(diff):  # added minus deleted non-generated lines of a unified diff
-                add, rm, gen = Counter(), Counter(), False
-                for l in diff.splitlines():
-                    if l.startswith('+++ '): gen = bool(GEN.search(l[6:] if l.startswith('+++ b/') else l[4:])); continue
-                    if l.startswith('--- ') or gen or not l[1:].strip(): continue
-                    if l[0] == '+': add[l[1:].strip()] += 1
-                    elif l[0] == '-': rm[l[1:].strip()] += 1
-                return add - rm
-            n = net(d.stdout); size = sum(n.values())
+        meta = f'{home}/state/{task}.meta'
+        wt = ([l[9:].strip() for l in open(meta) if l.startswith('worktree=')] or [''])[-1] if task and os.path.isfile(meta) else ''
+        diff = pr_diff(nwo, pr.get('baseRefOid'), head, [d for d in (wt, os.getcwd()) if os.path.isdir(d)])
+        if diff:  # no diff from any source keeps the full count: a failure never lowers it
+            ents = diff_entries(diff)
+            n = net(ents); size = sum(n.values())
             # Upstream catch-up (15 Oct, fork PR 74): lines the fork's parent repo already shipped are not authored
             # here, so subtract the upstream delta the PR merges in (PR base ... merged upstream tip). A plain fork PR
             # merges no new upstream commit, so its delta is empty. Any API failure keeps the full count.
-            gh = lambda *a: subprocess.run(['gh', 'api', *a], capture_output=True, text=True, timeout=60)
-            nwo = re.match(r'https://github\.com/([^/]+/[^/]+)/pull/', src)
-            p = gh(f'repos/{nwo[1]}', '--jq', '.parent | select(.) | .owner.login + ":" + .default_branch') if size >= 1000 and nwo else None
-            u = gh(f'repos/{nwo[1]}/compare/{p.stdout.strip()}...{head}', '--jq', '.merge_base_commit.sha') if p and p.returncode == 0 and p.stdout.strip() else None
-            dl = gh('-H', 'Accept: application/vnd.github.diff', f'repos/{nwo[1]}/compare/{pr.get("baseRefOid")}...{u.stdout.strip()}') if u and u.returncode == 0 and u.stdout.strip() else None
-            if dl and dl.returncode == 0: n -= net(dl.stdout); size = sum(n.values())
-            # Cross-repo move (16 Oct, add-ons PR 9): a body line "moved-from: <owner>/<repo>@<ref> <dst-prefix>=<src-prefix>..."
-            # cancels added lines that byte-match the mapped source files in a repo of the PR's own owner; authored lines still count.
-            mv = re.search(r'^\s*moved-from\s*:\s*([\w.-]+)/([\w.-]+)@(\S+)\s+(.+)$', body, re.M) if size >= 1000 and nwo else None
-            rules = [r.split('=', 1) for r in mv[4].split() if '=' in r] if mv and mv[1] == nwo[1].split('/')[0] else []
-            for f in files if rules else []:
-                for dst, sp in rules:
-                    if f.get('path', '').startswith(dst) and not GEN.search(f['path']):
-                        c = gh('-H', 'Accept: application/vnd.github.raw', f'repos/{mv[1]}/{mv[2]}/contents/{sp}{f["path"][len(dst):]}?ref={mv[3]}')
-                        if c.returncode == 0: n -= Counter(l.strip() for l in c.stdout.splitlines() if l.strip())
-                        break
-            if rules: size = sum(n.values())
+            p = gh_api(f'repos/{nwo[1]}', '--jq', '.parent | select(.) | .owner.login + ":" + .default_branch') if size >= 1000 and nwo else None
+            u = gh_api(f'repos/{nwo[1]}/compare/{p.stdout.strip()}...{head}', '--jq', '.merge_base_commit.sha') if p and p.returncode == 0 and p.stdout.strip() else None
+            dl = gh_api('-H', 'Accept: application/vnd.github.diff', f'repos/{nwo[1]}/compare/{pr.get("baseRefOid")}...{u.stdout.strip()}') if u and u.returncode == 0 and u.stdout.strip() else None
+            if dl and dl.returncode == 0: n -= net(diff_entries(dl.stdout)); size = sum(n.values())
+            # Moved files (cross-repo move 16 Oct, add-ons PR 9; rename with rewrites): cancel only the added lines
+            # of the moved file itself, up to its similarity budget, so a path rewrite rides along with its file
+            # and every authored line still counts.
+            pairs = moved_pairs(nwo, files, body, pr.get('baseRefOid'), head) if size >= 1000 else {}
+            if pairs: size = sum(cancel_moved(n, ents, pairs).values())
     if size >= 1000: done(False, f'{size} added non-generated lines (moved and upstream lines excluded): split it (limit 1000)', head)
 
 m = ([None] + list(re.finditer(r'^##\s*Checks\s*$(.*?)(?=^##\s|\Z)', body, re.M | re.S)))[-1]  # newest block: workers append, never replace

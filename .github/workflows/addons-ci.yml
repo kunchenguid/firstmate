@@ -201,6 +201,12 @@ jobs:
       # Same-lane follow-up may reuse its own frames; cross-task reuse still fails.
       - name: Checks lint lane-task identity test
         run: bash merge-on-green/tests/checks-lint-lane-task.test.sh
+      # A 305-file fixture above gh's 100-file list cap and 300-file diff cap; no real PRs are changed.
+      - name: Checks lint big-PR size test
+        run: bash merge-on-green/tests/checks-lint-big-pr.test.sh
+      # Moved-with-rewrites fixtures: a rename at 50% similarity or more is moved, lines past it are new code.
+      - name: Checks lint moved-similarity test
+        run: bash merge-on-green/tests/checks-lint-moved-similarity.test.sh
 
       - name: No old receipt path test
         run: bash merge-on-green/tests/no-old-receipt-path.test.sh

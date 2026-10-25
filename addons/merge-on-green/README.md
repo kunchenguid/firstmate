@@ -11,7 +11,10 @@ irreversible or security-sensitive work, and on work waiting for your own review
 whose evidence-gate PASS is a not-proven PASS — the installed `checks-lint.sh` reads the PR's newest `## Checks`
 block itself (filing the proof gap stays with the lead). Then it runs, in this order and as separate sequential commands, never piped and never in parallel:
 
-1. `FM_HOME=<home> checks-lint.sh <PR URL> <home>/data/<task>` — pinned done-done-axi 0.6.4 with the Firstmate size rules, falling back to the legacy lint when unavailable;
+1. `FM_HOME=<home> checks-lint.sh <PR URL> <home>/data/<task>` — the PR's changed-file count is read first:
+   one page (100 files or fewer) runs pinned done-done-axi 0.6.4 with the Firstmate size rules, while a
+   bigger PR, or one whose count cannot be read, runs the add-on `fm-checks-lint.sh`, which measures every
+   pull-files page; the legacy lint stays the last fallback when done-done is unavailable;
    the evidence gate must print PASS.
 2. `state/<task>.run-receipt.json` must read verdict PASS, head == the meta's `pr_head`, and
    spawn_gen == the meta's `spawn_gen`.
@@ -35,6 +38,18 @@ new one. Every command is bounded with `timeout` (a third of `FM_CHECK_TIMEOUT` 
 gate commands start only before 80% of the bound, a merge only when it fits inside the whole bound,
 so the watcher's kill can at worst cut a gate command (harmlessly retried next sweep), never a
 merge.
+
+## Size rule
+
+The added non-generated lines of a PR must stay under 1,000; deleted lines, generated paths, the PR's
+merged-in upstream lines and a moved file's own lines do not count: the lines it still shares with the
+file it came from, and the path rewrites, in a move git resolves as a rename at 50% similarity or more
+(the pull-files API's `renamed` with its `previous_filename`, or a `moved-from:` body line naming the
+source repo, same owner only); added lines past that similarity budget stay new code. A large history
+import is still measured: the file list comes from every page of the pull-files API (gh's `pr view` list
+stops at 100 files), the diff from the compare API (gh's
+`pr diff` refuses above 300 files) and, failing that, from a checkout holding both commits. When no diff
+is reachable the full file-list count stands, so an API failure can never turn a big PR into a PASS.
 
 ## Install
 

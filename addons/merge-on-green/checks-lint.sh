@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run done-done's pinned merge-gate lint, or the Firstmate lint when the pinned CLI is unavailable.
+# Run done-done's pinned merge-gate lint, or the Firstmate lint when the pinned CLI is unavailable or the PR
+# has more than one page (100 files) of changes for done-done's truncated file list to measure.
 # Usage: FM_HOME=<home> checks-lint.sh <PR URL | report file> <evidence folder>
 set -u
 [ "$#" -eq 2 ] && [ -n "${FM_HOME:-}" ] || { echo "usage: FM_HOME=<home> checks-lint.sh <PR URL | report file> <evidence folder>" >&2; exit 2; }
@@ -21,6 +22,21 @@ if [ -n "${FM_DONE_DONE_BIN:-}" ]; then DD=("$FM_DONE_DONE_BIN"); fi
 # Pin the released CLI: older installed done-done binaries do not have the config keys.
 if ! command -v "${DD[0]}" >/dev/null 2>&1 || ! "${DD[@]}" lint --help 2>/dev/null | grep -q 'checks.generated_paths:'; then
   exec "$LEGACY" "$source" "$evidence"
+fi
+
+# done-done's lint lists at most 100 changed files, so it measures a PR only when the whole change fits
+# one page. Ask the PR object for the real count and hand a bigger or uncountable PR to the add-on gate,
+# which reads every pull-files page: a truncated list must never become the measurement (Juggernaut fold,
+# 408 files). A local report file has no file list to truncate, so it keeps this path.
+if [[ "$source" == https://* ]]; then
+  changed=
+  if command -v gh >/dev/null 2>&1; then
+    nwo=$(printf '%s' "$source" | sed -nE 's#^https://github\.com/([^/]+)/([^/]+)/pull/([^/?#]+).*#\1/\2/pulls/\3#p')
+    [ -z "$nwo" ] || changed=$(gh api "repos/$nwo" --jq '.changed_files' 2>/dev/null)
+  fi
+  if ! [[ "$changed" =~ ^[0-9]+$ ]] || [ "$changed" -gt 100 ]; then
+    exec "$LEGACY" "$source" "$evidence"
+  fi
 fi
 
 mkdir -p "$DD_HOME" "$FM_HOME/data" || exit 2
