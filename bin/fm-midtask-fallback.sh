@@ -204,10 +204,12 @@ current_exhausted() {
   local array_json=$1 snapshot=$2 harness=$3 model=$4 effort=$5 provider
   provider=$(printf '%s\n' "$array_json" | jq -r \
     --arg h "$harness" --arg m "$model" --arg e "$effort" '
-    [.[] | select(type == "object" and .harness == $h
-        and ((.model // "default") as $rm | $rm == "default" or $rm == $m)
-        and ((.effort // "default") as $re | $re == "default" or $re == $e))
-      | .provider // ""] | first // ""
+    [.[] | select(type == "object" and .harness == $h)
+      | {p: (.provider // ""), m: (.model // "default"), e: (.effort // "default")}]
+    | ([.[] | select(.m == $m and .e == $e)]) as $exact
+    | (if ($exact | length) > 0 then $exact
+       else [.[] | select((.m == "default" or .m == $m) and (.e == "default" or .e == $e))] end)
+    | last.p // ""
   ' 2>/dev/null) || return 1
   if [ -z "$provider" ]; then
     provider=$(fm_quota_provider_for_harness "$harness" "$model" 2>/dev/null || true)
@@ -342,7 +344,7 @@ cmd_bind() {
 
 cmd_consider() {
   local id snapshot='' pane='' mode meta kind array cur_h cur_m cur_e
-  local rows_file='' lock='' idx harness model effort provider last_match=-1
+  local rows_file='' lock='' idx harness model effort provider last_match=-1 exact_match=-1 wild_match=-1
   local ch='' cm='' ce='' reason='' epoch note rc=0 now=0 mtime=0
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
@@ -414,12 +416,16 @@ cmd_consider() {
   fi
   [ -s "$rows_file" ] || die "task $id dispatch array is empty"
   while IFS=$'\t' read -r idx harness model effort provider; do
-    if [ "$harness" = "$cur_h" ] \
-      && { [ "$model" = default ] || [ "$model" = "$cur_m" ]; } \
+    [ "$harness" = "$cur_h" ] || continue
+    if [ "$model" = "$cur_m" ] && [ "$effort" = "$cur_e" ]; then
+      exact_match=$idx
+    elif { [ "$model" = default ] || [ "$model" = "$cur_m" ]; } \
       && { [ "$effort" = default ] || [ "$effort" = "$cur_e" ]; }; then
-      last_match=$idx
+      wild_match=$idx
     fi
   done < "$rows_file"
+  last_match=$wild_match
+  [ "$exact_match" -lt 0 ] || last_match=$exact_match
   if [ "$last_match" -lt 0 ]; then
     report_no_candidate "$id" "a $reason"
     return 2
