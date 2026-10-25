@@ -686,7 +686,7 @@ Instead:
 1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
 2. It then reports `send-failed`, so a resend starts from a clean composer.
 
-A payload still empty or only partly rendered when the wait ends does not receive Enter either.
+A payload still empty, only partly rendered, or unreadable when the wait ends does not receive Enter either.
 Its composer reads cannot be trusted while the target lags, and Claude's Ctrl+U deletes one wrapped row per press, so a press-then-read clear would stop early and leave the first rows of the text behind once the target catches up.
 The adapter instead sends the full press budget without reading in between, queued behind the typed text, and reports `send-failed`.
 
