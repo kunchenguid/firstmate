@@ -91,7 +91,7 @@ test_silent_home_maps_every_line() {
   dir=$(new_case silent)
   doctor "$dir" --json
   for id in doctor/jq doctor/inventory doctor/bootstrap doctor/unmapped-line \
-    tools/missing tools/missing-manual tools/presentation tools/provenance no-mistakes/agents permissions/claude-fm-scripts backend/invalid backend/herdr-launcher \
+    tools/missing tools/outdated tools/missing-manual tools/presentation tools/provenance no-mistakes/agents permissions/claude-fm-scripts backend/invalid backend/herdr-launcher \
     config/crew-dispatch fleet/tangle fleet/backlog-reconcile fleet/home-summary \
     fleet/secondmate-handoff fleet/info config/role; do
     assert_status "$DOCTOR_OUT" "$id" ok "silent home"
@@ -120,7 +120,8 @@ test_provoked_lines_render_their_ids() {
       FM_FAKE_GH_AXI_VERSION=0.1.0 FM_FAKE_LAVISH_AXI_VERSION=0.1.0 "$DOCTOR" --json 2>/dev/null) || DOCTOR_RC=$?
   }
   doctor_env_floor
-  assert_status "$DOCTOR_OUT" tools/missing fail "floor miss"
+  assert_status "$DOCTOR_OUT" tools/outdated fail "floor miss"
+  assert_status "$DOCTOR_OUT" tools/missing ok "outdated tool is present"
   assert_status "$DOCTOR_OUT" tools/presentation warn "lavish floor miss"
 
   dir=$(new_case backend)
@@ -353,7 +354,7 @@ test_memory_budget_status() {
 test_supported_harnesses() {
   local dir harness
   dir=$(new_case harnesses)
-  for harness in claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken; do
+  for harness in claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex; do
     printf '%s\n' "$harness" > "$dir/home/config/crew-harness"
     DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
       FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS="$harness" "$DOCTOR" --json --area config 2>/dev/null)
