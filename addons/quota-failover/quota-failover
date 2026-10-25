@@ -1,0 +1,503 @@
+#!/usr/bin/env bash
+# quota-failover - move limit-stopped Firstmate workers and leads to the next
+# live route, and keep a route that is answering errors out of new dispatch.
+#
+# Usage: quota-failover <fm-home>
+#
+# One pass over <fm-home>/state/*.meta, under a non-blocking lock.
+# A worker or lead counts as stopped by a limit when its status says working
+# (or it has none), it is not progressing (no status, turn-end, progress or
+# re-arm write for QUOTA_FAILOVER_STALL_SECS, default 240), it is not busy
+# unless the harness is only retrying a provider error (a session-retry busy
+# event), and one of: its screen shows a provider limit error; its route's
+# provider reads exhausted_now in quota-axi (alone never marks the route out);
+# its pinned route is already out of dispatch; or a one-line test of its
+# pinned route answers a limit or 429/5xx error (once per
+# QUOTA_FAILOVER_PROBE_SECS, default 900, per task).
+# A busy, progressing worker is never touched.
+# A stopped task moves to the first route, from the crew-dispatch rules that
+# hold its current route and then the default, that is not out of dispatch,
+# whose provider is not exhausted and that answers a one-prompt live test
+# (QUOTA_FAILOVER_TEST_SECS, default 90), through bin/fm-control.sh relaunch
+# with a note naming the old route, the new route and why; an Opus-only rule
+# only ever moves to another Opus route, and a remote task is logged, never
+# switched.
+# A route whose screen shows a limit, or that answers its pinned one-line test
+# with a limit or 429/5xx error, is OUT until it answers that test again: its
+# profile objects leave config/crew-dispatch.json (schema unchanged; a rule
+# left with no profiles goes too) into state/quota-failover-dead.json, and it
+# is passed over as a move target. Each pass re-tests it after
+# QUOTA_FAILOVER_RETEST_SECS (default 1800) and puts its profiles back at the
+# end of their list when it answers; the filter reads the file on disk, so
+# hand edits survive while it is out.
+# A stopped task on a pool account (account= in its meta that a usable
+# config/account-pool names) hit that account's limit, so its route stays in
+# dispatch: neither its screen nor the account's own one-line test can take
+# the route out for everyone else. Its limit is read on the account's own
+# profile folder, the folder the pool command names for that account, not on
+# the ambient login, so a full account cannot look like a full route. When
+# the task's tool may change accounts automatically (D1 below) it moves
+# through bin/fm-control.sh relaunch --account next, which rests the account;
+# only when that fails does the route move above run. A home that wants the
+# human in the loop instead writes config/account-pool-autorelaunch-off
+# (content ignored): then the account only rests, and one line in
+# state/quota-failover.wake names it and the manual command; check.sh prints
+# that line as the watcher's wake.
+# Before the limit: a worker whose pool account's fresh reading is at or below
+# FM_ACCOUNT_POOL_REST_FLOOR (15%) on 5h or week moves off it through the same
+# relaunch --account next, but only when its status says working and its own
+# lifecycle source reads idle between turns for QUOTA_FAILOVER_PRELIMIT_IDLE_SECS
+# (60), once per incarnation; a tool D1 bars from moving wakes the home instead.
+# With config/account-pool, a Claude test that names no account runs on the
+# pool's pick (account-pool/bin/fm-pool-claude-env.sh); a failed pick fails the
+# test instead of falling back to the default login.
+# Every decision is one line in state/quota-failover.log. A worker left with
+# no live route also gets one failed line on the home's parent channel, if any.
+set -u
+
+die() { echo "quota-failover: $*" >&2; exit 1; }
+
+home=${1:-${FM_HOME:-}}
+[ -n "$home" ] && [ -d "$home/state" ] || die "usage: quota-failover <fm-home>"
+FM_HOME=$(cd "$home" && pwd) || die "cannot read $home"
+export FM_HOME
+STATE=$FM_HOME/state BIN=$FM_HOME/bin LOG=$FM_HOME/state/quota-failover.log
+DISPATCH=$FM_HOME/config/crew-dispatch.json
+DEAD=$STATE/quota-failover-dead.json
+WAKE=$STATE/quota-failover.wake
+STALL=${QUOTA_FAILOVER_STALL_SECS:-240}
+TEST_SECS=${QUOTA_FAILOVER_TEST_SECS:-90}
+PROBE_SECS=${QUOTA_FAILOVER_PROBE_SECS:-900}
+RETEST=${QUOTA_FAILOVER_RETEST_SECS:-1800}
+LIMIT_RE='(usage|rate|quota|weekly|monthly|daily|hour|session) limit (has been )?reached|hit your (usage )?limit|rate[ _-]?limit(ed|_error| exceeded)|quota (exceeded|exhausted)|exceeded your (current )?quota|insufficient[ _-]quota|too many requests|retrying in [0-9]+h'
+# Screen text is untrusted (it can include files or diffs). Only Claude's own
+# usage-limit banner is a screen signal; route removal still needs a live probe.
+SCREEN_LIMIT_RE="You've hit your usage limit for your plan"
+# The provider hard-error class a limit-capped free model answers with (a
+# step-5-preview-free 429) plus the 5xx class, kept apart from prose.
+HTTP_ERR_RE='(^|[^0-9])429($|[^0-9])|(status|error|code|http)[^0-9]{0,16}5[0-9]{2}|upstream request failed|internal server error|service unavailable|bad gateway|gateway timeout'
+
+exec 9>"$STATE/.quota-failover.lock" && flock -n 9 || exit 0
+for lib in fm-backend.sh fm-busy-lib.sh fm-quota-axi-lib.sh fm-parent-channel-lib.sh; do
+  # shellcheck source=/dev/null
+  . "$BIN/$lib" || die "cannot load $BIN/$lib"
+done
+# Parked-home reader (firstmate-addons/parked-homes): a parked home is never
+# failover-moved - a parked home gets no relaunch. No-op when the reader is
+# absent (the predicate then answers "not parked").
+_FM_PARKED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../parked-homes/bin/fm-parked-homes-lib.sh"
+# shellcheck source=/dev/null # sibling add-on path, resolved at runtime
+[ -f "$_FM_PARKED_LIB" ] && . "$_FM_PARKED_LIB"
+# The pool library and a Claude test that names no account's pool pick are the account-pool add-on's, never the
+# default login. The library finds fm-timeout-lib.sh in SCRIPT_DIR, the home's bin/.
+_FM_POOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../account-pool/bin"
+_FM_POOL_ENV=$_FM_POOL_DIR/fm-pool-claude-env.sh
+# shellcheck disable=SC2034 # read by the sourced pool lib
+SCRIPT_DIR=$BIN
+# shellcheck source=/dev/null # sibling add-on path, resolved at runtime
+. "$_FM_POOL_DIR/fm-account-pool-lib.sh" || die "cannot load $_FM_POOL_DIR/fm-account-pool-lib.sh"
+
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+last() { sed -n "s|^[^ ]* $1: ||p" "$LOG" 2>/dev/null | tail -n 1; } # <id>
+# A repeated verdict is logged once until the task's last line changes.
+note() { [ "$(last "$1")" = "$2" ] || log "$1: $2"; } # <id> <text>
+
+# D1, fixed in code: the tools whose terms allow an automatic account change.
+# OpenCode Go bans several accounts used to get around limits, and OpenAI's
+# consumer terms (effective 1 Jan 2026) bar circumventing rate limits, so Go,
+# Codex and every OpenAI-login route stay rest + wake.
+auto_move() { # <harness> <model>
+  case $1 in claude|cursor|pi|pi-signed) ;; *) return 1 ;; esac
+  case $2 in *opencode-go*|openai-codex/*|codex-native/*) return 1 ;; esac
+}
+
+# pool_account_folder <id>: the profile folder the pool command names for one
+# account, or nothing when it will not say (then the test asks the ambient
+# login, as before). Non-zero when the pool answers that the account is not
+# one of its own (such as the "ambient" id a Claude pool gives a codex or pi
+# launch): that task has no account to move or rest, so it takes the route
+# move. A pool that times out still counts as the task's pool. The folder path
+# is the only thing read; nothing inside it is opened and no credential is printed.
+pool_account_folder() {
+  local out folder
+  [ -n "${1:-}" ] || return 0
+  out=$(timeout "${QUOTA_FAILOVER_POOL_SECONDS:-30}" "${pool%%$'\t'*}" status "$1" --json --state "${pool#*$'\t'}" 2>/dev/null) ||
+    { [ $? = 124 ]; return; }
+  folder=$(printf '%s' "$out" | jq -r 'if (.folder | type) == "string" then .folder else empty end' 2>/dev/null) || return 0
+  case "$folder" in /*) ;; *) return 0 ;; esac
+  [ -d "$folder" ] || return 0
+  printf '%s\n' "$folder"
+}
+
+QUOTA=$(quota-axi --json --no-credential-refresh --max-age "${QUOTA_FAILOVER_MAX_AGE:-10m}" 2>/dev/null)
+fm_quota_json_valid <<<"$QUOTA" || QUOTA='{"schemaVersion":5,"providers":[]}'
+
+provider() { # <harness> <model> [declared provider]
+  [ -z "${3:-}" ] || { echo "$3"; return; }
+  fm_quota_single_provider_for_harness "$1" 2>/dev/null && return
+  case $2 in
+    openai-codex/*|codex-native/*) echo codex ;;
+    anthropic/*) echo claude ;;
+    */*) echo "${2%%/*}" ;;
+  esac
+}
+
+exhausted() { # <provider> <harness> <model>
+  # Scope matching is bin/fm-dispatch-resolve.sh's: the model's bare name
+  # against an exact model: or product: scope, and the account-wide scopes.
+  [ -n "$1" ] && jq -e --arg p "$1" --arg h "$2" --arg m "$3" "$FM_QUOTA_ROW_JQ"'
+    ($m | split("/") | last) as $b
+    | [(quota_row(.; $p; quota_lane($h; $m)) // {}).quotaSemantics.effectiveAvailability[]?
+      | select(.runway.status == "exhausted_now") | .scope as $s
+      | select($s == "all_models" or $s == "all_products"
+          or $s == ("model:" + $b) or $s == ("product:" + $b))]
+    | length > 0' <<<"$QUOTA" >/dev/null
+}
+
+probe() { # <harness> <model> [account folder]: the one-line prompt through the harness CLI,
+  # on that account's profile folder when the caller names one, with the login
+  # variables a pool launch sheds also shed here so the answer is the account's own
+  local -a on_account=()
+  local dir rc prompt='Reply with the single word PONG.'
+  [ -z "${3:-}" ] || on_account=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR="$3")
+  dir=$(mktemp -d) || return 1
+  ( cd "$dir" || exit 1
+  if [ -z "${3:-}" ] && [[ $1 = claude* ]] && [ -f "$FM_HOME/config/account-pool" ]; then
+    # shellcheck source=/dev/null # sibling add-on path, resolved at runtime
+    . "$_FM_POOL_ENV" && fm_pool_claude_env || exit 1
+  fi
+  case $1 in
+    opencode*) timeout "$TEST_SECS" "${on_account[@]}" opencode run --model "$2" "$prompt" ;;
+    pi*) timeout "$TEST_SECS" "${on_account[@]}" pi --model "$2" -p --no-session "$prompt" ;;
+    claude*) timeout "$TEST_SECS" "${on_account[@]}" claude -p --model "$2" "$prompt" ;;
+    codex*) timeout "$TEST_SECS" "${on_account[@]}" codex exec --skip-git-repo-check --model "$2" "$prompt" ;;
+    *) exit 1 ;;
+  esac ) 2>&1 </dev/null
+  rc=$?
+  rm -rf "$dir"
+  return "$rc"
+}
+
+live_test() { # <harness> <model>: one prompt must come back answered
+  local out rc
+  out=$(probe "$1" "$2")
+  rc=$?
+  [ "$rc" = 0 ] && grep -q PONG <<<"$out" && ! grep -qiE "$LIMIT_RE" <<<"$out"
+}
+
+# account_out <id> <model> <account folder>: the limit/429/5xx line that account's
+# own profile folder answers, throttled on its own stamp. It says the account is
+# full, never that the route is dead, so it is never a reason to take a route out
+# of dispatch for every other task on it.
+account_out() {
+  local id=$1 out t now
+  now=$(date +%s)
+  t=$(stat -c %Y "$STATE/$id.account-probe-at" 2>/dev/null) || t=0
+  [ $((now - t)) -ge "$PROBE_SECS" ] || return 1
+  printf '%s\n' "$now" >"$STATE/$id.account-probe-at"
+  out=$(probe claude "$2" "$3") || true
+  grep -oiE "$LIMIT_RE|$HTTP_ERR_RE" <<<"$out" | head -n 1 | sed 's/^ *//; s/ *$//'
+}
+
+pinned_out() { # <id> <harness> <model> [account folder]: the pinned route's limit/429/5xx line
+  local id=$1 out t now
+  now=$(date +%s)
+  t=$(stat -c %Y "$STATE/$id.probe-at" 2>/dev/null) || t=0
+  [ $((now - t)) -ge "$PROBE_SECS" ] || return 1
+  printf '%s\n' "$now" >"$STATE/$id.probe-at"
+  out=$(probe "$2" "$3" "${4:-}") || true
+  grep -oiE "$LIMIT_RE|$HTTP_ERR_RE" <<<"$out" | head -n 1 | sed 's/^ *//; s/ *$//'
+}
+
+# A route is OUT while state/quota-failover-dead.json lists it. Each entry
+# keeps the profile objects dropped from config/crew-dispatch.json, keyed by
+# their rule's `when` (null for default), so a revive rejoins them at the end
+# of the list they came from.
+DEAD_JSON=$(jq -c . "$DEAD" 2>/dev/null) || DEAD_JSON='[]'
+
+dead_write() { # <json>
+  local tmp
+  tmp=$(mktemp "$STATE/.quota-failover-dead.XXXXXX") || return 1
+  printf '%s\n' "$1" >"$tmp" && mv -f "$tmp" "$DEAD"
+}
+
+dead_has() { # <harness> <model>
+  jq -e --arg h "$1" --arg m "$2" \
+    'any(.[]; .harness == $h and .model == $m)' <<<"$DEAD_JSON" >/dev/null
+}
+
+dispatch_sync() { # rewrite $DISPATCH without every out route; no-op when unchanged
+  [ -f "$DISPATCH" ] || return 0
+  local tmp
+  tmp=$(mktemp "$STATE/.crew-dispatch.XXXXXX") || return 1
+  jq --argjson dead "$DEAD_JSON" '
+    def deadp($p): any($dead[]?; .harness == $p.harness and .model == $p.model);
+    def clean:
+      if type == "array" then (map(select(deadp(.) | not)) | if length == 0 then null else . end)
+      elif deadp(.) then null
+      else . end;
+    if has("rules") then .rules |= (map(.use |= clean) | map(select(.use != null))) else . end
+    | .default |= clean
+    | if .default == null then del(.default) else . end
+  ' "$DISPATCH" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if [ "$(jq -S -c . "$DISPATCH" 2>/dev/null)" != "$(jq -S -c . "$tmp")" ]; then
+    cp "$tmp" "$DISPATCH"
+  fi
+  rm -f "$tmp"
+}
+
+dead_mark_out() { # <harness> <model>: record the route out; dispatch_sync drops it
+  dead_has "$1" "$2" && return 0
+  local removed
+  removed=$(jq -c --arg h "$1" --arg m "$2" '
+    def profiles: if type == "array" then .[] elif type == "object" then . else empty end;
+    [ (.rules[]? as $r | ($r.use | profiles) | select(.harness == $h and .model == $m) | {when: $r.when, profile: .}),
+      ((.default // null | profiles) | select(.harness == $h and .model == $m) | {when: null, profile: .}) ]
+  ' "$DISPATCH" 2>/dev/null) || removed='[]'
+  DEAD_JSON=$(jq -c --arg h "$1" --arg m "$2" --argjson removed "$removed" \
+      --argjson now "$(date +%s)" \
+      '. + [{harness: $h, model: $m, out_at: $now, last_test: $now, removed: $removed}]' \
+      <<<"$DEAD_JSON") || return 1
+  dead_write "$DEAD_JSON" || return 1
+  log "dispatch: $1 $2 is out until it answers its one-line test"
+}
+
+dead_restore() { # <entry>: put the entry's dropped profiles back in dispatch
+  [ -f "$DISPATCH" ] || return 0
+  local tmp
+  tmp=$(mktemp "$STATE/.crew-dispatch.XXXXXX") || return 1
+  jq --argjson e "$1" '
+    def as_list: if type == "array" then . elif . == null then [] else [.] end;
+    reduce $e.removed[] as $r (.;
+      if $r.when == null then .default = ((.default // []) | as_list) + [$r.profile]
+      else .rules |= (map(if .when == $r.when then .use = ((.use // []) | as_list) + [$r.profile] else . end))
+      end)
+  ' "$DISPATCH" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  cp "$tmp" "$DISPATCH"
+  rm -f "$tmp"
+}
+
+dead_retest() { # revive every out route whose one-line test answers again
+  local h m last entry
+  while IFS=$'\t' read -r h m last; do
+    [ -n "${h:-}" ] && [ $(( $(date +%s) - last )) -ge "$RETEST" ] || continue
+    if live_test "$h" "$m"; then
+      entry=$(jq -c --arg h "$h" --arg m "$m" \
+        'first(.[] | select(.harness == $h and .model == $m))' <<<"$DEAD_JSON")
+      dead_restore "$entry" || true
+      DEAD_JSON=$(jq -c --arg h "$h" --arg m "$m" \
+        'map(select(.harness != $h or .model != $m))' <<<"$DEAD_JSON") || continue
+      log "dispatch: $h $m answers its one-line test again; restored to crew-dispatch"
+    else
+      DEAD_JSON=$(jq -c --arg h "$h" --arg m "$m" --argjson now "$(date +%s)" \
+        'map(if .harness == $h and .model == $m then .last_test = $now else . end)' \
+        <<<"$DEAD_JSON") || continue
+    fi
+    dead_write "$DEAD_JSON" || true
+  done < <(jq -r '.[] | [.harness, .model, .last_test] | @tsv' <<<"$DEAD_JSON" 2>/dev/null)
+}
+
+# Line 1: <opus-pinned> <declared provider of the route>; then one
+# <harness> <model> <effort> <provider> line per candidate, in rule order.
+# shellcheck disable=SC2016 # jq program text
+CANDIDATES_JQ='
+  def profiles: if type == "array" then .[] elif type == "object" then . else empty end;
+  def same: .harness == $h and .model == $m;
+  def opus: (.model // "") | test("opus"; "i");
+  [.rules[]? | select(any(.use | profiles; same))] as $hit
+  | ([$hit[].use | profiles] + [.default | profiles]) as $all
+  | any($hit[]; all(.use | profiles; opus)) as $pinned
+  | [$pinned, (first($all[] | select(same) | .provider // empty) // "")],
+    (reduce $all[] as $p ([]; if any(.[]; .harness == $p.harness and .model == $p.model) then . else . + [$p] end)
+     | .[] | select((same | not) and (($pinned | not) or opus))
+     | [.harness, .model, .effort // "default", .provider // ""])
+  | @tsv'
+
+# account_low <tool> <id> <pool state>: "<5h>% 5h, <7d>% week" when the newest pool reading (home
+# state or pool state, as the pick reads it) is fresh and puts the account at or below the rest floor.
+PRELIMIT_FLOOR=${FM_ACCOUNT_POOL_REST_FLOOR:-15}
+account_low() {
+  local f a at=0 best=''
+  for f in "$FM_HOME/state/$1-accounts.json" "$3/$1-accounts.json"; do
+    a=$(jq -r '.generated_at // 0' "$f" 2>/dev/null) || continue
+    [ "$a" -gt "$at" ] 2>/dev/null && { at=$a; best=$f; }
+  done
+  [ -n "$best" ] && [ $(($(date +%s) - at)) -le "${QUOTA_FAILOVER_PRELIMIT_MAX_AGE:-1800}" ] || return 1
+  jq -er --arg id "$2" --argjson floor "$PRELIMIT_FLOOR" 'first(.accounts[]? | select(.id == $id and .problem == null)
+    | select([.five_hour.left, .seven_day.left] | map(select(. != null)) | length > 0 and min <= $floor)
+    | "\(.five_hour.left // "?")% 5h, \(.seven_day.left // "?")% week")' "$best" 2>/dev/null
+}
+
+# prelimit <meta> <id> <account> <left>: move a worker off an account that is about to run out, before it
+# stops on the limit. Only a task whose status says working and whose own lifecycle source reads idle
+# between turns moves (never mid-turn, never unknown), once per incarnation. relaunch --account next
+# rests the account only after a fresh reading confirms it is at or below the floor, so a stale reading
+# refuses before the worker stops. A tool whose terms bar an automatic move (D1) gets the wake line.
+prelimit() {
+  local meta=$1 id=$2 acct=$3 left=$4 h m gen crew verdict notefile out
+  h=$(fm_meta_get "$meta" harness) m=$(fm_meta_get "$meta" model) gen=$(fm_meta_get "$meta" spawn_gen)
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 1
+  crew=$(FM_CREW_STATE_NO_FORGE=1 "$BIN/fm-crew-state.sh" "$id" 2>/dev/null) crew=${crew#state: } crew=${crew%% *}
+  [ "$crew" = working ] || return 1
+  verdict=$(fm_busy_classify_meta "$meta" "$id" "$STATE" \
+    "$(fm_backend_visible_capture "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)")
+  [ "${verdict%% *}" = idle ] || return 1
+  printf '%s\n' "$gen" >"$STATE/$id.prelimit-gen"
+  if ! auto_move "$h" "$m" || [ -e "$FM_HOME/config/account-pool-autorelaunch-off" ]; then
+    log "$id: account $acct is low ($left) under idle $h $m; move it by hand: bin/fm-control.sh $id relaunch --account <id>"
+    printf 'quota-failover: %s account %s is low (%s); move it by hand: bin/fm-control.sh %s relaunch --account <id>\n' "$id" "$acct" "$left" "$id" >>"$WAKE"
+    return 0
+  fi
+  notefile=$(mktemp)
+  echo "quota-failover moved this task off pool account $acct ($left left) to the next $h account before it ran out. Continue the task from where it stopped." >"$notefile"
+  if out=$("$BIN/fm-control.sh" "$id" relaunch --account next --note-file "$notefile" 2>&1); then
+    log "$id: moved idle $h $m off low account $acct ($left) to the next $h account"
+  else
+    out=$(grep -m1 '^error: ' <<<"$out" || tail -n 1 <<<"$out")
+    # A relaunch can fail after it replaced the incarnation; say what the meta now records.
+    if [ "$(fm_meta_get "$meta" spawn_gen)" != "$gen" ]; then
+      log "$id: moved idle $h $m off low account $acct ($left) to account $(fm_meta_get "$meta" account), but the relaunch reported: $out"
+    else
+      log "$id: pre-limit move off $acct ($left) refused: $out"
+    fi
+  fi
+  rm -f "$notefile"
+}
+
+dead_retest
+
+for meta in "$STATE"/*.meta; do
+  [ -f "$meta" ] || continue
+  id=${meta##*/} id=${id%.meta}
+  # A parked home never moves: the skip is logged once per change, not per pass.
+  if fm_parked_meta "$meta" "$id"; then
+    note "$id" "parked: its home is parked (config/parked-homes); skipped"
+    continue
+  fi
+  [ ! -e "$STATE/$id.backlog-close" ] || continue
+  # Busy-state is not progress: a harness retrying a limit rewrites it on every
+  # attempt. busy-gen is re-armed at every spawn or relaunch, so a fresh
+  # incarnation is never touched while its screen may still show the previous
+  # run's last frame.
+  newest=0
+  for f in "$STATE/$id".{status,turn-ended,progress} "$STATE/$id.busy-gen"; do
+    t=$(stat -c %Y "$f" 2>/dev/null) && [ "$t" -gt "$newest" ] && newest=$t
+  done
+  acct=$(fm_meta_get "$meta" account)
+  if [ -n "$acct" ] && [ $(($(date +%s) - newest)) -ge "${QUOTA_FAILOVER_PRELIMIT_IDLE_SECS:-60}" ] \
+    && [ "$(cat "$STATE/$id.prelimit-gen" 2>/dev/null)" != "$(fm_meta_get "$meta" spawn_gen)" ] \
+    && pool=$(fm_account_pool_config "$FM_HOME/config" 2>/dev/null) && [ -n "$pool" ] \
+    && tool=$(fm_account_pool_tool "$(fm_meta_get "$meta" harness)") \
+    && left=$(account_low "$tool" "$acct" "${pool#*$'\t'}") && prelimit "$meta" "$id" "$acct" "$left"; then
+    continue
+  fi
+  [ $(($(date +%s) - newest)) -ge "$STALL" ] || continue
+  crew=$(FM_CREW_STATE_NO_FORGE=1 "$BIN/fm-crew-state.sh" "$id" 2>/dev/null) crew=${crew#state: } crew=${crew%% *}
+  [[ $crew = working || $crew = unknown ]] || continue
+  screen=$(fm_backend_visible_capture "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)
+  # A harness only retrying a provider error is busy but not progressing: the
+  # harness's own session status writes a session-retry busy event on every
+  # attempt, and that worker moves like a stopped one.
+  verdict=$(fm_busy_classify_meta "$meta" "$id" "$STATE" "$screen")
+  [ "${verdict%% *}" != busy ] || [[ $(fm_busy_record_read "$STATE" "$id" 2>/dev/null) = *" session-retry "* ]] || continue
+
+  h=$(fm_meta_get "$meta" harness) m=$(fm_meta_get "$meta" model) gen=$(fm_meta_get "$meta" spawn_gen)
+  route="$h $m" cands=() pinned=false declared='' pool=''
+  acct=$(fm_meta_get "$meta" account)
+  acct_folder=''
+  [ -z "$acct" ] || pool=$(fm_account_pool_config "$FM_HOME/config" 2>/dev/null)
+  [ -z "$pool" ] || acct_folder=$(pool_account_folder "$acct") || pool=''
+  [ -f "$DISPATCH" ] && { IFS=$'\t' read -r pinned declared; mapfile -t cands; } \
+    < <(jq -r --arg h "$h" --arg m "$m" "$CANDIDATES_JQ" "$DISPATCH" 2>/dev/null)
+  prov=$(provider "$h" "$m" "${declared:-}")
+  if { [ "$h" = claude ] && grep -qF "$SCREEN_LIMIT_RE" <<<"$screen"; } || { [ "$h" != claude ] && grep -qiE "$LIMIT_RE" <<<"$screen"; }; then
+    why="its screen shows a provider limit error"
+    if [ -z "$pool" ] && err=$(pinned_out "$id" "$h" "$m") && grep -qiE "$LIMIT_RE" <<<"$err"; then
+      dead_mark_out "$h" "$m" || true
+    fi
+  elif [ "$h" = claude ] && [ -n "$acct_folder" ] && err=$(account_out "$id" "$m" "$acct_folder") && [ -n "$err" ]; then
+    why="its pool account $acct answered a provider error ($err)"
+  elif exhausted "$prov" "$h" "$m"; then
+    why="quota-axi reads provider $prov exhausted"
+  elif dead_has "$h" "$m"; then
+    why="its pinned route is already out of dispatch"
+  elif err=$(pinned_out "$id" "$h" "$m") && [ -n "$err" ]; then
+    why="its pinned route answered a provider error ($err)"
+    dead_mark_out "$h" "$m" || true
+  else
+    continue
+  fi
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    note "$id" "stopped on $route ($why); remote task, not switched"
+    continue
+  fi
+
+  if [ -n "$pool" ]; then
+    if auto_move "$h" "$m" && [ ! -e "$FM_HOME/config/account-pool-autorelaunch-off" ]; then
+      [ "$(fm_meta_get "$meta" spawn_gen)" = "$gen" ] || continue
+      notefile=$(mktemp)
+      echo "quota-failover moved this task off pool account $acct to the next $h account because $why. Continue the task from where it stopped." > "$notefile"
+      out=$("$BIN/fm-control.sh" "$id" relaunch --account next --note-file "$notefile" 2>&1) && rc=0 || rc=$?
+      rm -f "$notefile"
+      if [ "$rc" = 0 ]; then
+        log "$id: moved $route off account $acct to the next $h account ($why)"
+        continue
+      fi
+      note "$id" "account move off $acct failed, trying a route move: $(grep -m1 '^error: ' <<<"$out" || tail -n 1 <<<"$out")"
+    else
+      [ "$(fm_meta_get "$meta" spawn_gen)" = "$gen" ] || continue
+      hand='<id|next>'
+      auto_move "$h" "$m" || hand='<id>'
+      # config/account-pool-autorelaunch-off, or a tool whose terms bar an automatic move:
+      # rest the account, then wake the home with the command that moves it.
+      text="stopped on $route account $acct ($why, gen $gen); account rested, move it by hand: bin/fm-control.sh $id relaunch --account $hand"
+      case $(last "$id") in *"account $acct ("*"gen $gen); account rested"*) continue ;; esac
+      if out=$(fm_account_pool_rest "${pool%%$'\t'*}" "${pool#*$'\t'}" "$acct" 2>&1); then
+        log "$id: $text"
+        printf 'quota-failover: %s %s\n' "$id" "$text" >>"$WAKE"
+      else
+        errline=${out%%$'\n'*}
+        ftext="stopped on $route account $acct ($why, gen $gen); rest failed ($errline), move it by hand: bin/fm-control.sh $id relaunch --account $hand"
+        case $(last "$id") in *"account $acct ("*"gen $gen); rest failed ("*) continue ;; esac
+        log "$id: $ftext"
+        printf 'quota-failover: %s %s\n' "$id" "$ftext" >>"$WAKE"
+      fi
+      continue
+    fi
+  fi
+
+  next='' passed=''
+  for c in "${cands[@]}"; do
+    IFS=$'\t' read -r ch cm ce cp <<<"$c"
+    if dead_has "$ch" "$cm"; then passed+=", $cm is out of dispatch"
+    elif exhausted "$(provider "$ch" "$cm" "$cp")" "$ch" "$cm"; then passed+=", $cm exhausted"
+    elif live_test "$ch" "$cm"; then next=$c; break
+    else passed+=", $cm failed its live test"
+    fi
+  done
+  why+=${passed:+; passed over ${passed#, }}
+  if [ -z "$next" ]; then
+    left="no live route in crew-dispatch"
+    [ "${pinned:-false}" = false ] || left="Opus-only route and no live Opus route"
+    note "$id" "stopped on $route ($why); $left, left waiting"
+    fm_parent_channel_report "$FM_HOME" "$STATE" \
+      "failed [key=quota-failover-$id]: quota-failover: $id is stopped by a usage limit on $route and no live route exists" \
+      >/dev/null 2>&1 || true
+    continue
+  fi
+  IFS=$'\t' read -r ch cm ce _ <<<"$next"
+  [ "$(fm_meta_get "$meta" spawn_gen)" = "$gen" ] || continue
+  notefile=$(mktemp)
+  echo "quota-failover moved this task from $route to $ch $cm because $why. Continue the task from where it stopped." > "$notefile"
+  if out=$("$BIN/fm-control.sh" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note-file "$notefile" 2>&1); then
+    log "$id: switched $route -> $ch $cm ($why)"
+  else
+    # The first error line is fm-control's cause; the last is rollback bookkeeping.
+    log "$id: switch $route -> $ch $cm failed: $(grep -m1 '^error: ' <<<"$out" || tail -n 1 <<<"$out")"
+  fi
+  rm -f "$notefile"
+done
+
+# One dispatch write per pass: every route marked out above loses its profile
+# objects here, so the next spawn's intake cannot rank it.
+dispatch_sync || true

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Pin a lane's git identity and refuse pushes of commits made as anyone else.
+#
+# Usage:
+#   git-identity env-file <out-file>
+#       Run in the lane pane (cwd = the lane worktree) by the home's config/launch-env-hook. Writes <out-file> as one
+#       export statement that appends two includeIf.gitdir entries after the GIT_CONFIG_COUNT entries this process
+#       inherited, scoped to the worktree's clone (its common dir and every linked worktree under it). Both include
+#       identity.gitconfig next to this script: [user] name and email, and core.hooksPath = the hooks/ dir next to it.
+#       Command-scope config beats the clone's shared .git/config, so a stray repo-local [user] cannot reach lane
+#       commits, while git -c, GIT_AUTHOR_* and every other repo the lane touches (test fixtures) keep their identity.
+#   git-identity hook <name> [args...]
+#       Run by hooks/<name>. pre-push refuses when any pushed commit not already on a remote has an author or
+#       committer email other than identity.gitconfig's user.email, or when a pushed commit cannot be inspected.
+#       Every hook then runs any add-on extensions in hooks.d/<name>/ (sorted, same args; a non-zero exit refuses)
+#       and the repository's own hook of that name (core.hooksPath without our include, else $GIT_DIR/hooks),
+#       pre-push with the same stdin.
+set -u -o pipefail
+unset CDPATH
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+CONF=$HERE/identity.gitconfig
+
+env_file() {
+  local out=$1 count=${GIT_CONFIG_COUNT:-0} common tmp
+  case "$count" in '' | *[!0-9]*) echo "git-identity: invalid inherited GIT_CONFIG_COUNT" >&2; return 1 ;; esac
+  count=$((10#$count))
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    common=$(cd "$common" && pwd -P) || {
+    echo "git-identity: $PWD is not a git worktree; cannot pin the lane identity" >&2
+    return 1
+  }
+  tmp=$(mktemp "$out.XXXXXX") || return 1
+  if ! printf 'export GIT_CONFIG_KEY_%s=%q GIT_CONFIG_VALUE_%s=%q GIT_CONFIG_KEY_%s=%q GIT_CONFIG_VALUE_%s=%q GIT_CONFIG_COUNT=%s\n' \
+    "$count" "includeIf.gitdir:$common.path" "$count" "$CONF" \
+    "$((count + 1))" "includeIf.gitdir:$common/**.path" "$((count + 1))" "$CONF" "$((count + 2))" >"$tmp" ||
+    ! mv -f "$tmp" "$out"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Print the pushed commits (stdin: git's pre-push ref lines) made as anyone but $1, one per line.
+bad_commits() {
+  local allowed=${1,,} lsha rsha not h ae ce an cn s
+  while read -r _ lsha _ rsha; do
+    case "$lsha" in *[!0]*) ;; *) continue ;; esac # branch delete
+    not=(--not --remotes)
+    case "$rsha" in *[!0]*) git cat-file -e "$rsha^{commit}" 2>/dev/null && not+=("$rsha") ;; esac
+    git log --format='%h%x09%ae%x09%ce%x09%an%x09%cn%x09%s' "$lsha" "${not[@]}" -- ||
+      { echo "git-identity: cannot inspect pushed commits" >&2; exit 1; }
+  done | while IFS=$'\t' read -r h ae ce an cn s; do
+    [ "${ae,,}" = "$allowed" ] && [ "${ce,,}" = "$allowed" ] ||
+      printf '  %s  author=%s <%s>  committer=%s <%s>  %s\n' "$h" "$an" "$ae" "$cn" "$ce" "$s"
+  done | awk '!seen[$0]++'
+}
+
+hook() {
+  local name=$1 input='' allowed bad oldest count i kept k v orig hooks_path
+  shift
+  if [ "$name" = pre-push ]; then
+    input=$(cat)
+    allowed=$(git config -f "$CONF" user.email) || { echo "git-identity: no user.email in $CONF" >&2; exit 1; }
+    bad=$(printf '%s\n' "$input" | bad_commits "$allowed") || exit 1
+    if [ -n "$bad" ]; then
+      oldest=$(printf '%s\n' "$bad" | tail -n 1 | awk '{print $1}')
+      cat >&2 <<EOF
+git-identity: push refused: these commits were not made as $allowed
+$bad
+fix: find the stray identity with \`git config --show-origin --get-all user.email\` (a repo-local [user] in a
+shared clone is the usual cause; remove it with \`git config --local --unset-all user.email\`), then re-author
+the commits and push again:
+  git rebase -r --exec 'git commit --amend --no-edit --reset-author' $oldest~1
+EOF
+      exit 1
+    fi
+  fi
+  # Add-on hook extensions (e.g. owner-guard): every executable in hooks.d/<name>/ runs in sorted
+  # order with the same args (pre-push gets the same stdin); a non-zero exit refuses the operation.
+  if [ -d "$HERE/hooks.d/$name" ]; then
+    for ext in "$HERE/hooks.d/$name/"*; do
+      if [ ! -x "$ext" ] || [ ! -f "$ext" ]; then continue; fi
+      if [ "$name" = pre-push ] && [ -n "$input" ]; then
+        printf '%s\n' "$input" | "$ext" "$@" || exit $?
+      else
+        "$ext" "$@" || exit $?
+      fi
+    done
+  fi
+  # Drop our include entries from GIT_CONFIG_* so the repository's own core.hooksPath shows through; later entries
+  # shift down. Ignore GIT_CONFIG_PARAMETERS like the fork's trailer wrappers do.
+  count=${GIT_CONFIG_COUNT:-0}
+  case "$count" in '' | *[!0-9]*) count=0 ;; esac
+  i=0 kept=0
+  while [ "$i" -lt "$((10#$count))" ]; do
+    k=GIT_CONFIG_KEY_$i v=GIT_CONFIG_VALUE_$i
+    k=${!k-} v=${!v-}
+    if [ "${k#includeIf.gitdir:}" = "$k" ] || [ "$v" != "$CONF" ]; then
+      [ "$i" = "$kept" ] || export "GIT_CONFIG_KEY_$kept=$k" "GIT_CONFIG_VALUE_$kept=$v"
+      kept=$((kept + 1))
+    fi
+    i=$((i + 1))
+  done
+  [ -z "${GIT_CONFIG_COUNT:-}" ] || export GIT_CONFIG_COUNT=$kept
+  orig=$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
+    if hooks_path=$(unset GIT_CONFIG_PARAMETERS; git config --get --type=path core.hooksPath 2>/dev/null) && [ -z "$hooks_path" ]; then
+      exit 0
+    fi
+    echo "git-identity: cannot resolve this repository's hooks directory; refusing to skip its $name hook" >&2
+    exit 1
+  }
+  [ "$orig" != "$HERE/hooks" ] && [ -x "$orig/$name" ] || exit 0
+  [ "$name" != pre-push ] || [ -z "$input" ] || exec "$orig/$name" "$@" <<<"$input"
+  exec "$orig/$name" "$@"
+}
+
+usage() { echo "usage: git-identity env-file <out-file> | hook <name> [args...]" >&2; exit 2; }
+case "${1:-}:$#" in
+env-file:2) env_file "$2" ;;
+hook:1) usage ;;
+hook:*) shift && hook "$@" ;;
+*) usage ;;
+esac

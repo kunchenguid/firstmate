@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Set a readable pane title, disable Claude's competing auto-title, and rename the current Herdr tab.
+set -euo pipefail
+[ "$#" -eq 1 ] || { echo 'pane-titles: expected the launch environment output path' >&2; exit 2; }
+out=$1
+addon=${FM_PANE_TITLES_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/fm-pane-titles}
+previous=$addon/previous-launch-env-hook
+tmp=$out.pane-titles.$$
+trap 'rm -f -- "$tmp"' EXIT
+
+title=''
+if [ -n "${FM_TASK_ID:-}" ]; then
+  id=${FM_TASK_ID//[-_]/ }
+  home=${FM_HOME:-}
+  [ -x "$home/bin/fm-tasks-axi.sh" ] || { echo 'pane-titles: FM_HOME backlog helper is unavailable' >&2; exit 1; }
+  shown=$(FM_HOME="$home" "$home/bin/fm-tasks-axi.sh" show "$FM_TASK_ID" --full) || {
+    echo "pane-titles: cannot read backlog title for task $FM_TASK_ID" >&2; exit 1;
+  }
+  backlog_title=$(printf '%s\n' "$shown" | sed -n 's/^  title: //p' | head -1)
+  [ -n "$backlog_title" ] || { echo "pane-titles: task $FM_TASK_ID has no backlog title" >&2; exit 1; }
+  title="$id: $backlog_title"
+else
+  home=${FM_HOME:-$(pwd -P)}
+  name=''
+  if [ -r "$home/data/secondmates.md" ]; then
+    name=$(awk -v home="$home" 'index($0, "(home: " home ";") { print $2; exit }' "$home/data/secondmates.md")
+  fi
+  [ -n "$name" ] || name=$(basename "$home")
+  name=${name//[-_]/ }
+  name=${name^}
+  title="$name lead"
+fi
+if [ -f "$previous" ]; then
+  if [ -x "$previous" ]; then "$previous" "$tmp"; else bash "$previous" "$tmp"; fi || {
+    echo 'pane-titles: chained launch-env-hook failed' >&2; exit 1;
+  }
+  IFS= read -r exports < "$tmp" || { echo 'pane-titles: chained hook wrote no export statement' >&2; exit 1; }
+  [ "$(wc -l < "$tmp")" -eq 1 ] && [[ "$exports" == export\ * ]] || {
+    echo 'pane-titles: chained hook must write one export statement' >&2; exit 1;
+  }
+  printf '%s CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1\n' "$exports" > "$out"
+else
+  printf 'export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1\n' > "$out"
+fi
+# Keep the tab label and terminal title identical and bounded for Herdr's tab strip.
+title=$(printf '%s' "$title" | tr -cd '[:print:]' | cut -c1-72)
+if [ -n "${HERDR_SESSION:-}" ]; then
+  tab_id=$(herdr --session "$HERDR_SESSION" pane current --current | jq -er '.result.pane.tab_id') || {
+    echo 'pane-titles: Herdr could not identify the current pane tab' >&2; exit 1;
+  }
+  herdr --session "$HERDR_SESSION" tab rename "$tab_id" "$title" || {
+    echo "pane-titles: Herdr could not rename tab $tab_id to '$title'" >&2; exit 1;
+  }
+fi
+printf '\033]0;%s\007' "$title"

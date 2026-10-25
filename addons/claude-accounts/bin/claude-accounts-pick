@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# claude-accounts-pick - config/account-pool's `command=` for a home that spreads new Claude workers over
+# every signed-in Claude account. fm-spawn runs `<command> pick <tool> --json [--prefer <id>] --state <dir>`
+# for each new worker; the answer names one existing profile folder for CLAUDE_CONFIG_DIR and the credential
+# variable names to unset (names only). Smooth weighted round robin picks the largest assignment
+# deficit (runway share * next assignment number - recent count) within each provider's best tier.
+# Assignments expire after FM_ACCOUNT_POOL_ASSIGNMENT_SECONDS (default 300); flock serializes picks.
+# Runway is min(5h, 7d left). Two floors, stated explicitly (not the same number):
+# - Launch admission: FM_CLAUDE_ACCOUNTS_LOW (default 5%). An account under that percent is skipped
+#   for new worker launches, so new workers go to the other account when one runs low.
+# - Verified rest / tool eligibility: FM_ACCOUNT_POOL_REST_FLOOR (default 15%). `rest` and
+#   account-pool/bin/fm-model-pool use that higher floor so tools rotate off an account earlier than
+#   spawn admission would. Do not silently treat 5% and 15% as one policy.
+# A running worker is never moved: the pick only happens at launch. Claude and Codex use their own
+# registry roster and quota reading; Codex keeps its ambient folder only when no Codex registry
+# accounts exist. Pi remains ambient.
+# A quota-reader failure never refuses a launch. The roster comes from the registry (id, name, folder);
+# the reading is whatever the last good run left on disk, in <home>/state or in the pool state folder,
+# whichever is newer. A reading older than FM_CLAUDE_ACCOUNTS_STALE_MAX (3600 s) still counts by its 7-day
+# side alone, which is the window that decays slowly, and an account with no reading at all ranks last but
+# is still picked. The answer carries `read`: where the numbers came from, and how old they are. An account
+# whose last reading says it must sign in again is skipped, however much runway it shows, so a signed-out
+# profile never wins on a stale number. The pick fails only when the pool itself has nothing to offer: every
+# account rested, every known runway under the low mark, or no registry account with an existing folder.
+# `status <id> --json` names the tool and folder of one account. `rest <id> --json` requires a quota
+# window at/below FM_ACCOUNT_POOL_REST_FLOOR (15%) and lasts until it resets; launch prompts cannot rest it.
+# A recovered reading invalidates a legacy rest. Accounts with a five_hour window still need
+# every present window at 100. Weekly-only Codex (null five_hour, seven_day present) clears when
+# problem is null and seven_day.left >= FM_ACCOUNT_POOL_REST_FLOOR (default 15). `unrest <id>`
+# returns an account. A rested account is never replaced by a paid fallback: with every account
+# rested the pick refuses.
+# Env: FM_HOME (the home whose state holds the reading; optional - --state alone is enough),
+# FM_CLAUDE_ACCOUNTS_REGISTRY, FM_CLAUDE_ACCOUNTS_FRESH (seconds a reading is reused, 120).
+# State must be supplied through --state or FM_HOME, and holds account-assignments.json (no secrets).
+set -uo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SHED='CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID'
+
+fail() { jq -cn --arg r "$1" '{ok: false, reason: $r}'; echo "error: $1" >&2; exit 1; }
+usage="usage: claude-accounts-pick pick <tool> --json [--prefer <id>] --state <dir>"
+verb=${1:-}
+case "$verb" in pick | status | rest | unrest) ;; *) fail "$usage" ;; esac
+[ -n "${2:-}" ] || fail "$usage"
+tool=$2
+shift 2
+prefer=
+state=
+while [ $# -gt 0 ]; do
+  case "$1" in --prefer) prefer=${2:-}; shift ;; --state) state=${2:-}; shift ;; esac
+  shift
+done
+
+REGISTRY=${FM_CLAUDE_ACCOUNTS_REGISTRY:-$HOME/.muxr/plans/accounts-v1.json}
+if [ "$verb" != pick ]; then
+  id=$tool
+  tool=$(jq -r --arg id "$id" 'first(.accounts[]? | select(.id == $id and (.provider == "claude" or .provider == "codex")) | .provider) // empty' "$REGISTRY")
+  [ -n "$tool" ] || fail "no account $id in the pool"
+  rested=${state:-${FM_HOME:+$FM_HOME/state}}/$tool-accounts-rested
+  [ -n "$rested" ] || fail "$verb $id needs the pool state folder: pass --state <dir> or set FM_HOME"
+  case "$verb" in
+    status) jq -cn --arg id "$id" --arg tool "$tool" --arg f "$(jq -r --arg id "$id" 'first(.accounts[]? | select(.id == $id) | .folder)' "$REGISTRY")" \
+      '{ok: true, id: $id, tool: $tool, folder: $f}' ;;
+    rest)
+      quota_dir=${FM_HOME:+$FM_HOME/state}; quota_dir=${quota_dir:-$state}
+      if [ -n "${FM_HOME:-}" ]; then
+        FM_ACCOUNTS_PROVIDER=$tool "$here/claude-accounts-quota.sh" >/dev/null || fail "cannot verify quota before resting $id"
+      fi
+      # Claude reports UTC offsets and fractional seconds; jq's parser requires whole-second Z.
+      until=$(jq -er --arg id "$id" --argjson floor "${FM_ACCOUNT_POOL_REST_FLOOR:-15}" --argjson now "$(date +%s)" '
+        select($now - .generated_at <= 120) | .accounts[] | select(.id == $id and .problem == null)
+        | [.five_hour, .seven_day] | map(select(.left != null and .left <= $floor) | .resets_at
+          | sub("[.][0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601)
+        | max | select(. > $now)' "$quota_dir/$tool-accounts.json") \
+        || fail "rest requires low quota with a future reset for $id; a launch prompt is not a limit"
+      mkdir -p "$rested" || fail "cannot write the rested list in $rested"
+      echo "$until" >"$rested/$id" || fail "cannot rest $id in $rested"
+      jq -cn --arg id "$id" --argjson until "$until" '{ok: true, id: $id, rested: true, until: $until, reason: "low quota"}' ;;
+    unrest) rm -f "$rested/$id"; jq -cn --arg id "$id" '{ok: true, id: $id, rested: false}' ;;
+  esac
+  exit 0
+fi
+
+case "$tool" in
+  claude) store=CLAUDE_CONFIG_DIR ;;
+  codex) store=CODEX_HOME; SHED='OPENAI_API_KEY CODEX_API_KEY' ;;
+  pi) jq -cn --arg d "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" '{ok: true, id: "ambient", set: {PI_CODING_AGENT_DIR: $d}, unset: []}'; exit 0 ;;
+  *) fail "no account choice for $tool" ;;
+esac
+
+# The roster: the registry is the list of accounts, the reading only fills in the numbers.
+roster=$(jq -c --arg tool "$tool" '[.accounts[]? | select(.provider == $tool and (.folder | type) == "string" and (.folder | startswith("/")))
+  | {id, name: (.name // ""), folder}]' "$REGISTRY" 2>/dev/null) || roster=''
+[ "$tool" != codex ] || [ "$roster" != '[]' ] || { jq -cn --arg d "${CODEX_HOME:-$HOME/.codex}" '{ok: true, id: "ambient", set: {CODEX_HOME: $d}, unset: []}'; exit 0; }
+[ -n "$roster" ] && [ "$roster" != '[]' ] || fail "no $tool account with a folder in $REGISTRY"
+
+# The last good reading: <home>/state and the pool state folder, whichever the reader wrote last.
+# A file the reader just wrote with nothing but errors carries no window at all, so a file that still
+# has one wins over it whatever its age.
+candidates=("${FM_HOME:+$FM_HOME/state/$tool-accounts.json}" "${state:+$state/$tool-accounts.json}")
+scan_reading() {
+  local f at score best=-1
+  file=''; newest=0
+  for f in "${candidates[@]}"; do
+    [ -n "$f" ] && [ -r "$f" ] || continue
+    at=$(jq -r '.generated_at // 0' "$f" 2>/dev/null) || continue
+    case "$at" in '' | *[!0-9]*) continue ;; esac
+    score=$(( at + $(jq -r 'if any(.accounts[]?; .five_hour != null or .seven_day != null) then 100000000000000 else 0 end' "$f" 2>/dev/null || echo 0) ))
+    [ "$score" -gt "$best" ] && { best=$score; newest=$at; file=$f; }
+  done
+}
+scan_reading
+read_err=''
+if [ -z "$file" ] || [ "$((newest + ${FM_CLAUDE_ACCOUNTS_FRESH:-120}))" -le "$(date +%s)" ]; then
+  # Try a fresh reading when there is a home to write it to. A reader failure is a note, never a refusal.
+  if [ -n "${FM_HOME:-}" ]; then
+    read_err=$(FM_ACCOUNTS_PROVIDER=$tool "$here/claude-accounts-quota.sh" 2>&1 >/dev/null) || :
+    [ -s "${FM_HOME}/state/$tool-accounts.json" ] || read_err=${read_err:-the quota reader wrote no reading}
+    scan_reading
+  else
+    read_err=${read_err:-FM_HOME is unset, so the last good reading on disk is the only number there is}
+  fi
+fi
+[ -n "$read_err" ] && read_err=${read_err%%$'\n'*}
+reading=$([ -s "${file:-}" ] && cat "$file" 2>/dev/null || echo null)
+
+low=${FM_CLAUDE_ACCOUNTS_LOW:-5}
+state=${state:-${FM_HOME:+$FM_HOME/state}}
+[ -n "$state" ] || fail "pick needs --state <dir> or FM_HOME to balance assignments"
+rested_dir=$state/$tool-accounts-rested
+rested_ids=$(for f in "$rested_dir"/*; do
+  [ -f "$f" ] || continue
+  # Recovered: Claude (five_hour present) needs every present window at 100; weekly-only Codex
+  # (null five_hour) clears when seven_day.left >= the rest floor.
+  if jq -e --arg id "${f##*/}" --argjson floor "${FM_ACCOUNT_POOL_REST_FLOOR:-15}" \
+      'any(.accounts[]?; .id == $id and .problem == null and (
+        if .five_hour == null and .seven_day != null then .seven_day.left >= $floor
+        else ([.five_hour, .seven_day] | map(select(. != null)) | length > 0 and all(.left == 100))
+        end))' <<<"$reading" >/dev/null; then
+    printf '0\n' >"$f" || fail "cannot expire the recovered account rest"
+  fi
+  expiry=$(cat "$f") || fail "cannot read account rest"
+  if [ "$expiry" -gt "$(date +%s)" ] 2>/dev/null; then basename "$f"; fi
+done | jq -Rsc 'split("\n") | map(select(. != ""))') || fail "cannot read or expire account rests"
+
+# The picker owns the counter, so all callers (spawn, relaunch, and tool judges) share it.
+mkdir -p "$state" || fail "cannot create assignment state in $state"
+exec {assignment_lock}>"$state/account-assignments.lock" || fail "cannot open the assignment lock"
+flock -w 15 "$assignment_lock" || fail "account assignment lock timed out"
+assignments='[]'
+if [ -e "$state/account-assignments.json" ]; then
+  assignments=$(jq -ce 'if type == "array" then . else error("expected an assignment array") end' "$state/account-assignments.json") \
+    || fail "cannot read recent account assignments"
+fi
+now=$(date +%s)
+assignments=$(jq -c --argjson now "$now" --argjson ttl "${FM_ACCOUNT_POOL_ASSIGNMENT_SECONDS:-300}" \
+  'map(select(.at > $now - $ttl))' <<<"$assignments") || fail "cannot expire recent account assignments"
+
+# tier 0: a reading young enough to trust, ranked on min(5h, 7d). tier 1: an older reading, ranked on its
+# 7-day side alone. tier 2: no reading at all, ranked last so a known account always wins. An account whose
+# last reading says it must sign in again is out whatever it shows.
+# shellcheck disable=SC2016 # jq program text
+pick=$(jq -cn --arg prefer "$prefer" --arg tool "$tool" --argjson assignments "$assignments" --argjson low "$low" --argjson now "$now" \
+    --argjson max "${FM_CLAUDE_ACCOUNTS_STALE_MAX:-3600}" --argjson rested "$rested_ids" --argjson read "$reading" '
+  ($read // {}) as $rd
+  | def sign_in: test("sign-?in|log ?in|unauthenticated|not authenticated|no credentials"; "i");
+  def weight: [.runway, 1] | max;
+  [ $roster[] as $r
+    | (($rd.accounts // []) | map(select(.id == $r.id)) | first // {}) as $m
+    | ($m.read_at // $rd.generated_at // 0) as $at
+    | (if ($m.problem == null and ($m.five_hour != null or $m.seven_day != null) and $now - $at <= $max) then 0
+       elif $m.seven_day != null then 1 else 2 end) as $tier
+    | {id: $r.id, name: $r.name, folder: $r.folder, tier: $tier, read_at: $at,
+       assigned: ([$assignments[] | select(.provider == $tool and .id == $r.id)] | length),
+       runway: (if $tier == 0 then ([$m.five_hour.left, $m.seven_day.left] | map(select(. != null)) | min)
+                 elif $tier == 1 then $m.seven_day.left else -1 end)}
+    | select(([.id] | inside($rested) | not) and ((($m.problem // "") | sign_in) | not))
+    | select(.runway < 0 or .runway >= $low)
+    | select($prefer == "" or $prefer == "next" or .id == $prefer)]
+  | (map(.tier) | min) as $tier | map(select(.tier == $tier))
+  | (map(weight) | add) as $total | ((map(.assigned) | add) + 1) as $turn
+  | sort_by(.assigned - (weight * $turn / $total), -.runway) | first // empty' --argjson roster "$roster")
+[ -n "$pick" ] || fail "no ${tool/claude/Claude} account can take a worker${prefer:+ (asked for $prefer)}: each is resting, signed out, or under $low% left${read_err:+ (quota reading unavailable: $read_err)}"
+folder=$(jq -r '.folder' <<<"$pick")
+[ -d "$folder" ] || fail "the chosen $tool account's folder is missing"
+tmp=$(mktemp "$state/account-assignments.XXXXXX") || fail "cannot create assignment update"
+if ! jq -c --arg tool "$tool" --arg id "$(jq -r .id <<<"$pick")" --argjson at "$now" \
+  '. + [{provider:$tool,id:$id,at:$at}]' <<<"$assignments" >"$tmp" || ! mv -f "$tmp" "$state/account-assignments.json"; then
+  rm -f "$tmp"
+  fail "cannot save recent account assignments"
+fi
+tier=$(jq -r '.tier' <<<"$pick"); at=$(jq -r '.read_at // 0' <<<"$pick")
+case $tier in 0) source=reading ;; 1) source=last-good ;; *) source=none ;; esac
+jq -cn --argjson p "$pick" --arg store "$store" --arg shed "$SHED" --arg source "$source" --argjson at "${at:-0}" \
+  --argjson age "$([ "${at:-0}" -gt 0 ] && echo $(($(date +%s) - at)) || echo 0)" --arg why "${read_err:-}" \
+  '{ok: true, id: $p.id, set: {($store): $p.folder}, unset: ($shed | split(" ")),
+    read: {source: $source, at: $at, age: $age, problem: ($why | select(. != "") // null)}}'

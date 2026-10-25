@@ -1,0 +1,75 @@
+diff --git a/bin/fm-brief.sh b/bin/fm-brief.sh
+index 5dc8b1ce..791da67d 100755
+--- a/bin/fm-brief.sh
++++ b/bin/fm-brief.sh
+@@ -132,9 +132,10 @@
+ # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+ # second owner of a contract that must stay current across relaunches.
+ # A home may carry standing worker instructions without editing this tracked
+-# script: when config/brief-include.md exists under the active home, ship and
+-# scout scaffolds append its text verbatim as their last section, "# Home brief
+-# additions", which defers to every other section of the brief. It goes last
++# script: when config/brief-include-shared.md or config/brief-include.md exists
++# under the active home, ship and scout scaffolds append their text verbatim,
++# shared first, as their last section, "# Home brief additions", which defers
++# to every other section of the brief. It goes last
+ # because the machine-read `# Task` heading resolves to its first match, so
+ # appended text can never shadow it; a later scout promotion appends its ship
+ # contract below it, which that position-free deference already covers. An
+@@ -392,26 +393,25 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
+   exit 1
+ fi
+ 
+-# The optional home-local include is read before anything is written, so an
+-# unusable file never leaves a partial scaffold behind.
+-BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
++# Read both optional includes before writing, so an unusable file never
++# leaves a partial scaffold behind. Shared instructions precede home-local ones.
+ BRIEF_INCLUDE_BODY=
+-if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
+-  { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
+-    echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
+-    exit 1
+-  }
+-  if printf '%s\n' "$BRIEF_INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
+-    echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
+-    exit 1
+-  fi
+-  [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
++if [ "$KIND" != secondmate ]; then
++  for BRIEF_INCLUDE_FILE in "$CONFIG/brief-include-shared.md" "$CONFIG/brief-include.md"; do
++    { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; } || continue
++    { [ -f "$BRIEF_INCLUDE_FILE" ] && INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
++      echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
++      exit 1
++    }
++    if printf '%s\n' "$INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
++      echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
++      exit 1
++    fi
++    [ -n "$(printf '%s' "$INCLUDE_BODY" | tr -d '[:space:]')" ] || continue
++    BRIEF_INCLUDE_BODY="${BRIEF_INCLUDE_BODY}${BRIEF_INCLUDE_BODY:+$'\n'}$INCLUDE_BODY"
++  done
+ fi
+ 
+-_bi="${FM_ADDONS_DIR:-${FM_HOME:-$SCRIPT_DIR/..}/projects/firstmate-addons}/brief-inherit/bin/fm-brief-inherit-lib.sh"
+-# shellcheck disable=SC1090 # The optional add-on source is installed outside this repository.
+-[ ! -f "$_bi" ] || { . "$_bi" && fm_brief_inherit_shared "$CONFIG" "$KIND"; }
+-
+ # Append the include as the last section of a ship or scout scaffold.
+ append_brief_include() {
+   [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
+diff --git a/bin/fm-config-inherit-lib.sh b/bin/fm-config-inherit-lib.sh
+index 7f61447a..ad058407 100644
+--- a/bin/fm-config-inherit-lib.sh
++++ b/bin/fm-config-inherit-lib.sh
+@@ -87,8 +87,7 @@ FM_SHARED_CAPTAIN_MODE="444"
+ # The declared inheritable set (space-separated, config-dir-relative item paths).
+ # Extend here to inherit more of the primary's local config; override via the
+ # environment only in tests. Items must not contain whitespace.
+-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role lane-target}"
+-_bi="${FM_ADDONS_DIR:-${FM_HOME:-$(dirname "${BASH_SOURCE[0]}")/..}/projects/firstmate-addons}/brief-inherit/bin/fm-brief-inherit-lib.sh"; [ ! -f "$_bi" ] || { . "$_bi" && fm_brief_inherit_config; }
++FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role brief-include-shared.md lane-target}"
+ 
+ # firstmate-role additionally carries a proof-of-state receipt: a scoped role
+ # grant (or its recorded absence) authorizes a secondmate home only while

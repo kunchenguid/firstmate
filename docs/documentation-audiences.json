@@ -647,6 +647,258 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/README.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/account-next-relaunch.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/claude-accounts-first-run.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/claude-accounts-pick.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/claude-accounts-quota.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/claude-accounts-timer.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/fleet-dashboard-live-core.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/fleet-dashboard-wait-reasons.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/fleet-pulse-newest-retro.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/incremental-fleet-pulse-chat-export.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/merge-card-one-card-per-pr.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/merge-card-retitle.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/model-pool-helper.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/pipeline-route-switch.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/pipeline-route.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/quota-axi-pool.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/quota-failover-limit-handoff.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/quota-failover-live-route.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/quota-failover-prelimit.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/quota-failover-screen-match.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/FORK-EXIT.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "addons/README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "addons/VISION.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "addons/account-pool/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/alerts/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/bearings-board/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/brief-inherit/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/claude-accounts/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/codex-guard/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/docs/addons-reference.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/docs/media/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/fleet-contract-check/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/fleet-dashboard/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/fleet-flow/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/fleet-pulse/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/fleet-stats/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/host-memory/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/key-in-env-check/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/kill-guard/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/lead-wake/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/local-qwen-tuning/PROVENANCE.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "addons/local-qwen-tuning/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/lookout-adapter/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/merge-card/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/merge-on-green/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/nm-drain/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/owner-guard/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/owner-rules/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/owner-rules/skill/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "addons/parked-homes/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/pipeline-literal-delete/rule.txt",
+      "audience": "operator-example"
+    },
+    {
+      "path": "addons/pipeline-quota-failover/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/quota-axi-pool/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/receipts/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/sentinel/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/signoff/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/status-wait-check/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/supervisor-guard/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/supervisor-guard/docs/supervisor-work-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "addons/task-priority/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/tickets-sync/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "addons/wait-timers/README.md",
+      "audience": "operator-current"
     }
   ]
 }

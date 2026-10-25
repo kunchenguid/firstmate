@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# PATH wrapper: with FM_HOME/config/account-pool, --json Claude row uses fm-model-pool's
+# claude-accounts reading (same pick/floors/credits refusal). Else exec upstream.
+# Env: FM_QUOTA_AXI_REAL, FM_MODEL_POOL, FM_QUOTA_AXI_POOL_UPSTREAM, FM_QUOTA_AXI_POOL_ATTEMPTED.
+set -euo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+addons=$(cd "$here/../.." && pwd)
+model_pool=${FM_MODEL_POOL:-${FM_ADDONS_DIR:-$addons}/account-pool/bin/fm-model-pool}
+upstream_file=${FM_QUOTA_AXI_POOL_UPSTREAM:-${XDG_DATA_HOME:-$HOME/.local/share}/fm-quota-axi-pool/upstream}
+
+find_upstream() {
+  if [ -n "${FM_QUOTA_AXI_REAL:-}" ] && [ -x "$FM_QUOTA_AXI_REAL" ]; then printf '%s\n' "$FM_QUOTA_AXI_REAL"; return 0; fi
+  if [ -r "$upstream_file" ]; then
+    local s; s=$(head -n 1 "$upstream_file")
+    [ -n "$s" ] && [ -x "$s" ] && { printf '%s\n' "$s"; return 0; }
+  fi
+  local self cand; self=$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    [ "$(readlink -f "$cand" 2>/dev/null || printf '%s\n' "$cand")" = "$self" ] && continue
+    case "$cand" in */fm-quota-axi-pool/*|*/quota-axi-pool/bin/*) continue ;; esac
+    [ -x "$cand" ] || continue
+    printf '%s\n' "$cand"; return 0
+  done < <(type -aP quota-axi 2>/dev/null || true)
+  return 1
+}
+
+want_json=0 passthru=0
+for a in "$@"; do case "$a" in --json) want_json=1 ;; --version|-v|-V|--help|-h) passthru=1 ;; esac; done
+upstream=$(find_upstream) || { echo "quota-axi-pool: upstream quota-axi not found (set FM_QUOTA_AXI_REAL)" >&2; exit 127; }
+pool_config=${FM_HOME:+$FM_HOME/config/account-pool}
+if [ "$passthru" = 1 ] || [ -z "${FM_HOME:-}" ] || [ ! -f "${pool_config:-}" ] || [ ! -x "$model_pool" ]; then
+  exec "$upstream" "$@"
+fi
+
+attempted=${FM_QUOTA_AXI_POOL_ATTEMPTED:-[]}
+case "$attempted" in \[*\]) ;; *) attempted='[]' ;; esac
+req=$(jq -nc --arg p "$pool_config" --argjson a "$attempted" '{v:1,purpose:"work",pool_config:$p,capabilities:["text"],attempted:$a}')
+pick=$(printf '%s' "$req" | "$model_pool" pick --json 2>/dev/null) || pick=''
+jq -e '.ok == true' <<<"${pick:-}" >/dev/null 2>&1 || exec "$upstream" "$@"
+pick_id=$(jq -r '.selection_id // .id // empty' <<<"$pick")
+provider=$(jq -r '.provider // empty' <<<"$pick")
+folder=$(jq -r '.set.CLAUDE_CONFIG_DIR // empty' <<<"$pick")
+
+if [ "$want_json" = 0 ]; then
+  if [ "$provider" = claude ] && [ -n "$folder" ] && [ -d "$folder" ]; then
+    while IFS= read -r var; do
+      [ -n "$var" ] || continue
+      case "$var" in [A-Za-z_][A-Za-z0-9_]*) unset "$var" ;; esac
+    done < <(jq -r '.unset[]? // empty' <<<"$pick")
+    export CLAUDE_CONFIG_DIR=$folder
+  fi
+  exec "$upstream" "$@"
+fi
+
+state=
+while IFS= read -r line || [ -n "$line" ]; do case "$line" in state=*) state=${line#state=} ;; esac; done <"$pool_config"
+reading=
+for cand in ${FM_HOME:+"$FM_HOME/state/claude-accounts.json"} ${state:+"$state/claude-accounts.json"}; do
+  [ -n "${cand:-}" ] && [ -r "$cand" ] || continue
+  reading=$cand; break
+done
+base=$("$upstream" "$@" 2>/dev/null) || base=''
+jq -e 'type=="object" and (.providers|type)=="array"' <<<"${base:-}" >/dev/null 2>&1 \
+  || base=$(jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{generatedAt:$at,schemaVersion:5,providers:[]}')
+
+unknown_row() {
+  jq -nc --arg id "$1" --arg note "$2" \
+    '{provider:"claude",state:{status:"fresh",stale:false},windows:[],quotaSemantics:{status:"unknown",effectiveAvailability:[]},pool:{id:$id,note:$note}}'
+}
+
+if [ "$provider" != claude ] || [ -z "$pick_id" ] || [[ $pick_id == route:* ]]; then
+  claude_row=$(unknown_row "$pick_id" "fm-model-pool non-Claude fallover")
+elif [ -z "$reading" ]; then
+  claude_row=$(unknown_row "$pick_id" "no claude-accounts reading")
+else
+  claude_row=$(jq -c --arg id "$pick_id" --arg folder "$folder" '
+    def through($p): if $p<=0 then {status:"exhausted_now",usableRunwaySeconds:0} else {status:"through_reset"} end;
+    (.accounts//[]|map(select(.id==$id))|first) as $a |
+    if $a==null then {provider:"claude",state:{status:"fresh",stale:false},windows:[],quotaSemantics:{status:"unknown",effectiveAvailability:[]},pool:{id:$id,note:"pick missing from reading"}}
+    else ([$a.five_hour.left,$a.seven_day.left]|map(select(.!=null))|if length==0 then null else min end) as $r |
+      if $r==null then {provider:"claude",state:{status:"fresh",stale:false},windows:[],quotaSemantics:{status:"unknown",effectiveAvailability:[]},pool:{id:$id,note:"no 5h/7d left"}}
+      else {
+        provider:"claude", state:{status:"fresh",stale:($a.stale==true)},
+        windows:[(if $a.five_hour.left!=null then {id:"five_hour",label:"session",kind:"session",percentRemaining:$a.five_hour.left}+(if $a.five_hour.resets_at!=null then {resetsAt:$a.five_hour.resets_at} else {} end) else empty end),
+                 (if $a.seven_day.left!=null then {id:"seven_day",label:"week",kind:"weekly",percentRemaining:$a.seven_day.left}+(if $a.seven_day.resets_at!=null then {resetsAt:$a.seven_day.resets_at} else {} end) else empty end)],
+        quotaSemantics:{status:"known",effectiveAvailability:[{
+          scope:"all_models",status:"known",effectivePercentRemaining:$r,
+          boundedBy:[(if $a.five_hour.left!=null then "five_hour" else empty end),(if $a.seven_day.left!=null then "seven_day" else empty end)],
+          limitingWindowIds:(if ($a.five_hour.left//999)<=($a.seven_day.left//999) then ["five_hour"] else ["seven_day"] end),
+          runway:through($r), selection:{status:"known",spendPriority:($r/100)}}]},
+        pool:{id:$id,folder:$folder,source:"fm-model-pool",runway:$r}
+      } end
+    end' "$reading")
+fi
+jq -c --argjson row "$claude_row" '.providers=(( [.providers[]?|select(.provider!="claude")] )+[$row])' <<<"$base"

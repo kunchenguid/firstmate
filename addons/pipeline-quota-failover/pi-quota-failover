@@ -1,0 +1,550 @@
+#!/usr/bin/env bash
+# pi-quota-failover - drop-in pi wrapper for the no-mistakes pipeline agent.
+#
+# no-mistakes calls pi once per agent invocation with one model from
+# agent_config.pi.model, and retries the same model up to 4 times when the
+# provider answers a quota error ("limit used up" and friends reach the retry
+# classifier as transient because they carry a 429; only seven exact quota
+# phrasings are terminal). A dead first model then wastes 4 attempts and the
+# run fails, costing a restart.
+#
+# This wrapper runs the real pi; the requested chain model goes first, then
+# the other chain models in chain order (default one route, Claude Haiku 5.5
+# through claude-bridge on the Claude subscription accounts, with no paid
+# fallback; never Opus, Sonnet, Fable, Codex, Go, Muse or Step 5). A call pinned to a model
+# outside the chain runs the chain in chain order, so no pipeline role reaches
+# a model the chain does not name. When an attempt answers a QUOTA error it
+# moves at once to the next model in that order inside the same invocation.
+# Any non-quota failure passes through
+# byte-for-byte with its original exit code, so the pipeline's own handling is
+# untouched. When every model in the chain is quota-dead it fails once with a
+# line containing "quota exhausted", which no-mistakes classifies as terminal,
+# so the dead chain is never re-retried.
+#
+# Each call runs pi with -ne and -e for every extension pi would load, except pi-hermes-memory (see README.md).
+#
+# Install (idempotent): pipeline-quota-failover/install.sh
+# It copies this script to ~/.local/share/fm-pipeline-quota-failover/ and sets
+# agent_path_override.pi in ~/.no-mistakes/config.yaml. The daemon re-reads
+# the config per run, so the next pipeline run picks it up without a restart.
+#
+# Knobs (environment):
+#   PI_QUOTA_FAILOVER_REAL_PI  absolute path to the real pi binary
+#   PI_QUOTA_FAILOVER_CHAIN    space-separated ordered model chain
+#   PI_QUOTA_FAILOVER_ACCOUNT_POOL  a firstmate config/account-pool file (default ~/firstmate/config/account-pool when it
+#                              exists; empty turns it off): route and account come from fm-model-pool pick/next (Claude
+#                              above the eligibility floor, else Sol then Goat then Cursor auto); a limit calls next
+#   PI_QUOTA_FAILOVER_MODEL_POOL  absolute path to fm-model-pool (default: sibling account-pool/bin/fm-model-pool)
+#   PI_QUOTA_FAILOVER_PRINT_CHAIN  non-empty: print the chain and exit (route-change reads it)
+#   PI_QUOTA_FAILOVER_LOG      log file (default ~/.local/state/pi-quota-failover.log)
+#   PI_QUOTA_FAILOVER_GATE     host-memory gate run before each call (default ~/firstmate/config/fm-mem-gate.sh
+#                              when executable; empty disables it)
+#   PI_QUOTA_FAILOVER_GATE_SECS  longest gate wait before pi starts anyway (default 600)
+#   PI_QUOTA_FAILOVER_DEAD_SECS  how long a quota error keeps a chain model skipped (default 3600)
+#   PI_QUOTA_FAILOVER_IDLE_SECS  a pi call with no stdout and no stderr for this long is killed; the chain moves on
+#                              for that call only and writes no quota marker (default 120; claude-bridge/*, deepseek/* and openrouter/* models use the knobs below). Measured 2026-10-18 on
+#   PI_QUOTA_FAILOVER_STALL_RETRIES  retries for a stalled last route (default 3; four calls total).
+#                              Haiku 5.5 with a 103 KB review prompt: pi streams JSON events (text and thinking
+#                              deltas, 1400+ lines per call), the longest gap was 26 s (pi start before the first
+#                              event) and 12 s mid-stream, so 120 s is about 4.5x the worst observed gap.
+#   PI_QUOTA_FAILOVER_BRIDGE_IDLE_SECS  the same idle limit for claude-bridge/* models (default 300). Their Haiku calls
+#                              answer in 30-166 s on the fleet's logs, so the 120 s limit killed slow answers.
+#   PI_QUOTA_FAILOVER_DEEPSEEK_IDLE_SECS  the same idle limit for deepseek/* and openrouter/* models (default 300). The fleet's log from
+#                              2026-10-19 shows 8 DeepSeek calls silent for 120 s and killed, each then moved to Haiku.
+#                              The OpenRouter DeepSeek floor route answers on the same clock, so openrouter/* takes this limit too.
+#
+# Before each route, quota-axi (on PATH) is asked for that route's provider: a runway of exhausted_now skips the
+# route without calling it. quota-axi missing, slower than 10s or failing leaves the route to be tried as before.
+set -u
+
+# The real quota-error classes seen in this fleet's pipeline logs (see the
+# lane evidence): zai weekly/5-hour usage limits, GoUsageLimitError, upstream
+# rate limits, credit exhaustion, the report's "limit used up" phrasing, and
+# claude-bridge's Claude subscription limit ("Claude rate limit (five_hour) ...:
+# You're out of extra usage"). Case-insensitive; matched against pi's error
+# surface only. The balance and budget phrasings come from pi's own terminal list (isTerminalRateLimitError); Z.AI's
+# "Insufficient balance" and "Rate limit reached for requests" refusals were passed through as non-quota failures,
+# so the run ended instead of moving on. OpenRouter's empty balance answers 402 "This request requires more credits,
+# or fewer max_tokens. You requested up to N tokens, but can only afford M": that is the "more credits" / "can only afford" pair.
+QUOTA_RE='limit used up|usage limit|limit has been reached|rate limit reached|GoUsageLimitError|FreeUsageLimitError|rate limit exceeded|quota|available credits|available balance|insufficient credits|insufficient balance|insufficient_quota|out of budget|Claude rate limit|out of extra usage|more credits|can only afford|out of credits|key limit exceeded'
+
+# A non-zero pi exit whose error surface names the Go exec WaitDelay ("pi parse events: exec: WaitDelay expired") or an
+# extension warning/failure is a route failure: the chain moves on without a quota marker (fleet retro 19 Oct, fix 2).
+ROUTE_FAIL_RE='WaitDelay|parse events|extension.*(warning|failed|error)|(warning|error|failed).*extension'
+
+# The default chain is the pipeline route: Claude Haiku through claude-bridge on the subscription
+# accounts, never extra credits. A pinned model outside the chain does not run, so the chain's route is the route that runs.
+chain=${PI_QUOTA_FAILOVER_CHAIN:-'claude-bridge/claude-haiku-5-5'}
+# The chain is the fleet's one route list: route-change reads it from here.
+[ -z "${PI_QUOTA_FAILOVER_PRINT_CHAIN:-}" ] || { printf '%s\n' "$chain"; exit 0; }
+
+real_pi=${PI_QUOTA_FAILOVER_REAL_PI:-}
+if [ -z "$real_pi" ]; then
+  real_pi=$(command -v pi 2>/dev/null || true)
+fi
+if [ -z "$real_pi" ] || [ "$real_pi" -ef "$0" ] || [ "$real_pi" = "$0" ]; then
+  echo "pi-quota-failover: cannot resolve the real pi binary; set PI_QUOTA_FAILOVER_REAL_PI" >&2
+  exit 127
+fi
+
+# The pipeline prompt arrives on stdin (no-mistakes writes it to the child's
+# stdin), and a failover attempt must re-feed it.
+stdin_file=$(mktemp) || exit 127
+out_file=$(mktemp) || exit 127
+err_file=$(mktemp) || exit 127
+if [ ! -t 0 ]; then
+  cat >"$stdin_file"
+fi
+trap 'rm -f "$stdin_file" "$out_file" "$err_file"' EXIT
+
+log_dir=${XDG_STATE_HOME:-$HOME/.local/state}
+mkdir -p "$log_dir" 2>/dev/null || true
+log=${PI_QUOTA_FAILOVER_LOG:-$log_dir/pi-quota-failover.log}
+log_line() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$log" 2>/dev/null; printf 'pi-quota-failover: %s\n' "$*" >&2; }
+
+# A quota error leaves a marker (model and epoch) so later calls skip that
+# model for PI_QUOTA_FAILOVER_DEAD_SECS instead of sitting through pi's own
+# retries on it again (13-16 min per call on a dead GLM); after the window the
+# model is tried again, and an answer without a quota error clears the marker.
+dead_dir=$log_dir/pi-quota-failover-dead
+dead_secs=${PI_QUOTA_FAILOVER_DEAD_SECS:-3600}
+marker() { printf '%s/%s\n' "$dead_dir" "${1//\//%}"; }
+# dead_age <model>: seconds since its quota marker; empty when it has none.
+dead_age() {
+  local m at
+  read -r m at 2>/dev/null <"$(marker "$1")" || return 0
+  case $at in '' | *[!0-9]*) return 0 ;; esac
+  [ "$m" = "$1" ] && echo $(($(date +%s) - at))
+}
+# mark_dead <model>: record a quota failure for the route.
+mark_dead() {
+  mkdir -p "$dead_dir" 2>/dev/null
+  printf '%s %s\n' "$1" "$(date +%s)" >"$(marker "$1")" 2>/dev/null
+}
+# quota_provider <pi-provider>: the quota-axi name of a pi provider. quota-axi calls the openai-codex provider "codex"
+# and has no claude-bridge provider; any other name is the same in both.
+quota_provider() {
+  case $1 in
+    openai-codex) echo codex ;;
+    *) echo "$1" ;;
+  esac
+}
+# quota_exhausted <model>: quota-axi reports exhausted_now for this model's provider with scope all_models or model:<id>.
+# Missing, slow (10s cap), failing or unparseable quota-axi answers no, so the route is tried as before.
+quota_exhausted() {
+  local answer qp
+  qp=$(quota_provider "${1%%/*}")
+  command -v jq >/dev/null 2>&1 || { log_line "jq missing: quota pre-check off, model=$1 tried as before"; return 1; }
+  answer=$(timeout 10 quota-axi --provider "$qp" --json --max-age 5m --no-credential-refresh 2>/dev/null) || {
+    log_line "quota-axi gave no answer for $qp (exit $?); model=$1 not pre-checked"
+    return 1
+  }
+  jq -e --arg p "$qp" --arg s "model:${1#*/}" '[.providers[]? | select(.provider == $p) | .quotaSemantics.effectiveAvailability[]? | select((.scope == "all_models" or .scope == $s) and .runway.status == "exhausted_now")] | length > 0' <<<"$answer" >/dev/null 2>&1
+}
+# credit_empty <model>: a 1-request probe (the real pi, one "ok" prompt) answers a QUOTA_RE balance error. Any other answer,
+# a timeout or a failed start leaves the route to be tried; a model id ending in :free is never probed. PI_QUOTA_FAILOVER_PROBE=0 turns the probe off.
+credit_empty() {
+  local probe_out
+  [ "${PI_QUOTA_FAILOVER_PROBE:-1}" != 0 ] || return 1
+  case $1 in *:free) return 1 ;; esac # a :free model needs no balance
+  probe_out=$(printf 'ok' | timeout "${PI_QUOTA_FAILOVER_PROBE_SECS:-60}" "$real_pi" "${ext_args[@]}" --model "$1" --mode json --no-session 2>&1) || true
+  grep -oE '"errorMessage":"(\\.|[^"])*"' <<<"$probe_out" | grep -qiE "$QUOTA_RE"
+}
+# Route and Claude account come from fm-model-pool (pick/next), not a local byokit pick/rest client.
+# Folder paths and unset names only; never credentials. Without a pool file the static chain runs as before.
+pool_file=${PI_QUOTA_FAILOVER_ACCOUNT_POOL-$HOME/firstmate/config/account-pool}
+pool_helper=${PI_QUOTA_FAILOVER_MODEL_POOL:-}
+pool_sel='' pool_id='' pool_model='' pool_attempted='[]' pool_mode=0
+if [ -z "$pool_helper" ]; then
+  for cand in \
+    "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/account-pool/bin/fm-model-pool" \
+    "${FM_ADDONS_DIR:+$FM_ADDONS_DIR/account-pool/bin/fm-model-pool}" \
+    "${FM_HOME:+$FM_HOME/projects/firstmate-addons/account-pool/bin/fm-model-pool}"; do
+    [ -n "${cand:-}" ] && [ -x "$cand" ] && { pool_helper=$cand; break; }
+  done
+fi
+if [ -n "$pool_file" ] && [ -f "$pool_file" ] && [ -n "$pool_helper" ] && [ -x "$pool_helper" ]; then
+  pool_mode=1
+fi
+# pool_apply <selection-json>: export set/, shed unset/, and set pool_model for pi.
+pool_apply() {
+  local sel=$1 folder v provider model
+  pool_sel=$sel
+  pool_id=$(jq -r '.selection_id // .id // empty' <<<"$sel")
+  provider=$(jq -r '.provider // empty' <<<"$sel")
+  model=$(jq -r '.model // empty' <<<"$sel")
+  for v in $(jq -r '.unset[]?' <<<"$sel"); do [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && unset "$v"; done
+  folder=$(jq -r '.set.CLAUDE_CONFIG_DIR // empty' <<<"$sel")
+  if [ -n "$folder" ]; then
+    [ -d "$folder" ] || { detail="fm-model-pool named a missing folder for $pool_id"; return 1; }
+    export CLAUDE_CONFIG_DIR=$folder
+  else
+    unset CLAUDE_CONFIG_DIR 2>/dev/null || true
+  fi
+  case $provider in
+    claude)
+      case $model in
+        '' ) pool_model=claude-bridge/claude-haiku-5-5 ;;
+        */*) pool_model=$model ;;
+        *) pool_model=claude-bridge/$model ;;
+      esac
+      ;;
+    *) pool_model=$model ;;
+  esac
+  [ -n "$pool_model" ] || { detail="fm-model-pool selection $pool_id has no model"; return 1; }
+  log_line "fm-model-pool selection id=$pool_id provider=$provider model=$pool_model"
+}
+pool_pick() {
+  local req out
+  req=$(jq -nc --arg p "$pool_file" '{v:1,purpose:"work",pool_config:$p,capabilities:["text"],attempted:[]}')
+  out=$(printf '%s' "$req" | timeout 120 "$pool_helper" pick --json 2>/dev/null) || out=''
+  if ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    detail="fm-model-pool pick refused: $(jq -r '.reason // "no answer"' <<<"${out:-}" 2>/dev/null)"
+    return 1
+  fi
+  pool_attempted='[]'
+  pool_apply "$out"
+}
+pool_next() {
+  local cause=${1:-quota} req out id
+  [ -n "$pool_sel" ] || return 1
+  id=$(jq -r '.selection_id // .id // empty' <<<"$pool_sel")
+  [ -n "$id" ] || return 1
+  pool_attempted=$(jq -c --arg id "$id" '. + [$id]' <<<"$pool_attempted")
+  req=$(jq -nc --arg p "$pool_file" --argjson s "$pool_sel" --argjson a "$pool_attempted" --arg c "$cause" \
+    '{v:1,purpose:"work",pool_config:$p,capabilities:["text"],selection:$s,cause:$c,attempted:$a}')
+  out=$(printf '%s' "$req" | timeout 120 "$pool_helper" next --json 2>/dev/null) || out=''
+  if ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    detail="fm-model-pool next refused: $(jq -r '.reason // "no answer"' <<<"${out:-}" 2>/dev/null)"
+    return 1
+  fi
+  pool_apply "$out"
+}
+idle_secs=${PI_QUOTA_FAILOVER_IDLE_SECS:-120}
+bridge_idle_secs=${PI_QUOTA_FAILOVER_BRIDGE_IDLE_SECS:-300}
+deepseek_idle_secs=${PI_QUOTA_FAILOVER_DEEPSEEK_IDLE_SECS:-300}
+# idle_for <model>: the idle limit for that model's call; claude-bridge/*, deepseek/* and openrouter/* models get their own.
+idle_for() {
+  case $1 in
+    claude-bridge/*) echo "$bridge_idle_secs" ;;
+    deepseek/*) echo "$deepseek_idle_secs" ;;
+    openrouter/*) echo "$deepseek_idle_secs" ;;
+    *) echo "$idle_secs" ;;
+  esac
+}
+stall_retries=${PI_QUOTA_FAILOVER_STALL_RETRIES:-3}
+
+# Host-memory gate (speed-report B3: model calls under heavy host load crash): every pipeline model call goes
+# through this wrapper, so wait here until the host has room. The gate given no command only waits; pi keeps its
+# normal priority and no memory cap. The wait is bounded so it never eats the whole step timeout.
+gate=${PI_QUOTA_FAILOVER_GATE-$HOME/firstmate/config/fm-mem-gate.sh}
+gate_secs=${PI_QUOTA_FAILOVER_GATE_SECS:-600}
+if [ -n "$gate" ] && [ -x "$gate" ]; then
+  timeout "$gate_secs" "$gate" </dev/null >&2 || log_line "memory gate still waiting after ${gate_secs}s; starting pi anyway"
+fi
+
+# rewrite_model <new-model> <args...>: print args with the --model <m> /
+# --model=<m> argument rewritten in place; everything else (--thinking, --mode
+# and any other flags) is kept untouched.
+rewrite_model() {
+  local new=$1
+  shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --model=*) printf '%s\n' "--model=$new" ;;
+      --model) printf '%s\n' --model; printf '%s\n' "$new"; shift ;;
+      *) printf '%s\n' "$1" ;;
+    esac
+    shift
+  done
+}
+
+# drop_session: read args one per line on stdin; remove a --session <id> pair
+# so a failover attempt starts fresh, mirroring no-mistakes' own fresh-session
+# retry after a provider switch. The dead model answered nothing, so no
+# context is lost.
+drop_session() {
+  local skip=0 a
+  while IFS= read -r a; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$a" = "--session" ]; then skip=1; continue; fi
+    printf '%s\n' "$a"
+  done
+}
+
+# ext_list <dir>: the extension files pi finds in a directory: direct .ts/.js files and subdirectories' index.ts/index.js.
+ext_list() {
+  local f
+  for f in "$1"/*.ts "$1"/*.js "$1"/*/index.ts "$1"/*/index.js; do [ -f "$f" ] && printf '%s\n' "$f"; done
+}
+# ext_entry <path>: what pi loads for a manifest or settings path: a file as is, a directory's index, else the directory's
+# extensions (a bare -e on a directory without an index does not load).
+ext_entry() {
+  if [ ! -d "$1" ]; then printf '%s\n' "$1"
+  elif [ -f "$1/index.ts" ]; then printf '%s\n' "$1/index.ts"
+  elif [ -f "$1/index.js" ]; then printf '%s\n' "$1/index.js"
+  else ext_list "$1"
+  fi
+}
+# package_extensions <package dir>: its pi.extensions entries when it has a pi manifest, else its extensions/ directory.
+package_extensions() {
+  local p
+  if jq -e 'has("pi")' "$1/package.json" >/dev/null 2>&1; then
+    jq -r '.pi.extensions[]?' "$1/package.json" | while IFS= read -r p; do
+      if [ -e "$1/${p#./}" ]; then ext_entry "$1/${p#./}"; else log_line "manifest entry $p not found in $1; not loaded"; fi
+    done
+  else
+    ext_list "$1/extensions"
+  fi
+}
+# pi_extension_args: prints "-ne" and "-e <path>" pairs for every extension pi would load here except pi-hermes-memory:
+# the user packages (pi list), the user extensions dir, the settings' extensions array and pi's built-ins minus any the
+# settings turn off. An unreadable list prints the reason and returns 1; the caller then runs pi as before.
+pi_extension_args() {
+  local agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent} settings list src dir e b
+  command -v jq >/dev/null 2>&1 || { echo "jq missing"; return 1; }
+  settings=$(cat "$agent_dir/settings.json" 2>/dev/null || echo '{}')
+  jq -e . <<<"$settings" >/dev/null 2>&1 || { echo "$agent_dir/settings.json does not parse"; return 1; }
+  list=$("$real_pi" list 2>/dev/null) || { echo "pi list exited $?"; return 1; }
+  printf '%s\n' -ne
+  {
+    while IFS=$'\t' read -r src dir; do
+      [ "$src" = npm:pi-hermes-memory ] || package_extensions "$dir"
+    done < <(awk '/^  [^ ]/ {src=$1} /^    \// {print src "\t" $1}' <<<"$list")
+    ext_list "$agent_dir/extensions"
+    while IFS= read -r e; do
+      case $e in
+        builtin:* | /*) ;;
+        ~*) e=$HOME${e#\~} ;;
+        *) e=$agent_dir/$e ;;
+      esac
+      ext_entry "$e"
+    done < <(jq -r '.extensions[]? | select(startswith("-") or startswith("+") or startswith("!") | not)' <<<"$settings")
+    for b in mcp llama.cpp codemode tool-search; do
+      jq -e --arg d "-builtin:$b" '(.extensions // []) | index($d) | not' <<<"$settings" >/dev/null 2>&1 && echo "builtin:$b"
+    done
+  } | while IFS= read -r p; do printf '%s\n' -e "$p"; done
+}
+
+tree_pids() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do
+    tree_pids "$c"
+    echo "$c"
+  done
+}
+
+# end_pi <pid>: TERM pi and its descendants, then KILL the ones still alive after a 5s grace.
+end_pi() {
+  local g p kids alive
+  kids=$(tree_pids "$1")
+  # kids is one numeric pid per line; word splitting is the list
+  # shellcheck disable=SC2086
+  kill -TERM "$1" $kids 2>/dev/null
+  for ((g = 0; g < 5; g++)); do
+    alive=0
+    for p in "$1" $kids; do kill -0 "$p" 2>/dev/null && alive=1; done
+    [ "$alive" = 1 ] || return 0
+    sleep 1
+  done
+  for p in "$1" $kids; do kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null; done
+}
+
+# run_watched <args...>: the real pi with the captured stdin re-attached. No stdout and no stderr for idle_limit ends it
+# and sets idle_killed=1.
+run_watched() {
+  local pid='' sizes seen='' last now s
+  idle_killed=0
+  ( trap - INT; exec "$real_pi" "${ext_args[@]}" "$@" ) <"$stdin_file" >"$out_file" 2>"$err_file" &
+  pid=$!
+  last=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    sizes=$(stat -c %s "$out_file" "$err_file" 2>/dev/null | tr '\n' ' ')
+    now=$(date +%s)
+    if [ "$sizes" != "$seen" ]; then
+      seen=$sizes
+      last=$now
+    elif [ $((now - last)) -ge "$idle_limit" ]; then
+      idle_killed=1
+      log_line "pi produced no output for ${idle_limit}s; killing it"
+      end_pi "$pid"
+      break
+    fi
+  done
+  wait "$pid"
+  s=$?
+  return "$s"
+}
+
+# error_text <exit-code>: pi exits 0 even when the provider fails - the error
+# rides in its JSON stream as an errorMessage field (verified with a 401
+# probe: stopReason "error" in the stream, exit 0; the pipeline's own run
+# errors read "pi reported error: 429: ..."). Failure text is therefore the
+# stream's errorMessage lines, plus stderr for non-zero exits.
+error_text() {
+  # The value carries escaped quotes, so the capture allows backslash escapes.
+  grep -oE '"errorMessage":"(\\.|[^"])*"' "$out_file" 2>/dev/null \
+    | sed -E 's/^"errorMessage":"//; s/"$//; s/\\"/"/g; s/\\\\/\\/g'
+  if [ "$1" != 0 ]; then cat "$err_file" 2>/dev/null; fi
+}
+
+# Every pi call runs with -ne and the extension list (pi-hermes-memory is out: its startup sync delayed pi's first event).
+ext_args=()
+if ext_out=$(pi_extension_args); then
+  mapfile -t ext_args <<<"$ext_out"
+else
+  log_line "extension list unreadable ($ext_out); pi runs with its default extensions, pi-hermes-memory included"
+fi
+
+IFS=' ' read -r -a models <<<"$chain"
+args=("$@")
+requested=''
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  case ${args[$i]} in
+    --model=*) requested=${args[$i]#--model=} ;;
+    --model) i=$((i + 1)); requested=${args[$i]:-} ;;
+  esac
+  i=$((i + 1))
+done
+
+# Every pipeline call runs the chain. A requested model in the chain goes first,
+# then every other chain model in chain order, so a profile pinned to any chain
+# model fails over to the rest of the chain. A model outside the chain (a pin to
+# Codex, Go, Muse or any other route) is not run: the chain runs in chain order,
+# and a call with no --model gets the chain head.
+order=()
+in_chain=0
+for m in "${models[@]}"; do
+  if [ "$m" = "$requested" ]; then in_chain=1; else order+=("$m"); fi
+done
+if [ "$in_chain" = 1 ]; then
+  order=("$requested" "${order[@]}")
+else
+  order=("${models[@]}")
+  [ -n "$requested" ] || args+=(--model "${models[0]}")
+fi
+live=()
+detail="every chain model hit a quota error in the last ${dead_secs}s"
+if [ "$pool_mode" = 1 ]; then
+  # Helper owns account and Sol/Goat/Cursor fallovers; the static chain is not the route list.
+  if ! pool_pick; then
+    log_line "quota exhausted: $detail"
+    exit 1
+  fi
+  order=("$pool_model")
+  mapfile -t args < <(rewrite_model "$pool_model" "${args[@]}" | drop_session)
+else
+  for m in "${order[@]}"; do
+    age=$(dead_age "$m")
+    if [ -n "$age" ] && [ "$age" -lt "$dead_secs" ]; then
+      if [ "$age" -ge 0 ]; then when="${age}s ago"; else when="dated in the future, $((dead_secs - age))s until it expires"; fi
+      log_line "model=$m skipped: quota error $when (skip window ${dead_secs}s)"
+    elif quota_exhausted "$m"; then
+      mark_dead "$m"
+      detail="quota-axi reports $m exhausted_now"
+      log_line "model=$m skipped: quota-axi reports exhausted_now"
+    elif [ ${#live[@]} -eq 0 ] && credit_empty "$m"; then
+      mark_dead "$m"
+      detail="credit probe found no balance on $m"
+      log_line "pulse: model=$m skipped: credit probe found no balance"
+    else
+      live+=("$m")
+    fi
+  done
+  if [ ${#live[@]} -gt 0 ] && [ "${live[0]}" != "$requested" ]; then
+    mapfile -t args < <(rewrite_model "${live[0]}" "${args[@]}" | drop_session)
+  fi
+  order=("${live[@]}")
+fi
+any_stall=0
+stall_retries_used=0
+for ((attempt = 0; ; attempt++)); do
+  if [ "$pool_mode" = 1 ]; then
+    [ -n "${pool_model:-}" ] || break
+  else
+    [ "$attempt" -lt "${#order[@]}" ] || break
+  fi
+  model=${order[$attempt]:-$pool_model}
+  idle_limit=$(idle_for "$model")
+  t0=$(date +%s%3N)
+  run_watched "${args[@]}"
+  rc=$?
+  t1=$(date +%s%3N)
+  quota=0 stall=0 rfail=0
+  if [ "$idle_killed" = 1 ]; then
+    stall=1
+    any_stall=1
+    detail="no output for ${idle_limit}s"
+  else
+    errs=$(error_text "$rc")
+    if grep -qiE "$QUOTA_RE" <<<"$errs"; then
+      quota=1
+      detail=$(head -n 1 <<<"$errs")
+    elif [ "$rc" != 0 ] && grep -qiE "$ROUTE_FAIL_RE" <<<"$errs"; then
+      rfail=1
+      any_stall=1
+      detail=$(grep -iE -m1 "$ROUTE_FAIL_RE" <<<"$errs")
+    fi
+  fi
+  if [ "$quota" = 0 ] && [ "$stall" = 0 ] && [ "$rfail" = 0 ]; then
+    if [ "$rc" = 0 ] && [ -z "$(error_text 0)" ]; then
+      rm -f "$(marker "$model")"
+      log_line "model=$model answered in $((t1 - t0))ms ($(stat -c %s "$out_file") bytes)"
+    fi
+    cat "$out_file"
+    cat "$err_file" >&2
+    exit "$rc"
+  fi
+  # Helper next rests the limited account (or advances Sol/Goat/Cursor) and never marks the whole Claude route dead.
+  if [ "$quota" = 1 ] && [ "$pool_mode" = 1 ]; then
+    old=$pool_id old_model=$model
+    if pool_next quota; then
+      log_line "model=$old_model quota-error on account $old in $((t1 - t0))ms ($detail); next id=$pool_id model=$pool_model"
+      mapfile -t args < <(rewrite_model "$pool_model" "${args[@]}" | drop_session)
+      order=("$pool_model")
+      attempt=-1
+      continue
+    fi
+    log_line "model=$model quota-error in $((t1 - t0))ms ($detail); $detail"
+    break
+  fi
+  if [ "$quota" != 0 ]; then
+    mark_dead "$model"
+    kind="quota-error"
+  elif [ "$rfail" = 1 ]; then
+    kind="route-failure"
+  else
+    kind="stalled"
+  fi
+  if [ "$kind" = stalled ] && { [ "$pool_mode" = 1 ] || [ $((attempt + 1)) -ge ${#order[@]} ]; } && [ "$stall_retries_used" -lt "$stall_retries" ]; then
+    stall_retries_used=$((stall_retries_used + 1))
+    log_line "model=$model stalled in $((t1 - t0))ms (no output for ${idle_limit}s); retrying it ($stall_retries_used/$stall_retries)"
+    attempt=$((attempt - 1))
+    continue
+  fi
+  if [ "$pool_mode" = 1 ]; then
+    log_line "model=$model $kind in $((t1 - t0))ms ($detail); no fm-model-pool next for a stall/route-failure"
+    break
+  elif [ $((attempt + 1)) -lt ${#order[@]} ]; then
+    next=${order[$((attempt + 1))]}
+    log_line "model=$model $kind in $((t1 - t0))ms ($detail); moving to $next"
+    mapfile -t args < <(rewrite_model "$next" "${args[@]}" | drop_session)
+  else
+    log_line "model=$model $kind in $((t1 - t0))ms ($detail); no model left in the chain"
+    break
+  fi
+done
+
+# A stall is not a quota failure, so a chain that stalled is not "quota exhausted": the pipeline may retry the call,
+# and the stalled route is tried again then. Only a chain of quota errors gets the terminal needle.
+if [ "$any_stall" = 1 ]; then
+  log_line "no model in the chain answered ($chain); last: ${detail:-unknown}; no quota marker written for a stall"
+  exit 1
+fi
+# Every model in the chain answered a quota error. "quota exhausted" is one of
+# no-mistakes' terminal needles (internal/agent/retry.go), so the failed
+# invocation is not re-retried 4 times on the dead chain.
+log_line "quota exhausted on every model in the chain ($chain); last error: ${detail:-unknown}"
+exit 1

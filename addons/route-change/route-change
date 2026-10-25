@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# route-change - move worker dispatch, the no-mistakes gate and lead pins to
+# one route together.
+#
+# Usage: route-change [--dry-run] <fm-home> <route>
+#
+# A route is one model of the pipeline-quota-failover chain, the fleet's one
+# route list: it is read from the wrapper the gate runs (agent_path_override.pi
+# in ~/.no-mistakes/config.yaml, or $NM_CONFIG). Every route runs on pi, and its
+# provider is the one `pi --list-models` names for it.
+#
+# In order:
+#  1. quota-axi first: a route whose provider reads exhausted_now is refused
+#     with the reason, and so is one quota-failover holds out of dispatch;
+#     nothing is written.
+#  2. Every file it will change is backed up as <file>.bak-route-change-<stamp>.
+#  3. All pins move:
+#     - <fm-home>/config/crew-dispatch.json: in the default and every rule, the
+#       route leads the non-Claude profiles (Claude and Opus entries keep their
+#       place; an Opus-only rule is left alone). A list that already holds the
+#       route, as <route> or <provider>/<route> on any harness, moves that entry;
+#       any other list gets a pi profile for it.
+#     - the gate: agent and agent_config.pi.model in the no-mistakes config,
+#       edited by key name; no value other than route names is printed.
+#     - lead pins: config/secondmate-harness and config/secondmates/*/harness,
+#       except pins on Claude or Opus, which are not routes.
+#  4. One real request (a one-word prompt through pi on the route, as the gate
+#     calls it). When it fails every backup is restored and the cause printed.
+# --dry-run runs step 1, prints the planned edits and writes nothing.
+# Each switch is one line in <fm-home>/state/route-change.log. It holds
+# quota-failover's lock while it works, so the two never edit dispatch at once.
+#
+# Needs pi, quota-axi, jq, python3 with yaml, flock and timeout on PATH, and
+# <fm-home>/bin/fm-quota-axi-lib.sh. ROUTE_CHANGE_TEST_SECS (default 90) bounds
+# the real request; ROUTE_CHANGE_MAX_AGE (default 10m) is the oldest quota
+# reading it trusts.
+set -u
+
+die() { echo "route-change: $*" >&2; exit 1; }
+
+dry=0
+[ "${1:-}" = --dry-run ] && { dry=1; shift; }
+[ $# -eq 2 ] || die "usage: route-change [--dry-run] <fm-home> <route>"
+[ -d "$1/config" ] && [ -d "$1/state" ] || die "$1 is not a firstmate home (no config/ or state/)"
+FM_HOME=$(cd "$1" && pwd) route=$2
+CONFIG=$FM_HOME/config STATE=$FM_HOME/state
+DISPATCH=$CONFIG/crew-dispatch.json
+NM=${NM_CONFIG:-$HOME/.no-mistakes/config.yaml}
+[ -f "$DISPATCH" ] || die "no $DISPATCH"
+[ -f "$NM" ] || die "no no-mistakes config at $NM"
+# shellcheck source=/dev/null
+. "$FM_HOME/bin/fm-quota-axi-lib.sh" || die "cannot load $FM_HOME/bin/fm-quota-axi-lib.sh"
+
+exec 9>"$STATE/.quota-failover.lock" && flock -w 120 9 || die "quota-failover holds its lock; try again"
+
+yget() { # <dotted key>: a string value of the no-mistakes config, or empty
+  python3 -I -c 'import sys, yaml
+v = yaml.safe_load(open(sys.argv[1]))
+for k in sys.argv[2].split("."):
+    v = v.get(k) if isinstance(v, dict) else None
+print(v if isinstance(v, str) else "")' "$NM" "$1"
+}
+
+wrapper=$(yget agent_path_override.pi) || die "cannot parse $NM with python3-yaml"
+[ -n "$wrapper" ] && [ -x "$wrapper" ] || die "the gate runs no pipeline-quota-failover wrapper (key agent_path_override.pi); install pipeline-quota-failover first"
+chain=$(PI_QUOTA_FAILOVER_PRINT_CHAIN=1 PI_QUOTA_FAILOVER_REAL_PI=/bin/false PI_QUOTA_FAILOVER_GATE='' \
+  timeout 10 "$wrapper" </dev/null 2>/dev/null) && [ -n "$chain" ] \
+  || die "$wrapper does not print its route list; reinstall pipeline-quota-failover from main"
+case " $chain " in *" $route "*) ;; *) die "'$route' is not a route; routes: $chain" ;; esac
+
+provider=$(timeout 60 pi --list-models "$route" 2>/dev/null \
+  | awk -v r="$route" 'NR > 1 && ($1 "/" $2 == r || $2 == r) { print $1 }' | sort -u)
+[ "$(wc -w <<<"$provider")" = 1 ] || die "pi lists no single provider for $route (got: ${provider:-none})"
+
+tmp=$(mktemp -d) || die "no temp dir"
+trap 'rm -rf -- "$tmp"' EXIT
+
+# 1. quota-axi first.
+quota=$(quota-axi --json --no-credential-refresh --max-age "${ROUTE_CHANGE_MAX_AGE:-10m}" 2>"$tmp/err") \
+  && fm_quota_json_valid <<<"$quota" || die "quota-axi gave no reading: $(head -c 300 "$tmp/err")"
+# Scope matching is quota-failover's exhausted(): the model's bare name against
+# a model: or product: scope, and the account-wide scopes.
+why=$(jq -r --arg p "$provider" --arg m "$route" "$FM_QUOTA_ROW_JQ"'
+  ($m | split("/") | last) as $b
+  | [(quota_row(.; $p; quota_lane("pi"; $m)) // {}).quotaSemantics.effectiveAvailability[]?
+    | select(.runway.status == "exhausted_now") | .scope as $s
+    | select($s == "all_models" or $s == "all_products" or $s == ("model:" + $b) or $s == ("product:" + $b))
+    | "\($s), window \(.runway.limitingWindowId // .limitingWindowIds[0]? // "unknown")"]
+  | first // empty' <<<"$quota") || die "quota-axi reading unusable"
+[ -z "$why" ] || die "refused: quota-axi reads $provider exhausted now ($why); nothing written"
+if jq -e --arg p "$provider" --arg m "$route" \
+  '[.. | objects | select((.model? == $m) or (.model? == ($p + "/" + $m)))] | length > 0' \
+  "$STATE/quota-failover-dead.json" >/dev/null 2>&1; then
+  die "refused: quota-failover holds $route out of dispatch until it answers its test again; nothing written"
+fi
+
+# Plan every edit into a scratch copy.
+changed=()
+
+jq --arg m "$route" --arg p "$provider" '
+  def cl: .harness == "claude" or ((.model // "") | test("opus"; "i"));
+  def move: if length > 0 and all(.[]; cl) then . else
+    def same: .model == $m or .model == ($p + "/" + $m);
+    (first(.[] | select(same)) // {harness: "pi", model: $m, provider: $p}) as $route
+    | map(select(same | not)) as $r
+    | ($r | map(cl) | index(false) // ($r | length)) as $i
+    | $r[:$i] + [$route] + $r[$i:] end;
+  (if has("default") then .default |= move else . end) | if has("rules") then .rules |= map(.use |= move) else . end' \
+  "$DISPATCH" >"$tmp/dispatch" || die "cannot plan the $DISPATCH edit"
+if ! cmp -s "$DISPATCH" "$tmp/dispatch"; then
+  changed+=("$DISPATCH:$tmp/dispatch")
+  echo "dispatch $DISPATCH (route order per list, default first):"
+  diff <(jq -c '[.default // empty, .rules[].use] | .[] | map(.model)' "$DISPATCH") \
+    <(jq -c '[.default // empty, .rules[].use] | .[] | map(.model)' "$tmp/dispatch") | grep '^[<>]'
+fi
+
+old_route=$(yget agent_config.pi.model) old_agent=$(yget agent)
+[ "$old_agent" != pi ] || old_agent=
+python3 -I - "$NM" "$tmp/gate" "$route" <<'EOF' || die "cannot plan the gate edit in $NM (keys agent, agent_config.pi.model)"
+import re, sys, yaml
+src, dst, route = sys.argv[1:]
+lines = open(src).read().splitlines(keepends=True)
+done, block, pi = set(), False, None
+for i, line in enumerate(lines):
+    if line.lstrip().startswith('#') or not line.strip():
+        continue
+    if re.match(r'^agent:', line):
+        lines[i] = re.sub(r'^(agent:\s*)\S+', lambda mm: mm.group(1) + 'pi', line); done.add('agent')
+    if re.match(r'^\S', line):
+        block = line.startswith('agent_config:'); pi = None; continue
+    m = re.match(r'^(\s+)(\S+):', line)
+    if not block or not m:
+        continue
+    if pi is not None and len(m.group(1)) <= pi:
+        pi = None
+    if m.group(2) == 'pi' and pi is None:
+        pi = len(m.group(1))
+    elif pi is not None and m.group(2) == 'model':
+        lines[i] = re.sub(r'^(\s+model:\s*)\S+', lambda mm: mm.group(1) + route, line); done.add('model')
+if done != {'agent', 'model'}:
+    sys.exit('key not found: ' + ', '.join(sorted({'agent', 'model'} - done)))
+want = yaml.safe_load(open(src)); want['agent'] = 'pi'; want['agent_config']['pi']['model'] = route
+open(dst, 'w').write(''.join(lines))
+if yaml.safe_load(open(dst)) != want:
+    sys.exit('the edit would change keys other than agent and agent_config.pi.model')
+EOF
+if ! cmp -s "$NM" "$tmp/gate"; then
+  changed+=("$NM:$tmp/gate")
+  echo "gate $NM:${old_agent:+ agent $old_agent -> pi;} agent_config.pi.model $old_route -> $route"
+fi
+
+n=0
+for pin in "$CONFIG/secondmate-harness" "$CONFIG"/secondmates/*/harness; do
+  [ -f "$pin" ] || continue
+  line=$(grep -m1 -vE '^[[:space:]]*(#|$)' "$pin") || continue
+  read -r h m e _ <<<"$line"
+  case "$h:$m" in claude*|*[Oo]pus*|default:*|:*) continue ;; esac
+  new="pi $route${e:+ $e}"
+  [ "$line" = "$new" ] && continue
+  n=$((n + 1))
+  awk -v old="$line" -v new="$new" '!d && $0 == old { print new; d = 1; next } { print }' "$pin" >"$tmp/pin$n"
+  changed+=("$pin:$tmp/pin$n")
+  echo "lead pin $pin: $line -> $new"
+done
+
+[ ${#changed[@]} -gt 0 ] || { echo "every pin is already on $route; nothing to change"; exit 0; }
+[ "$dry" = 0 ] || { echo "dry-run: quota-axi allows $route ($provider); ${#changed[@]} file(s) planned, nothing written"; exit 0; }
+
+# 2. Back up every file, then 3. write them all.
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+for c in "${changed[@]}"; do
+  cp -p "${c%%:*}" "${c%%:*}.bak-route-change-$stamp" || die "cannot back up ${c%%:*}; nothing written"
+done
+restore() {
+  local c
+  for c in "${changed[@]}"; do cat "${c%%:*}.bak-route-change-$stamp" >"${c%%:*}"; done
+  echo "route-change: restored ${#changed[@]} file(s) from their .bak-route-change-$stamp backups" >&2
+}
+for c in "${changed[@]}"; do
+  cat "${c#*:}" >"${c%%:*}" || { restore; die "cannot write ${c%%:*}; every file restored"; }
+done
+
+# 4. One real request on the new route, the way the gate calls pi.
+out=$(cd "$tmp" && timeout "${ROUTE_CHANGE_TEST_SECS:-90}" pi --model "$route" -p --no-session \
+  'Reply with the single word PONG.' 2>&1 </dev/null)
+rc=$?
+if [ "$rc" != 0 ] || ! grep -qw PONG <<<"$out"; then
+  restore
+  die "the real request on $route failed (exit $rc): $(tail -n 3 <<<"$out" | head -c 400)"
+fi
+printf '%s %s -> %s (%s); %s\n' "$stamp" "${old_route:-?}" "$route" "$provider" \
+  "$(for c in "${changed[@]}"; do printf '%s ' "${c%%:*}"; done)" >>"$STATE/route-change.log"
+echo "moved ${#changed[@]} file(s) to $route ($provider); the real request answered; backups end .bak-route-change-$stamp"

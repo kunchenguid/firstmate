@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Daily owner-details scan: shallow-clone (depth 1) the default branch of every
+# fleet public repo and match every line against the Main home's private
+# config/owner-details-patterns (same file format as the hook: one extended
+# regex per line, full-line # comments and blank lines ignored,
+# case-insensitive). A full clone loop cannot finish inside the watcher's
+# timeout, so when a scan is due this records the run, starts the loop
+# detached in the background, and returns at once with no output. A finished
+# loop with hits leaves its one wake line under the Main home's state/; the
+# next check run prints it once and removes it. Nothing is printed when clean,
+# unconfigured, or when no finished scan is waiting. The patterns themselves
+# are never printed.
+set -u -o pipefail
+umask 077 # the run dir, the copied patterns, the report and the result file stay owner-only
+M=${FM_MAIN_HOME:-$HOME/firstmate}
+MARK=$M/state/.owner-details-scan.last
+RES=$M/state/.owner-details-scan.result
+PAT=$M/config/owner-details-patterns
+REPOS=$M/config/owner-guard-repos
+DATA=$M/data/owner-details-scan
+SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")
+
+_worker() { # _worker <rundir>: clone every repo, match every line, leave one
+  # wake line in $RES on hits only. Single-flight via a lock dir; a lock
+  # whose PID is dead is stale and taken over.
+  W_RUN=$1
+  W_LOCK=$M/state/.owner-details-scan.lock
+  if mkdir "$W_LOCK" 2>/dev/null; then
+    printf '%s' "$$" >"$W_LOCK/pid"
+  else
+    old=$(cat "$W_LOCK/pid" 2>/dev/null || true)
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+      return 0
+    fi
+    printf '%s' "$$" >"$W_LOCK/pid"
+  fi
+  # shellcheck disable=SC2064
+  trap "rm -rf -- \"$W_LOCK\" \"$W_RUN\"" EXIT
+  pat=$W_RUN/patterns
+  repos=$W_RUN/repos
+  : >"$W_RUN/report"
+  summary=""
+  i=0
+  while IFS= read -r entry; do
+    entry=$(printf '%s' "$entry" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$entry" ] || continue
+    case "$entry" in
+    *://*|/*|*.git|git@*) src=$entry; display=$(basename "$entry" .git) ;;
+    *) src="https://github.com/$entry.git"; display=$entry ;;
+    esac
+    [ -n "${display:-}" ] && [ "$display" != / ] && [ "$display" != . ] || display="repo$i"
+    i=$((i + 1))
+    git clone -q --depth 1 "$src" "$W_RUN/work/$i" 2>/dev/null || continue
+    hits=$( (cd "$W_RUN/work/$i" && grep -rInEi --exclude-dir=.git -f "$pat" . 2>/dev/null | sed 's|^\./||') || true)
+    [ -n "$hits" ] || continue
+    n=$(printf '%s\n' "$hits" | grep -c .)
+    summary="${summary}${summary:+, }$display ($n)"
+    { printf '## %s (%s hit(s))\n' "$display" "$n"; printf '%s\n' "$hits"; } >>"$W_RUN/report"
+  done <"$repos"
+  [ -n "$summary" ] || return 0
+  mkdir -p "$DATA"
+  report=$DATA/scan-$(date -u +%F).txt
+  { printf '# owner-details-scan %s: file:line hits (matched lines included; keep this report private)\n' "$(date -u +%FT%TZ)"; cat "$W_RUN/report"; } >"$report"
+  printf 'owner-details-scan: owner details in %s - full file:line report: %s\n' "$summary" "$report" >"$W_RUN/wake"
+  mv "$W_RUN/wake" "$RES"
+}
+
+case "${1:-}" in
+_worker) [ -n "${2:-}" ] || exit 2; _worker "$2"; exit 0 ;;
+esac
+
+# A finished background scan leaves its one wake line here; print it once.
+if [ -f "$RES" ]; then
+  line=$(cat "$RES" 2>/dev/null || true)
+  rm -f -- "$RES"
+  [ -n "$line" ] && printf '%s\n' "$line"
+fi
+
+now=$(date +%s)
+[ -f "$MARK" ] && [ $((now - $(stat -c %Y "$MARK"))) -lt 86400 ] && exit 0
+[ -s "$PAT" ] || exit 0
+TMPD=$(mktemp -d) || exit 0
+trap 'rm -rf -- "$TMPD"' EXIT
+grep -v '^[[:space:]]*\(#\|$\)' "$PAT" >"$TMPD/patterns" 2>/dev/null || true
+[ -s "$TMPD/patterns" ] || exit 0
+grep -Ei -f "$TMPD/patterns" </dev/null >/dev/null 2>&1
+rc=$?
+mkdir -p "$M/state"
+if [ "$rc" -gt 1 ]; then
+  touch "$MARK"
+  echo "owner-details-scan: the patterns file holds an invalid pattern; fix config/owner-details-patterns (patterns stay private)"
+  exit 0
+fi
+: >"$TMPD/repos"
+if [ -s "$REPOS" ]; then
+  grep -v '^[[:space:]]*\(#\|$\)' "$REPOS" >"$TMPD/repos" 2>/dev/null || true
+else
+  if command -v gh-axi >/dev/null 2>&1; then
+    gh-axi repo list --visibility public --limit 100 --json nameWithOwner --jq '.[].nameWithOwner' >"$TMPD/repos" 2>/dev/null || true
+  fi
+  if [ ! -s "$TMPD/repos" ] && command -v gh >/dev/null 2>&1; then
+    gh repo list --visibility public --limit 100 --json nameWithOwner --jq '.[].nameWithOwner' >"$TMPD/repos" 2>/dev/null || true
+  fi
+fi
+[ -s "$TMPD/repos" ] || { touch "$MARK"; exit 0; }
+RUND=$M/state/.owner-details-scan.run
+rm -rf -- "$RUND"
+mkdir -p "$RUND"
+cp "$TMPD/patterns" "$TMPD/repos" "$RUND/"
+touch "$MARK"
+setsid bash "$SELF" _worker "$RUND" </dev/null >"$RUND/worker.log" 2>&1 &
+exit 0

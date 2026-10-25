@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Wake Main when the shared Z.AI GLM plan burns ahead of time. GLM 5.3 Flash carries reviews, the shared no-mistakes
+# pipeline and normal workers. An empty 5 h window stops every home's pipeline runs until it resets. Fires when the
+# 5 h window is under 30% with more than 45 min to its reset, or the week's used share runs more than 15 points ahead
+# of the week's elapsed share, or the week is under 20%; repeats on a 10% step of the 5 h window only while the 5 h
+# condition holds, otherwise on a 10% step of the week alone (the week-ahead condition stays true all week, so the
+# repeat signature carries the 5 h step only while the 5 h condition holds). At most one read per 10 min.
+# Usage: $0 [quota-json-file] (file = test input; ZAI_QUOTA_MARK then names the repeat-state file, default a fresh temp file).
+# ponytail: fixed thresholds; tune here if the number of GLM lanes changes.
+set -u
+FM_MAIN=${FM_MAIN_HOME:-$HOME/firstmate}
+MARK=$FM_MAIN/state/.zai-quota.last
+now=$(date +%s)
+if [ $# -eq 0 ]; then
+  [ -f "$MARK" ] && [ $((now - $(stat -c %Y "$MARK"))) -lt 600 ] && exit 0
+  j=$(timeout 60 quota-axi --json 2>/dev/null) || exit 0
+else
+  j=$(cat "$1"); MARK=${ZAI_QUOTA_MARK:-$(mktemp)}
+fi
+out=$(printf '%s' "$j" | python3 -I -c '
+import json,sys,datetime as D
+try:
+    x=[p for p in json.load(sys.stdin)["providers"] if p.get("provider")=="zai"][0]
+    W={w["id"]:w for w in x["windows"]}; f,w=W["five_hour"],W["weekly"]
+except Exception: sys.exit()
+P=lambda s: D.datetime.fromisoformat(s.replace("Z","+00:00"))
+now=D.datetime.now(D.timezone.utc)
+left=int((P(f["resetsAt"])-now).total_seconds()//60)
+fp,wp,wr=f["percentRemaining"],w["percentRemaining"],w["resetsAt"]
+wel=max(0,min(100,round(100-100*(P(wr)-now)/D.timedelta(days=7))))
+five=fp<30 and left>45
+if not (five or 100-wp>wel+15 or wp<20): sys.exit()
+print(f"{fp//10}|{wp//10}" if five else f"|{wp//10}")
+print(f"zai-quota: Z.AI GLM plan 5 h window {fp}% left with {left} min to its reset; week {wp}% left with {wel}% of the week gone (resets {wr}). GLM 5.3 Flash carries reviews, the shared no-mistakes pipeline and normal workers: move the newest GLM workers to Go Muse / DeepSeek within the Go pace (never Step 5) so the pipeline keeps its share; if the 5 h window empties, the no-mistakes pipeline and its reviews fail over to Claude Haiku 5.5 on their own (pipeline-quota-failover) until it resets, so leave the pipeline model as it is")
+')
+[ -n "$out" ] || { : > "$MARK"; exit 0; }
+sig=${out%%$'\n'*}
+[ "$sig" = "$(cat "$MARK" 2>/dev/null)" ] && { touch "$MARK"; exit 0; }
+printf '%s' "$sig" > "$MARK"
+printf '%s\n' "${out#*$'\n'}"

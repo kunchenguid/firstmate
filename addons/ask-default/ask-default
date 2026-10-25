@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# ask-default: when the captain is unreachable, an unanswered ask gets its safe,
+# pre-declared default applied instead of blocking the home, and work continues.
+#
+#   ask-default open <ask-id> --wait-until <YYYY-MM-DDTHH:MM:SSZ> | --wait <seconds>
+#       --default-cmd <command> --safety <class> --reason <one line>
+#     Records one ask in $FM_HOME/data/ask-default/asks/<ask-id>: its wait clock (when an
+#     unanswered ask may be defaulted), the pre-declared default action, that action's safety
+#     class, and the reason. Re-opening refreshes the clock; a defaulted ask is settled and
+#     is never re-opened under the same id.
+#   ask-default decide <ask-id> [--probe-cmd <command>] [--timeout <seconds>]
+#     Reads the ask, probes the captain once under a hard timeout, and decides.
+#   ask-default probe <command> [--timeout <seconds>]   runs one bounded probe on its own.
+#   ask-default show <ask-id>                           prints the ask record.
+#
+# The probe decides "captain reachable" from "captain unreachable": the probe command exits
+# 0 for reachable; anything else, including the timeout, reports unreachable, so a hanging
+# endpoint resolves instead of wedging the caller. The probe command comes from --probe-cmd,
+# then $ASK_DEFAULT_PROBE; the timeout from --timeout, then $ASK_DEFAULT_TIMEOUT, else 5
+# seconds. A missing probe is refused, never assumed unreachable.
+#
+# A safe default is declared, not guessed: the ask's --safety class is `safe` only when its
+# default action is reversible and touches no destructive, irreversible, money, credential,
+# or merge action. Any other class (or none) means no safe default exists, so the ask stays
+# held, never defaulted.
+#
+# Exit-code contract, so a caller can invoke it and read the decision:
+#   decide  0 defaulted (or already-defaulted): the caller may continue unrelated work, and
+#              the applied default and its reason were appended to data/ask-default/applied.log
+#          10 held: the clock expired and the captain is unreachable, but the ask has no safe
+#              default, so it stays held, not defaulted
+#          11 waiting: the captain is unreachable but the wait clock has not expired yet
+#          12 reachable: the captain answered the probe, so the ask stays open for the real
+#              answer and no default is applied
+#           1 error: usage, record, or probe configuration problem (stderr)
+#   open    0 recorded, 1 refused (stderr)
+#   probe   0 reachable, 1 unreachable, 2 usage error
+set -u
+
+die() { echo "ask-default: $*" >&2; exit 1; }
+
+DATA_DIR="$FM_HOME/data/ask-default"
+ASKS_DIR="$DATA_DIR/asks"
+LOG="$DATA_DIR/applied.log"
+
+# The classes a default may declare. Only `safe` may ever be applied.
+SAFETY_CLASSES="safe destructive irreversible money credential merge none"
+
+slug() {  # <label> <value>: privacy-safe one-line slug
+  case "$2" in
+    '' | *[!A-Za-z0-9._-]*) die "$1 must be a non-empty privacy-safe slug: $2" ;;
+  esac
+}
+
+one_line() {  # <label> <value>
+  [ -n "$2" ] || die "$1 must not be empty"
+  case "$2" in
+    *$'\n'* | *$'\r'*) die "$1 must be one line" ;;
+  esac
+}
+
+stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+epoch_of() {  # <iso-utc>: seconds since epoch, or fail on an unparsable stamp
+  date -u -d "$1" +%s 2>/dev/null || die "not a UTC YYYY-MM-DDTHH:MM:SSZ timestamp: $1"
+}
+
+record_path() { printf '%s/%s' "$ASKS_DIR" "$1"; }
+
+# Write the record atomically from its parts: a reader never sees a partial ask.
+write_record() {  # <id> <opened_at> <wait_until> <safety> <default_cmd> <reason> [defaulted_at] [rc]
+  local id=$1 opened=$2 until=$3 safety=$4 cmd=$5 reason=$6 done_at=${7:-} rc=${8:-}
+  local path tmp
+  path=$(record_path "$id")
+  tmp="$path.$$"
+  {
+    printf 'opened_at=%s\n' "$opened"
+    printf 'wait_until=%s\n' "$until"
+    printf 'safety=%s\n' "$safety"
+    printf 'default_cmd=%s\n' "$cmd"
+    printf 'reason=%s\n' "$reason"
+    if [ -n "$done_at" ]; then
+      printf 'defaulted_at=%s\ndefaulted_rc=%s\n' "$done_at" "$rc"
+    fi
+  } > "$tmp" || die "cannot stage the record for $id"
+  mv "$tmp" "$path" || die "cannot record ask $id"
+}
+
+# Load one record's fields; prints the fail message and returns 1 when it is
+# not a complete ask record, so decide can refuse instead of guessing.
+load_record() {  # <id>; sets R_OPENED R_UNTIL R_SAFETY R_CMD R_REASON R_DEFAULTED R_RC
+  local id=$1 path line key value
+  R_OPENED='' R_UNTIL='' R_SAFETY='' R_CMD='' R_REASON='' R_DEFAULTED='' R_RC=''
+  path=$(record_path "$id")
+  [ -f "$path" ] || { echo "ask $id is not recorded here ($path)" >&2; return 1; }
+  while IFS= read -r line; do
+    key=${line%%=*}
+    value=${line#*=}
+    [ "$key" != "$line" ] || continue
+    case "$key" in
+      opened_at) R_OPENED=$value ;;
+      wait_until) R_UNTIL=$value ;;
+      safety) R_SAFETY=$value ;;
+      default_cmd) R_CMD=$value ;;
+      reason) R_REASON=$value ;;
+      defaulted_at) R_DEFAULTED=$value ;;
+      defaulted_rc) R_RC=$value ;;
+    esac
+  done < "$path"
+  [ -n "$R_UNTIL" ] && [ -n "$R_SAFETY" ] && [ -n "$R_REASON" ] && [ -n "$R_OPENED" ] || {
+    echo "ask $id has an incomplete record ($path)" >&2
+    return 1
+  }
+}
+
+open_ask() {
+  local id=${1:-} until='' wait='' cmd='' safety='' reason='' now
+  [ $# -ge 1 ] || die "usage: ask-default open <ask-id> --wait-until <ts> | --wait <seconds> --default-cmd <cmd> --safety <class> --reason <line>"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wait-until) shift; until=${1:-} ;;
+      --wait) shift; wait=${1:-} ;;
+      --default-cmd) shift; cmd=${1:-} ;;
+      --safety) shift; safety=${1:-} ;;
+      --reason) shift; reason=${1:-} ;;
+      *) die "unknown argument: $1" ;;
+    esac
+    shift
+  done
+  slug ask-id "$id"
+  [ -n "$until" ] || [ -n "$wait" ] || die "one of --wait-until or --wait is required"
+  [ -z "$until" ] || [ -z "$wait" ] || die "--wait-until and --wait are alternatives, not a pair"
+  one_line reason "$reason"
+  case " $SAFETY_CLASSES " in
+    *" $safety "*) ;;
+    *) die "--safety must be one of:$SAFETY_CLASSES" ;;
+  esac
+  # A safe default must name the reversible action to apply, so it can be
+  # recorded and replayed; `none` is the explicit declaration that no safe
+  # default exists and the ask must stay held.
+  if [ "$safety" = safe ]; then
+    one_line default-cmd "$cmd"
+  else
+    cmd=''
+  fi
+  now=$(stamp)
+  if [ -n "$wait" ]; then
+    case "$wait" in
+      '' | *[!0-9]*) die "--wait must be a whole number of seconds" ;;
+    esac
+    until=$(date -u -d "@$(( $(epoch_of "$now") + wait ))" +%Y-%m-%dT%H:%M:%SZ)
+  fi
+  case "$until" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) die "--wait-until must be a UTC YYYY-MM-DDTHH:MM:SSZ timestamp: $until" ;;
+  esac
+  epoch_of "$until" >/dev/null
+  # A defaulted ask is settled: defaulting it again would answer a question
+  # that already got its default, so the id is closed for good.
+  if load_record "$id" 2>/dev/null && [ -n "$R_DEFAULTED" ]; then
+    die "ask $id was already defaulted at $R_DEFAULTED; a new question needs a new ask id"
+  fi
+  mkdir -p "$ASKS_DIR" || die "cannot create $ASKS_DIR"
+  write_record "$id" "$now" "$until" "$safety" "$cmd" "$reason"
+  printf 'opened: %s (wait until %s, safety %s)\n' "$id" "$until" "$safety"
+}
+
+run_probe() {  # <cmd> <timeout>: exit 0 reachable, 1 unreachable (never hangs)
+  local cmd=$1 t=$2 kill_after
+  case "$t" in
+    '' | *[!0-9]* | 0) die "timeout must be a whole number of seconds" ;;
+  esac
+  # A broken probe command is refused, never spent as unreachable. Beyond that,
+  # any non-zero probe result - a timeout, a missing endpoint, a refused
+  # connection - resolves to unreachable inside the bound.
+  bash -n -c "$cmd" 2>/dev/null || die "the probe command is not valid shell: $cmd"
+  kill_after=$((t / 2 + 1))
+  timeout -k "$kill_after" "$t" bash -c "$cmd" >/dev/null 2>&1
+}
+
+decide_ask() {
+  local id=${1:-} cmd='' t='' now until_epoch probe_rc
+  [ $# -ge 1 ] || die "usage: ask-default decide <ask-id> [--probe-cmd <command>] [--timeout <seconds>]"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --probe-cmd) shift; cmd=${1:-} ;;
+      --timeout) shift; t=${1:-} ;;
+      *) die "unknown argument: $1" ;;
+    esac
+    shift
+  done
+  slug ask-id "$id"
+  [ -n "$cmd" ] || cmd=${ASK_DEFAULT_PROBE:-}
+  [ -n "$cmd" ] || die "no reachability probe: pass --probe-cmd or set ASK_DEFAULT_PROBE; an unprobed captain is never assumed unreachable"
+  [ -n "$t" ] || t=${ASK_DEFAULT_TIMEOUT:-5}
+  load_record "$id" || exit 1
+  if [ -n "$R_DEFAULTED" ]; then
+    printf 'ask: %s\ndecision: already-defaulted\napplied: %s\nreason: %s\n' "$id" "$R_DEFAULTED" "$R_REASON"
+    return 0
+  fi
+  now=$(stamp)
+  until_epoch=$(epoch_of "$R_UNTIL")
+  run_probe "$cmd" "$t" && probe_rc=0 || probe_rc=$?
+  if [ "$probe_rc" -eq 0 ]; then
+    printf 'ask: %s\ndecision: reachable\nreason: the captain answered the probe, so the ask stays open for the real answer\n' "$id"
+    return 12
+  fi
+  now=$(epoch_of "$now")
+  if [ "$now" -lt "$until_epoch" ]; then
+    printf 'ask: %s\ndecision: waiting\nwait_until: %s (%ss left)\n' "$id" "$R_UNTIL" "$((until_epoch - now))"
+    return 11
+  fi
+  if [ "$R_SAFETY" != safe ] || [ -z "$R_CMD" ]; then
+    printf 'ask: %s\ndecision: held\nsafety: %s\nreason: %s\n' "$id" "$R_SAFETY" "$R_REASON"
+    printf 'ask-default: no safe default exists for %s, so it stays held, not defaulted\n' "$id" >&2
+    return 10
+  fi
+  # One apply per ask, serialized: the lock plus the in-lock re-read makes a concurrent second decide see this application instead of repeating it.
+  mkdir -p "$DATA_DIR" "$ASKS_DIR" || die "cannot create $DATA_DIR"
+  exec 9>"$ASKS_DIR/$id.lock"
+  flock -w 30 -x 9 || die "could not acquire the apply lock for ask $id"
+  if load_record "$id" && [ -n "$R_DEFAULTED" ]; then
+    printf 'ask: %s\ndecision: already-defaulted\napplied: %s\nreason: %s\n' "$id" "$R_DEFAULTED" "$R_REASON"
+    return 0
+  fi
+  local applied_at rc=0 line
+  applied_at=$(stamp)
+  bash -c "$R_CMD" >/dev/null 2>&1 || rc=$?
+  line=$(jq -nc --arg ask "$id" --arg at "$applied_at" --arg cmd "$R_CMD" \
+    --arg reason "$R_REASON" --argjson rc "$rc" \
+    '{ask: $ask, applied_at: $at, default_cmd: $cmd, reason: $reason, rc: $rc}')
+  # Append-only: applications are never rewritten, so the history of defaults that kept the home moving stays auditable.
+  { flock -x 200; printf '%s\n' "$line" >> "$LOG"; } 200>>"$LOG" || die "cannot append to $LOG"
+  write_record "$id" "$R_OPENED" "$R_UNTIL" "$R_SAFETY" "$R_CMD" "$R_REASON" "$applied_at" "$rc"
+  printf 'ask: %s\ndecision: defaulted\napplied: %s\ndefault: %s\nreason: %s\nrecorded: %s\n' \
+    "$id" "$applied_at" "$R_CMD" "$R_REASON" "$LOG"
+  [ "$rc" -eq 0 ] || printf 'ask-default: the default action for %s exited %s; the ask is unblocked and the failure is the action own\n' "$id" "$rc" >&2
+  return 0
+}
+
+probe_cmd() {
+  local cmd='' t=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout) shift; t=${1:-} ;;
+      *) [ -z "$cmd" ] || die "one probe command at a time: $cmd"; cmd=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$cmd" ] || die "usage: ask-default probe <command> [--timeout <seconds>]"
+  [ -n "$t" ] || t=${ASK_DEFAULT_TIMEOUT:-5}
+  if run_probe "$cmd" "$t"; then echo reachable; exit 0; else echo unreachable; exit 1; fi
+}
+
+show_ask() {
+  local id=${1:-}
+  [ $# -eq 1 ] || die "usage: ask-default show <ask-id>"
+  slug ask-id "$id"
+  load_record "$id" || exit 1
+  printf 'ask: %s\nopened_at: %s\nwait_until: %s\nsafety: %s\ndefault_cmd: %s\nreason: %s\n' \
+    "$id" "$R_OPENED" "$R_UNTIL" "$R_SAFETY" "${R_CMD:-none}" "$R_REASON"
+  [ -z "$R_DEFAULTED" ] || printf 'defaulted_at: %s\ndefaulted_rc: %s\n' "$R_DEFAULTED" "$R_RC"
+}
+
+[ -n "${FM_HOME:-}" ] || die "FM_HOME is not set, so the ask records have no home"
+mkdir -p "$ASKS_DIR" 2>/dev/null || true
+
+case ${1:-} in
+  open) shift; open_ask "$@" ;;
+  decide) shift; decide_ask "$@" ;;
+  probe) shift; probe_cmd "$@" ;;
+  show) shift; show_ask "$@" ;;
+  *) die "usage: ask-default open|decide|probe|show ... (see the header of $0)" ;;
+esac

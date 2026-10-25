@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Wake Main when a running fleet process carries a provider API key in its environment.
+
+Read-only on /proc: /proc/<pid>/environ is split on NUL and only the variable
+NAMES are kept for matching (matched against FM_KEY_PATTERNS, the home's
+config/key-in-env-patterns, or DEFAULT). Values are never printed, logged,
+written, or sent on the network. A value is read transiently only to hash it
+(sha256) against ~/.config/openrouter/api_key when OPENROUTER_API_KEY is among
+the hits: a different hash means an old key (log-only on stderr with the
+key-revoked note, never wake); the same hash means the current key (wake once
+for a new finding, new name, or >25% count jump). Each hit is attributed to a
+home and task through the cwd of the process (or its nearest ancestor) against
+every home's state/*.meta worktree= record, and the parent chain is walked to
+the topmost ancestor holding the same variable.
+Output: state/key-in-env.incidents, one TSV line per process (pid, home, task,
+variables, topmost parent), rewritten each run. The alert baseline is
+state/.key-in-env.alerted.json. Nothing is killed, signalled or changed.
+Fixture knobs: FM_KEY_HOMES (colon list of home dirs), FM_KEY_TREES (comma list
+of pids: scan only them and their descendants), FM_PROC.
+"""
+import fnmatch, hashlib, json, os, re, sys
+
+PROVIDERS = "OPENROUTER ANTHROPIC OPENAI MINIMAX GOOGLE GEMINI XAI MOONSHOT ZAI DEEPSEEK MISTRAL GROQ COHERE TOGETHER FIREWORKS".split()
+DEFAULT = ["*_API_KEY", "*_API_TOKEN"] + [f"{p}_*{s}" for p in PROVIDERS for s in ("KEY", "TOKEN", "SECRET")]
+
+PROC = os.environ.get("FM_PROC", "/proc")
+HOME = os.environ.get("FM_HOME") or os.path.expanduser("~/firstmate")
+STATE = os.path.join(HOME, "state")
+OPENROUTER_KEY_FILE = os.path.join(os.path.expanduser("~"), ".config", "openrouter", "api_key")
+
+def patterns():
+    raw = os.environ.get("FM_KEY_PATTERNS")
+    if raw is None:
+        try:
+            raw = open(os.path.join(HOME, "config", "key-in-env-patterns")).read()
+        except OSError:
+            return DEFAULT
+    return re.split(r"[\s,]+", raw.strip()) if raw.strip() else DEFAULT
+
+def env_names(pid):
+    """Variable names of one process; the values are dropped inside this expression."""
+    try:
+        with open(f"{PROC}/{pid}/environ", "rb") as f:
+            return {e.split(b"=", 1)[0].decode("utf-8", "replace") for e in f.read().split(b"\0") if e}
+    except OSError:
+        return set()
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+def _env_value_bytes(pid, variable):
+    """Raw value bytes for a local hash only; never logged or returned to callers as text."""
+    try:
+        with open(f"{PROC}/{pid}/environ", "rb") as f:
+            prefix = variable.encode() + b"="
+            for entry in f.read().split(b"\0"):
+                if entry.startswith(prefix):
+                    return entry[len(prefix):]
+    except OSError:
+        return None
+    return None
+
+def openrouter_old_key(pids):
+    """True when OPENROUTER_API_KEY is present and none of its values match the key file.
+
+    Compares sha256 of each found value to sha256 of ~/.config/openrouter/api_key
+    (HOME-expandable for tests). No network. Values are hashed and discarded.
+    """
+    try:
+        file_key = open(OPENROUTER_KEY_FILE, "rb").read().strip()
+    except OSError:
+        return False
+    if not file_key:
+        return False
+    want = _sha256(file_key)
+    saw = False
+    for pid in pids:
+        raw = _env_value_bytes(pid, "OPENROUTER_API_KEY")
+        if raw is None:
+            continue
+        saw = True
+        if _sha256(raw.strip()) == want:
+            return False
+    return saw
+
+def stat_of(pid):
+    """(ppid, command) from /proc/<pid>/stat; comm may hold spaces, so split on the last ')'."""
+    try:
+        s = open(f"{PROC}/{pid}/stat").read()
+    except OSError:
+        return None
+    l, r = s.index("("), s.rindex(")")
+    return int(s[r + 2:].split()[1]), s[l + 1:r]
+
+def homes():
+    dirs = os.environ.get("FM_KEY_HOMES")
+    if dirs is None:
+        base = os.path.expanduser("~/.treehouse")
+        dirs = ":".join([HOME, os.path.expanduser("~/firstmate")] + sorted(
+            os.path.join(base, a, b, "firstmate") for a in os.listdir(base) if os.path.isdir(os.path.join(base, a))
+            for b in os.listdir(os.path.join(base, a))))
+    out = {}
+    for d in dirs.split(":"):
+        if os.path.isdir(os.path.join(d, "state")):
+            out[os.path.realpath(d)] = d
+    return out
+
+def task_map(hs):
+    """[(worktree realpath, home label, task)] from every home's state/*.meta."""
+    m = []
+    for real, d in hs.items():
+        parts = real.split(os.sep)
+        label = "main" if real == os.path.realpath(os.path.expanduser("~/firstmate")) else "/".join(parts[-3:-1])
+        m.append((real, label, "-"))
+        sd = os.path.join(d, "state")
+        for f in os.listdir(sd):
+            if f.endswith(".meta"):
+                try:
+                    wt = next((l.split("=", 1)[1].strip() for l in open(os.path.join(sd, f)) if l.startswith("worktree=")), "")
+                except OSError:
+                    continue
+                if wt:
+                    m.append((os.path.realpath(wt), label, f[:-5]))
+    return sorted(m, key=lambda t: -len(t[0]))
+
+def attribute(pid, tmap, chain):
+    for p in [pid] + chain:
+        try:
+            cwd = os.readlink(f"{PROC}/{p}/cwd")
+        except OSError:
+            continue
+        for wt, label, task in tmap:
+            if cwd == wt or cwd.startswith(wt + os.sep):
+                return label, task
+    return "unknown", "-"
+
+def main():
+    os.makedirs(STATE, exist_ok=True)
+    pats, me, uid = patterns(), os.getpid(), os.getuid()
+    names, info = {}, {}
+    for e in os.listdir(PROC):
+        if not e.isdigit():
+            continue
+        pid = int(e)
+        try:
+            if os.stat(f"{PROC}/{e}").st_uid != uid:
+                continue
+        except OSError:
+            continue
+        st = stat_of(pid)
+        if st is None:
+            continue
+        info[pid] = st
+        hit = {n for n in env_names(pid) if any(fnmatch.fnmatchcase(n, p) for p in pats)}
+        if hit:
+            names[pid] = hit
+    tmap = task_map(homes())
+    trees = {int(t) for t in os.environ.get("FM_KEY_TREES", "").split(",") if t}
+    rows = []
+    for pid in sorted(names):
+        if pid == me:
+            continue
+        chain, p = [], info[pid][0]
+        while p in info and p > 1 and p not in chain:
+            chain.append(p)
+            p = info[p][0]
+        if trees and not trees & {pid, *chain}:
+            continue
+        top = pid
+        for a in chain:  # topmost ancestor that holds one of the same variables
+            if names.get(a, set()) & names[pid]:
+                top = a
+        home, task = attribute(pid, tmap, chain)
+        rows.append((pid, home, task, ",".join(sorted(names[pid])), f"{info[top][1]}({top})"))
+    lines = ["\t".join(map(str, r)) for r in rows]
+    inc = os.path.join(STATE, "key-in-env.incidents")
+    open(inc + ".tmp", "w").write("".join(l + "\n" for l in lines))
+    os.replace(inc + ".tmp", inc)
+    last = os.path.join(STATE, ".key-in-env.alerted.json")
+    try:
+        with open(last) as f:
+            prev = json.load(f)
+    except (OSError, ValueError):
+        prev = {}
+    if not rows:
+        if prev.get("active"):
+            prev["active"] = False
+            with open(last, "w") as f:
+                json.dump(prev, f)
+                f.write("\n")
+        return
+    variables = sorted({name for row in rows for name in row[3].split(",") if name})
+    revoked = openrouter_old_key(sorted(names))
+    old_names = set(prev.get("names", []))
+    new_name = bool(set(variables) - old_names)
+    count = len(rows)
+    count_jump = bool(prev.get("active") and prev.get("count", 0) > 0 and count * 100 > prev["count"] * 125)
+    tops = {}
+    for r in rows:
+        c = r[4].rsplit("(", 1)[0]
+        tops[c] = tops.get(c, 0) + 1
+    top = ", ".join(f"{c} x{n}" for c, n in sorted(tops.items(), key=lambda t: -t[1])[:4])
+    homes_n = len({r[1] for r in rows})
+    shown = "; ".join(f"pid {r[0]} {r[1]} {r[2]} {r[3]}" for r in rows[:3])
+    line = (f"key-in-env: {len(rows)} process(es) in {homes_n} home(s) carry a provider API key "
+            f"in their environment (names only): {shown}; topmost parent still exporting: {top}"
+            f"{'; key revoked' if revoked else ''} - full list {inc}")
+    if revoked:
+        # Old key (hash differs from key file): log only. Never wake, even on count jumps.
+        log = not prev.get("active") or not prev.get("revoked", False) or new_name
+        if not log:
+            return
+        print(line, file=sys.stderr)
+        with open(last, "w") as f:
+            json.dump({"active": True, "count": count, "names": variables, "revoked": True}, f)
+            f.write("\n")
+        return
+    alert = not prev.get("active") or new_name or count_jump
+    if not alert:
+        return
+    print(line)
+    with open(last, "w") as f:
+        json.dump({"active": True, "count": count, "names": variables, "revoked": False}, f)
+        f.write("\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

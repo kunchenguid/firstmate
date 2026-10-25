@@ -1,0 +1,76 @@
+app: firstmate-addons
+journeys:
+  merge-card-pool-fallback:
+    command: bash merge-card/run-proof.sh
+  readme-hero:
+    command: bash docs/capture-lookout-hero.sh
+  readme-render:
+    command: bash docs/run-proof.sh
+  owner-rules-hierarchy:
+    command: bash owner-rules/run-hierarchy-proof.sh
+  owner-rules-publication:
+    command: bash owner-rules/run-proof.sh
+  key-in-env-alert-once:
+    command: bash key-in-env-check/run-proof.sh
+  fleet-pulse-chat-tsv-refresh:
+    command: bash fleet-pulse/tests/chat-tsv.test.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  fleet-pulse-newest-retro:
+    command: bash fleet-pulse/run-proof.sh
+
+  limit-prompt-move:
+    command: bash limit-prompt-move/tests/limit-prompt-move-e2e.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  limit-prompt-move-live:
+    command: bash limit-prompt-move/run-live-proof.sh
+  quota-failover-screen-match:
+    command: bash quota-failover/run-proof.sh
+  quota-failover-live-route:
+    command: bash quota-failover/run-live-proof.sh
+  pipeline-route:
+    command: bash pipeline-quota-failover/run-proof.sh
+  pipeline-route-live:
+    command: bash pipeline-quota-failover/run-live-proof.sh
+  fleet-dashboard-wait-reasons:
+    command: bash fleet-dashboard/run-proof.sh
+  claude-quota-pool:
+    command: bash claude-quota/tests/claude-quota.test.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  claude-accounts-quota:
+    command: bash claude-accounts/run-proof.sh
+  claude-accounts-pick:
+    command: bash claude-accounts/run-proof-pick.sh
+  claude-accounts-codex-rest:
+    command: bash claude-accounts/run-proof-codex-rest.sh
+  claude-accounts-timer:
+    command: bash claude-accounts/run-proof-timer.sh
+  receipts-pr-candidate:
+    command: bash receipts/run-proof.sh
+  lookout-adapter-live:
+    command: bash lookout-adapter/run-proof.sh
+  lookout-service-dry:
+    command: bash lookout-adapter/run-service-proof.sh
+  wait-timers-identity:
+    command: bash wait-timers/run-proof.sh
+  core:
+    command: bash fleet-dashboard/run-core-proof.sh
+    core: true
+  merge-card-real-board:
+    command: bash merge-card/tests/real-board.test.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  merge-card-clean-clone:
+    command: bash merge-card/run-clean-clone-proof.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  merge-card-retitle:
+    command: bash merge-card/run-retitle-proof.sh > "$DONE_DONE_EVIDENCE_ROOT/${RUN_ID}.log" 2>&1
+  fleet-contract-check:
+    command: bash fleet-contract-check/run-proof.sh
+  pool-tool-account:
+    command: bash account-pool/run-tool-proof.sh
+  pool-helper:
+    command: bash account-pool/run-model-pool-proof.sh
+  quota-axi-pool:
+    command: bash quota-axi-pool/run-proof.sh
+  guards-pool-accounts:
+    command: bash read-guard/run-pool-proof.sh
+  codex-guard-live:
+    command: bash codex-guard/run-proof.sh
+  kill-guard-device:
+    command: bash kill-guard/run-device-proof.sh
+  kill-guard-main-live:
+    command: node kill-guard/run-main-proof.mjs

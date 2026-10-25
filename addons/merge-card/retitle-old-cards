@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Retitle legacy generic merge evidence cards without editing the board file.
+# Usage: retitle-old-cards [--apply] <board.json>
+# Dry-run is the default; --apply posts a replacement card then archives the old card.
+set -euo pipefail
+
+die() { printf 'retitle-old-cards: %s\n' "$*" >&2; exit 1; }
+
+apply=0
+if [ "${1:-}" = --apply ]; then apply=1; shift; fi
+[ "$#" -eq 1 ] || die 'usage: retitle-old-cards [--apply] <board.json>'
+board=$1
+[ -f "$board" ] || die "board does not exist: $board"
+command -v jq >/dev/null || die 'jq is required'
+command -v sign-off-axi >/dev/null || die 'sign-off-axi is required'
+
+cards=$(sign-off-axi list "$board" --json --full) || die "sign-off-axi could not list $board"
+jq -e '.decisions | type == "array"' <<<"$cards" >/dev/null || die 'sign-off-axi returned no decisions array'
+old_title='Internal change passed its checks'
+mapped=0
+skipped=0
+changed=0
+
+while IFS= read -r card; do
+  key=$(jq -r '.key // empty' <<<"$card")
+  identity=$(jq -r '
+    def by_link:
+      try (.link | capture("^https?://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>[0-9]+)(?:[/?#].*)?$")
+        | [.owner, .repo, .number] | @tsv) catch "";
+    def by_key:
+      try (.key | capture("^merge-(?<owner>[^-]+)-(?<repo>.+)-pull-(?<number>[0-9]+)(?:-[[:xdigit:]]{12})?$")
+        | [.owner, .repo, .number] | @tsv) catch "";
+    (by_link) as $url | if $url != "" then $url else by_key end
+  ' <<<"$card")
+  if [ -z "$key" ] || [ -z "$identity" ] || [ "$(jq -r '.evidence | type' <<<"$card")" != object ]; then
+    printf 'skip: %s (no usable PR identity or sealed evidence)\n' "${key:-<no-key>}"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  IFS=$'\t' read -r owner repo number <<<"$identity"
+  [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$number" ] || {
+    printf 'skip: %s (no usable PR identity)\n' "${key:-<no-key>}"
+    skipped=$((skipped + 1))
+    continue
+  }
+  title="$repo #$number: internal change passed its checks"
+  mapped=$((mapped + 1))
+  printf '%s\t%s -> %s\n' "$key" "$old_title" "$title"
+  [ "$apply" -eq 1 ] || continue
+
+  base_key=$(printf 'merge-%s-%s-pull-%s' "$owner" "$repo" "$number" | tr -c 'A-Za-z0-9._-' '-')
+  base_key=${base_key:0:128}
+  suffix=$(printf '%s' "$key" | sha256sum | cut -c1-12)
+  replacement_key="$base_key-$suffix"
+  message=$(mktemp "$(dirname -- "$board")/.retitle-card.XXXXXX") || die 'cannot create a temporary card message beside the board'
+  trap 'rm -f -- "$message"' EXIT
+  jq -n --arg key "$replacement_key" --arg title "$title" --argjson card "$card" '
+    {contract:1,kind:"evidence",schema:1,key:$key,title:$title,about:$card.about,run:$card.evidence}
+    + if ($card.link // "") == "" then {} else {link:$card.link} end
+  ' >"$message" || die "could not build replacement for $key"
+  sign-off-axi post "$board" --kind evidence --from "$message" --filer firstmate-merge || die "could not post replacement for $key"
+  sign-off-axi dismiss "$key" "$board" || die "replacement posted but could not archive $key; rerun --apply to finish"
+  rm -f -- "$message"
+  trap - EXIT
+  changed=$((changed + 1))
+done < <(jq -c --arg title "$old_title" '.decisions[] | select(.title == $title and .dismissed != true)' <<<"$cards")
+
+if [ "$apply" -eq 1 ]; then
+  printf 'retitled %s card(s); skipped %s\n' "$changed" "$skipped"
+else
+  printf 'would retitle %s card(s); skipped %s\n' "$mapped" "$skipped"
+fi

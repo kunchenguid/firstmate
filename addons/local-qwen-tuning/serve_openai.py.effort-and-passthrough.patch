@@ -1,0 +1,33 @@
+diff --git i/tools/serve_openai.py w/tools/serve_openai.py
+index 5b47389..066264c 100644
+--- i/tools/serve_openai.py
++++ w/tools/serve_openai.py
+@@ -756,7 +756,11 @@ def parse_request(body):
+     # keeps the UI from promising a hard limit it cannot deliver.
+     kwargs = body.get("chat_template_kwargs") or {}
+     enable_thinking = kwargs.get("enable_thinking")
+-    effort = str(body.get("reasoning_effort") or "").strip().lower()
++    # reasoning_effort is accepted both top-level (OpenAI spelling) and inside
++    # chat_template_kwargs, which is where a vLLM/SGLang-style client puts every
++    # template variable - the same place enable_thinking already comes from.
++    effort = str(body.get("reasoning_effort")
++                 or kwargs.get("reasoning_effort") or "").strip().lower()
+     if enable_thinking is None:
+         enable_thinking = effort not in ("none", "off", "minimal")
+     return dict(
+@@ -1199,6 +1203,15 @@ def main():
+     if args.cpu_cache_size:
+         argv += ["-ccs", str(args.cpu_cache_size)]
+ 
++    # Engine flags this wrapper does not name itself (draft depth, dynamic
++    # drafting, n-gram drafting, recurrent cache size, ...), passed through
++    # verbatim so a tuning experiment does not have to fork the kit. Empty or
++    # absent means the launch is byte-identical to before this line existed.
++    extra = os.environ.get("EXL3_EXTRA_ARGS", "").strip()
++    if extra:
++        argv += extra.split()
++        print(f" == extra engine args: {extra}", flush = True)
++
+     print(f" == loading {args.model}"
+           + (" + MTP head" if use_mtp else
+              (f" + draft {args.draft_model}" if use_draft else " (no draft)"))

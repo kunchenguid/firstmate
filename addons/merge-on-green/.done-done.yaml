@@ -1,0 +1,6 @@
+checks:
+  upstream_catch_up: true
+  moved_from: true
+  generated_paths:
+    - packages/accounts/src/pi/**
+    - packages/accounts/src/routes.json

@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""lookout-front - the fleet dashboard's address: Lookout behind it, the retired Tickets and Needs routes sent to sign-off.
+
+  lookout-front --upstream http://127.0.0.1:P [--bind ADDR] [--port N] [--board-url-file FILE]
+
+Reads need no token, as on the old dashboard (reach is the bind address). /tickets, /needs, /backlog, /measure and /overview answer
+301 to the sign-off board's address, taken from the url file on each request with its query (the access token) dropped: a device that
+opened the board's access link carries its cookie, so nothing secret goes in a Location header. Every other GET is Lookout's."""
+import argparse, os, sys, urllib.request, urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+MOVED = ('/tickets', '/needs', '/backlog', '/measure', '/overview')
+
+
+def board_url(path):
+    try:
+        u = urlsplit(open(path).read().strip())
+        return f'{u.scheme}://{u.netloc}/' if u.netloc else None
+    except OSError:
+        return None
+
+
+def main(argv):
+    p = argparse.ArgumentParser()
+    p.add_argument('--upstream', required=True)
+    p.add_argument('--bind', default='127.0.0.1')
+    p.add_argument('--port', type=int, default=4390)
+    p.add_argument('--board-url-file', default=os.path.expanduser('~/firstmate/state/signoff-board.url'))
+    a = p.parse_args(argv)
+
+    class H(BaseHTTPRequestHandler):
+        def reply(self, code, body=b'', headers=()):
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = urlsplit(self.path).path.rstrip('/')
+            if path in MOVED:
+                url = board_url(a.board_url_file)
+                return self.reply(301, headers=[('Location', url)]) if url else self.reply(503, b'sign-off board address unknown\n')
+            try:
+                with urllib.request.urlopen(a.upstream + self.path, timeout=30) as r:
+                    return self.reply(r.status, r.read(), [(k, v) for k, v in r.headers.items() if k.lower() not in ('transfer-encoding', 'connection')])
+            except urllib.error.HTTPError as e:
+                return self.reply(e.code, e.read(), [('content-type', e.headers.get('content-type', 'text/plain'))])
+            except OSError as e:
+                return self.reply(502, f'Lookout is not answering: {e}\n'.encode())
+
+        do_POST = lambda self: self.reply(405, b'read-only\n')
+        log_message = lambda *x: None
+
+    srv = ThreadingHTTPServer((a.bind, a.port), H)
+    print(f'serving http://{a.bind}:{srv.server_port}/', flush=True)
+    srv.serve_forever()
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

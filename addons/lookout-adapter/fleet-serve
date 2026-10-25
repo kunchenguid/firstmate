@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# fleet-serve [--bind ADDR] [--port N]: the fleet dashboard in one process group. The adapter and Lookout listen on loopback
+# ports of their own; lookout-front takes the dashboard's address. If any of the three exits the script ends and systemd restarts it.
+# FM_HOME: the home to read (default ~/firstmate). LOOKOUT_DIR: the lookout clone or install. FM_SIGNOFF_URL_FILE: the board's url file.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+: "${LOOKOUT_DIR:?set LOOKOUT_DIR to the lookout clone}"
+export FM_HOME=${FM_HOME:-$HOME/firstmate}
+bind=127.0.0.1 port=4390
+while [ $# -gt 0 ]; do case $1 in --bind) bind=$2; shift 2 ;; --port) port=$2; shift 2 ;; *) echo "fleet-serve: unknown argument $1" >&2; exit 2 ;; esac; done
+free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+ap=$(free_port); lp=$(free_port)
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+"$here/lookout-firstmate" --serve --port "$ap" & 
+(cd "$LOOKOUT_DIR" && exec node bin/lookout.js serve --adapter "http://127.0.0.1:$ap/fleet.json" --port "$lp") &
+"$here/lookout-front" --upstream "http://127.0.0.1:$lp" --bind "$bind" --port "$port" --board-url-file "${FM_SIGNOFF_URL_FILE:-$FM_HOME/state/signoff-board.url}" &
+wait -n

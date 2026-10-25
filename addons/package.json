@@ -1,0 +1,19 @@
+{
+  "name": "firstmate-addons",
+  "private": true,
+  "description": "Keep your coding-agent fleet moving through stalled tasks, depleted quota, and destructive commands.",
+  "keywords": [
+    "coding-agents",
+    "agent-fleet",
+    "developer-tools",
+    "automation",
+    "shell",
+    "guardrails"
+  ],
+  "homepage": "https://github.com/umeranjum17/firstmate-addons#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umeranjum17/firstmate-addons.git"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# tailscale-resilience: detect a dead Tailscale network or a dead display/session on
+# this host, heal the Tailscale connection once per outage, alert without Tailscale,
+# and append one record per event.
+#
+#   tailscale-resilience check [--samples N] [--window S] [--cooldown S] [--state-dir DIR]
+#     One pass over both detectors. Call it again to feed the windows: each call is one
+#     sample, and the windows live in the state dir, so cron, a systemd timer or the
+#     fleet watcher can all drive it. Needs bash, jq, tailscale and loginctl on PATH.
+#
+# Detectors, both read from the real CLI and never from a config file:
+#   net: `tailscale status --json` (BackendState, peer Online flags) and
+#     `tailscale netcheck --format json` (RegionLatency). The Tailscale network is
+#     unreachable when the daemon answers but nothing else does: the status call fails,
+#     BackendState is not Running, or no DERP relay and no peer is reachable.
+#   display: `loginctl list-sessions` and `show-session`. A session logind still lists
+#     is dead when it is closing, its leader PID is gone from /proc, or a graphical
+#     session has no display socket left for its user.
+#
+# A window needs --samples consecutive failing samples inside --window seconds, so one
+# transient failure never heals and never alerts.
+# The heal is one `tailscale up` per detected outage and never twice inside --cooldown
+# seconds: it reattaches the connection and changes nothing else.
+# Alerting never uses Tailscale: a local alert log always works, and TSR_ALERT_CMD adds
+# a local channel (LAN webhook, notify-send) run with the text on stdin and $1.
+# Every detection, heal and alert is appended to $STATE_DIR/events.jsonl.
+set -u
+
+usage() {
+  echo "usage: tailscale-resilience check [--samples N] [--window S] [--cooldown S] [--state-dir DIR]"
+  echo "       one pass over both detectors; run again to feed the bounded sample windows"
+}
+
+die() { echo "tailscale-resilience: $*" >&2; exit 1; }
+
+STATE_DIR=${TSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tailscale-resilience}
+SAMPLES=${TSR_SAMPLES:-3}
+WINDOW=${TSR_WINDOW:-600}
+COOLDOWN=${TSR_COOLDOWN:-300}
+ALERT_CMD=${TSR_ALERT_CMD:-}
+RUN=()
+command -v timeout >/dev/null 2>&1 && RUN=(timeout 20)
+
+case ${1:-check} in
+  check) ;;
+  -h | --help | help) usage; exit 0 ;;
+  *) die "unknown subcommand '$1' (only 'check' exists)" ;;
+esac
+shift
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --samples) [ $# -ge 2 ] || die "--samples needs a number"; SAMPLES=$2; shift 2 ;;
+    --window) [ $# -ge 2 ] || die "--window needs a number"; WINDOW=$2; shift 2 ;;
+    --cooldown) [ $# -ge 2 ] || die "--cooldown needs a number"; COOLDOWN=$2; shift 2 ;;
+    --state-dir) [ $# -ge 2 ] || die "--state-dir needs a path"; STATE_DIR=$2; shift 2 ;;
+    *) die "unknown option '$1'" ;;
+  esac
+done
+
+for tool in jq tailscale loginctl; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH"
+done
+
+# num <value> <default>: keep only a number, so a corrupt state file cannot wedge one.
+num() { case $1 in '' | *[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac; }
+
+# read_num <file> <default>: a state number, or the default when there is none.
+read_num() { local v; v=$(cat "$1" 2>/dev/null); num "$v" "$2"; }
+
+# prop <props> <name>: one "Name=value" line out of `loginctl show-session` output.
+prop() { sed -n "s/^$2=//p" <<<"$1"; }
+
+# record <kind> <state> <detail>: append one event to the append-only record.
+record() {
+  local kind=$1 state=$2 detail=$3
+  mkdir -p "$STATE_DIR" 2>/dev/null || die "cannot write the state dir $STATE_DIR"
+  jq -nc --arg ts "$(date -u +%FT%TZ)" --arg kind "$kind" --arg state "$state" --arg detail "$detail" \
+    '{ts: $ts, kind: $kind, state: $state, detail: $detail}' >> "$STATE_DIR/events.jsonl"
+}
+
+# alert <kind> <state> <detail>: deliver without Tailscale. The local log never needs
+# a network; TSR_ALERT_CMD adds the local channel the operator named, run with the
+# alert text on stdin and as $1.
+alert() {
+  local kind=$1 state=$2 detail=$3 line out
+  line="$state $kind on $(hostname): $detail"
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$line" >> "$STATE_DIR/alerts.log" || return 1
+  echo "alert: $line"
+  if [ -n "$ALERT_CMD" ]; then
+    if out=$(printf '%s\n' "$line" | bash -c "$ALERT_CMD" _ "$line" 2>&1); then
+      record "$kind" alerted "local alert log and TSR_ALERT_CMD"
+    else
+      record "$kind" alert-failed "TSR_ALERT_CMD ($ALERT_CMD) failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+    fi
+  else
+    record "$kind" alerted "local alert log; set TSR_ALERT_CMD for a push channel"
+  fi
+}
+
+# window <detector> <ok|fail> <detail>: advance one bounded sample window and print the
+# verdict for this sample: "ok" while healthy, "window <n>/<samples>" while too few
+# failures are in, "open" when this outage was already handled, or "detected" on the
+# first sample that reaches --samples inside --window seconds.
+window() {
+  local det=$1 verdict=$2 n since t
+  t=$(date +%s)
+  n=$(read_num "$STATE_DIR/$det.streak" 0)
+  since=$(read_num "$STATE_DIR/$det.since" 0)
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  if [ "$verdict" = ok ]; then
+    printf '0\n' > "$STATE_DIR/$det.streak" || return 1
+    printf '0\n' > "$STATE_DIR/$det.since" || return 1
+    echo ok
+    return 0
+  fi
+  # The window is bounded twice: --samples failures, and --window seconds from the
+  # first one, so failures spread over hours never accumulate into an outage.
+  if [ "$n" -le 0 ] || [ $((t - since)) -gt "$WINDOW" ]; then
+    n=0
+    since=$t
+  fi
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$STATE_DIR/$det.streak" || return 1
+  printf '%s\n' "$since" > "$STATE_DIR/$det.since" || return 1
+  if [ "$n" -lt "$SAMPLES" ]; then
+    echo "window $n/$SAMPLES"
+    return 0
+  fi
+  if [ "$since" = "$(read_num "$STATE_DIR/$det.handled-since" 0)" ]; then
+    echo open
+    return 0
+  fi
+  printf '%s\n' "$since" > "$STATE_DIR/$det.handled-since" || return 1
+  echo detected
+}
+
+# net_sample: one observation of the Tailscale network from the real CLI, printing
+# "<ok|fail>|<detail>". Reading it needs no Tailscale to be reachable.
+net_sample() {
+  local out backend net peers=0 relays=0 detail
+  if ! out=$("${RUN[@]}" tailscale status --json 2>&1); then
+    printf 'fail|tailscale status failed: %s\n' "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+    return 0
+  fi
+  backend=$(jq -r '.BackendState // empty' <<<"$out" 2>/dev/null)
+  peers=$(num "$(jq -r '[.Peer[]? | select(.Online == true)] | length' <<<"$out" 2>/dev/null)" 0)
+  if [ -z "$backend" ]; then
+    detail="tailscale status answered without a BackendState"
+  elif [ "$backend" != Running ]; then
+    detail="tailscaled is running but BackendState=$backend"
+  else
+    net=$("${RUN[@]}" tailscale netcheck --format json 2>/dev/null)
+    relays=$(num "$(jq -r '.RegionLatency // {} | length' <<<"${net:-{\}}" 2>/dev/null)" 0)
+    if [ "$relays" -gt 0 ] || [ "$peers" -gt 0 ]; then
+      printf 'ok|BackendState=Running, %s DERP relays and %s online peers reachable\n' "$relays" "$peers"
+      return 0
+    fi
+    detail="tailscaled is running but no DERP relay and no peer is reachable"
+  fi
+  printf 'fail|%s (relays=%s peers=%s)\n' "$detail" "$relays" "$peers"
+}
+
+# net_heal: reattach the Tailscale connection once, printing what the CLI said.
+net_heal() {
+  local out rc=0
+  out=$("${RUN[@]}" tailscale up 2>&1) || rc=$?
+  out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)
+  if [ "$rc" -eq 0 ]; then
+    echo "tailscale up reattached: ${out:-no output}"
+  else
+    echo "tailscale up failed (exit $rc): ${out:-no output}"
+  fi
+}
+
+# display_sample: one observation of logind's sessions, printing "<ok|fail>|<detail>".
+# A session is dead when any one independent signal says so: logind is closing it, its
+# leader process is gone from /proc, or a graphical session has no display socket left.
+display_sample() {
+  local ids id props type state leader display user dead sockets
+  ids=$("${RUN[@]}" loginctl list-sessions --no-legend 2>/dev/null | awk 'NF {print $1}')
+  [ -n "$ids" ] || { echo 'ok|logind lists no session'; return 0; }
+  for id in $ids; do
+    props=$("${RUN[@]}" loginctl show-session "$id" -p Type -p State -p Leader -p Display -p User 2>/dev/null)
+    [ -n "$props" ] || continue
+    type=$(prop "$props" Type)
+    state=$(prop "$props" State)
+    leader=$(prop "$props" Leader)
+    display=$(prop "$props" Display)
+    user=$(prop "$props" User)
+    dead=
+    case $state in closing | offline) dead="state=$state" ;; esac
+    if [ -z "$dead" ] && [ -n "$leader" ] && [ ! -d "/proc/$leader" ]; then
+      dead="leader pid $leader is gone from /proc"
+    fi
+    if [ -z "$dead" ] && { [ "$type" = wayland ] || [ "$type" = x11 ]; }; then
+      case $display in
+        wayland-*)
+          [ -S "${XDG_RUNTIME_DIR:-/run/user/$user}/$display" ] || dead="display socket $display is gone" ;;
+        :*) [ -S "/tmp/.X11-unix/X${display#:}" ] || dead="display socket $display is gone" ;;
+        *) sockets=$(ls -d /tmp/.X11-unix/X* "${XDG_RUNTIME_DIR:-/run/user/$user}"/wayland-* 2>/dev/null)
+          [ -n "$sockets" ] || dead="no display socket is left for user $user" ;;
+      esac
+    fi
+    [ -z "$dead" ] || { echo "fail|session $id (type=$type, user=$user) $dead"; return 0; }
+  done
+  echo "ok|logind lists $(grep -c '' <<<"$ids") sessions, all live"
+}
+
+check_net() {
+  local sample verdict detail act heal now last
+  sample=$(net_sample)
+  verdict=${sample%%|*}
+  detail=${sample#*|}
+  act=$(window net "$verdict" "$detail") || return 1
+  case $act in
+    ok) echo "net: ok - $detail" ;;
+    window*) echo "net: $act of failures inside the window, not an outage yet - $detail" ;;
+    open) echo "net: outage still open and already handled - $detail" ;;
+    detected)
+      record net detected "$detail"
+      now=$(date +%s)
+      last=$(read_num "$STATE_DIR/net.last-heal" 0)
+      if [ $((now - last)) -lt "$COOLDOWN" ]; then
+        record net heal-deferred "$detail; cooldown ${COOLDOWN}s leaves $((COOLDOWN - now + last))s"
+        alert net "detected" "$detail; the heal is cooling down for $((COOLDOWN - now + last))s"
+      else
+        heal=$(net_heal)
+        printf '%s\n' "$now" > "$STATE_DIR/net.last-heal"
+        record net healed "$heal"
+        alert net "detected and healed" "$detail - $heal"
+      fi
+      return 1
+      ;;
+  esac
+}
+
+check_display() {
+  local sample verdict detail act
+  sample=$(display_sample)
+  verdict=${sample%%|*}
+  detail=${sample#*|}
+  act=$(window display "$verdict" "$detail") || return 1
+  case $act in
+    ok) echo "display: ok - $detail" ;;
+    window*) echo "display: $act of failures inside the window, not an outage yet - $detail" ;;
+    open) echo "display: still dead and already alerted - $detail" ;;
+    detected)
+      record display detected "$detail"
+      alert display "detected" "$detail; this add-on heals the Tailscale connection only"
+      return 1
+      ;;
+  esac
+}
+
+rc=0
+check_net || rc=1
+check_display || rc=1
+exit "$rc"

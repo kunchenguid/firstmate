@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Keep one live Evidence card per PR on a sign-off board, whoever filed the cards.
+# Usage: one-card-per-pr [--apply] <board.json>
+# A PR is a github.com/<owner>/<repo>/pull/<n> link. When it has more than one live evidence card,
+# the newest valid proof stays (the newest card carrying a passed-test receipt, else the newest card)
+# and every other one is archived with `sign-off-axi dismiss`: it moves under Archived, its history is
+# kept, and `sign-off-axi restore <key>` brings it back. Nothing is deleted.
+# Dry-run is the default: it prints one `archive` line per card and changes nothing.
+# merge-card post runs it with --apply after each card it files.
+set -euo pipefail
+
+die() { printf 'one-card-per-pr: %s\n' "$*" >&2; exit 1; }
+
+apply=0
+if [ "${1:-}" = --apply ]; then apply=1; shift; fi
+[ "$#" -eq 1 ] || die 'usage: one-card-per-pr [--apply] <board.json>'
+board=$1
+[ -f "$board" ] || die "board does not exist: $board"
+command -v jq >/dev/null || die 'jq is required'
+command -v sign-off-axi >/dev/null || die 'sign-off-axi is required'
+
+cards=$(sign-off-axi list "$board" --json --full 2>/dev/null) || die "sign-off-axi could not list $board"
+# One row per card to archive: key, filer, PR, the key that stays.
+plan=$(jq -r '
+  def pr: try (.link | capture("^https?://github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)(?:[/?#].*)?$")
+    | "\(.o | ascii_downcase)/\(.r | ascii_downcase)#\(.n)") catch "";
+  [.decisions[]? | select(.type == "evidence" and .dismissed != true) | . + {pr: pr} | select(.pr != "")]
+  | group_by(.pr)[] | select(length > 1)
+  | (sort_by([(.evidence | type == "object"), (.filed // ""), (.number // 0)]) | last) as $keep
+  | .[] | select(.key != $keep.key)
+  | [.key, (.filer // "-"), .pr, $keep.key] | @tsv' <<<"$cards") || die 'sign-off-axi returned no decisions array'
+
+n=0
+while IFS=$'\t' read -r key filer pr keep; do
+  [ -n "$key" ] || continue
+  printf 'archive %s (%s, %s) keep %s\n' "$key" "$filer" "$pr" "$keep"
+  if [ "$apply" -eq 1 ]; then
+    err=$(sign-off-axi dismiss "$key" "$board" 2>&1 >/dev/null) || die "could not archive $key: $err; rerun --apply to finish"
+  fi
+  n=$((n + 1))
+done <<<"$plan"
+
+if [ "$apply" -eq 1 ]; then
+  printf 'one-card-per-pr: archived %s card(s)\n' "$n"
+else
+  printf 'one-card-per-pr: would archive %s card(s)\n' "$n"
+fi

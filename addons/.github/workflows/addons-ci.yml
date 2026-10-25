@@ -1,0 +1,221 @@
+name: Add-ons CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Pull requests only: these checks exist so a pull request can be concluded
+# (no-mistakes waits for registered checks on the PR head), and every change
+# reaches main through a pull request, so a separate push run on main would
+# only repeat the verdict the PR already reported.
+jobs:
+  self-check:
+    name: Add-on self-checks
+    runs-on: ubuntu-latest
+    # The full-fork hook journeys take several minutes; leave room for them
+    # alongside shell checks and the stubbed add-on integration suites.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tasks-axi for fork lifecycle tests
+        run: npm install --global tasks-axi
+      - name: Wait-timers hook journey
+        run: |
+          git clone --no-single-branch https://github.com/umeranjum17/firstmate.git "$RUNNER_TEMP/firstmate"
+          FM_TEST_FORK="$RUNNER_TEMP/firstmate" bash wait-timers/tests/wait-timers-hook-e2e.sh
+      - name: Receipts hook journeys
+        run: FM_TEST_FORK="$RUNNER_TEMP/firstmate" bash receipts/tests/receipts-hook-e2e.sh
+      - name: Lead-wake hook journeys
+        run: FM_TEST_FORK="$RUNNER_TEMP/firstmate" bash lead-wake/tests/lead-wake-e2e.sh
+      # An add-on script is a shell script under a top-level add-on directory,
+      # either one level down (`merge-card/merge-card`, `fleet-dashboard/fm-dashboard.sh`)
+      # or two levels down in its `bin/` and `tests/` subdirectories
+      # (`fleet-flow/bin/fm-flow.sh`, `fleet-flow/tests/fm-flow.test.sh`), so a new
+      # add-on in either shape needs no edit here and a non-script file is left alone.
+      # The runner image ships shellcheck, so nothing is downloaded at run time.
+      - name: ShellCheck add-on scripts
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # SC2015 is excluded because both add-ons use the deliberate
+          # `A && B || fallback` idiom where the fallback is the intent:
+          # ask-default's incomplete-record check and merge-card's usage guard
+          # and media cap. The advisory also disagrees between the runner
+          # image's ShellCheck 0.9.0 and the fleet's 0.11.0, so leaving it on
+          # would make the gate follow the image instead of the code.
+          # A verbatim dormant copy from the fork carries `# shellcheck
+          # source=bin/...` or `source=tests/...` directives naming the sibling
+          # fork libraries beside it, but those siblings did not move into this
+          # repository. With -x ShellCheck cannot open them, so it reports
+          # SC1091 for each missing source and, when only the unfollowed library
+          # reads a variable, a follow-on SC2034. The copies are byte-identical
+          # to the fork and may not be edited, so exactly those two codes are
+          # exempt for those files. Every other check stays on at every severity.
+          found=0
+          for f in ./*/* ./*/*/*; do
+            [ -f "$f" ] || continue
+            head -n 1 "$f" | grep -Eq '^#!.*\b(bash|sh)\b' || continue
+            found=$((found + 1))
+            exclude=SC2015
+            case "$f" in
+              ./sentinel/*|./supervisor-guard/*|./wait-timers/bin/*|./signoff/bin/*|./host-memory/bin/*|./alerts/*|./receipts/bin/*|./fleet-stats/bin/*) exclude=SC2015,SC1091 ;;
+              ./wait-timers/tests/fm-wait-timers.test.sh) exclude=SC2015,SC1091,SC2034 ;;
+              ./fleet-dashboard/tests/fm-dashboard.test.sh) exclude=SC2015,SC1091,SC2034 ;;
+            esac
+            echo "== shellcheck -x -e $exclude $f =="
+            shellcheck -x -e "$exclude" "$f"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no add-on script found in any <add-on>/ directory" >&2
+            exit 1
+          fi
+      - name: Syntax-check add-on scripts
+        run: |
+          set -euo pipefail
+          found=0
+          for f in ./*/* ./*/*/*; do
+            [ -f "$f" ] || continue
+            head -n 1 "$f" | grep -Eq '^#!.*\b(bash|sh)\b' || continue
+            found=$((found + 1))
+            echo "== bash -n $f =="
+            bash -n "$f"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no add-on script found in any <add-on>/ directory" >&2
+            exit 1
+          fi
+      # Stub emulator, Gradle, pgrep and memory files only: nothing heavy starts.
+      - name: Memory gate test
+        run: bash host-memory/tests/fm-mem-gate.test.sh
+      # Fixture home and config, stub quota-axi and pi: nothing real is touched.
+      - name: Route change test
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml
+          bash route-change/tests/route-change-e2e.sh
+      # Stub pi and quota-axi in a throwaway HOME: the persisted pipeline route.
+      - name: Pipeline quota failover route test
+        run: bash pipeline-quota-failover/tests/pi-quota-failover-route.test.sh
+      # Quota JSON fixtures and a private repeat-state file: nothing real is touched.
+      - name: Z.AI quota check test
+        run: bash zai-quota-check/tests/zai-quota-check-e2e.sh
+      # The real watcher against a fixture home with stub harness CLIs, then its installer against throwaway homes
+      # with the cloned fork's check registration: nothing real is touched.
+      - name: Quota failover tests
+        run: |
+          bash quota-failover/tests/quota-failover-e2e.sh
+          FM_TEST_FORK="$RUNNER_TEMP/firstmate" bash quota-failover/tests/install.test.sh
+      # Quota JSON fixtures, a throwaway home and HOME, and a stub register: nothing real is touched.
+      - name: Claude quota check test
+        run: bash claude-quota/tests/claude-quota.test.sh
+      # Fixture fork home with stub callers and a throwaway HOME: nothing real is touched.
+      - name: Fleet contract check test
+        run: bash fleet-contract-check/tests/fleet-contract-check.test.sh
+      # Fixture homes, stub herdr and a temp state dir: nothing real is touched.
+      # A real Claude limit-menu capture on fixture panes, stub fm-control: nothing real is touched.
+      - name: Limit prompt move test
+        run: |
+          bash limit-prompt-move/tests/limit-prompt-move-e2e.sh
+          bash limit-prompt-move/tests/limit-prompt-move-e2e.sh --installed
+      - name: Fleet stall check test
+        run: bash fleet-stall/tests/fleet-stall-e2e.sh
+      # Fixture home and real fixture processes with a canary key value: nothing real is touched or signalled.
+      - name: Key-in-env check test
+        run: bash key-in-env-check/tests/key-in-env-check-e2e.sh
+      # Fixture Main and lead homes with stub fm-tasks-axi.sh and fm-crew-state.sh: lane slots and dry.
+      - name: Home flow check test
+        run: bash fleet-flow/tests/fm-flow-check.test.sh
+      # Stub upstream on 127.0.0.1 only: never reaches Z.AI.
+      - name: GLM queue test
+        run: bash glm-queue/tests/glm-queue.test.sh
+      # The real guard installers in a throwaway HOME; commands run the way Codex runs them: nothing real is touched.
+      - name: Kill guard Main allowance and CLI journeys
+        run: |
+          node kill-guard/tests/main-allowance.test.mjs
+          bash kill-guard/tests/kill-guard.test.sh --guard-only
+      - name: Codex guard test
+        run: bash codex-guard/tests/codex-guard.test.sh
+      # Fixture origin, shared clone, lane worktree and a throwaway HOME and home: nothing real is touched.
+      - name: Git identity test
+        run: bash git-identity/tests/git-identity.test.sh
+      # Fixture origin, clone, lane worktree and a throwaway HOME, home and patterns file: nothing real is touched.
+      - name: Owner guard test
+        run: bash owner-guard/tests/owner-guard.test.sh
+      # Fixture origin, plain repo and a throwaway HOME, global gitconfig, home and patterns file: nothing real is touched.
+      - name: Owner guard global test
+        run: bash owner-guard/tests/owner-guard-global.test.sh
+      # Fixture home, merge gate and patterns, a local bare repo standing in for GitHub and a stub gh: nothing real is touched.
+      - name: Owner guard merge gate test
+        run: bash owner-guard/tests/owner-guard-merge.test.sh
+      # Sentinel user install proves the uninstaller journey cannot escape its temporary HOME/XDG paths.
+      - name: Owner guard uninstall isolation test
+        run: bash owner-guard/tests/uninstall-isolation.test.sh
+      # Throwaway XDG_DATA_HOME: the installer and check touch nothing real.
+      - name: Task priority test
+        run: bash task-priority/tests/task-priority.test.sh
+      - name: Tickets sync real-board journey
+        run: command -v identify >/dev/null || sudo apt-get install -y --no-install-recommends imagemagick; npm install --global sign-off-axi && FM_TEST_FORK="$RUNNER_TEMP/firstmate" bash tickets-sync/tests/sync.test.sh
+      # Stub Firstmate checkout and a fixture home: no real board, hook or launcher is touched.
+      - name: Bearings board test
+        run: bash bearings-board/tests/bearings-board.test.sh
+      # Fixture transcripts and a throwaway home; no real chat data is read or written.
+      - name: Fleet pulse test
+        run: bash fleet-pulse/tests/chat-tsv.test.sh
+      # Stub byokit-accounts and a throwaway config: nothing real is touched.
+      - name: Account pool test
+        run: bash account-pool/tests/account-pool.test.sh
+      # Fixture registry and readings only: no network, no login copy, no real model CLI.
+      - name: Model pool helper test
+        run: bash account-pool/tests/model-pool.test.sh
+      # Fixture pool readings and stub upstream quota-axi: Claude row follows fm-model-pool.
+      - name: Quota-axi pool test
+        run: bash quota-axi-pool/tests/quota-axi-pool.test.sh
+      # Fixture muxr registry and a stub quota-axi: nothing real is touched.
+      - name: Claude accounts test
+        run: bash claude-accounts/tests/claude-accounts.test.sh
+      - name: Claude accounts pick test
+        run: bash claude-accounts/tests/claude-accounts-pick.test.sh
+      # A throwaway HOME and XDG paths and a stub systemctl: no real timer is touched.
+      - name: Claude accounts timer test
+        run: bash claude-accounts/tests/claude-accounts-timer.test.sh
+      # done-done-axi 0.6.4 requires Node 22.18 and reads generated path globs in the lint fixtures.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+      # Fake GitHub responses and isolated homes; no real PRs are changed.
+      - name: Checks lint parity test
+        run: bash merge-on-green/tests/checks-lint-parity.test.sh
+      # Same-lane follow-up may reuse its own frames; cross-task reuse still fails.
+      - name: Checks lint lane-task identity test
+        run: bash merge-on-green/tests/checks-lint-lane-task.test.sh
+
+      - name: No old receipt path test
+        run: bash merge-on-green/tests/no-old-receipt-path.test.sh
+      # Fixture home and gate logs; no merge runs.
+      - name: Merge-on-green test
+        run: bash merge-on-green/tests/merge-on-green.test.sh
+      - name: Merge-on-green uninstall test
+        run: bash merge-on-green/tests/merge-on-green-uninstall.test.sh
+      # Fixture home, stub gh and receipts; no merge runs.
+      - name: Owner-rules gate test
+        run: bash owner-rules/tests/owner-rules-gate.test.sh
+      - name: Owner-rules design flag test
+        run: bash owner-rules/tests/design-flag.test.sh
+      - name: Pipeline route switch test
+        run: bash pipeline-quota-failover/tests/switch-route.test.sh
+      - name: Owner ask real-board journey
+        run: |
+          npm install --global sign-off-axi
+          bash owner-rules/tests/no-lavish.test.sh
+          bash ask-default/tests-owner-ask.test.sh
+          FM_CODE_ROOT="$RUNNER_TEMP/firstmate" bash signoff/tests/fm-procevent-signoff.test.sh
+      # Fixture home: fleet JSON for Lookout from the builder's output files; no real home is read.
+      - name: Lookout adapter test
+        run: bash lookout-adapter/tests/test.sh
+      # Stub upstream and fixture url file; install.sh only in --dry-run, so no unit is touched.
+      - name: Lookout front and install dry-run test
+        run: bash lookout-adapter/tests/front.test.sh

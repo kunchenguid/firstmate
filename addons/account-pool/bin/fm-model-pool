@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# fm-model-pool - JSON pick/next for model-calling tools over the existing account pool.
+# Protocol v1: stdin JSON, stdout JSON. Folder paths and variable names only; never credentials.
+# Eligibility floor for this helper is the verified-rest floor (default 15%, FM_ACCOUNT_POOL_REST_FLOOR).
+# Worker-launch admission in claude-accounts-pick stays at FM_CLAUDE_ACCOUNTS_LOW (default 5%).
+# Those two numbers stay separate on purpose: launch admission vs tool rotation / rest.
+# Usage: fm-model-pool pick --json | fm-model-pool next --json
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=account-pool/bin/fm-account-pool-lib.sh
+SCRIPT_DIR=${SCRIPT_DIR:-$here}
+type fm_run_timed >/dev/null 2>&1 || fm_run_timed() { shift; "$@"; }
+# shellcheck source=account-pool/bin/fm-account-pool-lib.sh
+. "$here/fm-account-pool-lib.sh"
+
+FLOOR=${FM_MODEL_POOL_FLOOR:-${FM_ACCOUNT_POOL_REST_FLOOR:-15}}
+LAUNCH_FLOOR=${FM_CLAUDE_ACCOUNTS_LOW:-5}
+REGISTRY=${FM_CLAUDE_ACCOUNTS_REGISTRY:-${HOME}/.muxr/plans/accounts-v1.json}
+
+# Built-in normal-work fallovers after every eligible Claude account is under the floor.
+# selection ids are stable route:* keys; billing is plan unless a route record enables credits.
+FALLBACK_JSON='[
+  {"id":"route:openai-codex/gpt-6.1-sol","provider":"codex","harness":"codex","model":"openai-codex/gpt-6.1-sol","billing":"plan"},
+  {"id":"route:deepseek/deepseek-goat","provider":"deepseek","harness":"opencode","model":"deepseek/deepseek-goat","billing":"plan"},
+  {"id":"route:cursor/auto","provider":"cursor","harness":"cursor","model":"auto","billing":"plan"}
+]'
+
+die() {
+  local reason=$1 code=${2:-1}
+  jq -cn --arg r "$reason" --argjson floor "$FLOOR" --argjson launch "$LAUNCH_FLOOR" \
+    '{ok:false,v:1,reason:$r,floor:{eligibility:$floor,launch_admission:$launch,note:"eligibility uses the 15% verified-rest floor; launch admission in claude-accounts-pick stays at 5%"}}'
+  echo "error: $reason" >&2
+  exit "$code"
+}
+
+log() { printf 'fm-model-pool: %s\n' "$*" >&2; }
+
+read_req() {
+  local raw
+  raw=$(cat)
+  jq -e '.v == 1' <<<"$raw" >/dev/null 2>&1 || die "request must set v:1"
+  printf '%s' "$raw"
+}
+
+# credits_enabled <account-json>: 0 when the registry record enables usage credits or overage.
+credits_enabled() {
+  jq -e '
+    def on: . == true or . == 1 or . == "true" or . == "1" or . == "yes";
+    (.usage_credits | on)
+    or (.extra_usage | on)
+    or (.overage | on)
+    or ((.billing // {}) | (.usage_credits | on) or (.extra_usage | on) or (.overage | on) or (.credits | on))
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+parse_pool_config() {
+  local file=$1 command=byokit-accounts state='' line
+  [ -f "$file" ] && [ -r "$file" ] || die "pool_config must be a readable absolute file: $file"
+  case "$file" in /*) ;; *) die "pool_config must be an absolute path" ;; esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '' | '#'*) continue ;;
+    command=*) command=${line#command=} ;;
+    state=*) state=${line#state=} ;;
+    esac
+  done <"$file"
+  case "$state" in /*) ;; *) die "config/account-pool must name absolute state=" ;; esac
+  printf '%s\t%s\n' "$command" "$state"
+}
+
+# When the request omits pool_config (lfm account_picker does), use the same default
+# order as pipeline-quota-failover/switch.sh: $FM_HOME/config/account-pool when that
+# file is readable, else $HOME/firstmate/config/account-pool.
+default_pool_config() {
+  if [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/config/account-pool" ] && [ -r "$FM_HOME/config/account-pool" ]; then
+    printf '%s\n' "$FM_HOME/config/account-pool"
+    return 0
+  fi
+  if [ -f "$HOME/firstmate/config/account-pool" ] && [ -r "$HOME/firstmate/config/account-pool" ]; then
+    printf '%s\n' "$HOME/firstmate/config/account-pool"
+    return 0
+  fi
+  return 1
+}
+
+deadline_ok() {
+  local dl=$1
+  [ -z "$dl" ] || [ "$dl" = null ] && return 0
+  case "$dl" in *[!0-9]*) die "deadline must be a unix epoch second" ;; esac
+  [ "$(date +%s)" -lt "$dl" ] || die "overall deadline passed" 2
+}
+
+# Load roster + reading once; log and drop any account whose registry record enables credits/overage.
+roster_json() {
+  jq -c '[.accounts[]? | select(.provider == "claude" and (.folder | type) == "string" and (.folder | startswith("/")))
+    | {id, name: (.name // ""), folder, usage_credits, extra_usage, overage, billing}]' "$REGISTRY" 2>/dev/null || echo '[]'
+}
+
+# Rank Claude accounts by greatest min(5h,7d) runway at or above FLOOR; skip attempted and credits.
+rank_claude() {
+  local state=$1 attempted=$2 reading file roster row id
+  file=
+  for cand in ${FM_HOME:+"$FM_HOME/state/claude-accounts.json"} "$state/claude-accounts.json"; do
+    [ -n "${cand:-}" ] && [ -r "$cand" ] || continue
+    file=$cand
+  done
+  reading=$( [ -n "$file" ] && cat "$file" || echo null )
+  roster=$(roster_json)
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    id=$(jq -r .id <<<"$row")
+    if credits_enabled "$row"; then
+      log "credits-check refuse id=$id usage_credits_or_overage=enabled"
+    fi
+  done < <(jq -c '.[]' <<<"$roster")
+  jq -cn --argjson floor "$FLOOR" --argjson attempted "$attempted" --argjson read "$reading" --argjson roster "$roster" '
+    def sign_in: test("sign-?in|log ?in|unauthenticated|not authenticated|no credentials"; "i");
+    def credits:
+      def on: . == true or . == 1 or . == "true" or . == "1" or . == "yes";
+      (.usage_credits | on) or (.extra_usage | on) or (.overage | on)
+      or ((.billing // {}) | (.usage_credits | on) or (.extra_usage | on) or (.overage | on) or (.credits | on));
+    [ $roster[] as $r
+      | select(($attempted | index($r.id)) | not)
+      | select($r | credits | not)
+      | (($read.accounts // []) | map(select(.id == $r.id)) | first // {}) as $m
+      | ($m.read_at // $read.generated_at // 0) as $at
+      | {id:$r.id, name:$r.name, folder:$r.folder, account:$r,
+         runway: ([$m.five_hour.left, $m.seven_day.left] | map(select(. != null)) | if length==0 then -1 else min end),
+         problem: ($m.problem // null), read_at:$at}
+      | select(((.problem // "") | tostring | sign_in) | not)
+      | select(.runway >= $floor)
+    ] | sort_by(-.runway, .id)
+  '
+}
+
+emit_claude() {
+  local command=$1 state=$2 id=$3 folder=$4 account=$5 model=${6:-claude-haiku-5-5} out
+  if credits_enabled "$account"; then
+    log "credits-check refuse id=$id usage_credits_or_overage=enabled"
+    return 1
+  fi
+  log "credits-check accept id=$id usage_credits_or_overage=disabled"
+  [ -d "$folder" ] && [ -r "$folder" ] && [ -x "$folder" ] || return 1
+  out=$(fm_run_timed "${FM_ACCOUNT_POOL_PICK_SECONDS:-120}" "$command" pick claude --json --prefer "$id" --state "$state") || return 1
+  jq -e --arg id "$id" '.ok == true and .id == $id' <<<"$out" >/dev/null || return 1
+  jq -c --argjson floor "$FLOOR" --argjson launch "$LAUNCH_FLOOR" --arg model "$model" \
+    --argjson now "$(date +%s)" '
+    . + {
+      v:1,
+      provider:"claude",
+      harness:"claude",
+      model:$model,
+      selection_id:.id,
+      billing:"plan",
+      billing_classification:"plan",
+      floor:{eligibility:$floor, launch_admission:$launch},
+      read_freshness:(.read // null),
+      at:$now
+    }' <<<"$out" # stdin is the pool pick JSON
+}
+
+emit_route() {
+  local route=$1
+  if jq -e '
+    def on: . == true or . == 1 or . == "true" or . == "1" or . == "yes";
+    (.usage_credits | on) or (.extra_usage | on) or (.overage | on)
+    or ((.billing // {}) | type == "object" and ((.usage_credits | on) or (.overage | on) or (.credits | on)))
+    or .billing == "credits" or .billing == "overage"
+  ' <<<"$route" >/dev/null; then
+    log "credits-check refuse route=$(jq -r .id <<<"$route") usage_credits_or_overage=enabled"
+    return 1
+  fi
+  log "credits-check accept route=$(jq -r .id <<<"$route") usage_credits_or_overage=disabled billing=$(jq -r .billing <<<"$route")"
+  jq -cn --argjson floor "$FLOOR" --argjson launch "$LAUNCH_FLOOR" --argjson now "$(date +%s)" --argjson r "$route" '
+    {ok:true, v:1, id:$r.id, selection_id:$r.id, provider:$r.provider, harness:$r.harness, model:$r.model,
+     set:{}, unset:[], billing:$r.billing, billing_classification:$r.billing,
+     floor:{eligibility:$floor, launch_admission:$launch}, at:$now}
+  '
+}
+
+pick_work() {
+  local req=$1 command=$2 state=$3 attempted model ranked first id folder account i n route
+  attempted=$(jq -c '.attempted // []' <<<"$req")
+  model=$(jq -r '.model // "claude-haiku-5-5"' <<<"$req")
+  deadline_ok "$(jq -r '.deadline // empty' <<<"$req")"
+  ranked=$(rank_claude "$state" "$attempted")
+  n=$(jq 'length' <<<"$ranked")
+  for ((i = 0; i < n; i++)); do
+    first=$(jq -c --argjson i "$i" '.[$i]' <<<"$ranked")
+    id=$(jq -r .id <<<"$first")
+    folder=$(jq -r .folder <<<"$first")
+    account=$(jq -c .account <<<"$first")
+    if out=$(emit_claude "$command" "$state" "$id" "$folder" "$account" "$model"); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    log "claude candidate $id skipped after admission failure; trying next"
+    attempted=$(jq -c --arg id "$id" '. + [$id]' <<<"$attempted")
+  done
+  n=$(jq 'length' <<<"$FALLBACK_JSON")
+  for ((i = 0; i < n; i++)); do
+    route=$(jq -c --argjson i "$i" '.[$i]' <<<"$FALLBACK_JSON")
+    id=$(jq -r .id <<<"$route")
+    jq -e --arg id "$id" 'index($id) != null' <<<"$attempted" >/dev/null && continue
+    if out=$(emit_route "$route"); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    attempted=$(jq -c --arg id "$id" '. + [$id]' <<<"$attempted")
+  done
+  die "no eligible Claude account above ${FLOOR}% and every fallover route was unavailable or credits-enabled"
+}
+
+do_next() {
+  local req=$1 command=$2 state=$3 prior cause attempted id out
+  prior=$(jq -c '.selection // .prior // empty' <<<"$req")
+  [ -n "$prior" ] && [ "$prior" != null ] || die "next requires selection (prior pick)"
+  cause=$(jq -r '.cause // "quota"' <<<"$req")
+  attempted=$(jq -c '.attempted // []' <<<"$req")
+  id=$(jq -r '.selection_id // .id // empty' <<<"$prior")
+  [ -n "$id" ] || die "next selection has no id"
+  jq -e --arg id "$id" 'index($id) != null' <<<"$attempted" >/dev/null || attempted=$(jq -c --arg id "$id" '. + [$id]' <<<"$attempted")
+  case "$cause" in
+  quota | rate_limit)
+    if [[ $id == route:* ]]; then
+      log "next: route $id limited ($cause); not resting a pool account"
+    else
+      if fm_run_timed "${FM_ACCOUNT_POOL_REST_SECONDS:-60}" "$command" rest "$id" --json --state "$state" >/dev/null 2>&1; then
+        log "next: rested $id after $cause"
+      else
+        log "next: rest failed for $id after $cause; excluding locally and advancing"
+      fi
+    fi
+    ;;
+  unavailable | timeout)
+    log "next: $cause on $id; excluding locally without treating as quota rest evidence"
+    ;;
+  *) log "next: cause=$cause on $id; excluding locally" ;;
+  esac
+  req=$(jq -c --argjson a "$attempted" '.attempted = $a' <<<"$req")
+  pick_work "$req" "$command" "$state"
+}
+
+verb=${1:-}
+shift || true
+case "$verb" in
+pick | next) ;;
+*) die "usage: fm-model-pool pick|next --json" ;;
+esac
+json=0
+for a in "$@"; do case "$a" in --json) json=1 ;; esac; done
+[ "$json" = 1 ] || die "usage: fm-model-pool $verb --json"
+
+req=$(read_req)
+cfg_path=$(jq -r '.pool_config // empty' <<<"$req")
+if [ -z "$cfg_path" ]; then
+  cfg_path=$(default_pool_config) || die "pool_config is required (absolute path to config/account-pool)"
+fi
+# parse_pool_config may die with JSON on stdout; keep that on the caller's stdout
+# (a plain cfg=$(...) under set -e would swallow the refusal body).
+set +e
+cfg=$(parse_pool_config "$cfg_path")
+parse_rc=$?
+set -e
+if [ "$parse_rc" -ne 0 ]; then
+  printf '%s\n' "$cfg"
+  exit "$parse_rc"
+fi
+command=${cfg%%$'\t'*}
+state=${cfg#*$'\t'}
+purpose=$(jq -r '.purpose // "work"' <<<"$req")
+case "$purpose" in
+work) ;;
+measure | probe) die "purpose=$purpose is reserved for scoped measurement; this slice serves purpose:work" ;;
+*) die "unknown purpose: $purpose" ;;
+esac
+
+case "$verb" in
+pick) pick_work "$req" "$command" "$state" ;;
+next) do_next "$req" "$command" "$state" ;;
+esac

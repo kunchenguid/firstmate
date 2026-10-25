@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# limit-prompt-move - move a Claude worker or lead that sits on Claude's usage-limit menu
+# ("What do you want to do? 1. Stop and wait for limit to reset ...") to another pool account.
+#
+# Usage: limit-prompt-move <fm-home>
+#
+# One locked pass over the Claude tasks <fm-home> recorded (state/*.meta with a kind; local, not
+# parked, not closing); an attended pane has no meta and is never touched. The menu counts only as
+# the bottom of the visible screen: a "You've hit your ... limit" line, "What do you want to do?",
+# "1. Stop and wait for limit to reset", then "Enter to confirm · Esc to cancel" last.
+# Moves go through bin/fm-control.sh only: interrupt (Claude's Esc cancels the menu, so no option,
+# usage credits included, is ever chosen), then relaunch --account next, which rests the recorded
+# account, or, with no recorded account (a secondmate on the ambient login), --account <the pool's
+# pick>, the account with the most room. One attempt per spawn_gen, logged in
+# state/limit-prompt-move.log and the task's state/<id>.status (working, or blocked [key=limit-prompt-move]).
+set -u
+
+die() { echo "limit-prompt-move: $*" >&2; exit 1; }
+home=${1:-${FM_HOME:-}}
+[ -n "$home" ] && [ -d "$home/state" ] || die "usage: limit-prompt-move <fm-home>"
+FM_HOME=$(cd "$home" && pwd) || die "cannot read $home"
+export FM_HOME
+STATE=$FM_HOME/state BIN=$FM_HOME/bin LOG=$FM_HOME/state/limit-prompt-move.log
+
+exec 9>"$STATE/.limit-prompt-move.lock" && flock -n 9 || exit 0
+# shellcheck source=/dev/null
+. "$BIN/fm-backend.sh" || die "cannot load $BIN/fm-backend.sh"
+# The pool library is the account-pool add-on's (the sibling folder, or its installed copy beside this
+# script), as in quota-failover; a fork bin/ copy is used only if the add-on is absent and the copy exists.
+# The library finds fm-timeout-lib.sh in SCRIPT_DIR, the home's bin/.
+_pool=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../account-pool/bin/fm-account-pool-lib.sh
+[ -f "$_pool" ] || _pool=$BIN/fm-account-pool-lib.sh
+# shellcheck disable=SC2034 # read by the sourced pool lib
+SCRIPT_DIR=$BIN
+# shellcheck source=/dev/null
+. "$_pool" || die "cannot load $_pool"
+_FM_PARKED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../parked-homes/bin/fm-parked-homes-lib.sh"
+# shellcheck source=/dev/null # sibling add-on path, resolved at runtime
+[ -f "$_FM_PARKED_LIB" ] && . "$_FM_PARKED_LIB"
+command -v fm_parked_meta >/dev/null || fm_parked_meta() { return 1; }
+
+# on_limit_menu: 0 when stdin's last non-blank lines are Claude's usage-limit menu.
+on_limit_menu() {
+  awk 'NF { l[++n] = $0 } END {
+    if (n < 4 || l[n] !~ /^ *Enter to confirm · Esc to cancel *$/) exit 1
+    for (i = n - 1; i > 0 && i >= n - 8; i--) {
+      if (l[i] ~ /^ *(❯ *)?1\. Stop and wait for limit to reset *$/) stop = i
+      if (stop && l[i] ~ /^ *What do you want to do\? *$/) { ask = i; break }
+    }
+    if (!ask) exit 1
+    for (i = ask - 1; i > 0 && i >= ask - 8; i--) if (l[i] ~ /You.ve hit your .*limit/) exit 0
+    exit 1 }'
+}
+
+BLOCKED='blocked [key=limit-prompt-move]'
+report() { # <id> <status state> <text>: the log line and the task's own status line
+  printf '%s %s: %s\n' "$(date -u +%FT%TZ)" "$1" "$3" >>"$LOG"
+  printf '%s [at=%s]: limit-prompt-move: %s\n' "$2" "$(date +%s)" "$3" >>"$STATE/$1.status"
+  [ ! -e "$FM_HOME/config/fleet-ledger" ] || "$BIN/fm-fleet-ledger.sh" appended "$FM_HOME/config" "$STATE/$1.status" >/dev/null 2>&1 || true
+}
+
+first_error() { grep -m1 '^error: ' <<<"$1" || tail -n 1 <<<"$1"; }
+
+for meta in "$STATE"/*.meta; do
+  [ -f "$meta" ] || continue
+  id=${meta##*/} id=${id%.meta}
+  [ "$(fm_meta_get "$meta" harness)" = claude ] && [ -n "$(fm_meta_get "$meta" kind)" ] || continue
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] && [ ! -e "$STATE/$id.backlog-close" ] || continue
+  ! fm_parked_meta "$meta" "$id" || continue
+  gen=$(fm_meta_get "$meta" spawn_gen)
+  [ "$(cat "$STATE/$id.limit-prompt-gen" 2>/dev/null)" != "$gen" ] || continue
+  fm_backend_visible_capture "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")" 2>/dev/null \
+    | on_limit_menu || continue
+  printf '%s\n' "$gen" >"$STATE/$id.limit-prompt-gen"
+  acct=$(fm_meta_get "$meta" account)
+  if ! out=$("$BIN/fm-control.sh" "$id" interrupt 2>&1); then
+    report "$id" "$BLOCKED" "sits on Claude's usage-limit menu; the interrupt failed: $(first_error "$out")"
+    continue
+  fi
+  want=next from="account $acct"
+  if [ -z "$acct" ]; then
+    from="its unrecorded account"
+    if ! pick=$(fm_account_pool_select claude "$FM_HOME/config" 2>"$STATE/.limit-prompt-move.err") || [ -z "${pick%%$'\t'*}" ]; then
+      out=$(cat "$STATE/.limit-prompt-move.err")
+      report "$id" "$BLOCKED" "sat on Claude's usage-limit menu with no recorded account, and the pool has no pick: $(first_error "${out:-no config/account-pool}"); move it by hand: bin/fm-control.sh $id relaunch --account <id>"
+      continue
+    fi
+    want=${pick%%$'\t'*}
+  fi
+  notefile=$(mktemp)
+  echo "limit-prompt-move moved this task off $from because it sat on Claude's usage-limit menu. Continue the task from where it stopped." >"$notefile"
+  if out=$("$BIN/fm-control.sh" "$id" relaunch --account "$want" --note-file "$notefile" 2>&1); then
+    report "$id" working "sat on Claude's usage-limit menu; moved off $from to account $(fm_meta_get "$meta" account)"
+  else
+    report "$id" "$BLOCKED" "sat on Claude's usage-limit menu; interrupted, but relaunch --account $want failed: $(first_error "$out")"
+  fi
+  rm -f "$notefile"
+done
