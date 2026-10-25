@@ -721,8 +721,92 @@ fm_backend_rex_id_atom_valid() {  # <kind> <id>
   esac
 }
 
+# Optional window->meta index for a caller that resolves many targets in one
+# pass. Without it every lookup rescans every meta file, so a cycle resolving
+# each of N recorded windows several times costs O(N^2) file reads, which on a
+# home with ~75 records stretched one watcher cycle past the liveness grace.
+# fm_backend_meta_index_build snapshots the last window= and terminal= value of
+# every meta once, in the CALLING shell (never inside $(...), whose copy is
+# discarded); command substitutions started afterwards inherit it. A lookup
+# trusts an indexed hit only after re-reading that one meta and confirming it
+# still records the target, and anything else - no index, a different state
+# dir, an unindexed target, or a meta rewritten or removed since the build -
+# falls back to the full scan, so the index can only make a lookup cheaper,
+# never different from a scan of a home that has not changed since the build.
+FM_BACKEND_META_INDEX=()
+FM_BACKEND_META_INDEX_STATE=''
+FM_BACKEND_META_INDEX_HIT=''
+
+# fm_meta_last_target_fields: sets FM_META_LAST_WINDOW and FM_META_LAST_TERMINAL
+# to the last window= and terminal= (else t3_thread_id=) values of <meta-file>, in one read.
+fm_meta_last_target_fields() {  # <meta-file>
+  local line thread=''
+  FM_META_LAST_WINDOW=''
+  FM_META_LAST_TERMINAL=''
+  [ -f "$1" ] || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        window=*) FM_META_LAST_WINDOW=${line#window=} ;;
+        terminal=*) FM_META_LAST_TERMINAL=${line#terminal=} ;;
+        t3_thread_id=*) thread=${line#t3_thread_id=} ;;
+      esac
+    done < "$1"
+  } 2>/dev/null
+  # Same fallback the scan applies: a record without terminal= answers to its T3 thread id.
+  [ -n "$FM_META_LAST_TERMINAL" ] || FM_META_LAST_TERMINAL=$thread
+  return 0
+}
+
+# Each entry is "<target><TAB><meta>", in scan order, so the first entry naming
+# a target is the meta a scan would return. One short entry per comparison
+# keeps a lookup linear in entries; a glob over one long joined string measured
+# about as slow as the scan it replaces.
+fm_backend_meta_index_build() {  # <state-dir>
+  local state=$1 meta tab=$'\t'
+  FM_BACKEND_META_INDEX=()
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    fm_meta_last_target_fields "$meta" || continue
+    [ -z "$FM_META_LAST_WINDOW" ] || FM_BACKEND_META_INDEX+=("$FM_META_LAST_WINDOW$tab$meta")
+    [ -z "$FM_META_LAST_TERMINAL" ] || FM_BACKEND_META_INDEX+=("$FM_META_LAST_TERMINAL$tab$meta")
+  done
+  FM_BACKEND_META_INDEX_STATE=$state
+}
+
+fm_backend_meta_index_clear() {
+  FM_BACKEND_META_INDEX=()
+  FM_BACKEND_META_INDEX_STATE=''
+}
+
+# fm_backend_meta_index_lookup: sets FM_BACKEND_META_INDEX_HIT to the indexed,
+# still-valid meta for <target> and returns 0, or returns 1 when the caller must
+# scan. Sets a variable rather than printing so a caller pays no subshell.
+fm_backend_meta_index_lookup() {  # <target> <state-dir>
+  local target=$1 state=$2 tab=$'\t' entry meta=''
+  FM_BACKEND_META_INDEX_HIT=''
+  [ -n "$target" ] && [ -n "$FM_BACKEND_META_INDEX_STATE" ] || return 1
+  [ "$FM_BACKEND_META_INDEX_STATE" = "$state" ] || return 1
+  # An empty array expands as unbound under bash 3.2's set -u.
+  [ "${#FM_BACKEND_META_INDEX[@]}" -gt 0 ] || return 1
+  for entry in "${FM_BACKEND_META_INDEX[@]}"; do
+    [ "${entry%%"$tab"*}" = "$target" ] || continue
+    meta=${entry#*"$tab"}
+    break
+  done
+  [ -n "$meta" ] || return 1
+  fm_meta_last_target_fields "$meta" || return 1
+  [ "$FM_META_LAST_WINDOW" = "$target" ] || [ "$FM_META_LAST_TERMINAL" = "$target" ] || return 1
+  FM_BACKEND_META_INDEX_HIT=$meta
+  return 0
+}
+
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta line window terminal thread
+  if fm_backend_meta_index_lookup "$target" "$state"; then
+    printf '%s' "$FM_BACKEND_META_INDEX_HIT"
+    return 0
+  fi
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=''

@@ -299,10 +299,11 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
+# The liveness beacon is touched at the top of each cycle and, on a cycle long
+# enough to need it, again inside its per-window and per-check loops and before
+# the terminal wait below (event_wait_or_sleep) - see watcher_beat - so a
+# healthy cycle's beacon can legitimately age up to POLL seconds between
+# touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
 # transitively above) is the single owner of the max(300, poll+60)
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
@@ -3528,6 +3529,24 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# watcher_beat: touch the liveness beacon, which the cycle top always does.
+# watcher_beat_due re-touches it from inside the per-window and per-check loops
+# and before the terminal wait once WATCHER_BEAT_INTERVAL seconds have passed,
+# because one cycle over a large fleet can legitimately outlast the guard grace;
+# a single step that genuinely hangs still lets the beacon age. The interval
+# keeps a quick cycle's only touch at its top, which cycle-boundary observers
+# rely on, and costs no fork when not due ($SECONDS is a shell builtin).
+WATCHER_BEAT_INTERVAL=${FM_WATCHER_BEAT_INTERVAL:-30}
+case "$WATCHER_BEAT_INTERVAL" in ''|*[!0-9]*) WATCHER_BEAT_INTERVAL=30 ;; esac
+WATCHER_LAST_BEAT=$SECONDS
+watcher_beat() {
+  touch "$STATE/.last-watcher-beat"
+  WATCHER_LAST_BEAT=$SECONDS
+}
+watcher_beat_due() {
+  [ $((SECONDS - WATCHER_LAST_BEAT)) -lt "$WATCHER_BEAT_INTERVAL" ] || watcher_beat
+}
+
 while :; do
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
@@ -3564,7 +3583,11 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  watcher_beat
+
+  # Snapshot the window->meta index once per cycle (bin/fm-backend.sh) so the
+  # many per-window lookups below stop rescanning every meta file each time.
+  fm_backend_meta_index_build "$STATE"
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -3660,6 +3683,7 @@ while :; do
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      watcher_beat_due
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -3914,6 +3938,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watcher_beat_due
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -4200,5 +4225,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr, rex),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watcher_beat_due
   event_wait_or_sleep
 done
