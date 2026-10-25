@@ -1597,14 +1597,9 @@ touch "$PARENT/config/status-archive"
 record_export_root="$TMP_ROOT/record-export"
 printf '%s\n' "$record_export_root" > "$PARENT/config/record-export-root"
 printf 'working: remote task history\ndone: remote task complete\n' > "$PARENT/state/ios.status"
-awk -F= '$1 != "spawn_gen"' "$PARENT/state/ios.meta" > "$TMP_ROOT/remote-meta.tmp"
-printf 'spawn_gen=remote-retirement-test\n' >> "$TMP_ROOT/remote-meta.tmp"
-mv -- "$TMP_ROOT/remote-meta.tmp" "$PARENT/state/ios.meta"
 mkdir -p "$PARENT/state/ios.inbox/handled"
 printf 'pending remote steer\n' > "$PARENT/state/ios.inbox/001.msg"
 printf 'handled remote steer\n' > "$PARENT/state/ios.inbox/handled/002.msg"
-cp "$PARENT/state/ios.status" "$TMP_ROOT/remote-status.expected"
-cp "$PARENT/state/ios.meta" "$TMP_ROOT/remote-meta.saved"
 grep '^- ios ' "$PARENT/data/secondmates.md" > "$TMP_ROOT/remote-route.saved"
 FM_FAKE_SSH_MODE=retire-lost-slot remote_env "$ROOT/bin/fm-teardown.sh" ios \
   > "$TMP_ROOT/teardown-serialized.out" 2> "$TMP_ROOT/teardown-serialized.err" &
@@ -1617,6 +1612,13 @@ if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
+# Pin the archive fixture generation only after the respawn has finished
+# publishing metadata, so the exporter sees exactly one spawn_gen.
+awk -F= '$1 != "spawn_gen"' "$PARENT/state/ios.meta" > "$TMP_ROOT/remote-meta.tmp"
+printf 'spawn_gen=remote-retirement-test\n' >> "$TMP_ROOT/remote-meta.tmp"
+mv -- "$TMP_ROOT/remote-meta.tmp" "$PARENT/state/ios.meta"
+cp "$PARENT/state/ios.status" "$TMP_ROOT/remote-status.expected"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/remote-meta.saved"
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
