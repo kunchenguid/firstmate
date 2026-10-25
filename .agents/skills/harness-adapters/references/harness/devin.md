@@ -24,10 +24,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Imported config | The worker config sets `read_config_from.claude` false, so no Claude Code hook, `CLAUDE.md` rule, `.claude/skills`, or Claude MCP entry is imported; `AGENTS.md` and `.agents/skills` still load. |
 | Commit attribution | Unless the home sets `config/keep-ai-trailers` (`../../../../../docs/configuration.md` "Commit attribution"), the worker config sets `attribution` false, Devin's switch for its `Co-Authored-By` trailer and `Generated with Devin` line; with the flag, the user config's setting (default on) is kept. |
 
-A Devin launch uses only Devin's native SWE models.
-The included ids are `swe-2-high`, `swe-2-medium`, and `swe-2-max`.
-SWE-2 Lightning is native SWE and priced, so it is not an included-window launch.
-A Claude model goes through harness `claude`, a GPT model through `codex`, and a Grok model through `grok`.
+[Model and effort](../common/model-and-effort.md) owns which models prefer a native harness and when an exhausted native Claude or Codex window may use this adapter.
 
 ## Worker lifecycle limits
 
