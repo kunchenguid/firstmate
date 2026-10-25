@@ -2059,6 +2059,32 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
+  local case_dir id out url=https://github.com/example/repo/pull/7
+  id=atomic-heal-unconfirmed-b9
+  case_dir=$(make_home heal-pending-unconfirmed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The shape a cleanup records when the forge did not report a merge: the
+  # completion is a plain done, and the pull-request link travels in the note,
+  # percent-encoded so the note's own spaces survive the line format.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-unconfirmed\narg=--note\narg=Delivered,%%20merge%%20not%%20confirmed%%20because%%20it%%20was%%20still%%20open%%20when%%20this%%20finished:%%20%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded unconfirmed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "replaying an unconfirmed close invented a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"Delivered, merge not confirmed because it was still open when this finished: $url\"" >/dev/null \
+    || fail "the replayed close did not restore the note the cleanup recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed unconfirmed close left its record behind"
+  pass "session start replays an unconfirmed close as a done note, never as a merge"
+}
+
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
   local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   id=atomic-heal-gerrit-b9
@@ -3124,6 +3150,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read

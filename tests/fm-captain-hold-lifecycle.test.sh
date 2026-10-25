@@ -114,6 +114,10 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
+      *"state,mergedAt,url"*)
+        # The merge fact a completion record reads before it may say "merged".
+        printf '%s\t%s\t%s\n' 'MERGED' '2026-07-14T00:00:00Z' "${3:-}"
+        ;;
       *statusCheckRollup*)
         printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
         ;;
