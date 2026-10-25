@@ -2085,6 +2085,35 @@ test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
   pass "session start replays an unconfirmed close as a done note, never as a merge"
 }
 
+test_recovery_replays_a_long_unconfirmed_note() {
+  local case_dir id out url note encoded
+  id=atomic-heal-long-unconfirmed-b9
+  case_dir=$(make_home heal-pending-long-unconfirmed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The pending-close note bound must cover a link at the pending-close --pr
+  # validator's 2048-byte limit, or recording an otherwise accepted delivery
+  # would refuse and turn an interrupted cleanup into a stuck task.
+  url="https://$(printf 'a%.0s' {1..200})/$(printf 'b%.0s' {1..1839})"
+  note="Delivered, merge not confirmed because it was still open when this finished: $url. The link is a historical record whose merge was not verified in this run"
+  encoded=${note// /%20}
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-long-unconfirmed\narg=--note\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$encoded" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a long recorded unconfirmed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "replaying a long unconfirmed note invented a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"$note\"" >/dev/null \
+    || fail "the replayed close did not restore the long note the cleanup recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed long unconfirmed close left its record behind"
+  pass "session start replays a long unconfirmed note without inventing a merge"
+}
+
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
   local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   id=atomic-heal-gerrit-b9
@@ -3151,6 +3180,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_close_whose_merge_was_never_confirmed
+test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read

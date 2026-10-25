@@ -539,7 +539,14 @@ fm_backlog_pr_note_label() {  # <url>
 # the punctuation below - and validation requires that re-encoding the decoded
 # value reproduces the recorded text, so a value outside it is refused rather
 # than silently altered.
-FM_BACKLOG_NOTE_MAX=300
+#
+# The bound is the `--pr` bound the validator below enforces (2048) plus the
+# fixed prose a completion note composes around that link ("Delivered, merge not
+# confirmed because <reason>: " and the trailing historical-record sentence, at
+# most 161 bytes). A shorter bound would make a long-but-recordable pull-request
+# URL unstageable, turning cleanup of otherwise landed work into a refusal even
+# though the link itself is acceptable.
+FM_BACKLOG_NOTE_MAX=2250
 fm_backlog_note_encode() {  # <text>
   local text=$1 out='' ch encoded i=0
   [ -n "$text" ] || return 1
@@ -583,7 +590,7 @@ fm_backlog_note_decode() {  # <encoded-note>
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg label previous_arg=''
+  local data=$1 id=$2 arg label previous_arg='' pr_close=0
   local -a done_args=()
   shift 2
   for arg in "$@"; do
@@ -591,11 +598,99 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
       done_args[${#done_args[@]}-1]=--note
       done_args+=("$label $arg")
     else
+      [ "$previous_arg" != --pr ] || pr_close=1
       done_args+=("$arg")
     fi
     previous_arg=$arg
   done
+  # A close that carries no pull-request link did not read a merge from the
+  # forge in this run, and tasks-axi renders any closed row that still carries
+  # such a link on its title as "merged". An earlier link on that title
+  # therefore cannot survive this close: it is removed here, while any note
+  # keeps the delivery's own link in the body. A close that records a `--pr`
+  # link keeps the title as it is, because that link is the merge this run
+  # verified.
+  if [ "$pr_close" = 0 ]; then
+    fm_backlog_pr_link_clear "$data" "$id" || return 1
+  fi
   fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
+}
+
+# Decode one `tasks-axi show` scalar. The field arrives as a JSON-encoded bare
+# string, so ask JSON::PP for allow_nonref instead of inheriting an older
+# library's default, and write raw bytes so a non-ASCII title survives the
+# round-trip this library makes to rewrite it.
+fm_backlog_shown_value() {  # <shown-field>
+  local value=$1
+  case "$value" in
+    \"*\")
+      printf '%s' "$value" | LC_ALL=C perl -MJSON::PP -e '
+        local $/;
+        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
+        print $value;
+      '
+      ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+# Print <title> with every canonical pull request link removed. tasks-axi
+# derives its `pr` links from the title prose alone, trimming sentence
+# punctuation from the end of each URL before it classifies it, so this drops
+# exactly those links and leaves every other URL in place.
+fm_backlog_title_without_pr_links() {  # <title>
+  local rest=$1 out='' url trailing
+  while :; do
+    case "$rest" in
+      *https://*) ;;
+      *) out=$out$rest; break ;;
+    esac
+    out=$out${rest%%https://*}
+    rest=https://${rest#*https://}
+    case "$rest" in
+      *[[:space:]]*) url=${rest%%[[:space:]]*}; rest=${rest#"$url"} ;;
+      *) url=$rest; rest= ;;
+    esac
+    trailing=
+    while :; do
+      case "$url" in
+        *[\)\".,\;]) trailing=${url: -1}$trailing; url=${url%?} ;;
+        *) break ;;
+      esac
+    done
+    if ( fm_pr_url_parse "$url" \
+         && { [ "$FM_PR_PROVIDER" = forgejo ] \
+              || { [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" = github.com ]; }; } ); then
+      # Keep the separating space that sat before the link; the trailing trim
+      # below removes it when the link ended the title.
+      case "$rest" in \ *) rest=${rest# } ;; esac
+    else
+      out=$out$url$trailing
+    fi
+  done
+  printf '%s' "$out" | tr -s ' ' | sed 's/^ *//;s/ *$//'
+}
+
+# Remove an earlier pull-request link from this row's title, because a close
+# that records only prose must not leave the row presenting as a merge nobody
+# read in this run. A title made of nothing but that link would normalize to an
+# empty title, which tasks-axi refuses, so the task's own id stands in: it is a
+# factual single-line title and keeps the close from becoming a refusal.
+fm_backlog_pr_link_clear() {  # <data-dir> <id>
+  local data=$1 id=$2 out title stripped
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  out=$(fm_backlog_row_show "$data" "$id" --full) || return 1
+  title=$(printf '%s\n' "$out" | sed -n 's/^  title: //p' | head -1)
+  # A backend render without a title field leaves nothing this can rewrite; the
+  # close itself still owns the completion, so treat it as no link to clear.
+  [ -n "$title" ] || return 0
+  title=$(fm_backlog_shown_value "$title") || return 1
+  stripped=$(fm_backlog_title_without_pr_links "$title") || return 1
+  [ "$stripped" != "$title" ] || return 0
+  [ -n "$stripped" ] || stripped=$id
+  fm_backlog_mutate "$data" update "$id" --title "$stripped"
 }
 
 fm_backlog_row_artifact_supported() {
@@ -616,7 +711,7 @@ fm_backlog_row_artifact_supported() {
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local arg deliverable='' line body new_body tmp pr_args=0
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -636,6 +731,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
+          pr_args=1
         else
           deliverable="${deliverable:+$deliverable; }$(fm_backlog_pr_note_label "$arg") $arg"
         fi
@@ -644,6 +740,12 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     esac
     previous_arg=$arg
   done
+  # A retention without a verified pull-request link cannot leave an earlier
+  # one on the row: the captain's later answer closes the row, and tasks-axi
+  # renders a closed row carrying such a link as merged.
+  if [ "$pr_args" = 0 ]; then
+    fm_backlog_pr_link_clear "$data" "$id" || return 1
+  fi
   if [ -n "$deliverable" ]; then
     out=$(fm_backlog_row_show "$data" "$id" --full)
     command_status=$?
