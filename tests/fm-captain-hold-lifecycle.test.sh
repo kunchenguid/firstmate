@@ -3408,9 +3408,97 @@ test_answer_clears_an_earlier_pr_link_it_did_not_verify() {
   show=$(tasks_in "$home" show "$id" --full) || fail "the answered row disappeared"
   assert_contains "$show" "state: done" "the answer did not close the held row"
   assert_not_contains "$show" "pr:$pr" "the answered row kept an unverified pull-request link"
+  # The link leaves the title, which is the only thing tasks-axi renders as a
+  # merge, and stays in the body note so the delivery is still traceable.
+  assert_contains "$show" "$pr" "the answered row dropped the pull-request URL"
+  assert_contains "$show" "the merge was not verified in this run" \
+    "the answered row did not say why the merge is unconfirmed"
   assert_no_grep '(merged ' "$home/data/backlog.md" \
     "the answered row rendered as a merge that never happened"
   pass "answer clears an earlier pull-request link it did not verify"
+}
+
+test_answer_keeps_a_merge_the_retention_verified() {
+  local home id repo wt rc show pr
+  home=$(make_home answer-verified-retention)
+  id=sample-answer-verified-retention
+  pr=https://github.com/sample/sample/pull/44
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" fm/answer-verified-retention
+  tasks_in "$home" add "$id" "Ship the verified retained pull request" --kind ship \
+    --repo sample --start >/dev/null \
+    || fail "could not create the verified retained answer fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  configure_merged_github "$home"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the verified merge for the captain"
+  # The worktree return fails, so the cleanup records its retained close with the
+  # merge it read from the forge and the captain answers before the replay.
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted cleanup lost its retained-close record"
+  assert_grep 'pr_merge_verified_at=' "$home/state/$id.backlog-close" \
+    "the retained record did not carry the merge the cleanup read"
+
+  printf 'Proceed with the merged change.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer a verified retained merge"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the retained row"
+  assert_contains "$show" "links: \"pr:$pr\"" \
+    "the answer dropped a merge the retention had verified"
+  assert_grep '(merged ' "$home/data/backlog.md" \
+    "the answered row did not record the merge the retention verified"
+  pass "answer keeps a merge the retention read from the forge"
+}
+
+test_answer_downgrades_a_recorded_link_no_run_verified() {
+  local home id pr show marker
+  home=$(make_home answer-legacy-record)
+  id=sample-answer-legacy-record
+  pr=https://github.com/sample/sample/pull/45
+  tasks_in "$home" add "$id" "Ship the legacy recorded link" --kind ship --repo sample >/dev/null \
+    || fail "could not create the legacy recorded link fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the legacy pull-request link"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the legacy recorded link"
+  # A record staged before the merge check existed: it carries the link and no
+  # verified-merge fact, so the answer must not close the row as a merge.
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$id" "$pr" > "$marker"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer the legacy recorded link"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered legacy row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the legacy row"
+  assert_not_contains "$show" "pr:$pr" \
+    "the answer kept a recorded link no run verified"
+  assert_contains "$show" "$pr" "the answer dropped the recorded link"
+  assert_contains "$show" "the merge was not verified in this run" \
+    "the answer did not say why the recorded merge is unconfirmed"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the answered legacy row rendered as a merge nobody read"
+  pass "answer downgrades a recorded pull-request link no run verified"
 }
 
 test_merge_approval_releases_before_zero_done_retention() {
@@ -4902,6 +4990,8 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_teardown_retains_a_gerrit_captain_call_with_its_change_url
 test_teardown_retains_an_open_pull_request_without_claiming_a_merge
 test_answer_clears_an_earlier_pr_link_it_did_not_verify
+test_answer_keeps_a_merge_the_retention_verified
+test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task

@@ -1867,6 +1867,10 @@ backlog_pr_completion_args() {  # <pr-url>
   pr_merge_fact "$1"
   if [ "$FM_TEARDOWN_PR_MERGE" = merged ]; then
     BACKLOG_DONE_ARGS=(--pr "$1")
+    # The pending-close record carries this moment so that a replay, or a captain
+    # answer to a retained row, can tell the merge this run read from a link
+    # written before that check existed.
+    FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   else
     BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1. The link is a historical record whose merge was not verified in this run")
   fi

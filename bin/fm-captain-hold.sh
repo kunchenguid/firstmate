@@ -1196,6 +1196,10 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
     "$1" "$2" "${FM_BACKLOG_TRANSITION_ERROR:-no reason reported}" >&2
 }
 
+# The artifact a retained record owes the row it held. A `--pr` link is applied
+# as the close's own link only when the record says some run read that merge from
+# the forge; a link no run verified becomes a body note instead, so the answer
+# keeps the delivery traceable and never closes the row as a merge nobody read.
 apply_pending_retained_artifact() {  # <task-id>
   local id=$1 marker label
   local -a args=()
@@ -1207,11 +1211,24 @@ apply_pending_retained_artifact() {  # <task-id>
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
-    --pr|--report)
-      if [ "${args[0]}" = --pr ] && label=$(fm_backlog_pr_note_label "${args[1]-}"); then
+    --pr)
+      if [ -n "$FM_BACKLOG_CLOSE_VALIDATED_MERGE_VERIFIED_AT" ] \
+         && fm_backlog_row_artifact_supported "$id" --pr "${args[1]-}"; then
+        RETAINED_CLOSE_ARGS=(--pr "${args[1]}")
+        return 0
+      fi
+      if label=$(fm_backlog_pr_note_label "${args[1]-}"); then
+        # A GitLab merge request or Gerrit change never was a pull-request merge
+        # link, so its own label stays the note this answer records. Any earlier
+        # pull-request link on the row is downgraded by close_answered below.
         RETAINED_CLOSE_ARGS=(--note "$label ${args[1]}")
         return 0
       fi
+      fm_backlog_pr_link_downgrade "$DATA" "$id" \
+        "the recorded retention did not verify the merge" "${args[1]-}" || return 1
+      RETAINED_CLOSE_ARGS=(--note "$FM_BACKLOG_DOWNGRADE_NOTE")
+      ;;
+    --report)
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
@@ -1220,16 +1237,32 @@ apply_pending_retained_artifact() {  # <task-id>
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
+  local id=$1 note i merged=0
   if [ "$2" = 1 ]; then
-    tasks_axi unhold "$1" >/dev/null
-  else
-    apply_pending_retained_artifact "$1" || return 1
-    case "${RETAINED_CLOSE_ARGS[0]-}" in
-      --pr) ;;
-      *) fm_backlog_pr_link_clear "$DATA" "$1" || return 1 ;;
-    esac
-    tasks_axi "done" "$1" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
+    tasks_axi unhold "$id" >/dev/null
+    return 0
   fi
+  apply_pending_retained_artifact "$id" || return 1
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ]; then
+    # An answer that read no merge cannot close the row as one, even when the
+    # record carried a link: that link becomes a historical note, which keeps the
+    # URL and states that this run did not verify the merge.
+    fm_backlog_pr_link_downgrade "$DATA" "$id" "the answer read no merge" || return 1
+    note=$FM_BACKLOG_DOWNGRADE_NOTE
+    if [ -n "$note" ]; then
+      for ((i = 0; i < ${#RETAINED_CLOSE_ARGS[@]}; i++)); do
+        if [ "${RETAINED_CLOSE_ARGS[i]}" = --note ] && [ $((i + 1)) -lt "${#RETAINED_CLOSE_ARGS[@]}" ]; then
+          merged=1
+          # A note that already keeps the link does not need the sentence twice.
+          fm_backlog_text_names_link "${RETAINED_CLOSE_ARGS[i + 1]}" "$FM_BACKLOG_DOWNGRADE_LINKS" \
+            && continue
+          RETAINED_CLOSE_ARGS[i + 1]="${RETAINED_CLOSE_ARGS[i + 1]}; $note"
+        fi
+      done
+      [ "$merged" = 1 ] || RETAINED_CLOSE_ARGS+=(--note "$note")
+    fi
+  fi
+  tasks_axi "done" "$id" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
