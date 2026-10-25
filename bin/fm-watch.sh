@@ -17,7 +17,10 @@
 # while an away record (state/.afk-contract, never quiet mode's) exists an
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# on every wake. When the task record opts in, one paused stale poll per status
+# mtime runs bin/fm-midtask-fallback.sh consider. A usage-limit pause can
+# relaunch onto the next recorded profile and keeps the local copy. A held
+# transfer is left alone. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
@@ -2431,11 +2434,36 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
   [ "$(( $(date +%s) - ts ))" -ge "$STREAM_SILENT_MAX_SECS" ]
 }
 
+# One consider per status mtime, and only when bind recorded the opt-in.
+# The call no-ops unless the latest status line is a usage-limit pause.
+maybe_midtask_fallback() {  # <task>
+  local task=$1 meta statusf marker mtime recorded
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 0
+  [ "$(fm_meta_get "$meta" dispatch_fallback)" = on ] || return 0
+  statusf="$STATE/$task.status"
+  [ -f "$statusf" ] || return 0
+  marker="$STATE/.midtask-considered-$task"
+  mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -f "$marker" ]; then
+    recorded=$(cat "$marker" 2>/dev/null || true)
+    [ "$recorded" = "$mtime" ] && return 0
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-midtask-fallback.sh" consider "$task" || true
+  mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  printf '%s\n' "$mtime" > "$marker"
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
+# cheap: it NEVER re-reads crew state. The opt-in mid-task consider is the one
+# extra read, and only once per status mtime when the task record opted in.
+# The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. The bounded re-surface itself is the shared resurface_absorbed
@@ -2460,6 +2488,9 @@ handle_paused_stale() {  # <window> <task> <hash>
   now=$(date +%s)
   age=$(( now - mtime ))
   last=$(status_declared_wait_line "$statusf")
+  if ! status_is_captain_held "$last"; then
+    maybe_midtask_fallback "$task" || true
+  fi
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then

@@ -1854,6 +1854,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Profile `model` and `effort`; rule `why` | Optional. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
+| `mid_task_fallback` | Optional file-wide opt-in. Absent means dispatch-time selection only. See Mid-task fallback. |
 
 **Preferred provider**
 
@@ -1930,6 +1931,28 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
+
+**Mid-task fallback**
+
+`mid_task_fallback` is an optional file-wide setting on this file.
+Absent and `false` keep dispatch-time selection only.
+`true` opts every array in the file in, and refuses a candidate whose effort is lower than the effort recorded for the task.
+`{"allow_lower_reasoning_class": true}` opts in and allows that lower effort.
+`{"allow_lower_reasoning_class": false}` opts in and keeps the same effort rule as `true`.
+Any other value is invalid.
+One file-wide key covers rule arrays and the default array.
+A per-rule key cannot attach to `default` without a second field.
+A switch can move the task onto a smaller model, so existing files stay on dispatch-time selection until this key is set.
+
+`bin/fm-midtask-fallback.sh` owns the record, the detection, the relaunch, and the task-record fields.
+Bind the matched array after spawn.
+Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
+No eligible candidate stays on the current profile and is reported for a decision.
+A completed switch is stored on the task record and reported as an outcome.
+Vendor limit text stays in a version-pinned adapter under `bin/limit-messages/`.
+This path does not re-rank the array.
+`quota-array-dispatch` remains the dispatch-time ranker.
+Profile `floor` values stay dispatch-time checks.
 
 **Validation and diagnostics**
 
