@@ -1875,13 +1875,14 @@ test_take_over_waits_for_a_left_watcher_that_defers_its_stop() {
 printf '{"sessions":[{"name":"default","socket_path":"/nonexistent/herdr.sock"}]}\n'
 SH
   # The event reader blocks past the take-over's stop bound once the test has
-  # asked it to, as a full production poll budget does.
+  # asked it to, for the full 15s production poll budget. The take-over's stop
+  # bound counts 50 sleeps, which on a loaded host outlast a shorter block.
   cat > "$home/fakebin/fake-eventwait" <<'SH'
 #!/usr/bin/env bash
 printf '@subscribed\n'
 if [ -e "$FM_HOME/eventwait.block" ] && rm "$FM_HOME/eventwait.block" 2>/dev/null; then
   : > "$FM_HOME/eventwait.blocking"
-  sleep 9
+  sleep 15
 else
   sleep "$2"
 fi
