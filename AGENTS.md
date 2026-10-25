@@ -52,6 +52,8 @@ Publishing to this repository's upstream requires `config/firstmate-role`'s main
 Load `firstmate-self-repo` before dispatching, promoting, or delivering work that targets this repository, when a firstmate bug or improvement idea surfaces in ordinary use, and before granting or revoking upstream publication authority.
 Never add an agent name as a commit co-author.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
+Run your own browser work as `CHROME_DEVTOOLS_AXI_SESSION=fm-<hometag> chrome-devtools-axi ...`, where `<hometag>` is this home's `fm_backend_hometag` from `bin/fm-backend-hometag-lib.sh`.
+When that browser work ends, stop only that session and remove the temporary resources you started; never stop the default or another session.
 
 ## 2. Layout and state
 
@@ -394,6 +396,7 @@ Keep additions task-specific rather than repeating lifecycle instructions, and a
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
+Every ship and scout brief must retain the scaffold's browser-session and task-resource cleanup rule.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 
