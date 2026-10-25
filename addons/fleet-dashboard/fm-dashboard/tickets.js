@@ -110,10 +110,10 @@ export const ticketsHead = (d, r) => { const ts = mine(d, d.tickets || [], r), k
   return { h: r.kind === 'system' ? 'Where the system work stands' : 'Where your asks stand', sub: `${k(SHOW.done[1])} done, ${k(SHOW.moving[1])} moving, ${k(SHOW.todo[1])} not started, ${k(SHOW.hold[1])} on hold · ${ts.length} tickets` } }
 export const KindSeg = ({ d, r, go, counts }) => html`<div class="kseg" role="group" aria-label="Whose work">${[['', 'Your asks', t => t.asked], ['system', 'System', t => !t.asked]].map(([v, n, f]) =>
   html`<button aria-pressed=${(r.kind || '') === v} onClick=${() => go({ kind: v, ticket: null })}>${n}${counts ? html`<small class="num">${(d.tickets || []).filter(f).length}</small>` : ''}</button>`)}</div>`
-function Hero({ ts, r, go, aside }) {
+function Hero({ ts, r, go, aside, stale = 0 }) {
   const ord = { done: 0, review: 1, progress: 1, todo: 2, hold: 3 }, wk = weekDone(ts, 0), before = weekDone(ts, 1)
   const body = html`<div class="h"><div class="sp"><label>${r.kind === 'system' ? 'System work done' : 'Your asks done'}</label><div class="big num">${ts.filter(SHOW.done[1]).length}<small>of ${ts.length}</small></div></div>
-      <div class="hside"><span class="delta num"><i>▲</i>${wk} this week</span>${before ? `${before} the week before` : 'none the week before'}</div></div>
+      <div class="hside"><span class="delta num"><i>▲</i>${wk} this week</span>${before ? `${before} the week before` : 'none the week before'}<span class="num" title="Open tickets whose last update is a day old or more">${stale ? `${stale} stale` : 'none stale'}</span></div></div>
     <div class="dots" aria-label=${`${ts.length} tickets, one square each`}>${[...ts].sort((a, b) => ord[a.state] - ord[b.state]).map(t => html`<i class=${Object.values(SHOW).find(([, f]) => f(t))?.[2] || ''}></i>`)}</div>
     <div class="legend" role="group" aria-label="Show in the list">${Object.entries(SHOW).map(([k, [n, f, c]]) => html`<button aria-pressed=${!r.by && (r.show || 'moving') === k} onClick=${() => go({ show: k === 'moving' ? '' : k, by: '' })}><i class=${c}></i>${n} <b class="num">${ts.filter(f).length}</b></button>`)}</div>`
   return aside ? html`<section class="soft hero hwide"><div>${body}</div><div class="side2">${aside}</div></section>` : html`<section class="soft hero">${body}</section>`
@@ -148,7 +148,7 @@ export function Tickets({ d, r, go, wide }) {
   const page = r.ticket && all.find(t => t.id === r.ticket)
   const body = lists.map(([s, name, xs]) => html`<${List} key=${s} d=${d} s=${s} name=${name} xs=${xs} go=${go} wide=${wide} r=${r}/>`)
   return html`<div class=${'tks' + (wide ? ' wide' : '')}>${unread.length ? html`<p class="sum"><span class="bad">Backlog not read: ${unread.map(h => hname(d, h)).join(', ')}</span></p>` : ''}
-    ${wide ? html`<${Hero} ts=${ts} r=${r} go=${go} aside=${html`<${Tiles} d=${d}/>`}/><div class="kgrid"><div class="k8" style="display:flex;flex-direction:column;gap:16px">${body}</div><div class="k4"><${ByProject} d=${d} ts=${ts} go=${go}/></div></div>`
-      : html`<${KindSeg} d=${d} r=${r} go=${go} counts/><div style="margin-top:16px"><${Hero} ts=${ts} r=${r} go=${go}/></div>${body}<${Tiles} d=${d}/>`}
+    ${wide ? html`<${Hero} ts=${ts} r=${r} go=${go} stale=${d.tickets_stale ?? 0} aside=${html`<${Tiles} d=${d}/>`}/><div class="kgrid"><div class="k8" style="display:flex;flex-direction:column;gap:16px">${body}</div><div class="k4"><${ByProject} d=${d} ts=${ts} go=${go}/></div></div>`
+      : html`<${KindSeg} d=${d} r=${r} go=${go} counts/><div style="margin-top:16px"><${Hero} ts=${ts} r=${r} go=${go} stale=${d.tickets_stale ?? 0}/></div>${body}<${Tiles} d=${d}/>`}
     ${page ? html`<${TicketPage} d=${d} t=${page} go=${go} wide=${wide}/>` : ''}</div>`
 }

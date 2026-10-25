@@ -3953,6 +3953,16 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+# A non-forced teardown only finishes work that landed, so its ticket closes and
+# keeps the delivered PR; a forced teardown discarded the work, and the poll then
+# publishes whatever the backlog says instead of a false done.
+if [ "$FORCE" != --force ]; then
+  if [ -n "${PR_URL:-}" ]; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-ticket.sh" "$ID" --stage "done" --state "done" --pr "$PR_URL" || true
+  else
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-ticket.sh" "$ID" --stage "done" --state "done" || true
+  fi
+fi
 # Durable per-task outcome for per-model fleet statistics, while the record and
 # the spawn-recorded model history still exist. Best effort: a failure never
 # blocks cleanup, and bin/fm-task-outcome.sh itself only fails on a usage error.

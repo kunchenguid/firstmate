@@ -1928,6 +1928,15 @@ for cs in said.values():
                                                     else [p for p in msgs if f"delivery={c['id']}" in open(p, errors='replace').read()])
         c.pop('note'); c['replies'] = answers.get(c.pop('id'), [])
 tickets = [dict(ticket(h, r), comments=said.get(f"{h}/{r['id']}", [])[-50:]) for h in ACTIVE for r in backlog.get(h) or []]
+# A stale ticket is open work whose last update is older than a day: the board still
+# shows a state nothing has confirmed since - a lane that never wrote a status line,
+# or an item nobody touched. A ticket's updated is a lane status epoch or the filing day.
+def last_update(t):
+    u = t.get('updated')
+    if isinstance(u, (int, float)): return float(u)
+    try: return datetime.fromisoformat(str(u)[:10]).replace(tzinfo=NOW.tzinfo).timestamp()
+    except (TypeError, ValueError): return None
+tickets_stale = sum(1 for t in tickets if t.get('state') != 'done' and (u := last_update(t)) is not None and NOW_TS - u > 86400)
 # Cycle time: dispatch to merge, for each merged task whose dispatch is in a ledger.
 cycles = sorted(at - d['ts'] for at, h, task in merges.values() if (d := dispatch(h, task, at)))
 # A failed read names its cause (the reader's last error line, its exit or the deadline), shown on Insights.
@@ -1995,7 +2004,7 @@ board = dict(
     schema='fm-dashboard-board.v1', generated=int(NOW_TS), owner=OWNER or None, stages=[dict(id=s, name=n) for s, n in STAGES],
     homes=[dict(id=h, name=hname(h), plan=plan(h), open=sum(c['home'] == h and c['stage'] not in ('queued', 'landed') for c in cards), ready=len(bl(h, 'ready')) if backlog.get(h) is not None else None,
                 known=h not in lane_err) for h in ACTIVE],
-    parked=PARKED, cards=cards, tickets=tickets, tickets_unread=bl_unread, flow=flow, flow_error=flow_error,
+    parked=PARKED, cards=cards, tickets=tickets, tickets_stale=tickets_stale, tickets_unread=bl_unread, flow=flow, flow_error=flow_error,
     models=models, models_error=models_error,
     skills=skills, skills_error=skills_error,
     asks=[dict(id=f[0], text=f[2], url=f[3] if len(f) > 3 else '', type=f[4] if len(f) == 5 else None, age=a, options=[o for o in f[4].split('|') if o] if len(f) > 5 else [],

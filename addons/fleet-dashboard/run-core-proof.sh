@@ -204,6 +204,11 @@ for w in 390 1280; do
 done
 # A phone opens on the hero and the Moving list; the hero's legend switches the list, here to To do.
 shot tickets-390 '#/tickets' 390 'Your asks done'
+# The hero counts open tickets nothing has updated for a day. This seed files m-held seven
+# days ago, held and untouched since, while today's lanes and ready items are fresh.
+stale=$(sed -n 's/.*\([0-9][0-9]* stale\).*/\1/p' "$DONE_DONE_EVIDENCE_ROOT/tickets-390.txt" | head -n1)
+[ -n "$stale" ] || { echo 'run-core-proof: the Tickets hero does not count stale open tickets' >&2; exit 1; }
+echo "stale tickets on the seeded board: $stale"
 chrome-devtools-axi eval '[...document.querySelectorAll(".legend button")].find(b => b.textContent.startsWith("To do")).click()' >/dev/null
 sleep 1
 chrome-devtools-axi screenshot "$DONE_DONE_EVIDENCE_ROOT/tickets-todo-390.png" >/dev/null

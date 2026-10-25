@@ -1,4 +1,5 @@
 """Lane/PR evidence for ticket leaves; backlog prose references are not completion evidence."""
+import datetime as dt
 import re
 import time
 
@@ -34,6 +35,24 @@ def evidence(source, item, row):
     return stage, terminal or bool(explicit), link
 
 
+def newest_event(source, item, row):
+    """Newest status [at=] stamp; else noon-UTC of backlog closed/created; None when unknown."""
+    status = source / 'state' / (item + '.status')
+    if status.exists():
+        stamps = [int(m) for m in re.findall(r'\[at=(\d+)\]', status.read_text())]
+        if stamps: return max(stamps)
+    stamps = []
+    for key in ('closed', 'created'):
+        raw = row.get(key) or ''
+        if raw in ('', '-'): continue
+        try:
+            day = dt.date.fromisoformat(raw[:10])
+        except ValueError:
+            continue
+        stamps.append(int(dt.datetime(day.year, day.month, day.day, 12, tzinfo=dt.timezone.utc).timestamp()))
+    return max(stamps) if stamps else None
+
+
 def progress(source, item, row, cache, run):
     stage, terminal, link = evidence(source, item, row)
     done = row['state'] == 'done' or terminal
@@ -49,4 +68,5 @@ def progress(source, item, row, cache, run):
             cache[link] = old
         done = old['merged']
         if not done and old['state'] == 'open' and not old['draft'] and stage != 'merging': stage = 'review'
-    return (100 if done else {'queued': 0, 'building': 30, 'review': 65, 'merging': 90}[stage]), done, link
+    word = 'done' if done else stage
+    return (100 if done else {'queued': 0, 'building': 30, 'review': 65, 'merging': 90}[stage]), done, link, word, newest_event(source, item, row)

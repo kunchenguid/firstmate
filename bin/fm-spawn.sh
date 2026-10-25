@@ -6209,6 +6209,9 @@ SPAWN_ACCOUNT=
 fm_account_hook spawn-line
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# The board's ticket says what this lane is doing from the first minute instead
+# of the next poll. A relaunch keeps whatever stage the lane already reached.
+[ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-ticket.sh" "$ID" --stage building --state "in progress" || true
 # Herdr assigns every agent a random call-sign at start and fresh ones across
 # a server restart, so pin the live agent's display name to this task's id now
 # that the spawn has fully succeeded (the agent is live here; a rename on an

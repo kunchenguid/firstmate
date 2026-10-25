@@ -148,5 +148,7 @@ MERGE_CONTROL_LOCK=
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" merged "$ID" local || true
+# A local-only landing has no PR; the ticket closes here instead of at the next poll.
+FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-ticket.sh" "$ID" --stage "done" --state "done" || true
 if [ "$before" != "$after" ] && declare -F fm_merge_post_hook >/dev/null; then fm_merge_post_hook "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$candidate" - >&2; fi
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

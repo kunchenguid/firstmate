@@ -111,6 +111,9 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fm_lock_release "$lock"
   # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
   [ ! -e "${FM_CONFIG_OVERRIDE:-$home/config}/fleet-ledger" ] || [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-fleet-ledger.sh" merged "$id" pr "$FM_PR_URL" || true
+  # The ticket closes with the merge and carries the delivered PR, not the link
+  # some earlier status line happened to mention.
+  [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-ticket.sh" "$id" --stage "done" --state "done" --pr "$FM_PR_URL" || true
   if [ "$status" -eq 0 ] && declare -F fm_merge_post_hook >/dev/null; then fm_merge_post_hook "${FM_CONFIG_OVERRIDE:-$home/config}" "$home" "$id" "$state/$id.meta" - "$FM_PR_URL" >&2; fi
   return "$status"
 }

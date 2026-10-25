@@ -46,7 +46,7 @@ copies used by the proof below
 task data). Treat any future diff against the fork file as a contract change,
 not a refactor.
 
-Four changes are deliberate. `fm-dashboard.sh` no longer blanks the fleet's Ready
+Five changes are deliberate. `fm-dashboard.sh` no longer blanks the fleet's Ready
 and queue numbers when a single home's backlog cannot be read: it counts the
 homes that were read, marks a partial count as a lower bound (`≥`), names each
 unread home with its reason, and reports the partial metric with status
@@ -71,6 +71,7 @@ The comment goes to the owning lead with `fm-send.sh` (or to Main with `fm-inbox
 the lead runs `"$FM_HOME/bin/fm-secondmate-report.sh" note <comment id> <answer>`, Main `fm-inbox.sh reply <note id> <answer>`.
 The build shows each comment with its pickup (the steer or note moved to `handled/`) and answer (the lead's `corr=<comment id>` line on its channel, or Main's inbox reply).
 The Ship tab is removed, with its `ship/` files and the vendored three.js it alone used. The app takes the approved Tickets prototype's look: neutral greys and one accent in both themes (Insights included), Tickets as the landing view, Overview labelled Metrics, a phone dock that names each view, flat neutral Metrics cards, and Board cards whose names drop leading tags and Main refs as tickets do. Tickets filters by release as well as project and lays open items in release lanes (Next release, After, Later; `#/tickets?by=release`); each Metrics lifecycle stage and To land open the Board filtered to that stage (`#/board?stage=ci`, a removable Stage chip); a phone's column switcher scrolls sideways only, never the page. Every memory pressure figure (the Metrics Memory card, the generated pages, `data.json` and Insights) is the memory gate's own sustained reading, the lower of the 10 s and 60 s averages. Metrics shows Time in stage: each open lane at its time in its current stage, the median per stage, and the bottleneck (most lane-hours, lanes on hold left out); a row opens the stage-filtered Board. A ticket's name and description are whole even when `tasks-axi list` cuts them (filled from `show --full`, cached in `state/dashboard/full-text.json`), its ask names the Main message that carried it, and its page shows the lane's proof (completion receipt and done-done verdict). Metrics' Flow card shows GitHub's merges in the repositories the fleet recorded merges in beside the recorded ones, by local day, with the records' coverage (one read-only `gh pr list` per repository at most every 30 minutes, kept in `state/dashboard/forge.json`; `FM_DASHBOARD_FORGE=off` skips it).
+The fifth adds the stale-ticket count: `fm-dashboard.sh` derives `tickets_stale` from the backlog it already reads — open tickets (`state != done`) whose `updated` is more than a day old, the one-day rule counted once on the server — and `tickets.js` names it in the Tickets hero at both widths, so a board that has drifted says how far on the view the captain opens first.
 Every other moved file remains byte-identical to the fork.
 
 ## Side-by-side proof (re-run before the served path swaps)

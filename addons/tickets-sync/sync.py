@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only tasks-axi backfill and incremental publication via sign-off-axi ticket."""
+"""Read-only tasks-axi backfill and incremental publication via sign-off-axi ticket.
+
+--check reads without writing and prints one line per ticket whose board state
+disagrees with its PR and backlog item, plus every board ticket no home's work
+accounts for; the watcher check whose stdout wakes Main runs it.
+"""
 import argparse
 import datetime as dt
 import fcntl
@@ -27,7 +32,7 @@ def run(args, env=None, cwd=None, missing=False):
     return '{}' if r.returncode else r.stdout
 
 def rows(args, env, cwd=None):
-    text = run(args + ['--limit', '100000', '--fields', 'held,hold_kind,closed,priority,body,links'], env, cwd)
+    text = run(args + ['--limit', '100000', '--fields', 'held,hold_kind,closed,created,priority,body,links'], env, cwd)
     result = toon_rows(text)
     if result is None or re.search(r'count: \d+ of (?!0\b)\d+ total', text) and len(result) >= 100000:
         raise RuntimeError('tasks-axi returned an unreadable or capped task list')
@@ -69,6 +74,7 @@ def ticket_id(home, item):
 def sync():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--audit', action='store_true')
+    parser.add_argument('--check', action='store_true', help='print board tickets that disagree with their work; write nothing')
     parser.add_argument('--reconcile', action='store_true', help='read every home without the watcher time budget')
     parser.add_argument('--close', metavar='HOME/ITEM', help='record an authorized cancellation or supersession on the board only')
     parser.add_argument('--reason', choices=['superseded', 'cancelled'])
@@ -115,12 +121,20 @@ def sync():
         tried = set()
         def save(path, value):
             temp = path.with_suffix('.tmp'); temp.write_text(json.dumps(value)); temp.replace(path)
+        seen = set()
         def publish(tid, desired):
             nonlocal changed
+            seen.add(tid)
+            if options.check:
+                # A leaf's state is the one its PR and backlog item derive; a grouping row's is its own.
+                if 'stage' in desired and (existing.get(tid, {}).get('state') or '') != desired['state']:
+                    board_state = existing.get(tid, {}).get('state') or 'no state'
+                    print(f"tickets-check: {desired['title'][:70]} ticket says {board_state}, its PR and backlog item say {desired['state'] or 'no state'}")
+                return
             digest = hashlib.sha256(json.dumps(desired, sort_keys=True).encode()).hexdigest()
             old = existing.get(tid, {})
             # Board wins over ledger: a prior digest can drift after a partial write.
-            matched = all((old.get('prs', []) == ([v] if v else []) if k == 'pr' else old.get(k, '') == (v == 'yes' if k in ('hold', 'asked') else v)) for k, v in desired.items())
+            matched = all((old.get('prs', []) == ([v] if v else []) if k == 'pr' else old.get('last_event_at', '') == v if k == 'last-event-at' else old.get(k, '') == (v == 'yes' if k in ('hold', 'asked') else v)) for k, v in desired.items())
             if matched:
                 if ledger.get(tid) != digest: ledger[tid] = digest; save(ledger_file, ledger)
                 return
@@ -130,6 +144,7 @@ def sync():
             updated = dict(old)
             for key, value in desired.items():
                 if key == 'pr': updated['prs'] = [value] if value else []
+                elif key == 'last-event-at': updated['last_event_at'] = int(value)
                 elif key in ('hold', 'asked'): updated[key] = value == 'yes'
                 else: updated[key] = value
             existing[tid] = updated
@@ -210,16 +225,16 @@ def sync():
                     m = re.search(r'^\s*' + key + r':\s*(.+)$', body, re.M | re.I)
                     return m[1].strip() if m else ''
                 held = name in parked or r.get('held') == 'yes' or r.get('hold_kind') == 'parked'
-                progress, done, pr = lane_progress(source, item, r, prs, run)
+                progress, done, pr, stage, event = lane_progress(source, item, r, prs, run)
                 save(pr_file, prs)
                 done = done or f'{name}/{item}' in closures or existing.get(tid, {}).get('state') == 'done'
-                if done: progress = 100
+                if done: progress, stage = 100, 'done'
                 parent = ancestry[item]
                 root_ask = item in asks
                 title = request_title(r, root_ask)
                 if len(title) > 160: title = title[:159].rstrip() + '…'
                 project = r['_project']
-                if project and project not in tried:
+                if project and project not in tried and not options.check:  # --check writes no board project
                     tried.add(project); reason = register_icon(board, project, registry)
                     if reason != skipped.get(project):
                         skipped.pop(project, None) if reason is None else skipped.__setitem__(project, reason)
@@ -230,7 +245,15 @@ def sync():
                     required.add(parent); ids.append(parent)
                 parent_id = ticket_id(name, parent) if parent in tasks else '' if root_ask else upkeep_id
                 desired = dict(title=title, progress=0 if item in parents else progress, state='' if item in parents else 'done' if done else 'on hold' if held else 'queued' if progress == 0 else 'in progress', pr=pr, release=(field('release') or 'later')[:40], parent=parent_id, priority=f"P{r['priority']}" if str(r.get('priority')) in ('0', '1', '2', '3') else '', project=project, hold='yes' if held and not done else 'no', asked='yes' if root_ask else 'no')
+                if item not in parents:
+                    desired['stage'] = stage
+                    if event is not None: desired['last-event-at'] = event
                 publish(tid, desired)
+        if options.check:
+            for tid, old in existing.items():
+                if tid.startswith('fm-') and tid not in seen and (old.get('state') or '') != 'done':
+                    print(f"tickets-check: {str(old.get('title'))[:70]} ticket says {old.get('state') or 'no state'}, but no home's work accounts for it")
+            return
         save(cursor, {})
         if changed: print(f'tickets-sync: {len(homes)} homes read; {changed} tickets changed')
 
