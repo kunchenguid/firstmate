@@ -1242,11 +1242,26 @@ apply_pending_retained_artifact() {  # <task-id>
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
       ;;
+    --note)
+      # A retention that recorded its completion as a note - every unverified
+      # pull request does - owes that note to the close; dropping it here would
+      # lose the only copy of the delivery link.
+      fm_backlog_note_decode "${args[1]-}" >/dev/null \
+        || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+      RETAINED_CLOSE_ARGS=(--note "$(fm_backlog_note_decode "${args[1]-}")")
+      ;;
   esac
 }
 
+# Close a captain-held row on the captain's answer.
+#
+# The order below is the guarantee: the note that keeps an unverified delivery
+# link is written to the body first, the link leaves the title second, and the
+# row closes last. Each step is idempotent and the note is rebuilt from the body
+# when an interrupted earlier attempt already wrote it, so a failed or killed
+# close never costs the URL it is the only copy of.
 close_answered() {  # <task-id> <release-0-or-1>
-  local id=$1 note i merged=0
+  local id=$1 note i merged=0 recorded=''
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$id" >/dev/null
     return 0
@@ -1259,26 +1274,35 @@ close_answered() {  # <task-id> <release-0-or-1>
   if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ] && fm_backlog_merge_fact_read "$STATE" "$id"; then
     RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
   fi
-  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ]; then
-    # An answer that read no merge cannot close the row as one, even when the
-    # record carried a link: that link becomes a historical note, which keeps the
-    # URL and states that this run did not verify the merge.
-    fm_backlog_pr_link_downgrade "$DATA" "$id" "the answer read no merge" || return 1
-    note=$FM_BACKLOG_DOWNGRADE_NOTE
-    if [ -n "$note" ]; then
-      for ((i = 0; i < ${#RETAINED_CLOSE_ARGS[@]}; i++)); do
-        if [ "${RETAINED_CLOSE_ARGS[i]}" = --note ] && [ $((i + 1)) -lt "${#RETAINED_CLOSE_ARGS[@]}" ]; then
-          merged=1
-          # A note that already keeps the link does not need the sentence twice.
-          fm_backlog_text_names_link "${RETAINED_CLOSE_ARGS[i + 1]}" "$FM_BACKLOG_DOWNGRADE_LINKS" \
-            && continue
-          RETAINED_CLOSE_ARGS[i + 1]="${RETAINED_CLOSE_ARGS[i + 1]}; $note"
-        fi
-      done
-      [ "$merged" = 1 ] || RETAINED_CLOSE_ARGS+=(--note "$note")
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" = --pr ]; then
+    if ! tasks_axi "done" "$id" --pr "${RETAINED_CLOSE_ARGS[1]}" >/dev/null; then
+      return 1
     fi
+    fm_backlog_merge_fact_remove "$STATE" "$id"
+    return 0
   fi
-  if ! tasks_axi "done" "$id" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null; then
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" = --note ]; then
+    recorded="${RETAINED_CLOSE_ARGS[1]-}"
+  fi
+  # An answer that read no merge cannot close the row as one: the link becomes a
+  # historical note, which keeps the URL and states that this run did not verify
+  # the merge. The note is computed without changing anything, so it is written
+  # before the title loses the link.
+  fm_backlog_pr_link_note "$DATA" "$id" "the answer read no merge" || return 1
+  note=$FM_BACKLOG_DOWNGRADE_NOTE
+  if [ -n "$note" ] && [ -z "$recorded" ]; then
+    recorded=$note
+  elif [ -n "$note" ] \
+       && ! fm_backlog_text_names_link "$recorded" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+    # The recorded note keeps a different link, or none, so this close records both.
+    recorded="$recorded; $note"
+  fi
+  if [ -n "$recorded" ]; then
+    fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
+      || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
+  fi
+  fm_backlog_pr_title_strip "$DATA" "$id" || return 1
+  if ! tasks_axi "done" "$id" >/dev/null; then
     return 1
   fi
   # The row is closed in the backlog, which is when the record has done its work.

@@ -3518,6 +3518,84 @@ test_answer_keeps_a_merge_after_the_retention_landed() {
   pass "answer keeps a verified merge after the retention that recorded it landed"
 }
 
+test_answer_survives_a_failed_close_without_losing_the_link() {
+  local home id pr show rc body
+  home=$(make_home answer-failed-close-retry)
+  id=sample-answer-failed-close
+  pr=https://github.com/sample/sample/pull/47
+  tasks_in "$home" add "$id" "Ship the retried answer pull request" --kind ship --repo sample >/dev/null \
+    || fail "could not create the failed close fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the pull-request link the retried answer clears"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the retried answer fixture"
+  # The first close fails the way a lock or a backend error does, after the answer
+  # has already recorded its note and taken the link off the title.
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-answer-failed-close ] \
+   && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  : > "$FM_HOME/close-failed-once" || exit 93
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Do not merge this pull request.\n' > "$home/answer.txt"
+  set +e
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the injected close failure reported success"
+  # The note is durable before the close, so the interrupted attempt keeps the URL.
+  show=$(tasks_in "$home" show "$id" --full) || fail "the interrupted row is gone"
+  assert_contains "$show" "$pr" "the failed close lost the pull-request URL"
+  assert_contains "$show" "the merge was not verified in this run" \
+    "the failed close lost its note"
+
+  rm -f "$home/fakebin/tasks-axi"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the retried answer failed after a failed close"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the retried row is gone"
+  assert_contains "$show" "state: done" "the retried answer did not close the row"
+  assert_contains "$show" "$pr" "the retried answer lost the pull-request URL"
+  assert_contains "$show" "the merge was not verified in this run" \
+    "the retried answer lost its note"
+  assert_not_contains "$show" 'body: ""' "the retried answer recorded an empty note"
+  body=$(tasks_in "$home" show "$id" --full | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o "Historical record: $pr" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried answer duplicated or dropped its historical-record note: $body"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the retried answer rendered as a merge nobody read"
+  pass "answer survives a failed close without losing the link it recorded"
+}
+
+test_answer_records_the_note_a_retained_record_carried() {
+  local home id pr show
+  home=$(make_home answer-retained-note)
+  id=sample-answer-retained-note
+  pr=https://github.com/sample/sample/pull/48
+  tasks_in "$home" add "$id" "Ship the noted retained pull request" --kind ship --repo sample >/dev/null \
+    || fail "could not create the retained note fixture"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the retained note fixture"
+  # The shape an unverified retention stages: the completion note holds the URL.
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--note\narg=Delivered,%%20merge%%20not%%20confirmed%%20because%%20it%%20was%%20still%%20open%%20when%%20this%%20finished:%%20%s\n' \
+    "$id" "$home/data" "$id" "$pr" > "$home/state/$id.backlog-close"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer a retained record that carried a note"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered noted row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the noted row"
+  assert_contains "$show" "merge not confirmed because it was still open when this finished: $pr" \
+    "the answer dropped the note the retained record carried"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the noted answer rendered as a merge nobody read"
+  pass "answer records the note a retained record carried"
+}
+
 test_answer_downgrades_a_recorded_link_no_run_verified() {
   local home id pr show marker
   home=$(make_home answer-legacy-record)
@@ -5041,6 +5119,8 @@ test_teardown_retains_an_open_pull_request_without_claiming_a_merge
 test_answer_clears_an_earlier_pr_link_it_did_not_verify
 test_answer_keeps_a_merge_the_retention_verified
 test_answer_keeps_a_merge_after_the_retention_landed
+test_answer_survives_a_failed_close_without_losing_the_link
+test_answer_records_the_note_a_retained_record_carried
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
