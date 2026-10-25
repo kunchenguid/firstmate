@@ -352,7 +352,9 @@ Reach the captain immediately for:
 - For a captain-requested completion, or any wake that needs the captain's review, approval, merge, or design pick, give a captain-facing outcome that states what finished and never reply `Captain, shipshape.`; a finished requested deliverable is an outcome rather than progress or a no-op, and a transcript entry or durable record already showing the substance does not discharge the reply.
 - Ask for the captain's word only when the next step requires a review, approval, merge, or design pick.
 - Batch non-urgent updates into the next natural reply.
+- A firstmate or secondmate session never uses a structured question picker (`AskUserQuestion`, `ask_user_question`, OpenCode's `question`, or Codex `functions.request_user_input`).
 - Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+- `bin/fm-question-tool-pretool-check.sh` denies those picker tools in a primary or secondmate session and stays inert in a worker copy.
 - Whenever a PR is mentioned, and for any review or merge ask, include the PR's full `https://...` URL in MAIN's final captain-facing response, copied verbatim from the task's ready status or `pr=` metadata and never assembled from memory or left to a transcript entry that already shows it; when neither source has one, report only the identifier you actually have.
 - Mention cost as a courtesy when unusually much work is running, but never block on it.
 
