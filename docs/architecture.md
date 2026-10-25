@@ -260,18 +260,8 @@ Ordinary child teardown uses its own home's configuration; retiring a whole home
 
 ### Read-only record exports
 
-[Record export](configuration.md#record-export-configrecord-export-root) is an opt-in publication boundary for a fixed versioned subset of Firstmate-owned files.
-`bin/fm-record-export.sh sync` builds an immutable allowlisted generation without modifying sources and atomically replaces an external `live` pointer, while teardown calls the same owner to publish one immutable archive generation before retiring metadata, status, or steering records.
-The task's `spawn_gen` is the archive generation key, so a reused ID cannot replace an earlier incarnation.
-The strict manifest gives a read-only consumer byte counts and SHA-256 values for completeness checks, and the generation directory appears only after its files and manifest have been flushed.
-
-The export root is cold output rather than operational state.
-No presentation, wake, classification, spawn, or fleet snapshot path reads it, and the versioned schema is not a command API.
-One canonical home owns each dedicated disjoint root through a versioned marker.
-The filesystem engine binds checks and operations to directory descriptors, refuses unsafe source and managed destination objects, and performs no network access or redaction.
-[`bin/fm-record-export.sh`](../bin/fm-record-export.sh) owns the exact schema and copy mechanics, while `bin/fm-teardown.sh` owns when the pre-retirement transaction runs.
-[`tests/fm-record-export.test.sh`](../tests/fm-record-export.test.sh) covers allowlist, transaction, manifest, retention, race, and cold-reader safety.
-[`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh) covers local and nested retirement, while [`tests/fm-record-export-remote-home.test.sh`](../tests/fm-record-export-remote-home.test.sh) independently reaches remote-home commit and fail-closed preservation without depending on the broad remote lifecycle fixture.
+The [record export reference](configuration.md#record-export-configrecord-export-root) owns the operator contract, allowlist, publication mechanics, and teardown boundary.
+The export root remains cold output; no operational reader consumes it.
 
 ## Busy state is semantic, per adapter
 

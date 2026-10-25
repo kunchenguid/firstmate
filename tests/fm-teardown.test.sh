@@ -5422,6 +5422,54 @@ test_record_export_captures_forced_secondmate_sub_state() {
   pass "forced secondmate teardown exports task records from the child sub-state"
 }
 
+test_record_export_waits_for_endpoint_quiescence_before_archiving() {
+  local case_dir export_root archive rc=0
+  case_dir=$(make_case record-export-close-retry)
+  write_meta "$case_dir" local-only ship
+  export_root="$case_dir/export"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'done: before refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'before refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 1 ;;
+  list-windows) printf '%s\n' fm-task-x1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "record-export-close-retry: endpoint close should refuse"
+  assert_grep "could not be closed" "$case_dir/first.stderr" \
+    "record-export-close-retry: first attempt did not reach endpoint refusal"
+  assert_absent "$export_root/archive/task-x1/teardown-test-task-x1" \
+    "record-export-close-retry: archive published while the endpoint remained live"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: endpoint refusal removed metadata"
+
+  printf 'done: after refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'after refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "record-export-close-retry: retry should complete"
+  archive="$export_root/archive/task-x1/teardown-test-task-x1"
+  assert_grep "done: after refusal" "$archive/status" \
+    "record-export-close-retry: retry archive contains status from before endpoint quiescence"
+  assert_grep "after refusal" "$archive/inbox/001.msg" \
+    "record-export-close-retry: retry archive contains inbox from before endpoint quiescence"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: successful retry retained task metadata"
+  pass "record export waits for endpoint quiescence and retry captures records changed after refusal"
+}
+
 test_status_archive_reuse_and_retention() {
   local case_dir rc archive
   case_dir=$(make_case status-archive-reuse)
@@ -5703,6 +5751,7 @@ test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure
 test_record_export_captures_forced_secondmate_sub_state
+test_record_export_waits_for_endpoint_quiescence_before_archiving
 test_status_archive_nested_secondmate_children
 test_status_archive_missing_status_noop
 test_status_archive_reuse_and_retention
