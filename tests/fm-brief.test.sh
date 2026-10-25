@@ -225,6 +225,39 @@ test_ship_modes_generate_clean_briefs() {
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
 # mode, and its refusal must say to classify the task's surface first.
+# Every PR a worker opens must explain itself visually: push modes carry the
+# required PR-body section, local-only asks for committed evidence, scouts for
+# shown findings.
+test_visual_evidence_contract() {
+  local home id mode brief
+  home="$TMP_ROOT/visual-home"
+  write_registry "$home"
+  for mode in no-mistakes direct-PR; do
+    id="visual-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_grep "Visual evidence (required PR body section)" "$brief" "$mode: brief lost the visual evidence section"
+    assert_grep "The captain will not read the diff" "$brief" "$mode: brief lost the no-diff statement"
+    assert_grep "a PR without this section is not done" "$brief" "$mode: brief lost the not-done rule"
+    assert_grep 'a bare link to an image does not count' "$brief" "$mode: brief lost the inline-render rule"
+    assert_grep 'mermaid' "$brief" "$mode: brief lost the mermaid form"
+    assert_grep "chrome-devtools-axi" "$brief" "$mode: brief lost the screenshot tool"
+    assert_grep ".pr-evidence/$id/" "$brief" "$mode: brief lost the evidence path"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" visual-local some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "fm-brief.sh local-only should exit 0"
+  brief="$home/data/visual-local/brief.md"
+  assert_grep "There is no PR body" "$brief" "local-only: brief lost its visual evidence form"
+  if grep -q "required PR body section" "$brief"; then fail "local-only brief must not carry the PR-body section"; fi
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" visual-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout should exit 0"
+  brief="$home/data/visual-scout/brief.md"
+  assert_grep "show every finding that can be shown" "$brief" "scout: brief lost the shown-findings rule"
+  if grep -q "required PR body section" "$brief"; then fail "scout brief must not carry the PR-body section"; fi
+  pass "fm-brief.sh: visual evidence contract rendered per delivery form"
+}
+
 test_ship_mode_is_required_and_closed_set() {
   local home id out status label flag expect
   home="$TMP_ROOT/mode-required-home"
@@ -1392,3 +1425,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_visual_evidence_contract

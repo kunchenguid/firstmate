@@ -338,6 +338,42 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# The visual-evidence contract for a PR body, a local-only done note, or a scout report.
+# This function is its single owner; AGENTS.md only points here.
+fm_visual_evidence_block() {  # <pr|local|report> <task-id> [branch]
+  local kind=$1 id=$2 branch=${3:-fm/$2}
+  case "$kind" in
+    pr)
+      cat <<EOF
+
+## Visual evidence (required PR body section)
+The captain will not read the diff, so a PR without this section is not done.
+Write a section of the PR body for someone who never reads code:
+1. In plain words, what a human will see or experience differently, naming every page, route, screen, command, or output file affected.
+2. VISUAL EVIDENCE rendered inline as \`![alt](url)\`; a bare link to an image does not count.
+   - UI: before/after screenshots taken with \`chrome-devtools-axi\` against the branch's dev server or preview deployment.
+   - Generated artifacts (PDF, print, images): a rendered PNG of every page.
+   - Behavior, process, or infra with nothing to screenshot: a \`mermaid\` flow diagram (before -> after) and/or a screenshot or transcript of the command output.
+3. If the PR asks the captain to choose between options: one image per option side by side, and a one-line recommendation.
+Commit the images under \`.pr-evidence/$id/\` on \`$branch\` before the PR is opened or the pipeline pushes, and reference them by their raw URL on that branch (\`https://github.com/<owner>/<repo>/raw/$branch/.pr-evidence/$id/<file>.png\`), or upload them so GitHub serves them.
+EOF
+      ;;
+    local)
+      cat <<EOF
+
+## Visual evidence
+There is no PR body, so the captain will not read the diff and a plain-words summary is not enough.
+Commit screenshots, rendered PNGs, or a \`mermaid\` before -> after diagram of the change under \`.pr-evidence/$id/\` on the branch, and name those files in the \`done:\` note.
+EOF
+      ;;
+    report)
+      cat <<EOF
+The captain will not read raw output, so show every finding that can be shown: a screenshot (\`chrome-devtools-axi\`), a \`mermaid\` diagram, or an annotated image, saved beside the report and referenced from it as \`![alt](file)\`.
+EOF
+      ;;
+  esac
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
   local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
@@ -405,6 +441,7 @@ That \`done:\` is accepted only when this copy's HEAD - your latest commit - is 
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
+      fm_visual_evidence_block pr "$id" "$branch"
       ;;
     local-only:*)
       cat <<EOF
@@ -418,6 +455,7 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
+      fm_visual_evidence_block local "$id" "$branch"
       ;;
     no-mistakes:*)
       cat <<EOF
@@ -439,6 +477,7 @@ Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finis
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
+      fm_visual_evidence_block pr "$id" "$branch"
       ;;
     *)
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
