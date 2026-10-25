@@ -1622,22 +1622,37 @@ RECONCILE_VALUE=reconcile
 
 reconcile_request_path() { printf '%s/%s.request\n' "$RECONCILE_DIR" "$1"; }
 
-# Idempotent per task: a repeated reconcile keeps the one request and its
-# original timestamp, so a re-delivered board answer never resets the clock on
-# an obligation that is already open.
-reconcile_request_record() {  # <task-id> <provenance> [<captain-note>]
-  local id=$1 source=$2 note=${3:-} path tmp
+# Idempotent per task: a repeated reconcile keeps the one request with its
+# original timestamp and provenance, so a re-delivered board answer never resets
+# the clock on an obligation that is already open. Captain words that arrive on
+# a later selection are still added to that request's captain note.
+reconcile_request_record() {  # <task-id> <provenance> [<captain-note>]; sets RECONCILE_RECORDED
+  local id=$1 source=$2 note path tmp stored=''
+  note=$(sanitize_field "${3:-}")
   path=$(reconcile_request_path "$id")
-  [ ! -e "$path" ] || return 0
+  RECONCILE_RECORDED=created
+  if [ -e "$path" ]; then
+    RECONCILE_RECORDED=unchanged
+    [ -n "$note" ] || return 0
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    stored=$(sed -n 's/^note=//p' "$path" | head -1)
+    case "; $stored; " in *"; $note; "*) return 0 ;; esac
+    RECONCILE_RECORDED=updated
+  fi
   (umask 077; mkdir -p "$RECONCILE_DIR") || return 1
   [ -d "$RECONCILE_DIR" ] && [ ! -L "$RECONCILE_DIR" ] || return 1
   tmp=$(umask 077; mktemp "$RECONCILE_DIR/.request.XXXXXX") || return 1
   if {
-    printf 'schema=%s\n' "$RECONCILE_SCHEMA"
-    printf 'task=%s\n' "$id"
-    printf 'requested=%s\n' "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-    printf 'source=%s\n' "$(sanitize_reconcile_provenance "$source")"
-    [ -z "$note" ] || printf 'note=%s\n' "$(sanitize_field "$note")"
+    if [ "$RECONCILE_RECORDED" = updated ]; then
+      grep -v '^note=' "$path"
+      printf 'note=%s\n' "${stored:+$stored; }$note"
+    else
+      printf 'schema=%s\n' "$RECONCILE_SCHEMA"
+      printf 'task=%s\n' "$id"
+      printf 'requested=%s\n' "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+      printf 'source=%s\n' "$(sanitize_reconcile_provenance "$source")"
+      [ -z "$note" ] || printf 'note=%s\n' "$note"
+    fi
   } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; then
     return 0
   fi
@@ -1683,7 +1698,7 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
 }
 
 command_reconcile_requests() {
-  local source_id='' source='' origin row id note show show_status=0 created=0 skipped=0 tab=$'\t'
+  local source_id='' source='' origin row id note show show_status=0 created=0 updated=0 unchanged=0 skipped=0 tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source-id) shift; source_id=${1:-} ;;
@@ -1726,8 +1741,11 @@ command_reconcile_requests() {
       skipped=$((skipped + 1))
     else
       if reconcile_request_record "$id" "$source" "$note"; then
-        printf 'reconcile: %s\n' "$id"
-        created=$((created + 1))
+        case "$RECONCILE_RECORDED" in
+          created) printf 'reconcile: %s\n' "$id"; created=$((created + 1)) ;;
+          updated) printf 'reconcile: %s (captain note added to the pending request)\n' "$id"; updated=$((updated + 1)) ;;
+          *) printf 'reconcile: %s (already pending)\n' "$id"; unchanged=$((unchanged + 1)) ;;
+        esac
       else
         printf 'refused: %s (cannot record the reconcile request)\n' "$id"
         skipped=$((skipped + 1))
@@ -1735,7 +1753,7 @@ command_reconcile_requests() {
     fi
     release_task_control_lock || fail "cannot release task control for $id"
   done
-  printf 'reconcile-requests: created=%s skipped=%s\n' "$created" "$skipped"
+  printf 'reconcile-requests: created=%s updated=%s unchanged=%s skipped=%s\n' "$created" "$updated" "$unchanged" "$skipped"
   [ "$skipped" -eq 0 ]
 }
 

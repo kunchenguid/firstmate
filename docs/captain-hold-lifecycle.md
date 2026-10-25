@@ -287,7 +287,8 @@ This captured-source intake records a durable reconcile request under `state/rec
 There is one private record per task, carrying the requesting provenance and a UTC timestamp.
 A note the captain typed beside the selection is kept on the record as its captain note, apart from that provenance.
 The record exists so the obligation to re-check cannot be lost between the wake that carried the answer and the turn that acts on it.
-It is idempotent per task: repeating a reconcile keeps one request and its original timestamp.
+It is idempotent per task: repeating a reconcile keeps one request with its original timestamp and provenance.
+A captain note typed on a later selection for the same task is still added to that request's captain note, so the captain's words are never dropped as a duplicate.
 The supported creator is the runner carrying the captain's board selection.
 The binding-checked `reconcile-requests` command is that internal intake rather than an operator reconciliation outcome.
 

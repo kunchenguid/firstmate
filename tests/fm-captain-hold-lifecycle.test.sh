@@ -2074,6 +2074,65 @@ SH
   pass "a reconcile note keeps the captain's words on the request until firstmate handles them"
 }
 
+# The captain can submit the same card twice in one open board session: first a
+# bare Reconcile, then Reconcile with their decision typed into the note. The
+# one pending request keeps its original clock and provenance, yet the later
+# words must still reach it, or a retirement would drop them unread.
+test_reconcile_note_on_a_repeated_selection_reaches_the_pending_request() {
+  local home out rc list row tab=$'\t'
+  home=$(make_home reconcile-repeat-note)
+  tasks_in "$home" add demo-repeat-call "Captain call: deploy the demo build?" --repo sample >/dev/null \
+    || fail "could not create the repeated-selection call"
+  run_captain "$home" hold demo-repeat-call --reason "deploy the demo build?" >/dev/null \
+    || fail "could not hold the repeated-selection call"
+  run_captain "$home" bind repeat-src >/dev/null || fail "could not bind the board source"
+
+  out=$(printf 'demo-repeat-call\n' | FM_CAPTAIN_HOLD_NOW=2026-10-01T10:00:00Z \
+    run_captain "$home" reconcile-requests --source-id repeat-src --source "board sequence 1") \
+    || fail "the bare reconcile selection was not filed: $out"
+  assert_contains "$out" "created=1" "the bare reconcile selection was not reported as created: $out"
+
+  out=$(printf 'demo-repeat-call\tyes, deploy it\n' | FM_CAPTAIN_HOLD_NOW=2026-10-01T10:05:00Z \
+    run_captain "$home" reconcile-requests --source-id repeat-src --source "board sequence 2") \
+    || fail "the noted reconcile selection was refused: $out"
+  assert_contains "$out" "reconcile: demo-repeat-call (captain note added to the pending request)" \
+    "the noted repeat was not reported as adding the captain's words: $out"
+  assert_contains "$out" "created=0 updated=1" "the noted repeat was miscounted: $out"
+  list=$(run_captain "$home" reconcile list)
+  row=$(printf '%s\n' "$list" | grep -F 'demo-repeat-call')
+  [ "$row" = "demo-repeat-call${tab}requested=2026-10-01T10:00:00Z${tab}source=board sequence 1${tab}captain_note=yes, deploy it" ] \
+    || fail "the pending request lost its clock, its provenance, or the captain's later words: $list"
+
+  out=$(printf 'demo-repeat-call\tyes, deploy it\n' \
+    | run_captain "$home" reconcile-requests --source-id repeat-src --source "board sequence 2") \
+    || fail "a re-delivered noted selection was refused: $out"
+  assert_contains "$out" "reconcile: demo-repeat-call (already pending)" \
+    "a re-delivered noted selection was not reported as already pending: $out"
+  out=$(printf 'demo-repeat-call\tafter the demo review\n' \
+    | run_captain "$home" reconcile-requests --source-id repeat-src --source "board sequence 3") \
+    || fail "a second noted selection was refused: $out"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "${tab}captain_note=yes, deploy it; after the demo review" \
+    "a later captain note replaced or duplicated the earlier words: $list"
+  assert_contains "$list" "reconcile-requests: 1" "a repeated selection duplicated the request: $list"
+
+  printf 'The demo build was already deployed.\n' > "$home/moot.txt"
+  set +e
+  out=$(run_captain "$home" reconcile close demo-repeat-call --evidence-file "$home/moot.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile close retired the repeated request over the captain's unread words"
+  assert_contains "$out" "yes, deploy it; after the demo review" \
+    "the close refusal did not show the captain's later words: $out"
+  printf 'Re-checked: the demo build is still waiting.\n' > "$home/still-open.txt"
+  set +e
+  out=$(run_captain "$home" reconcile note demo-repeat-call --note-file "$home/still-open.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile note retired the repeated request over the captain's unread words"
+  pass "a captain note on a repeated reconcile selection reaches the pending request"
+}
+
 test_reconcile_outcomes_retry_partial_failures_once() {
   local home out show list rc
   home=$(make_home reconcile-partial-retry)
@@ -4912,6 +4971,7 @@ test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
 test_reconcile_closes_with_evidence_or_keeps_the_call_open
 test_reconcile_note_keeps_the_captains_words_until_handled
+test_reconcile_note_on_a_repeated_selection_reaches_the_pending_request
 test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
