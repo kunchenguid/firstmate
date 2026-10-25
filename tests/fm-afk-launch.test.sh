@@ -48,6 +48,7 @@ printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
 GLOBAL_CLEANUP() {
+  declare -F rex_test_cleanup >/dev/null 2>&1 && rex_test_cleanup
   rm -f "$SLEEPER" 2>/dev/null || true
   rm -rf "$OFF_CONFIG" 2>/dev/null || true
   local s
@@ -1721,6 +1722,70 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# E2E rex: topology invariant on this run's private Rex server. The shared
+# safety helper gives it a temporary socket, state directory, and config.
+# ---------------------------------------------------------------------------
+e2e_rex() {
+  local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid label rc
+  # shellcheck source=tests/rex-test-safety.sh
+  . "$ROOT/tests/rex-test-safety.sh"
+  rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && { echo "skip: Rex CLI or jq unavailable (rex e2e)"; return 0; }; fail "rex e2e: private Rex server setup failed"; return 1; }
+  rex_e2e() { (unset REX_SESSION REX_BLOCK; . "$ROOT/bin/fm-backend.sh"; fm_backend_source rex; "$@"); }
+  rex_e2e_shape() {  # <session-id>: window and block ids, or empty when gone
+    rex_e2e fm_backend_rex_session_view "$1" | jq -c '[.windows[] | {window_id, blocks: [.layers[].blocks[].block_id]}]'
+  }
+  rex_e2e_kill_test_session() {  # <session-id>: only an fm-test-* session
+    local l
+    l=$(rex_e2e fm_backend_rex_session_view "$1" | jq -r '.label // empty')
+    case "$l" in fm-test-*) rex_e2e fm_backend_rex_cli kill "$1" >/dev/null 2>&1 || true ;; esac
+  }
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-rex-home.XXXXXX")
+  label="fm-test-afk-daemon-$$"
+  out=$(rex_test_new_session afk-cap) \
+    || { fail "rex e2e: could not create the captain test session"; rm -rf "$home_tmp"; rex_test_cleanup; return 1; }
+  read -r cap_sid cap_bid <<<"$out"
+  cap_target="${cap_sid#session:}:${cap_bid#block:}"
+  enter_posture "$home_tmp" || fail "rex e2e: could not enter fixture posture"
+  before=$(rex_e2e_shape "$cap_sid")
+
+  (unset REX_SESSION REX_BLOCK
+    FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" FM_AFK_LAUNCH_LABEL="$label" \
+      FM_SUPERVISOR_TARGET="$cap_target" FM_SUPERVISOR_BACKEND=rex FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+      "$LAUNCH" start >/dev/null 2>&1)
+
+  during=$(rex_e2e_shape "$cap_sid")
+  IFS=$'\t' read -r rec_backend rec_target rec_sid <"$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true
+  [ -z "$rec_sid" ] || printf '%s\n' "$rec_sid" >>"$REX_TEST_WORK/allowed"
+  if [ "$before" = "$during" ]; then pass "rex e2e: captain session unchanged after start (no tab or split)"; else fail "rex e2e: captain session changed ($before -> $during)"; fi
+  if [ "$rec_backend" = rex ] && [ -n "$rec_sid" ] && [ "$rec_sid" != "$cap_sid" ] \
+    && [ "$(rex_e2e fm_backend_rex_session_view "$rec_sid" | jq -r .label)" = "$label" ] \
+    && [ "${rec_target%%:*}" = "${rec_sid#session:}" ]; then
+    pass "rex e2e: daemon launched in its own dedicated session, recorded by exact id"
+  else
+    fail "rex e2e: no separate recorded daemon session ($rec_backend $rec_target $rec_sid)"
+  fi
+
+  (unset REX_SESSION REX_BLOCK
+    FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+      FM_SUPERVISOR_TARGET="$cap_target" FM_SUPERVISOR_BACKEND=rex "$LAUNCH" stop >/dev/null 2>&1)
+
+  after=$(rex_e2e_shape "$cap_sid")
+  if [ "$after" = "$before" ]; then pass "rex e2e: captain session unchanged after stop"; else fail "rex e2e: captain session changed ($before -> $after)"; fi
+  if [ -n "$rec_sid" ] && ! rex_e2e fm_backend_rex_session_view "$rec_sid" >/dev/null 2>&1; then
+    pass "rex e2e: daemon session killed by exact id on stop"
+  else
+    fail "rex e2e: daemon session leaked ($rec_sid)"
+  fi
+  if [ ! -e "$home_tmp/state/.afk-daemon-terminal" ] && [ ! -e "$home_tmp/state/.afk" ]; then pass "rex e2e: record + .afk cleared on stop"; else fail "rex e2e: record or .afk not cleared"; fi
+
+  [ -z "$rec_sid" ] || rex_e2e_kill_test_session "$rec_sid"
+  rex_e2e_kill_test_session "$cap_sid"
+  rex_test_assert_isolated
+  rex_test_cleanup
+  rm -rf "$home_tmp" 2>/dev/null || true
+}
+
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
@@ -1776,5 +1841,6 @@ unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux
+e2e_rex
 
 [ "$FAILED" -eq 0 ] || exit 1

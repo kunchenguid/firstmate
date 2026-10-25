@@ -10,12 +10,12 @@
 #
 # The capability test is the pre-stop half of the control plane's own refusals
 # (bin/fm-control-lib.sh owns those tables): a mate whose recorded backend has
-# no recovery-grade agent-state classifier, or whose harness has no verified
-# control mechanics, can never have "the old agent stopped and the replacement
-# came up" proven for it. Asking here keeps that verdict on the side of the
-# transaction where nothing has been touched yet, so an incapable mate is routed
-# to the ordinary re-read nudge instead of being stopped for a launch that must
-# be refused.
+# no recovery-grade agent-state classifier or cannot launch a replacement agent,
+# or whose harness has no verified control mechanics, can never have "the old
+# agent stopped and the replacement came up" proven for it. Asking here keeps
+# that verdict on the side of the transaction where nothing has been touched
+# yet, so an incapable mate is routed to the ordinary re-read nudge instead of
+# being stopped for a launch that must be refused.
 #
 # Placement is resolved from the same remote_host= signal bin/fm-send.sh routes
 # on, and it changes only the transport: the restart itself is bin/fm-control.sh
@@ -88,6 +88,10 @@ fm_secondmate_restart_capable() {  # <meta-file>
   FM_SECONDMATE_RESTART_BACKEND=$backend
   if ! fm_control_backend_state_verified "$backend"; then
     FM_SECONDMATE_RESTART_REASON="its runtime cannot prove an agent stopped and came back (backend $backend)"
+    return 1
+  fi
+  if ! fm_control_backend_relaunch_supported "$backend"; then
+    FM_SECONDMATE_RESTART_REASON="its runtime cannot launch a replacement agent (backend $backend)"
     return 1
   fi
   if ! family=$(fm_control_harness_family "$harness") \
