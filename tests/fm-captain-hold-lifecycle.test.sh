@@ -149,6 +149,24 @@ SH
   : > "$home/gh-axi.log"
 }
 
+# A forge read that reports the pull request still open, so a completion must
+# record the pending merge rather than the merge itself.
+configure_open_github() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,mergedAt,url"*) printf '%s\t%s\t%s\n' 'OPEN' '' "${3:-}" ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$home/fakebin/gh"
+}
+
 run_pr_merge() {  # <home> <id> <url>
   local home=$1
   shift
@@ -2932,6 +2950,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "could not release the approved merge"
   show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  configure_merged_github "$home"
   run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
@@ -3471,6 +3490,79 @@ SH
   assert_absent "$home/state/$id.backlog-close" \
     "successful cleanup left its pending transition record behind"
   pass "cleanup keeps a captain-held Gerrit task open and records its change URL"
+}
+
+# A captain-held ship whose pull request is still open keeps the delivery
+# trackable without recording a merge: the retained row carries the link in its
+# deliverable note, and the captain's answer closes the row as a plain
+# completion because the row never received a pull-request link to render.
+test_teardown_retains_an_open_pull_request_without_claiming_a_merge() {
+  local home id repo wt pr show
+  home=$(make_home teardown-held-open-pr)
+  id=sample-held-open-pr
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  pr="https://github.com/sample/sample/pull/31"
+  fm_git_worktree "$repo" "$wt" fm/held-open-pr
+  tasks_in "$home" add "$id" "Ship the held open pull request" --kind ship \
+    --repo sample --start >/dev/null \
+    || fail "could not create the held open pull request fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: checks green, held for captain merge\n' > "$home/state/$id.status"
+  configure_open_github "$home"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the open pull request for the captain"
+
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of a captain-held open pull request failed: $(cat "$home/teardown.err")"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the captain-held row is gone after cleanup"
+  assert_contains "$show" "state: queued" "the held row still reads as worked on"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_not_contains "$show" "pr:$pr" "the retained row attached an unverified pull request link"
+  assert_contains "$show" "merge not confirmed because it was still open when this finished: $pr" \
+    "the retained row did not keep the link and the pending-merge fact"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the retained row rendered as a merge that never happened"
+
+  # The captain's answer closes the retained row. Because the row carries no
+  # pull-request link, the closed row records a plain completion, not a merge.
+  printf 'Do not merge this pull request yet.\n' > "$home/open-pr-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/open-pr-answer.txt" >/dev/null \
+    || fail "could not answer the retained open pull request"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row disappeared"
+  assert_contains "$show" "state: done" "the answer did not close the retained row"
+  assert_not_contains "$show" "pr:$pr" "the answered row carried an unverified pull request link"
+  assert_contains "$show" "merge not confirmed because it was still open when this finished: $pr" \
+    "the answered row lost the pending-merge fact"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the answered row rendered as a merge that never happened"
+  pass "a captain-held open pull request is retained and answered without claiming a merge"
+}
+
+test_answer_clears_an_earlier_pr_link_it_did_not_verify() {
+  local home id pr show
+  home=$(make_home answer-clear-open-pr)
+  id=sample-answer-open-pr
+  pr=https://github.com/sample/sample/pull/41
+  tasks_in "$home" add "$id" "Ship the sample answer pull request" --kind ship --repo sample >/dev/null \
+    || fail "could not create the answer pull request fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the earlier pull-request link"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the answer pull request for the captain"
+
+  printf 'Do not merge this pull request yet.\n' > "$home/open-pr-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/open-pr-answer.txt" >/dev/null \
+    || fail "could not answer the held pull request"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row disappeared"
+  assert_contains "$show" "state: done" "the answer did not close the held row"
+  assert_not_contains "$show" "pr:$pr" "the answered row kept an unverified pull-request link"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the answered row rendered as a merge that never happened"
+  pass "answer clears an earlier pull-request link it did not verify"
 }
 
 test_merge_approval_releases_before_zero_done_retention() {
@@ -5146,6 +5238,8 @@ test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_teardown_retains_a_gerrit_captain_call_with_its_change_url
+test_teardown_retains_an_open_pull_request_without_claiming_a_merge
+test_answer_clears_an_earlier_pr_link_it_did_not_verify
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task

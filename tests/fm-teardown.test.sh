@@ -821,6 +821,10 @@ test_teardown_close_never_claims_a_merge_it_did_not_read() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  # The row may already carry this link from an earlier record; the unconfirmed
+  # close has to remove it rather than let the closed row render as merged.
+  tasks-axi update task-x1 --pr https://github.com/example/repo/pull/7 \
+    --file "$case_dir/data/backlog.md" >/dev/null
   add_gh_pr_merge_fact "$case_dir" OPEN ''
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a task whose PR is still open failed: $out"
@@ -828,10 +832,13 @@ test_teardown_close_never_claims_a_merge_it_did_not_read() {
     || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
   assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
     "a still-open pull request was recorded as a merge that never happened"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
+    && fail "the unconfirmed close kept an earlier pull-request link that renders as a merge"
   assert_grep '(done ' "$case_dir/data/backlog.md" \
     "the completed item did not record its completion"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
-    | grep -F 'body: "Delivered, merge not confirmed because it was still open when this finished: https://github.com/example/repo/pull/7"' >/dev/null \
+    | grep -F 'body: "Delivered, merge not confirmed because it was still open when this finished: https://github.com/example/repo/pull/7. The link is a historical record whose merge was not verified in this run"' >/dev/null \
     || fail "the unmerged close did not keep the pull-request link and the pending-merge fact in its note"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed unmerged close left its pending-close record behind"
@@ -892,6 +899,122 @@ test_teardown_close_states_an_unreadable_pr_without_claiming_a_merge() {
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "the unreadable close dropped the pull-request link"
   pass "teardown states an unreadable pull-request state instead of claiming a merge"
+}
+
+test_teardown_retain_never_claims_a_merge_it_did_not_read() {
+  local case_dir out pr
+  # The retention path records the completion on a row that stays open for the
+  # captain. A pull-request link there is not a merge either: tasks-axi renders
+  # the row as merged as soon as the answer closes it, so it must travel as the
+  # same unconfirmed-completion note the close uses.
+  case_dir=$(make_case tasks-axi-retain-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # An earlier record already attached this link to the row; a still-open pull
+  # request must not leave it there to render as merged when the captain answers.
+  tasks-axi update task-x1 --pr https://github.com/example/repo/pull/7 \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi hold task-x1 --reason "captain merge approval pending" --kind captain \
+    --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "could not hold the fixture row for the captain"
+  add_gh_pr_merge_fact "$case_dir" OPEN ''
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a captain-held open PR failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "queued" ] \
+    || fail "teardown did not retain the captain-held row: $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a retained row with a still-open pull request rendered as a merge that never happened"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
+    && fail "the retained row attached an unverified pull request as its pr link"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "Deliverable of the finished work: Delivered, merge not confirmed because it was still open when this finished: https://github.com/example/repo/pull/7. The link is a historical record whose merge was not verified in this run" >/dev/null \
+    || fail "the retained row did not keep the deliverable and the pending-merge fact in its note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a retained row left its pending-close record behind"
+
+  # A retention that records no pull-request link must also drop an earlier one,
+  # or the captain's later answer closes the row as a merge nobody read.
+  case_dir=$(make_case tasks-axi-retain-without-pr-record)
+  pr=https://github.com/example/repo/pull/7
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr "$pr" --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi hold task-x1 --reason "captain merge approval pending" --kind captain \
+    --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "could not hold the fixture row without a recorded pull request"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a held row without a recorded PR failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "queued" ] \
+    || fail "teardown did not retain the held row without a recorded PR: $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a retained row without a merge read left an earlier pull-request link"
+  assert_not_contains "$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md")" \
+    "links: \"pr:$pr\"" "the retention without a merge kept an earlier pull-request link"
+  pass "teardown retains a captain-held row without claiming a merge the forge did not report"
+}
+
+test_teardown_close_without_a_merge_clears_an_earlier_pr_link() {
+  local case_dir out pr
+  # A close that records no pull-request link still must not leave an earlier
+  # one on the row: tasks-axi would render the closed row as merged even though
+  # this run read no merge.
+  pr=https://github.com/example/repo/pull/7
+  case_dir=$(make_case tasks-axi-close-without-pr-record)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr "$pr" --file "$case_dir/data/backlog.md" >/dev/null
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown with only an earlier pull-request link failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a close that read no merge left an earlier pull-request link rendering as merged"
+  assert_not_contains "$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md")" \
+    "links: \"pr:$pr\"" "the close without a merge kept an earlier pull-request link"
+  pass "teardown clears an earlier pull-request link when the close records no merge"
+}
+
+test_teardown_records_a_long_but_recordable_pr_link_as_its_unconfirmed_note() {
+  local case_dir out url host owner repo head
+  # A self-hosted Forgejo pull-request URL can exceed the old 300-byte note
+  # bound while still fitting the 2048-byte --pr bound the pending-close
+  # validator enforces. The completion note must stay recordable, or cleanup of
+  # landed work would refuse for a link the record itself accepts.
+  host="$(printf 'a%.0s' {1..60}).$(printf 'b%.0s' {1..60}).$(printf 'c%.0s' {1..60})"
+  owner=$(printf 'o%.0s' {1..60})
+  repo=$(printf 'r%.0s' {1..60})
+  url="https://$host/$owner/$repo/pulls/7"
+  case_dir=$(make_case tasks-axi-long-unconfirmed-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "login list --output json")
+    printf '%s\n' '[{"name":"forge","url":"https://$host"}]'
+    exit 0 ;;
+esac
+case "\${1:-} \${2:-}" in
+  "api --login")
+    printf '{"number":7,"state":"open","merged":false,"head":{"sha":"$head"}}\n'
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tea"
+
+  out=$(run_teardown "$case_dir" 2>&1) \
+    || fail "teardown refused to record a long but recordable pull-request link: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a long still-open pull request was recorded as a merge"
+  assert_grep "$url" "$case_dir/data/backlog.md" \
+    "the long pull-request link was dropped from the completion"
+  pass "teardown records a long but recordable pull-request link as an unconfirmed note"
 }
 
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
@@ -6126,8 +6249,11 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_close_never_claims_a_merge_it_did_not_read
+test_teardown_close_without_a_merge_clears_an_earlier_pr_link
 test_teardown_records_the_merge_the_forge_confirms
 test_teardown_close_states_an_unreadable_pr_without_claiming_a_merge
+test_teardown_retain_never_claims_a_merge_it_did_not_read
+test_teardown_records_a_long_but_recordable_pr_link_as_its_unconfirmed_note
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
