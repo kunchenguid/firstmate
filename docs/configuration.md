@@ -1804,6 +1804,7 @@ A herdr, zellij, cmux, paseo, rex, or t3code home is therefore never told `tmux`
 
 **Feature-specific requirements**
 
+- The on-demand [firstmate doctor](../bin/fm-doctor.sh) requires `jq` regardless of the selected backend.
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 
