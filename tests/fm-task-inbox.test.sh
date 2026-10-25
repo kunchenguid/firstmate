@@ -410,6 +410,37 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
+# A lagging Claude pane can keep only the doorbell's first wrapped row after a
+# ring's clear raced its render. That leading fragment is still our own line:
+# it is submitted, not skipped, while a fragment too short to name the inbox
+# glob, or a non-leading piece, still skips untouched.
+test_ring_submits_a_stranded_doorbell_fragment() {
+  local dir state rec doorbell log composer drops rc frag other
+  dir="$TMP_ROOT/ring-fragment"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+  frag=${doorbell%% and act*}
+  : > "$log"; printf '%s' "$frag" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a stranded leading fragment of our doorbell should be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $frag" ] || fail "the fragment should be submitted once:"$'\n'"$(cat "$log")"
+  for other in ': Firstmate instruction waiting: list' "${doorbell#*steering }"; do
+    : > "$log"; printf '%s' "$other" > "$composer"
+    rc=0; ring || rc=$?
+    [ "$rc" = 1 ] || fail "a fragment that is too short or not leading should skip, got rc $rc for: $other"
+    [ ! -s "$log" ] || fail "a non-qualifying fragment was submitted:"$'\n'"$(cat "$log")"
+  done
+  pass "inbox: the ring submits a stranded leading fragment of its own doorbell and still skips other fragments"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -1198,6 +1229,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_submits_a_stranded_doorbell_fragment
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
