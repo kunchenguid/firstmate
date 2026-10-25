@@ -271,6 +271,9 @@ classify_resolved_dir() {
     ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
   fi
 }
+classify_plain_dir /home/linuxbrew/.linuxbrew/bin
+LINUXBREW_DIRS=(${DISCOVERED_DIRS[@]+"${DISCOVERED_DIRS[@]}"})
+DISCOVERED_DIRS=()
 for candidate in "${MANAGER_DIRS[@]}"; do classify_plain_dir "$candidate"; done
 for candidate in "${RESOLVED_DIRS[@]}"; do classify_resolved_dir "$candidate"; done
 for candidate in "${PREFIX_DIRS[@]}"; do classify_plain_dir "$candidate"; done
@@ -281,6 +284,11 @@ expect_dir() {
 }
 path_has() { case ":$1:" in *":$2:"*) return 0 ;; esac; return 1; }
 CHILD_PATH=$(fm_on ios fm-probe-path.sh)
+FNM_CHILD_DIRS=()
+while IFS= read -r candidate; do
+  [ -z "$candidate" ] || FNM_CHILD_DIRS+=("$candidate")
+done < <(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sed -n '\|/aliases/default/bin$|p')
+[ "${#FNM_CHILD_DIRS[@]}" -le 1 ] || fail "the child PATH selected more than one fnm default"
 NVM_CHILD_DIRS=()
 while IFS= read -r candidate; do
   [ -z "$candidate" ] || NVM_CHILD_DIRS+=("$candidate")
@@ -290,6 +298,8 @@ expect_dir "$REMOTE_ROOT/bin"
 if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; then
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
+for candidate in ${FNM_CHILD_DIRS[@]+"${FNM_CHILD_DIRS[@]}"}; do expect_dir "$candidate"; done
+for candidate in ${LINUXBREW_DIRS[@]+"${LINUXBREW_DIRS[@]}"}; do expect_dir "$candidate"; done
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
 for candidate in "${DISCOVERED_DIRS[@]}"; do expect_dir "$candidate"; done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
