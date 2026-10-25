@@ -51,7 +51,7 @@
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
-#     fallback: <runner-up rule taken when the picked rule missed its own floor>
+#     fallback: <effective rule when confidence handling replaces the model choice>
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
@@ -570,7 +570,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     rule_when: when_of($picked),
     confidence: $a.confidence, probabilities: $a.probabilities
   }
-  + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
+  + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"}
+     elif $lc.top and $choice != $picked then {fallback: "\($choice) (\(when_of($choice))) probability \($a.probabilities[$choice]) replaces \($picked); answer confidence \($a.confidence) is below floor \($floor)"}
+     else {} end)
   as $ev |
   ($sel.note + (if $lc.top then " (low confidence: answer confidence \($a.confidence) below floor \($floor))" else "" end)) as $note |
   if $fb.below and $fb.global and $lc.tie then

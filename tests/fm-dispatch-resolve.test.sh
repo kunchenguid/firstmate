@@ -607,6 +607,19 @@ assert_not_contains "$out" '  fallback:' "without declared floors no runner-up i
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the most probable rule's rankable candidate wins"
 pass "per-rule confidence floors fall to the most probable runner-up that clears its own floor"
 
+for provider in typesafe openrouter; do
+  reset_log
+  write_floor_response "$RESPONSE" rule_4 0.41 0.01 0.55 0.01 0.42 0.01
+  FM_DISPATCH_PROVIDER="$provider" FM_DISPATCH_MODEL=jev-latest TYPESAFE_API_KEY=$KEY \
+    OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "$provider low-confidence substitution exits 0"
+  assert_contains "$out" '  status: clear' "$provider resolves the most probable rule"
+  assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.41' "$provider preserves the original choice"
+  assert_contains "$out" '  fallback: rule_2 (The task generates images.) probability 0.55 replaces rule_4; answer confidence 0.41 is below floor 0.6' "$provider names the effective rule and the original choice"
+  assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "$provider resolves the effective rule's profiles"
+done
+pass "low-confidence substitution evidence preserves both rules for both providers"
+
 # --- low confidence: approval, ties, and nothing rankable still escalate --------
 reset_log
 write_floor_response "$RESPONSE" rule_3 0.4 0.05 0.05 0.7 0.1 0.1
