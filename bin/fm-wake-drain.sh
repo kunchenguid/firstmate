@@ -92,10 +92,16 @@ rotate_scratch_locked() {
 }
 
 reclaim_stale_branch_grant_locked() {
+  local owner_state=0
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
-  if ! fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"; then
-    rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"
-  fi
+  fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE" || owner_state=$?
+  case "$owner_state" in
+    1) rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE" ;;
+    2)
+      printf 'wake drain: branch grant owner identity is unverifiable; preserving grant and queue\n' >&2
+      return 1
+      ;;
+  esac
 }
 
 # Retire rows no actor can ever consume. A claim, a presentation, and an

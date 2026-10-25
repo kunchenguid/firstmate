@@ -786,7 +786,7 @@ test_recovery_consumption_serializes_queue_publication() {
 }
 
 test_restart_preserves_recovery_across_reused_pid_lock() {
-  local dir home state fakebin armout unrelated owner
+  local dir home state fakebin armout unrelated owner identity
   dir=$(make_case restart-reused-pid-recovery)
   home="$dir/home"
   state="$dir/state"
@@ -800,7 +800,12 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   printf '%s\n' "$unrelated" > "$owner/pid"
   printf '%s\n' "$home" > "$owner/fm-home"
   printf '%s\n' "$WATCH" > "$owner/watcher-path"
-  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  identity=$(fm_test_pid_identity "$unrelated") || fail "could not identify the unrelated fixture process"
+  case "$identity" in
+    *cmdline-hex=*) identity="${identity}00" ;;
+    *) identity="$identity different-command" ;;
+  esac
+  printf '%s\n' "$identity" > "$owner/pid-identity"
   ln -s "$owner" "$state/.watch.lock"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
@@ -1630,7 +1635,10 @@ test_handling_delivered_accepts_already_acked_generation() {
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
     --watcher-pid "$dead" 2>/dev/null
   expect_code 1 "$?" "a dead watcher pid must stay rejected"
-  printf 'foreign-identity\n' > "$state/.watch.lock/pid-identity"
+  case "$identity" in
+    *cmdline-hex=*) printf '%s00\n' "$identity" ;;
+    *) printf '%s different-command\n' "$identity" ;;
+  esac > "$state/.watch.lock/pid-identity"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
     --watcher-pid "$pid" 2>/dev/null
   status=$?

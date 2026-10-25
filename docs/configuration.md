@@ -2518,7 +2518,7 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 **Ownership and recovery**
 
-- A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
+- A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, `uncertain`, or `dead` from the claim and handled captures without a second ownership record.
 - If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
 - The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
 - The interim crew instruction emitted by `bin/fm-brief.sh` points workers at this arm-and-acknowledge contract.
@@ -2642,6 +2642,12 @@ Ownership is machine-wide per canonical source, because separate homes can share
 - Each claim binds its caller-reported home and runner PID to a process identity, unique claim generation, exact registration-file generation, and resolved state-root identity.
 - Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 - A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
+
+New `ps`-based process identities use an explicitly recognizable UTC rendering, independent of the reader's timezone, locale, and terminal width.
+Compatible `/proc` identities retain their existing start-ticks and command-line contract.
+An older untagged `ps` identity has no timezone provenance and remains unverifiable while its PID is live; it cannot authorize replacement or signalling, and no timezone is inferred or record migrated.
+This prevents timezone mismatches for newly written identities but does not automatically restore existing ambiguous records, which require separately authorized recovery.
+`bin/fm-wake-lib.sh` owns the identity format and comparison interface; `bin/fm-extension.mjs` mirrors it for captured-result authorization.
 
 **Prove ownership before stopping a runner**
 

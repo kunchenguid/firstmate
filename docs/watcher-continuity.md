@@ -192,7 +192,7 @@ The next Stop then re-arms as before.
 
 The durable wake queue preserves actionable events between a watcher close and the next drain.
 The bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding.
-So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
+[`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns claim replacement eligibility, including the refusal to replace a live claim whose recorded identity is unverifiable.
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce the predecessor-delivered wake while its handling handoff remains open.
@@ -279,7 +279,8 @@ Every presented row is claimed to exactly one actor under the durable queue lock
 - A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`.
   The grant is bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`.
   Publication is refused if main already claimed any requested row.
-- A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
+- A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or a comparable stable identity proves a mismatch.
+  An unverifiable live identity preserves the grant and makes either actor's drain refuse before consumption; the [process-identity compatibility contract](configuration.md#process-to-event-sources-stateprocevent) owns the legacy limitation.
 - A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
 
 ### Lock deadlines during presentation
@@ -298,6 +299,7 @@ Acknowledgement invocations and every other mutation-critical queue-lock acquire
 Because the main drain's exclusion makes branch-granted rows invisible to main, `bin/fm-guard.sh`'s queued-wake warning counts only the rows the calling actor can itself present or retire.
 So an actor is never sent to a drain that provably has nothing for it.
 `bin/fm-wake-lib.sh` owns that per-actor count (`fm_wake_actor_pending_count`) alongside the grant row-list and owner-record reads that the drain and `bin/fm-wake-grant.sh` share.
+An unverifiable live grant owner produces a pending indication so that uncertainty still raises an alarm.
 
 A row a live grant reserves is therefore never counted as drainable for main.
 Rather than going silent about a visibly non-empty queue, the guard prints a distinct advisory.
@@ -375,6 +377,7 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
+Its [header](../bin/fm-watch-arm.sh) owns the ownership refusals for unverifiable live watcher identities in every arm mode.
 
 ### How an arm resolves a close
 

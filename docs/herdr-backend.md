@@ -923,10 +923,11 @@ In that last case, `bin/fm-afk-launch.sh`:
 
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
+The [launcher's header](../bin/fm-afk-launch.sh) owns readiness and ownership refusals for launch, stop, and recovery.
 
 ### Stopping the daemon
 
-On stop:
+After the launcher's ownership checks permit stopping:
 
 1. The daemon receives termination while `state/.afk` still exists, so its final flush can run.
 2. The recorded terminal is closed.

@@ -50,6 +50,15 @@
 # harness with a tracked native background job can run `start-native` there.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
+# An unverifiable live launcher owner refuses lock reclamation. An unverifiable
+# live daemon owner makes start, start-native, stop, and reconcile return 2,
+# preserving lifecycle state rather than replacing or signalling that owner.
+# Terminal launch readiness keeps polling through transient missing identity
+# for its existing 100 attempts at 0.05-second intervals. If identity remains
+# unverifiable at the deadline, it preserves the terminal and lifecycle records
+# and returns 2; quiet-mode rollback also leaves that uncertain owner intact.
+# The compatibility limit is owned by docs/configuration.md
+# "Machine-wide source ownership".
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
@@ -174,13 +183,14 @@ fm_afk_launch_lock_owned() {
   local pid expected actual
   [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
   pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
-  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
-  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$expected" ] && [ "$actual" = "$expected" ]
+  fm_pid_alive "$pid" || return 1
+  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 2
+  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 2
+  fm_pid_identity_compare "$actual" "$expected"
 }
 
 fm_afk_launch_lock_acquire() {
-  local attempt=0 incomplete=0 identity
+  local attempt=0 incomplete=0 identity owner_result
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
@@ -208,11 +218,19 @@ fm_afk_launch_lock_acquire() {
     else
       incomplete=0
     fi
-    if ! fm_afk_launch_lock_owned; then
-      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
-      incomplete=0
-      continue
-    fi
+    owner_result=0
+    fm_afk_launch_lock_owned || owner_result=$?
+    case "$owner_result" in
+      1)
+        rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
+        incomplete=0
+        continue
+        ;;
+      2)
+        fm_afk_launch_log "live launcher identity is unverifiable; preserving launcher lock"
+        return 1
+        ;;
+    esac
     sleep 0.05
   done
   fm_afk_launch_log "timed out waiting for launcher lock"
@@ -548,28 +566,37 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
 }
 
 fm_afk_launch_wait_ready() {  # <backend> <target>
-  local backend=$1 target=$2 attempt=0
+  local backend=$1 target=$2 attempt=0 owner_result
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
     fm_afk_launch_terminal_alive "$backend" "$target"
     return
   fi
   while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
-    daemon_lock_held_by_live_daemon && return 0
-    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
+    owner_result=0
+    daemon_lock_held_by_live_daemon || owner_result=$?
+    case "$owner_result" in
+      0) return 0 ;;
+      1) fm_afk_launch_terminal_alive "$backend" "$target" || return 1 ;;
+    esac
     sleep 0.05
   done
-  return 1
+  return "$owner_result"
 }
 
 fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]
-  local backend=$1 target=$2 extra=$3 already_recorded=${4:-0}
+  local backend=$1 target=$2 extra=$3 already_recorded=${4:-0} ready_result=0
   if [ "$already_recorded" -ne 1 ] && ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
     fm_afk_launch_log "failed to persist daemon terminal record; closing $backend:$target"
     fm_afk_launch_close_terminal "$backend" "$target" "$extra"
     return 1
   fi
-  if ! fm_afk_launch_wait_ready "$backend" "$target"; then
+  fm_afk_launch_wait_ready "$backend" "$target" || ready_result=$?
+  if [ "$ready_result" -eq 2 ]; then
+    fm_afk_launch_log "live daemon identity is unverifiable; preserving daemon terminal"
+    return 2
+  fi
+  if [ "$ready_result" -ne 0 ]; then
     fm_afk_launch_log "daemon did not become ready; closing $backend:$target"
     FM_AFK_REC_BACKEND=$backend
     FM_AFK_REC_TARGET=$target
@@ -609,11 +636,17 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
   return 1
 }
 
-# Reconcile a recorded-but-dead terminal: if a record exists and no live daemon
-# owns it, close the leaked terminal by exact id and drop the record.
+# Reconcile a recorded-but-dead terminal only after daemon ownership is proved
+# absent or mismatched in a comparable stable format; uncertainty preserves it.
 fm_afk_launch_reconcile() {
-  local read_result
-  if daemon_lock_held_by_live_daemon; then
+  local read_result owner_result
+  owner_result=0
+  daemon_lock_held_by_live_daemon || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    fm_afk_launch_log "live daemon identity is unverifiable; preserving lifecycle state"
+    return 2
+  fi
+  if [ "$owner_result" -eq 0 ]; then
     return 0
   fi
   fm_afk_launch_record_read
@@ -700,7 +733,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     fm_afk_launch_close_recorded || true
     return 1
   fi
-  fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" 1 || return 1
+  fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" 1 || return $?
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
@@ -737,7 +770,7 @@ fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
     fm_afk_launch_close_recorded || true
     return 1
   fi
-  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return 1
+  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return $?
   fm_afk_launch_log "daemon launched in dedicated rex session $sid (block $target), supervising $captain_target"
 }
 
@@ -761,12 +794,12 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
     fi
     return 1
   fi
-  fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
+  fm_afk_launch_commit_terminal tmux "$session" "" 1 || return $?
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
 fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
+  local captain_target captain_backend backup artifact had_afk=0 result owner_result
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
@@ -784,7 +817,13 @@ fm_afk_launch_start() {
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
-  if daemon_lock_held_by_live_daemon; then
+  owner_result=0
+  daemon_lock_held_by_live_daemon || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    fm_afk_launch_log "live daemon identity is unverifiable; preserving lifecycle state"
+    return 2
+  fi
+  if [ "$owner_result" -eq 0 ]; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to refresh away-mode flag"
@@ -805,15 +844,15 @@ fm_afk_launch_start() {
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
   done
-  if ! fm_afk_launch_reconcile; then
-    result=1
-  else
+  if fm_afk_launch_reconcile; then
     if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
     else
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
       result=1
     fi
+  else
+    result=$?
   fi
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_launch_flag_write; then
@@ -833,7 +872,9 @@ fm_afk_launch_start() {
         ;;
     esac
   fi
-  if [ "$result" -ne 0 ]; then
+  if [ "$result" -eq 2 ]; then
+    rm -rf "$backup" || result=1
+  elif [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
   else
     rm -rf "$backup" || result=1
@@ -842,12 +883,18 @@ fm_afk_launch_start() {
 }
 
 fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
+  local backup artifact had_afk=0 result=0 owner_result
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
-  if daemon_lock_held_by_live_daemon; then
+  owner_result=0
+  daemon_lock_held_by_live_daemon || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    fm_afk_launch_log "live daemon identity is unverifiable; preserving lifecycle state"
+    return 2
+  fi
+  if [ "$owner_result" -eq 0 ]; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
@@ -864,7 +911,7 @@ fm_afk_launch_start_native() {
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
   done
-  fm_afk_launch_reconcile || result=1
+  fm_afk_launch_reconcile || result=$?
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
@@ -876,7 +923,9 @@ fm_afk_launch_start_native() {
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_record_write none - native || result=1
   fi
-  if [ "$result" -ne 0 ]; then
+  if [ "$result" -eq 2 ]; then
+    rm -rf "$backup" || result=1
+  elif [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
   else
     rm -rf "$backup" || result=1
@@ -885,7 +934,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 owner_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -897,7 +946,13 @@ fm_afk_launch_stop() {
   # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
   pid_identity=""
-  if daemon_lock_held_by_live_daemon; then
+  owner_result=0
+  daemon_lock_held_by_live_daemon || owner_result=$?
+  if [ "$owner_result" -eq 2 ]; then
+    fm_afk_launch_log "live daemon identity is unverifiable; preserving lifecycle state"
+    return 2
+  fi
+  if [ "$owner_result" -eq 0 ]; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
@@ -960,9 +1015,10 @@ fm_afk_launch_stop() {
 # Roll back a failed quiet start (the header's QUIET MODE): with a quiet record
 # and no live daemon, archive the record as `stop` does. Returns <status>.
 fm_afk_launch_quiet_rollback() {  # <status>
-  local status=$1
+  local status=$1 owner_result=0
+  daemon_lock_held_by_live_daemon || owner_result=$?
   if [ "$(fm_afk_launch_requested_mode)" = quiet ] && fm_afk_launch_record_quiet \
-    && ! daemon_lock_held_by_live_daemon; then
+    && [ "$owner_result" -eq 1 ]; then
     fm_afk_launch_log "the quiet daemon did not start; ending quiet mode so its record does not outlive it"
     fm_afk_launch_stop
   fi
