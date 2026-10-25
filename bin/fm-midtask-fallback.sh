@@ -267,22 +267,39 @@ failed_candidate() {
   return 1
 }
 
+status_verb() {
+  local verb=${1%%:*}
+  verb=${verb%%\[*}
+  verb=${verb#"${verb%%[![:space:]]*}"}
+  printf '%s' "${verb%"${verb##*[![:space:]]}"}"
+}
+
 status_has_key() {
-  local id=$1 key=$2 line
+  local id=$1 verb=$2 key=$3 line
   line=$(last_status_line "$(status_path "$id")")
-  case "$line" in
-    needs-decision*|blocked*) ;;
-    *) return 1 ;;
-  esac
+  [ "$(status_verb "$line")" = "$verb" ] || return 1
   case "$line" in
     *"[key=$key]"*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
+worker_finished_or_waiting() {
+  local line verb
+  line=$(last_status_line "$(status_path "$1")")
+  case "$line" in
+    *"[key=midtask-fallback]"*) return 1 ;;
+  esac
+  verb=$(status_verb "$line")
+  case "$verb" in
+    done|failed|needs-decision|blocked) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 report_no_candidate() {
   local id=$1 reason=$2 epoch line
-  status_has_key "$id" midtask-fallback && return 0
+  status_has_key "$id" needs-decision midtask-fallback && return 0
   epoch=$(date +%s)
   line="needs-decision [at=$epoch] [key=midtask-fallback]: no eligible next profile after ${reason}; the current profile stays"
   append_status "$id" "$line"
@@ -344,8 +361,8 @@ cmd_bind() {
 
 cmd_consider() {
   local id snapshot='' pane='' mode meta kind array cur_h cur_m cur_e
-  local rows_file='' lock='' idx harness model effort provider last_match=-1 exact_match=-1 wild_match=-1
-  local ch='' cm='' ce='' reason='' epoch note rc=0 now=0 mtime=0
+  local rows='' idx harness model effort provider last_match=-1 exact_match=-1 wild_match=-1
+  local ch='' cm='' ce='' reason='' epoch note rc=0
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
   shift
@@ -380,6 +397,7 @@ cmd_consider() {
     [ -f "$snapshot" ] || die "quota snapshot is missing: $snapshot"
     fm_quota_json_valid < "$snapshot" || die "quota snapshot is not a valid quota-axi document"
   fi
+  worker_finished_or_waiting "$id" && return 0
   cur_h=$(fm_meta_get "$meta" harness)
   cur_m=$(fm_meta_get "$meta" model)
   cur_e=$(fm_meta_get "$meta" effort)
@@ -394,27 +412,8 @@ cmd_consider() {
   else
     return 0
   fi
-  rows_file=$(mktemp "${TMPDIR:-/tmp}/fm-midtask-rows.XXXXXX") || die "cannot allocate a candidate list"
-  lock=$STATE/.midtask-$id.lock
-  if [ -d "$lock" ]; then
-    now=$(date +%s)
-    mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || printf 0)
-    case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
-    if [ $((now - mtime)) -gt 180 ]; then
-      rmdir "$lock" 2>/dev/null || true
-    fi
-  fi
-  if ! mkdir "$lock" 2>/dev/null; then
-    rm -f -- "$rows_file"
-    return 0
-  fi
-  # Expand the paths now. An EXIT trap runs after this function's locals are gone.
-  # shellcheck disable=SC2064
-  trap "rm -f -- $(printf '%q' "$rows_file"); rmdir $(printf '%q' "$lock") 2>/dev/null || true" EXIT
-  if ! profile_rows "$array" > "$rows_file"; then
-    die "task $id dispatch array is unreadable"
-  fi
-  [ -s "$rows_file" ] || die "task $id dispatch array is empty"
+  rows=$(profile_rows "$array") || die "task $id dispatch array is unreadable"
+  [ -n "$rows" ] || die "task $id dispatch array is empty"
   while IFS=$'\t' read -r idx harness model effort provider; do
     [ "$harness" = "$cur_h" ] || continue
     if [ "$model" = "$cur_m" ] && [ "$effort" = "$cur_e" ]; then
@@ -423,7 +422,7 @@ cmd_consider() {
       && { [ "$effort" = default ] || [ "$effort" = "$cur_e" ]; }; then
       wild_match=$idx
     fi
-  done < "$rows_file"
+  done <<< "$rows"
   last_match=$wild_match
   [ "$exact_match" -lt 0 ] || last_match=$exact_match
   if [ "$last_match" -lt 0 ]; then
@@ -455,7 +454,7 @@ cmd_consider() {
     cm=$model
     ce=$effort
     break
-  done < "$rows_file"
+  done <<< "$rows"
   if [ -z "$ch" ]; then
     report_no_candidate "$id" "a $reason"
     return 2
@@ -468,7 +467,7 @@ cmd_consider() {
   if ! "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"; then
     printf 'midtask_switch_failed=%s\n' \
       "$(switch_object "$cur_h" "$cur_m" "$cur_e" "$ch" "$cm" "$ce" "$reason" "$epoch")" >> "$meta"
-    if ! status_has_key "$id" midtask-fallback; then
+    if ! status_has_key "$id" blocked midtask-fallback; then
       append_status "$id" "blocked [at=$epoch] [key=midtask-fallback]: relaunch onto the next profile failed; the local copy was kept"
     fi
     return 1
