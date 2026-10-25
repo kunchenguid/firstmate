@@ -704,6 +704,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+   Name any Lima VM you create \`$ID\` or \`$ID-<suffix>\` (no branch prefix), so cleanup can find and delete it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
@@ -781,6 +782,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
+   Name any Lima VM you create \`$ID\` or \`$ID-<suffix>\` (no branch prefix), so cleanup can find and delete it.
 3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`

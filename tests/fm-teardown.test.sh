@@ -63,6 +63,9 @@
 #   (z3d) forced secondmate + child return leaves residue    -> warning, retirement completes, exit 4
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
+#
+# Lane VMs: a landed ship or reported scout deletes its own Lima VMs only;
+# --force keeps them and an absent limactl is a quiet no-op.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -186,7 +189,18 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  # Hermetic Lima stub: `list --quiet` prints FM_FAKE_LIMA_VMS (one name per
+  # line, none by default) and `delete` appends its arguments to
+  # FM_FAKE_LIMA_DELETE_LOG when set, so no case ever touches a real VM.
+  cat > "$fakebin/limactl" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list) [ -z "${FM_FAKE_LIMA_VMS:-}" ] || printf '%s\n' "$FM_FAKE_LIMA_VMS" ;;
+  delete) shift; [ -z "${FM_FAKE_LIMA_DELETE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_LIMA_DELETE_LOG" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/limactl"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -684,6 +698,73 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+# Lane VMs: teardown deletes exactly the task's own Lima VMs (`task-x1` and
+# `task-x1-*`) once its work has landed, never a VM another live task's id
+# matches, and none on a --force discard.
+lane_vm_case() {  # <name> <kind>
+  local case_dir
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes "$2"
+  if [ "$2" = scout ]; then
+    prepare_scout_teardown "$case_dir"
+  else
+    wt_commit "$case_dir" "shippable work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+  fi
+  printf '%s\n' "window=firstmate:fm-task-x1-b" > "$case_dir/state/task-x1-b.meta"
+  printf '%s\n' "$case_dir"
+}
+
+lane_vm_teardown() {  # <case-dir> [teardown args...]
+  local case_dir=$1; shift
+  FM_FAKE_LIMA_VMS=$'task-x1\ntask-x1-it\ntask-x10\nfm-task-x1\ntask-x1-b\ntask-x1-b-it\nother' \
+  FM_FAKE_LIMA_DELETE_LOG="$case_dir/lima-deletes" \
+    run_teardown "$case_dir" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+test_landed_ship_teardown_deletes_only_its_own_lane_vms() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-ship ship)
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-ship: teardown should succeed"
+  assert_equals $'--force task-x1\n--force task-x1-it' "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-ship: deleted VMs"
+  pass "landed ship teardown deletes only its own lane VMs, sparing another live task's"
+}
+
+test_scout_teardown_deletes_its_own_lane_vms() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-scout scout)
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-scout: teardown should succeed"
+  assert_equals $'--force task-x1\n--force task-x1-it' "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-scout: deleted VMs"
+  pass "scout teardown after its report deletes its own lane VMs"
+}
+
+test_forced_teardown_keeps_lane_vms() {
+  local case_dir rc
+  case_dir=$(make_case lane-vm-force)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "unlanded work"
+  set +e; lane_vm_teardown "$case_dir" --force; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-force: forced teardown should succeed"
+  assert_absent "$case_dir/lima-deletes" "lane-vm-force: a forced discard deleted a VM"
+  pass "forced teardown of unlanded work keeps its lane VMs"
+}
+
+test_lane_vm_cleanup_without_limactl_is_quiet() {
+  local out rc
+  set +e
+  out=$(PATH=/nonexistent; . "$ROOT/bin/fm-lane-vm-lib.sh"; fm_lane_vm_cleanup task-x1 "$TMP_ROOT" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "lane-vm-absent: cleanup should succeed"
+  assert_equals "" "$out" "lane-vm-absent: cleanup output without limactl"
+  pass "lane VM cleanup skips quietly when limactl is absent"
 }
 
 test_local_only_fork_remote_allows() {
@@ -5903,3 +5984,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_landed_ship_teardown_deletes_only_its_own_lane_vms
+test_scout_teardown_deletes_its_own_lane_vms
+test_forced_teardown_keeps_lane_vms
+test_lane_vm_cleanup_without_limactl_is_quiet

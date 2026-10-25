@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# delete a ship or scout task's own Lima lane VMs (bin/fm-lane-vm-lib.sh),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -393,7 +394,8 @@ for _teardown_source in \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
-  fm-lease-lib.sh
+  fm-lease-lib.sh \
+  fm-lane-vm-lib.sh
 do
   teardown_require_source "$SCRIPT_DIR/$_teardown_source"
 done
@@ -410,6 +412,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-lane-vm-lib.sh
+. "$SCRIPT_DIR/fm-lane-vm-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -3809,6 +3813,13 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
+fi
+
+# The landed-work or scout-report gate has passed, so the task's own Lima lane
+# VMs (bin/fm-lane-vm-lib.sh) are spent. A --force run has proven nothing
+# landed, so it keeps them.
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$FORCE" != "--force" ]; then
+  fm_lane_vm_cleanup "$ID" "$STATE"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
