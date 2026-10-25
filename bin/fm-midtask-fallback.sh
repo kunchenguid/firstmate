@@ -395,9 +395,9 @@ cmd_consider() {
   [ -n "$cur_e" ] || cur_e=default
   reason=''
   if [ -n "$snapshot" ] && current_exhausted "$array" "$snapshot" "$cur_h" "$cur_m" "$cur_e"; then
-    reason=usage-limit
+    reason='usage-limit'
   elif [ -n "$pane" ] && limit_adapter_matches "$cur_h" "$pane"; then
-    reason=limit-message
+    reason='limit-message'
   else
     return 0
   fi
