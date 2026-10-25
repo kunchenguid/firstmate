@@ -1197,9 +1197,14 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
 }
 
 # The artifact a retained record owes the row it held. A `--pr` link is applied
-# as the close's own link only when the record says some run read that merge from
-# the forge; a link no run verified becomes a body note instead, so the answer
-# keeps the delivery traceable and never closes the row as a merge nobody read.
+# as the close's own link only when some run verified that merge; a link no run
+# verified becomes a body note instead, so the answer keeps the delivery
+# traceable and never closes the row as a merge nobody read.
+#
+# The verified fact is read from the task's durable merge-verification record
+# first, because a retention that lands retires its pending-close record and the
+# answer then has nothing else to read. The pending-close record's own fact is
+# the fallback for an answer that arrives before that transition lands.
 apply_pending_retained_artifact() {  # <task-id>
   local id=$1 marker label
   local -a args=()
@@ -1212,6 +1217,10 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr)
+      if fm_backlog_merge_fact_read "$STATE" "$id"; then
+        RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
+        return 0
+      fi
       if [ -n "$FM_BACKLOG_CLOSE_VALIDATED_MERGE_VERIFIED_AT" ] \
          && fm_backlog_row_artifact_supported "$id" --pr "${args[1]-}"; then
         RETAINED_CLOSE_ARGS=(--pr "${args[1]}")
@@ -1243,6 +1252,13 @@ close_answered() {  # <task-id> <release-0-or-1>
     return 0
   fi
   apply_pending_retained_artifact "$id" || return 1
+  # Without a pending-close record, the task's durable merge-verification record
+  # is what tells this answer that a run read the merge; a retention that landed
+  # keeps the row's structured link and leaves that record behind for exactly
+  # this moment.
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ] && fm_backlog_merge_fact_read "$STATE" "$id"; then
+    RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
+  fi
   if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ]; then
     # An answer that read no merge cannot close the row as one, even when the
     # record carried a link: that link becomes a historical note, which keeps the
@@ -1262,7 +1278,11 @@ close_answered() {  # <task-id> <release-0-or-1>
       [ "$merged" = 1 ] || RETAINED_CLOSE_ARGS+=(--note "$note")
     fi
   fi
-  tasks_axi "done" "$id" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
+  if ! tasks_axi "done" "$id" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null; then
+    return 1
+  fi
+  # The row is closed in the backlog, which is when the record has done its work.
+  fm_backlog_merge_fact_remove "$STATE" "$id"
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>

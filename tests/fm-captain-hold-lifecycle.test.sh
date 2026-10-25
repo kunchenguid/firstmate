@@ -3413,6 +3413,10 @@ test_answer_clears_an_earlier_pr_link_it_did_not_verify() {
   assert_contains "$show" "$pr" "the answered row dropped the pull-request URL"
   assert_contains "$show" "the merge was not verified in this run" \
     "the answered row did not say why the merge is unconfirmed"
+  assert_contains "$show" 'links: none' \
+    "the answered row still carried a structured link no run verified"
+  title=$(tasks_in "$home" show "$id" | sed -n 's/^  title: *//p' | head -1)
+  assert_not_contains "$title" "$pr" "the answered row kept the pull-request URL in its title"
   assert_no_grep '(merged ' "$home/data/backlog.md" \
     "the answered row rendered as a merge that never happened"
   pass "answer clears an earlier pull-request link it did not verify"
@@ -3467,6 +3471,51 @@ SH
   assert_grep '(merged ' "$home/data/backlog.md" \
     "the answered row did not record the merge the retention verified"
   pass "answer keeps a merge the retention read from the forge"
+}
+
+test_answer_keeps_a_merge_after_the_retention_landed() {
+  local home id repo wt pr show marker
+  home=$(make_home answer-retention-landed)
+  id=sample-answer-retention-landed
+  pr=https://github.com/sample/sample/pull/46
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" fm/answer-retention-landed
+  tasks_in "$home" add "$id" "Ship the landed retained pull request" --kind ship \
+    --repo sample --start >/dev/null \
+    || fail "could not create the landed retention fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  configure_merged_github "$home"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the landed retention"
+
+  # The ordinary path: cleanup lands, so it retires its own pending-close record,
+  # and the captain answers afterwards.
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of a captain-held verified merge failed: $(cat "$home/teardown.err")"
+  marker="$home/state/$id.backlog-close"
+  assert_absent "$marker" "the landed retention left its pending-close record behind"
+  assert_present "$home/state/$id.pr-merge" \
+    "cleanup did not keep the merge-verification record an answer has to read"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the retained row is gone"
+  assert_contains "$show" "state: queued" "the retained row is no longer held"
+
+  printf 'Proceed with the merged change.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer the landed retention"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the retained row"
+  assert_contains "$show" "links: \"pr:$pr\"" \
+    "the answer dropped a merge the landed retention had verified"
+  assert_grep '(merged ' "$home/data/backlog.md" \
+    "the answered row did not record the merge the retention verified"
+  assert_absent "$home/state/$id.pr-merge" \
+    "the answer kept the merge-verification record after the row closed"
+  pass "answer keeps a verified merge after the retention that recorded it landed"
 }
 
 test_answer_downgrades_a_recorded_link_no_run_verified() {
@@ -4991,6 +5040,7 @@ test_teardown_retains_a_gerrit_captain_call_with_its_change_url
 test_teardown_retains_an_open_pull_request_without_claiming_a_merge
 test_answer_clears_an_earlier_pr_link_it_did_not_verify
 test_answer_keeps_a_merge_the_retention_verified
+test_answer_keeps_a_merge_after_the_retention_landed
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
