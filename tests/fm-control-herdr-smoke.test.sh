@@ -31,6 +31,8 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=tests/agent-standin.sh
+. "$ROOT/tests/agent-standin.sh"
 herdr_forget_inherited_pane
 
 SESSION="fm-lab-control-smoke-$$"
@@ -212,8 +214,9 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+STANDIN_BIN=$(fm_standin_build "$AGENT_BIN") \
+  || fail "no long-running stand-in survives a rename (multicall coreutils and no C compiler)"
+ln -s "$STANDIN_BIN" "$AGENT_BIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
 
 wait_process_state() {  # <expected> <tries>

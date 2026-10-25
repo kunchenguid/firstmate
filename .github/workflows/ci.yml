@@ -19,8 +19,14 @@ permissions:
 # Pin it exactly like ShellCheck, actionlint, Herdr, and Treehouse, and treat a
 # bump as the deliberate moment to re-verify the Pi extension tests against the
 # new version. Owner of the value: this workflow.
+#
+# The Pi extension typecheck also needs a `tsc` on PATH. The hosted runner image
+# used to carry one and no longer does (main run 38593361924 passed; PR runs of
+# 2026-10-25 hit the required-gate skip), so install it pinned beside the Pi
+# package rather than depend on what the image happens to bundle.
 env:
   FM_PI_PACKAGE_VERSION: '0.87.1'
+  FM_TYPESCRIPT_VERSION: '5.9.3'
 
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
 # CI instead of letting superseded heads keep the full hosted-runner fan-out.
@@ -128,7 +134,8 @@ jobs:
       - name: Install the pinned Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g "@earendil-works/pi-coding-agent@${FM_PI_PACKAGE_VERSION}"
+          npm install -g "@earendil-works/pi-coding-agent@${FM_PI_PACKAGE_VERSION}" "typescript@${FM_TYPESCRIPT_VERSION}"
+          tsc --version
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
         run: |
@@ -233,7 +240,8 @@ jobs:
       - name: Install the pinned Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g "@earendil-works/pi-coding-agent@${FM_PI_PACKAGE_VERSION}"
+          npm install -g "@earendil-works/pi-coding-agent@${FM_PI_PACKAGE_VERSION}" "typescript@${FM_TYPESCRIPT_VERSION}"
+          tsc --version
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:

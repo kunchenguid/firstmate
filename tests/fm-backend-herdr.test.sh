@@ -14,6 +14,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+# shellcheck source=tests/agent-standin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/agent-standin.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
@@ -672,12 +674,14 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
 }
 
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
-  local lab sleep_bin shell_pid out shell_verdict
+  local lab standin sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
   # A symlink to a real long-running binary so the kernel records `pi` as the
   # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # The target must survive the rename, which a multicall `sleep` does not.
+  standin=$(fm_standin_build "$lab") || fail "no long-running stand-in survives a rename (multicall coreutils and no C compiler)"
+  ln -sf "$standin" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
   sh -c "'$lab/pi' 300; :" &
@@ -701,13 +705,13 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 }
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
-  local lab sleep_bin shell_pid out
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local lab standin shell_pid out
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
+  standin=$(fm_standin_build "$TMP_ROOT/stale-reg-spaced-standin") || fail "no long-running stand-in survives a rename (multicall coreutils and no C compiler)"
+  ln -sf "$standin" "$lab/pi"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
   sleep 0.3

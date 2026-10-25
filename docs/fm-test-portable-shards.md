@@ -69,8 +69,8 @@ That is not hypothetical: by 2026-09-01 the lane had grown from 116 to 139 scrip
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for that bound to trip.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
-Nine serial runners pack the refreshed measurements into a longest modeled script sum of 697969 ms (11m38s), with other shards near 10m36s.
-The longest script, `tests/fm-watch-triage.test.sh`, legitimately occupies one whole shard and is the indivisible floor for this layout.
+Nine serial runners pack the refreshed measurements, except that `tests/fm-supervision-host.test.sh` is hinted at 1200000 ms (20m, a conservative figure above the 16m+ seen on the Ubuntu 26.04 runner before the 30-minute cap canceled it) so it occupies a whole shard; refresh that hint from a green run's timing artifact.
+The next longest script, `tests/fm-watch-triage.test.sh` (697969 ms), also occupies a whole shard.
 This is a packing estimate, not measured new-workflow execution or an end-to-end latency guarantee.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
 `tests/fm-ci-workflow.test.sh` compares the parsed CI matrix to the executable runner lanes, and the runner rejects parallel `--jobs` on a serial lane even when that shard has only one member.

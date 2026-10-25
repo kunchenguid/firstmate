@@ -3796,8 +3796,16 @@ test_rejection_wake_survives_a_poll_that_cannot_write() {
   assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
     "a refusal must queue a wake"
 
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" "$POLL" >&- 2>/dev/null || true
+  # An unwritable stdout: /dev/full where it exists. A closed stdout cannot be
+  # staged under bash 5.3 or later, which reopens fds 0-2 on /dev/null at startup
+  # so the poll would write its line successfully.
+  if [ -w /dev/full ]; then
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" "$POLL" >/dev/full 2>/dev/null || true
+  else
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" "$POLL" >&- 2>/dev/null || true
+  fi
   assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
     "a wake whose line could not be written must stay queued"
   assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
