@@ -25,6 +25,7 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-path-lib.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
@@ -105,7 +106,7 @@ const pi = {
   on() {},
   registerCommand() {},
   registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    if (/^fm_watch_arm_(pi|omp)$/.test(candidate.name)) tool = candidate;
   },
   sendUserMessage: async (message) => {
     prompts.push(String(message));
@@ -221,6 +222,85 @@ test_handling_successor_does_not_go_blind() {
   wait "$child" 2>/dev/null || true
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
+
+test_adapter_waits_for_slow_supervision_scan() (
+  local mode=$1 dir repo home fakebin plugin delay=20
+  dir=$(make_case "slow-adapter-$mode")
+  repo="$dir/repo"
+  home="$dir/home"
+  fakebin="$dir/fakebin"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  fm_test_track_watcher_state "$home/state"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  install_pi_watch_extension_fixture "$repo"
+  cp -R "$ROOT/bin/." "$repo/bin/"
+  if [ "$mode" = pi ]; then
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  elif [[ "$mode" = omp* ]]; then
+    mkdir -p "$repo/.omp/extensions"
+    cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
+    plugin="$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  else
+    plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  fi
+  if [[ "$mode" = *-host ]]; then
+    delay=35
+    : > "$home/config/supervision-host"
+  else
+    : > "$home/config/supervision-host-off"
+  fi
+  export FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STATE_OVERRIDE="$home/state"
+  export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=45 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999
+  unset FM_OMP_ARM_READY_TIMEOUT_MS FM_PI_ARM_READY_TIMEOUT_MS FM_OPENCODE_ARM_READY_TIMEOUT_MS FM_ARM_CONFIRM_TIMEOUT FM_SUPERVISION_HOST_READY_TIMEOUT
+  {
+    printf '#!/usr/bin/env bash\nsleep %s\n' "$delay"
+    cat <<'SH'
+touch "$FM_HOME/scanned"
+SH
+  } > "$home/state/slow.check.sh"
+  chmod 0700 "$home/state/slow.check.sh"
+  "$ROOT/bin/fm-check-register.sh" slow >/dev/null || fail "register slow adapter check"
+  printf 'pending:downtime:adapter.1.aaa\n' > "$home/state/.watcher-down"
+  chmod 600 "$home/state/.watcher-down"
+  printf '%s\t1\tcheck\tseed\tcheck: adapter recovery\n' "$(date +%s)" > "$home/state/.wake-queue"
+  PLUGIN="$plugin" MODE="$mode" PATH="$fakebin:$PATH" bash -c 'case "$1" in omp*) name=omp ;; opencode*) name=opencode ;; *) name=$1 ;; esac; exec -a "$name" node --input-type=module' _ "$mode" <<'JS' || fail "$mode aborted a legitimate slow supervision scan"
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const prompts = [];
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (process.env.MODE === "pi" || process.env.MODE.startsWith("omp")) {
+  let tool;
+  mod.default({
+    on() {}, registerCommand() {},
+    registerTool(candidate) { if (/^fm_watch_arm_(pi|omp)$/.test(candidate.name)) tool = candidate; },
+    sendUserMessage: async (message) => { prompts.push(String(message)); },
+  });
+  await tool.execute("slow-scan", {}, undefined, undefined, {});
+} else {
+  const client = { session: { promptAsync: async (request) => { prompts.push(JSON.stringify(request)); } } };
+  await mod.FmPrimaryWatchArm({ client, directory: process.env.FM_ROOT_OVERRIDE, worktree: process.env.FM_ROOT_OVERRIDE });
+  await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("slow-scan", client);
+}
+for (let i = 0; i < 1200 && !prompts.length; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error(`expected one recovery delivery, got ${prompts.length}`);
+if (/watcher: FAILED|could not restore|could not verify/.test(prompts[0])) throw new Error(prompts[0]);
+if (!existsSync(`${home}/scanned`)) throw new Error("recovery delivered before the slow check completed");
+if (!existsSync(`${home}/state/.last-watcher-beat`)) throw new Error("recovery lacks a completed-scan heartbeat");
+const pid = Number(readFileSync(`${home}/state/.watch.lock/pid`, "utf8").trim());
+process.kill(pid, 0);
+process.exit(0);
+JS
+  pass "$mode waits for a slow real supervision scan before recovery delivery"
+)
+
+test_adapter_waits_for_slow_supervision_scan pi || exit 1
+test_adapter_waits_for_slow_supervision_scan opencode || exit 1
+test_adapter_waits_for_slow_supervision_scan opencode-host || exit 1
+test_adapter_waits_for_slow_supervision_scan omp || exit 1
+test_adapter_waits_for_slow_supervision_scan omp-host || exit 1
 
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation

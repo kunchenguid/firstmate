@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 // Supervision host: a home opted in with config/supervision-host
@@ -15,12 +16,6 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 // as they do for the arm, with a longer readiness budget for the host's own
 // startup. On a home that does not run the host nothing below changes.
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
-// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
-// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
-// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
-const ARM_READY_TIMEOUT_DEFAULT_MS = process.platform === "win32" ? 35000 : 12000;
-const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", ARM_READY_TIMEOUT_DEFAULT_MS);
-const HOST_READY_TIMEOUT_MS = Math.max(ARM_READY_TIMEOUT_MS, 30000);
 const WAKE_LINE = /^(signal:|stale:|check:|heartbeat($|:))/;
 const HOST_LINE = /^supervision-host:/;
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
@@ -37,7 +32,7 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
-let armHostMode = new WeakMap();
+let armReadyBudget = new WeakMap();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -52,7 +47,7 @@ function setArmStatus(status) {
 function waitForArmReady(armChild) {
   const readiness = armReadiness.get(armChild);
   if (!readiness) return Promise.resolve("failed");
-  const timeout = armHostMode.get(armChild) ? HOST_READY_TIMEOUT_MS : ARM_READY_TIMEOUT_MS;
+  const timeout = armReadyBudget.get(armChild);
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve("timeout"), timeout);
     timer.unref();
@@ -80,6 +75,19 @@ function runProcess(command, args, options = {}) {
     proc.on("error", (error) => resolve({ code: 127, stdout, stderr: String(error?.message ?? error) }));
     proc.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
   });
+}
+
+async function armReadinessBudgetMs(paths, hostMode) {
+  const override = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", 0);
+  if (override) return hostMode ? Math.max(override, 30000) : override;
+  const result = await runProcess("bash", ["-lc",
+    'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ ! -f "$config_dir/x-mode.env" ] || . "$config_dir/x-mode.env"; . "$1" && fm_watcher_confirmation_budget "$2" "$3" "$4"',
+    "fm-watcher-budget", fileURLToPath(new URL("../../bin/fm-wake-lib.sh", import.meta.url)), paths.state, `${paths.root}/bin/fm-watch.sh`, paths.home,
+  ], { env: { ...process.env, FM_HOME: paths.home, FM_CONFIG_OVERRIDE: paths.config, FM_STATE_OVERRIDE: paths.state } });
+  const seconds = Number(result.stdout.trim());
+  if (result.code !== 0 || !Number.isFinite(seconds) || seconds < 0) return 0;
+  const timeout = seconds * 1000 + 2000;
+  return hostMode ? Math.max(timeout, 30000) : timeout;
 }
 
 async function resolveRoot(anchor) {
@@ -417,9 +425,8 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   retryTimer = timer;
 }
 
-function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
+function spawnArm(paths, sessionID, client, predecessorArmPid, hostMode, timeoutMs) {
   setArmStatus("starting");
-  const hostMode = hostModeEnabled(paths);
   const env = {
     ...process.env,
     FM_HOME: paths.home,
@@ -434,7 +441,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  armHostMode.set(armChild, hostMode);
+  armReadyBudget.set(armChild, timeoutMs);
   child = armChild;
   let stdout = "";
   let stderr = "";
@@ -538,7 +545,10 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
-  return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
+  const hostMode = hostModeEnabled(paths);
+  const timeoutMs = await armReadinessBudgetMs(paths, hostMode);
+  if (!timeoutMs) return { status: "failed", armChild: null };
+  return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid, hostMode, timeoutMs) };
 }
 
 function armAttempt(status, armChild, includeArmChild) {

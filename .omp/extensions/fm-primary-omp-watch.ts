@@ -69,6 +69,7 @@ import { Type } from "typebox";
 // resolves bin/fm-operational-input.sh relative to its own location, which is
 // the same repository root this file lives in.
 import { encodeFirstmateOperationalInput } from "../../.pi/extensions/lib/fm-operational-input.ts";
+import { runCommandAsync } from "../../.pi/extensions/lib/fm-async-exec.ts";
 
 // The omp extension API surface this file uses. omp is a Pi fork and ships no
 // separately installable type package, so the contract is declared locally
@@ -149,14 +150,18 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
-// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
-// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
-// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
-const armReadyTimeoutMs = positiveInteger(
-  "FM_OMP_ARM_READY_TIMEOUT_MS",
-  process.platform === "win32" ? 35000 : 12000,
-);
-const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
+async function armReadinessBudgetMs(hostMode: boolean): Promise<number> {
+  const override = positiveInteger("FM_OMP_ARM_READY_TIMEOUT_MS", 0);
+  if (override) return hostMode ? Math.max(override, 30000) : override;
+  const result = await runCommandAsync("bash", ["-lc",
+    'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ ! -f "$config_dir/x-mode.env" ] || . "$config_dir/x-mode.env"; . "$1" && fm_watcher_confirmation_budget "$2" "$3" "$4"',
+    "fm-watcher-budget", `${root}/bin/fm-wake-lib.sh`, state, `${fmRoot}/bin/fm-watch.sh`, fmHome,
+  ], { env: { ...process.env, FM_HOME: fmHome, FM_CONFIG_OVERRIDE: config, FM_STATE_OVERRIDE: state } });
+  const seconds = Number(result.stdout.trim());
+  if (result.status !== 0 || !Number.isFinite(seconds) || seconds < 0) return 0;
+  const timeout = seconds * 1000 + 2000;
+  return hostMode ? Math.max(timeout, 30000) : timeout;
+}
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
@@ -201,7 +206,6 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRetired = new WeakSet<ChildProcess>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
-const armHostMode = new WeakMap<ChildProcess, boolean>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -849,10 +853,9 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess, timeout: number): Promise<boolean> {
     const readiness = armReadiness.get(armChild);
     if (!readiness) return Promise.resolve(false);
-    const timeout = armHostMode.get(armChild) ? hostReadyTimeoutMs : armReadyTimeoutMs;
     return new Promise((resolveReady) => {
       const timer = setTimeout(() => resolveReady(false), timeout);
       timer.unref();
@@ -886,9 +889,11 @@ export default function (pi: ExtensionAPI) {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (!generationIsLive(owner)) return { failure: "" };
+      const timeoutMs = await armReadinessBudgetMs(hostModeEnabled());
+      if (!timeoutMs) return { failure: "watcher: FAILED - omp extension could not read the watcher startup budget" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      if (replacement.ok && successorChild && await waitForReadiness(successorChild, timeoutMs)) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {
@@ -974,7 +979,6 @@ export default function (pi: ExtensionAPI) {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    armHostMode.set(armChild, hostMode);
     owner.child = armChild;
     let stdout = "";
     let stderr = "";

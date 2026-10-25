@@ -394,8 +394,6 @@ run_arm() {  # <output file, or empty for none>
 SUCCESSOR_FAILURE=
 start_handling_successor() {  # <closed-arm-pid>
   local out pid deadline budget line monitor_was_on=0 attempt=0 attempts=${FM_AUTOARM_SUCCESSOR_ATTEMPTS:-2}
-  budget=${FM_ARM_CONFIRM_TIMEOUT:-30}
-  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   case "$attempts" in ''|*[!0-9]*) attempts=2 ;; esac
   [ "$attempts" -ge 1 ] || attempts=1
   if ! out=$(mktemp "$STATE/.claude-autoarm-successor.XXXXXX"); then
@@ -405,6 +403,7 @@ start_handling_successor() {  # <closed-arm-pid>
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
     : > "$out"
+    budget=$(FM_GUARD_GRACE="$GRACE" fm_watcher_confirmation_budget "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$FM_HOME")
     case $- in *m*) monitor_was_on=1 ;; esac
     set -m 2>/dev/null || true
     FM_WATCH_PREDECESSOR_ARM_PID=$1 FM_GUARD_GRACE="$GRACE" \

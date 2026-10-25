@@ -155,6 +155,7 @@ A failed confirmation is never swallowed.
 ### Readiness timeout and retry
 
 The adapter waits at most one readiness timeout per attempt.
+Unless explicitly overridden, readiness uses the shared startup budget owned by `fm_watcher_confirmation_budget` in `bin/fm-wake-lib.sh`, allowing the successor's first supervision scan to finish.
 If the successor is not ready in that time, the adapter sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
@@ -420,8 +421,7 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 ### Grace, beacon, and stop signals
 
 The default 300-second grace is unchanged.
-Only the watcher process touches `state/.last-watcher-beat`.
-No helper process can make a wedged watcher appear healthy.
+[Guard grace and the poll cadence](turnend-guard.md#guard-grace-and-the-poll-cadence) owns beacon publication, scan completion, and stalled-holder replacement safeguards.
 An arm whose own script path sits under a disposable no-mistakes validation checkout (`.no-mistakes/worktrees/`) refuses with the typed failure line before touching any state, because a watcher started there outlives the validation step and keeps writing the real home's state from a checkout about to be deleted.
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked check or a blocked `fm_backend_capture` pane read, so both run its EXIT cleanup and stop that read.

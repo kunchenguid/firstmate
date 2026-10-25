@@ -206,8 +206,9 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+Only `bin/fm-watch.sh` publishes `state/.last-watcher-beat`: it clears the predecessor's beacon when it acquires the singleton and publishes a fresh one only after completing its supervision scan, immediately before its terminal wait (`event_wait_or_sleep`).
+Startup confirmation therefore requires resumed supervision; an actionable wake that exits before the beacon is handled through the arm's delivery path instead.
+A healthy watcher's beacon ages through the terminal wait and the following scan, so slow task checks also count toward its age.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
@@ -223,11 +224,14 @@ The default never drops below the historical 300-second floor for the common sho
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.
 
 That refusal has a ceiling.
-Once the live holder's beacon is stale past `FM_WATCHER_STALL_BOUND` (default three times the grace), the re-arm takes these steps:
+Once the live holder's beacon is stale past `FM_WATCHER_STALL_BOUND` (default three times the grace), or its lock's PID record reaches that age without a first beacon, the re-arm takes these steps:
 
 1. It re-verifies the holder against the lock's recorded identity.
-2. It retires the holder with TERM, escalating only if the same stalled holder remains.
-3. It starts in the holder's place.
+2. It retires the holder and its recorded descendants, matching each child's PID and start identity even after reparenting; unrelated or reused PIDs are protected.
+3. It permits replacement only after those identities are retired, keeping lock reclamation serialized through TERM-to-KILL escalation, concurrent re-arms, and retries after interrupted eviction.
+
+The watcher records descendants while the holder is alive so a check timeout cannot erase ownership by orphaning a child before recovery.
+`tests/fm-watcher-lock.test.sh` covers delayed recovery and resumed task checks; `tests/fm-watch-arm.test.sh` covers concurrent re-arms and interrupted child retirement.
 
 A watcher wedged mid-cycle can therefore no longer refuse every replacement indefinitely.
 `bin/fm-watch.sh`'s header owns the exact wording and the survives-TERM fallback.

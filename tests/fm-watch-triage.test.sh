@@ -6165,12 +6165,14 @@ test_procevent_captured_result_surfaces_proactively() {
   local dir state out drain_out pid beacon_age
   dir=$(make_case procevent-delivery); state="$dir/state"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || fail "the fixture watcher never completed a healthy supervision scan: $(cat "$out")"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
   grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
     || fail "the captured result was never published to the durable queue"
 
-  procevent_watch_bg "$dir" "$out"
-  pid=$!
   wait_for_exit "$pid" 100 \
     || fail "a healthy watcher never surfaced a durably captured process-event result: $(cat "$out")"
   grep -F "check:" "$out" >/dev/null \

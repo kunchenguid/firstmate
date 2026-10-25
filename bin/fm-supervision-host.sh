@@ -162,7 +162,7 @@
 # registration lets turns run past the boundary up to it, any other value is
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
-# also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
+# also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (shared watcher startup budget: how long a
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
@@ -217,7 +217,6 @@ PARK_LIMIT=$(numeric_or "${FM_SUPERVISION_HOST_PARK_LIMIT:-}" "$PARK_SECONDS")
 { [ "$PARK_LIMIT" -lt 28800 ] && [ "$PARK_LIMIT" -ge "$PARK_SECONDS" ]; } 2>/dev/null || PARK_LIMIT=$PARK_SECONDS
 TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
-READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
 POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
@@ -653,13 +652,15 @@ stand_down() {  # <why>
 # Start the successor cycle and wait until it proves a live watcher. Sets
 # SUCCESSOR_WATCHER and SUCCESSOR_GENERATION (empty when the arm attached).
 start_successor() {  # <predecessor-arm-pid>
-  local deadline line
+  local deadline line budget
   SUCCESSOR_WATCHER=
   SUCCESSOR_GENERATION=
+  budget=$(fm_watcher_confirmation_budget "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$FM_HOME")
+  budget=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" "$((budget + 2))")
   start_arm "$1" || return 1
   SUCCESSOR_PID=$STARTED_ARM_PID
   SUCCESSOR_OUT=$STARTED_ARM_OUT
-  deadline=$(( $(date +%s) + READY_TIMEOUT ))
+  deadline=$(( $(date +%s) + budget ))
   while :; do
     line=$(grep -E '^watcher: (started|attached) pid=[0-9]+' "$SUCCESSOR_OUT" 2>/dev/null | head -n 1)
     if [ -n "$line" ]; then

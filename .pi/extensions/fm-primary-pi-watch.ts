@@ -56,6 +56,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -164,13 +165,16 @@ const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 // claim wins over a late branch drain (that settlement then rejects back
 // harmlessly as already-claimed-by-main).
 const branchSettlementTimeoutMs = positiveInteger("FM_BRANCH_SETTLEMENT_TIMEOUT_MS", 600000);
-// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
-// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
-// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
-const armReadyTimeoutMs = positiveInteger(
-  "FM_PI_ARM_READY_TIMEOUT_MS",
-  process.platform === "win32" ? 35000 : 12000,
-);
+async function armReadinessBudgetMs(): Promise<number> {
+  const override = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 0);
+  if (override) return override;
+  const result = await runCommandAsync("bash", ["-lc",
+    'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ ! -f "$config_dir/x-mode.env" ] || . "$config_dir/x-mode.env"; . "$1" && fm_watcher_confirmation_budget "$2" "$3" "$4"',
+    "fm-watcher-budget", `${root}/bin/fm-wake-lib.sh`, state, `${fmRoot}/bin/fm-watch.sh`, fmHome,
+  ], { env: { ...process.env, FM_HOME: fmHome, FM_CONFIG_OVERRIDE: config, FM_STATE_OVERRIDE: state } });
+  const seconds = Number(result.stdout.trim());
+  return result.status === 0 && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 + 2000 : 0;
+}
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
@@ -995,11 +999,11 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess, timeoutMs: number): Promise<boolean> {
     const readiness = armReadiness.get(armChild);
     if (!readiness) return Promise.resolve(false);
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady(false), timeoutMs);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -1031,12 +1035,14 @@ export default function (pi: ExtensionAPI) {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (!generationIsLive(owner)) return { failure: "" };
+      const timeoutMs = await armReadinessBudgetMs();
+      if (!timeoutMs) return { failure: "watcher: FAILED - Pi extension could not read the watcher startup budget" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       appendExtensionLog(
         `restore attempt=${attempt} predecessor=${predecessorArmPid || "none"} start=${replacement.ok ? `ok pid=${successorChild?.pid ?? "none"}` : "failed"}`,
       );
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      if (replacement.ok && successorChild && await waitForReadiness(successorChild, timeoutMs)) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {

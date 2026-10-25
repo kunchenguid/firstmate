@@ -54,14 +54,18 @@ start_seed_watcher() {  # <state> <fakebin> <watch-out> [poll-seconds]
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   SEED_PID=$!
   i=0
-  while [ "$i" -lt 60 ]; do
+  # Initial supervision can include a large pending-reply scan. A lock alone
+  # no longer proves readiness: wait for the scan-complete beacon, bounded by
+  # the same 60-second ceiling used by this suite's pending-reply journey.
+  while [ "$i" -lt 600 ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
       && [ -e "$state/.last-watcher-beat" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
-    || fail "seed watcher did not take the lock"
+    || fail "seed watcher did not take the lock: $(cat "$out")"
+  [ -e "$state/.last-watcher-beat" ] || fail "seed watcher did not complete its first supervision scan"
 }
 
 # Attach a real arm to the live cycle.
@@ -258,10 +262,14 @@ test_pending_reply_scan_does_not_starve_ordinary_wake() {
       rec=$(fm_pending_reply_path "$state" "$corr")
       fm_pending_reply_set "$rec" parent_status "$status" || exit 1
       fm_pending_reply_set "$rec" escalated_epoch 1 || exit 1
+      fm_pending_reply_set "$rec" phase escalated || exit 1
       fm_pending_reply_write_delivery_confirmation "$state" "$corr" attempted 1 || exit 1
     done
   ' _ "$ROOT/bin/fm-marker-lib.sh" "$ROOT/bin/fm-pending-reply-lib.sh" "$state" "$state/umer.status" "$dir/home" \
     || fail "could not create undelivered escalated pending replies"
+  # This is existing history for the pending-reply scan, not the new ordinary
+  # wake below. Let the seed complete a real scan before the arm attaches.
+  prime_status_seen "$state" "$state/umer.status" || fail "could not prime existing pending-reply history"
   start_seed_watcher "$state" "$fakebin" "$out"
   start_attached_arm "$state" "$fakebin" "$armout" 1
 
@@ -425,6 +433,91 @@ test_attached_arm_hands_a_stalled_holder_to_its_replacement() {
   wait "$holder" 2>/dev/null || true
   pass "watch-arm: an attached arm hands a holder stalled past the bound to its owner's replacement"
 }
+
+test_concurrent_rearm_waits_for_recorded_child_retirement() (
+  local mode=$1 dir state fakebin holder='' child='' first='' second='' evictor='' unrelated='' id i age
+  dir=$(make_case "concurrent-child-retirement-$mode")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0
+  export FM_GUARD_GRACE=300 FM_WATCHER_STALE_GRACE=1 FM_WATCHER_STALL_BOUND=3
+  export FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=30
+  trap 'FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null 2>&1 || true
+    for id in "$holder" "$child" "$first" "$second" "$evictor" "$unrelated"; do
+      [ -z "$id" ] || kill -KILL "$id" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true' EXIT
+  sleep 300 &
+  unrelated=$!
+  cat > "$state/hung.check.sh" <<'SH'
+#!/usr/bin/env bash
+python3 - "$FM_HOME/child.pid" <<'PYTHON'
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", """
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(sys.argv[1], "w") as out:
+    out.write(str(os.getpid()))
+time.sleep(300)
+""", sys.argv[1]], start_new_session=True)
+child.wait()
+PYTHON
+SH
+  chmod 0700 "$state/hung.check.sh"
+  "$ROOT/bin/fm-check-register.sh" hung >/dev/null || fail "register concurrent-rearm check"
+  PATH="$fakebin:$PATH" "$WATCH" > "$dir/holder.out" 2>&1 &
+  holder=$!
+  for ((i=0; i<150; i++)); do
+    [ ! -s "$dir/child.pid" ] || break
+    sleep 0.1
+  done
+  child=$(cat "$dir/child.pid") || fail "holder never entered the hung check"
+  kill -STOP "$holder" "$child" || fail "could not stop the private holder and child"
+  for ((i=0; i<50; i++)); do
+    grep -q "^$child$(printf '\t')" "$state/.watch.lock/children" && break
+    sleep 0.1
+  done
+  grep -q "^$child$(printf '\t')" "$state/.watch.lock/children" || fail "child ownership was not recorded"
+  for ((i=0; i<50; i++)); do
+    age=$(bash -c '. "$1"; fm_watcher_progress_age "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$state")
+    [ "$age" -lt 3 ] || break
+    sleep 0.1
+  done
+  "$ROOT/bin/fm-check-unregister.sh" hung >/dev/null || fail "retire concurrent-rearm check"
+  PATH="$fakebin:$PATH" FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH_ARM" > "$dir/first.out" 2>&1 &
+  first=$!
+  for ((i=0; i<100; i++)); do
+    [ -n "$evictor" ] || evictor=$(cat "$state/.watch.lock.steal/pid" 2>/dev/null || true)
+    is_live_non_zombie "$holder" || break
+    sleep 0.1
+  done
+  is_live_non_zombie "$holder" && fail "the first arm did not retire the stopped holder"
+  is_live_non_zombie "$child" || fail "the child did not survive into the TERM grace"
+  [ "$mode" != interrupted ] || { [ -n "$evictor" ] && kill -KILL "$evictor"; } \
+    || fail "could not interrupt the partial eviction"
+  PATH="$fakebin:$PATH" FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH_ARM" > "$dir/second.out" 2>&1 &
+  second=$!
+  for ((i=0; i<150; i++)); do
+    is_live_non_zombie "$child" || break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$holder" ] \
+      || fail "a concurrent arm reclaimed the lock before child retirement"
+    ! grep -Eq '^watcher: (started|attached) pid=' "$dir/first.out" "$dir/second.out" \
+      || fail "a concurrent arm confirmed recovery while the child survived"
+    sleep 0.1
+  done
+  is_live_non_zombie "$child" && fail "the recorded TERM-resistant child survived recovery"
+  for ((i=0; i<150; i++)); do
+    grep -q '^watcher: started pid=' "$dir/first.out" "$dir/second.out" && break
+    sleep 0.1
+  done
+  grep -q '^watcher: started pid=' "$dir/first.out" "$dir/second.out" \
+    || fail "recovery did not resume after child retirement: $(cat "$dir/first.out" "$dir/second.out")"
+  is_live_non_zombie "$unrelated" || fail "recovery signalled the unrelated process"
+  bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$WATCH" "$dir" \
+    || fail "recovery did not produce a fresh identity-bound heartbeat"
+  pass "watch-arm: concurrent re-arm preserves the lock through child retirement ($mode)"
+)
 
 test_rearm_evicts_a_stalled_holder_that_inherited_ignored_term() (
   local dir state fakebin holder identity armout armpid status i
@@ -675,15 +768,16 @@ test_slow_rearm_recovery_is_still_surfaced() {
   wait "$first_arm" 2>/dev/null || true
   append_wake "$state" check startup-network 'check: startup-network before a slow re-arm'
 
-  # Removing the dead watcher's beacon makes the delay start exactly when the
-  # re-armed watcher publishes its own, so its startup and the arm's confirmation
-  # stay at full speed and only the work after confirmation is slowed.
+  # Delay only the replacement's recovery scan, after its lock identity is
+  # published. A recovery wake exits before a scan-complete beacon, so the
+  # predecessor's beacon must not control whether this delay actually runs.
   rm -f "$state/.last-watcher-beat"
   for tool in mktemp readlink; do
     real=$(command -v "$tool") || fail "no $tool to delay"
     cat > "$fakebin/$tool" <<SH
 #!/bin/sh
-[ -e "$state/.last-watcher-beat" ] && sleep 0.6
+holder=\$(cat "$state/.watch.lock/pid" 2>/dev/null)
+[ "\$holder" != "$watcher_pid" ] && [ -s "$state/.watch.lock/pid-identity" ] && sleep 0.6
 exec "$real" "\$@"
 SH
     chmod +x "$fakebin/$tool"
@@ -1865,6 +1959,8 @@ test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
+test_concurrent_rearm_waits_for_recorded_child_retirement uninterrupted || exit 1
+test_concurrent_rearm_waits_for_recorded_child_retirement interrupted || exit 1
 test_rearm_evicts_a_stalled_holder_that_inherited_ignored_term || exit 1
 test_rearm_does_not_kill_a_holder_that_changed_during_term_grace identity || exit 1
 test_rearm_does_not_kill_a_holder_that_changed_during_term_grace lock || exit 1

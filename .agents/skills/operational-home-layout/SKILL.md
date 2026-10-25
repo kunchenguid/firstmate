@@ -127,7 +127,7 @@ state/               runtime records and signals; gitignored
   .secondmate-relaunch-<id> .secondmate-relaunch-bound-<id>   durable relaunch history and parked-bound state; never touch (bin/fm-secondmate-liveness-lib.sh owns the ledger contract)
   .model-outages/    watcher-owned OpenCode model-error scan records (per-lane, per-episode alert records); the alerts add-on owns them; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
-  .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .last-watcher-beat watcher liveness beacon; publication and freshness: docs/turnend-guard.md "Guard grace and the poll cadence"
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

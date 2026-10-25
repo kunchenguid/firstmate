@@ -882,8 +882,18 @@ while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
   sleep 0.05
   i=$((i + 1))
 done
-[ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
-  || fail "the replacement restart watcher did not begin polling"
+# A home whose predecessor went down with queued wakes re-arms by announcing
+# that recovery and exiting before it can beat; the arm path confirms that
+# episode by the delivery rather than by a beacon. Require the announcement,
+# then let the block below prove the replacement that actually supervises
+# begins polling.
+if [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ]; then
+  grep -q 'check: rearm-resurface' "$TMP_ROOT/restart-watch-two.out" 2>/dev/null \
+    || fail "the replacement restart watcher neither began polling nor announced recovery: $(cat "$TMP_ROOT/restart-watch-two.err" 2>/dev/null)"
+  # Stand in for the harness draining what it received, so the replacement is
+  # the ordinary supervising watcher this scenario is about.
+  : > "$RESTART_HOME/state/.wake-queue"
+fi
 sleep 4
 [ ! -s "$RESTART_HOME/state/.home-summary-refresh.log" ] \
   || fail "watcher restart queued refreshes behind a live publication lock: $(cat "$RESTART_HOME/state/.home-summary-refresh.log")"

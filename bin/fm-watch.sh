@@ -195,7 +195,9 @@
 # starts in its place, printing "watcher: replaced stalled pid <N> (...)". A
 # holder that survives the five-second TERM grace is re-verified as the same
 # stalled lock holder before KILL; an unproved or surviving holder keeps the
-# refusal and the nonzero exit.
+# refusal and the nonzero exit. The replacement safeguards, including recorded
+# child retirement and missing-beacon handling, are owned by
+# docs/turnend-guard.md "Guard grace and the poll cadence".
 # Once per poll the watcher also checks that its home (when it existed at
 # start), its state directory, and its own bin directory still exist; when one
 # is gone it logs "watcher: exiting - <what> no longer exists: <path>" to stderr
@@ -318,10 +320,9 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
+# Beacon publication and scan timing are owned by docs/turnend-guard.md
+# "Guard grace and the poll cadence".
+# fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
 # transitively above) is the single owner of the max(300, poll+60)
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
@@ -2906,6 +2907,65 @@ if ! fm_procevent_launch_confirm_seconds >/dev/null; then
   exit 1
 fi
 
+watcher_process_table() {
+  local proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} stat_path stat_line pid
+  local -a fields
+  if [ -r "$proc_root/$$/stat" ]; then
+    for stat_path in "$proc_root"/[0-9]*/stat; do
+      read -r stat_line < "$stat_path" 2>/dev/null || continue
+      read -r -a fields <<< "${stat_line##*)}"
+      [ "${#fields[@]}" -ge 2 ] || continue
+      pid=${stat_path%/stat}
+      printf '%s %s\n' "${pid##*/}" "${fields[1]}"
+    done
+  else
+    ps -A -o pid= -o ppid=
+  fi
+}
+
+
+watcher_descendants() {
+  local root=$1 excluded=${2:-0} table
+  table=$(watcher_process_table) || return 1
+  printf '%s\n' "$table" | awk -v root="$root" -v excluded="$excluded" '
+    { parent[$1] = $2 }
+    END {
+      for (pid in parent) {
+        p = pid; depth = 0
+        while (p != "" && p != "0" && p != "1" && depth++ < 64) {
+          if (p == excluded) break
+          p = parent[p]
+          if (p == root) { print pid; break }
+        }
+      }
+    }'
+}
+
+watcher_record_children() {
+  local root=$1 identity=$2 ledger=$3 recorder child child_identity current descendants
+  trap - EXIT HUP INT TERM
+  fm_current_pid recorder || return 1
+  while fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$root" "$FM_HOME" \
+    && [ "$FM_WATCHER_MATCHED_IDENTITY" = "$identity" ]; do
+    descendants=$(watcher_descendants "$root" "$recorder") || return 1
+    {
+      for child in $descendants; do
+        child_identity=$(fm_watcher_child_identity "$child" 2>/dev/null) || continue
+        printf '%s\t%s\n' "$child" "$child_identity"
+      done
+      while IFS="$(printf '\t')" read -r child child_identity; do
+        fm_pid_alive "$child" || continue
+        current=$(fm_watcher_child_identity "$child" 2>/dev/null) || continue
+        [ "$current" = "$child_identity" ] || continue
+        printf '%s\t%s\n' "$child" "$child_identity"
+      done < "$ledger"
+    } | awk '!seen[$0]++' > "$ledger.next" || return 1
+    mv -f "$ledger.next" "$ledger" || return 1
+    sleep 1
+  done
+}
+
+
 # evict_stalled_holder <pid>: retire a live lock holder whose beacon stalled past
 # WATCHER_STALL_BOUND. The pid is signalled only while it still proves the
 # lock's own recorded identity (fm_watcher_lock_matches_pid: this home, this
@@ -2913,53 +2973,61 @@ fi
 # is never touched. After a five-second TERM grace, recheck the lock, original
 # identity, and stalled beacon before KILL: Bash can inherit ignored TERM and
 # cannot reset it with `trap - TERM`. Never use a name or pattern match.
-# Succeeds only once the holder has exited within the bounded waits.
+# Succeeds only once the holder and identity-matched descendants are retired
+# within the bounded waits; the steal mutex excludes concurrent reclamation.
 evict_stalled_holder() {
-  local pid=$1 i=0 identity
+  local status
+  fm_lock_try_acquire_steal_mutex "$WATCH_LOCK.steal" || return 1
+  evict_stalled_holder_locked "$1"
+  status=$?
+  fm_lock_release "$WATCH_LOCK.steal"
+  return "$status"
+}
+
+evict_stalled_holder_locked() {
+  local pid=$1 i=0 identity descendants child child_identity recorded line
   fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
+  descendants=$(watcher_descendants "$pid") || return 1
+  recorded=$(awk '!seen[$0]++' "$WATCH_LOCK/children" 2>/dev/null || true)
+  for child in $descendants; do
+    child_identity=$(fm_watcher_child_identity "$child" 2>/dev/null) || continue
+    printf -v line '%s\t%s' "$child" "$child_identity"
+    recorded="$recorded"$'\n'"$line"
+  done
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
+  [ "$FM_WATCHER_MATCHED_IDENTITY" = "$identity" ] || return 1
   kill -TERM "$pid" 2>/dev/null || return 1
   while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
-  fm_pid_alive "$pid" || return 0
-  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null)" = "$pid" ] || return 1
-  fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
-  [ "$FM_WATCHER_MATCHED_IDENTITY" = "$identity" ] || return 1
-  [ "$(fm_path_age "$BEAT")" -ge "$WATCHER_STALL_BOUND" ] || return 1
-  # TERM-ignoring stalled holders require escalation after the grace and identity checks.
-  kill -KILL "$pid" || return 1
-  i=0
-  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  ! fm_pid_alive "$pid"
+  if fm_pid_alive "$pid"; then
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null)" = "$pid" ] || return 1
+    fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
+    [ "$FM_WATCHER_MATCHED_IDENTITY" = "$identity" ] || return 1
+    [ "$(fm_watcher_progress_age "$STATE")" -ge "$WATCHER_STALL_BOUND" ] || return 1
+    kill -KILL "$pid" || return 1
+  fi
+  fm_watcher_retire_child_identities "$recorded" "$pid"
 }
 
 EVICTED_PID=
 EVICTED_BEAT_AGE=
-BEAT="$STATE/.last-watcher-beat"
 while ! fm_lock_try_acquire "$WATCH_LOCK"; do
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-    if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        # One eviction per arm: the retry re-reads the lock and beacon, so a
-        # holder that exited leaves a dead-pid lock the normal reclaim takes,
-        # and a rival arm that won first reads as a fresh running watcher.
-        if [ -z "$EVICTED_PID" ] && [ "$beat_age" -ge "$WATCHER_STALL_BOUND" ] \
-          && evict_stalled_holder "$FM_LOCK_HELD_PID"; then
-          EVICTED_PID=$FM_LOCK_HELD_PID
-          EVICTED_BEAT_AGE=$beat_age
-          continue
-        fi
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
-        exit 1
+    beat_age=$(fm_watcher_progress_age "$STATE")
+    if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
+      # One eviction per arm: the retry re-reads the lock and beacon, so a
+      # holder that exited leaves a dead-pid lock the normal reclaim takes,
+      # and a rival arm that won first reads as a fresh running watcher.
+      if [ -z "$EVICTED_PID" ] && [ "$beat_age" -ge "$WATCHER_STALL_BOUND" ] \
+        && evict_stalled_holder "$FM_LOCK_HELD_PID"; then
+        EVICTED_PID=$FM_LOCK_HELD_PID
+        EVICTED_BEAT_AGE=$beat_age
+        continue
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
+      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
       exit 1
     fi
     echo "watcher: already running pid $FM_LOCK_HELD_PID"
@@ -3061,8 +3129,14 @@ pr_poll_publish_release() {
   PR_POLL_PUBLISH_LOCK=
 }
 
+WATCH_CHILD_RECORDER_PID=
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  if [ -n "$WATCH_CHILD_RECORDER_PID" ]; then
+    kill -TERM "$WATCH_CHILD_RECORDER_PID" 2>/dev/null || true
+    wait "$WATCH_CHILD_RECORDER_PID" 2>/dev/null || true
+    WATCH_CHILD_RECORDER_PID=
+  fi
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -3091,12 +3165,17 @@ watcher_stop_signals
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+rm -f "$STATE/.last-watcher-beat" || exit 1
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+WATCH_OWNER_DIR=$(fm_lock_link_owner "$WATCH_LOCK") || exit 1
+: > "$WATCH_OWNER_DIR/children" || exit 1
+watcher_record_children "$WATCHER_PID" "$FM_WATCH_DELIVERY_IDENTITY" "$WATCH_OWNER_DIR/children" </dev/null >/dev/null 2>&1 &
+WATCH_CHILD_RECORDER_PID=$!
 if declare -F fm_memory_sampler_ensure >/dev/null; then fm_memory_sampler_ensure || triage_log "host memory sampler failed to start"; fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
@@ -3348,10 +3427,6 @@ while :; do
   host_memory_surface_queued
   if declare -F fm_model_outage_tick >/dev/null; then fm_model_outage_tick || triage_log "model-error observation failed"; fi
   own_queue_resurface || { echo "watcher: own wake-queue observation failed" >&2; exit 1; }
-
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -3874,6 +3949,12 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Confirm liveness only after a complete supervision scan. In particular a
+  # replacement must not inherit its predecessor's beacon or announce recovery
+  # while its task checks are still blocked. Actionable wakes exit above and
+  # are confirmed by the arm's delivery path instead.
+  touch "$STATE/.last-watcher-beat" || exit 1
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.

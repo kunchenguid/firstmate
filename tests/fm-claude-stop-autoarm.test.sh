@@ -546,6 +546,50 @@ test_attached_cycle_end_starts_handling_successor() {
   pass "auto-arm: an attached cycle's end starts a handling successor named after the closed arm before the rewake"
 }
 
+test_handling_successor_waits_for_real_slow_scan() (
+  local dir out status id pid
+  dir=$(make_primary_dir "$TMP_ROOT/successor-slow-real-scan")
+  fm_test_track_watcher_state "$dir/state"
+  export FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_ROOT_OVERRIDE="$dir"
+  export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=30 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999
+  unset FM_ARM_CONFIRM_TIMEOUT
+  mkdir -p "$dir/fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/tmux"
+  chmod +x "$dir/fakebin/tmux"
+  cat > "$dir/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+if [ -n "\${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf '%s\\n' "\$\$" >> "\$FM_HOME/state/successor-ran"
+fi
+export FM_ROOT_OVERRIDE="$ROOT"
+exec "$ROOT/bin/fm-watch-arm.sh" "\$@"
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  for id in one two three; do
+    printf '#!/usr/bin/env bash\nsleep 25\nprintf "%%s\\n" %s >> "$FM_HOME/scanned"\n' "$id" > "$dir/state/$id.check.sh"
+    chmod 0700 "$dir/state/$id.check.sh"
+    "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null || fail "register slow successor check $id"
+  done
+  printf 'pending:downtime:slow.1.aaa\n' > "$dir/state/.watcher-down"
+  chmod 600 "$dir/state/.watcher-down"
+  printf '%s\t1\tcheck\tseed\tcheck: seed recovery\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  out=$(PATH="$dir/fakebin:$PATH" run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a slow real handling successor must preserve the recovery wake: $out"
+  assert_contains "$out" 'check: rearm-resurface' "the foreground recovery wake must reach Claude"
+  assert_not_contains "$out" 'did not confirm a live watcher' "the hook must wait for the complete successor scan"
+  for id in one two three; do
+    grep -qx "$id" "$dir/scanned" || fail "hook returned before successor supervised $id"
+  done
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] \
+    || fail "legitimate startup triggered a duplicate successor"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$ROOT/bin/fm-watch.sh" "$dir" \
+    || fail "hook confirmed without a fresh identity-bound heartbeat"
+  pid=$(cat "$dir/state/.watch.lock/pid")
+  kill -TERM "$pid" 2>/dev/null || true
+  pass "auto-arm: handling successor completes three slow real checks before recovery confirmation"
+)
+
 test_unconfirmed_handling_successor_still_rewakes() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/successor-unconfirmed")
@@ -1778,6 +1822,7 @@ test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
+test_handling_successor_waits_for_real_slow_scan
 test_unconfirmed_handling_successor_still_rewakes
 test_transient_successor_failure_confirms_on_relaunch
 test_failed_close_rewakes_with_failure_banner

@@ -23,7 +23,9 @@
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
-# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
+# single source of truth, shared with fm-watch.sh and fm-guard.sh). Beacon
+# publication follows docs/turnend-guard.md "Guard grace and the poll cadence".
+# After confirmation this script prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
@@ -127,14 +129,6 @@ WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
-# How long to wait for a freshly forked watcher to acquire the lock and beat.
-# Git Bash/MSYS pays a much higher fork cost while the watcher completes its
-# required pre-lock migration, so its bounded default covers that cold start.
-case "${OSTYPE:-}" in
-  msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
-  *) ARM_CONFIRM_DEFAULT=10 ;;
-esac
-CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # The beacon age at which the watcher's own re-arm evicts a live holder; an
@@ -324,7 +318,7 @@ wait_for_healthy_successor() {
   local deadline
   # date(1) exposes whole seconds. Add one rounding second so a timeout of one
   # second cannot collapse to a few milliseconds when called near a boundary.
-  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  deadline=$(( $(date +%s) + $(fm_watcher_confirmation_budget "$STATE" "$WATCH" "$FM_HOME") + 1 ))
   while :; do
     healthy_watcher && return 0
     [ "$(date +%s)" -ge "$deadline" ] && return 1
@@ -671,7 +665,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 }
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+deadline=$(( $(date +%s) + $(fm_watcher_confirmation_budget "$STATE" "$WATCH" "$FM_HOME") + 1 ))
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
