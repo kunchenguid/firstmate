@@ -181,3 +181,4 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
 | `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
 | `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `juggernaut-name-gate.sh` | The Juggernaut rename's done gate: report and fail while the pre-rename product name survives in tracked content or tracked file names, allow-listing only the upstream credit line, git history, and named compatibility aliases |
