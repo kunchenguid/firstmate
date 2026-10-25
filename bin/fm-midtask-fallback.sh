@@ -67,6 +67,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -123,12 +125,6 @@ fallback_mode() {
     off|same|lower) printf '%s' "$mode" ;;
     *) die "config/crew-dispatch.json mid_task_fallback is invalid" ;;
   esac
-}
-
-last_status_line() {
-  local f=$1
-  [ -f "$f" ] || return 0
-  awk 'NF { line = $0 } END { print line }' "$f"
 }
 
 limit_adapter_matches() {
@@ -267,17 +263,10 @@ failed_candidate() {
   return 1
 }
 
-status_verb() {
-  local verb=${1%%:*}
-  verb=${verb%%\[*}
-  verb=${verb#"${verb%%[![:space:]]*}"}
-  printf '%s' "${verb%"${verb##*[![:space:]]}"}"
-}
-
 status_has_key() {
   local id=$1 verb=$2 key=$3 line
   line=$(last_status_line "$(status_path "$id")")
-  [ "$(status_verb "$line")" = "$verb" ] || return 1
+  [ "$(status_line_verb "$line")" = "$verb" ] || return 1
   case "$line" in
     *"[key=$key]"*) return 0 ;;
     *) return 1 ;;
@@ -290,7 +279,7 @@ worker_finished_or_waiting() {
   case "$line" in
     *"[key=midtask-fallback]"*) return 1 ;;
   esac
-  verb=$(status_verb "$line")
+  verb=$(status_line_verb "$line")
   case "$verb" in
     done|failed|needs-decision|blocked) return 0 ;;
     *) return 1 ;;
