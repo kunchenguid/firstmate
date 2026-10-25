@@ -171,6 +171,45 @@ test_missing_slot_directory_is_slot_lost() {
   pass "fm-slot-audit: a recorded slot directory that is gone reads slot-lost"
 }
 
+test_marked_stale_record_on_an_unclaimed_slot_stays_slot_lost() {
+  local dir out
+  dir=$(make_pool_case marked)
+  write_task "$dir" t-marked
+  # The claimant's teardown marked this record stale, then returned the slot
+  # and dropped its claim, so the claim alone now reads absent.
+  printf 'slot_stale=1\nslot_stale_by=t-claimant\nslot_stale_slot=%s\n' "$(cd "$dir/pool/1/project" && pwd -P)" \
+    >> "$dir/home/state/t-marked.meta"
+  printf '%s\n' "$dir/project" > "$dir/cwd"
+  FM_FAKE_POOL_JSON=$(pool_json "$dir/pool/1/project" available)
+  out=$(run_audit "$dir" t-marked) || fail "audit of a marked record failed: $out"
+  assert_equals "slot-audit: t-marked slot=$dir/pool/1/project claim=absent worker=outside:$dir/project pool=available verdict=slot-lost" "$out" \
+    "a record marked stale on its slot is slot-lost even after the claim is gone"
+  pass "fm-slot-audit: a record carrying the stale-slot marker for its slot reads slot-lost"
+}
+
+test_other_home_lines_keep_the_exact_format_and_json_carries_the_home() {
+  local dir out mate
+  dir=$(make_pool_case other-home)
+  mate="$dir/mate-home"
+  mkdir -p "$mate/state" "$mate/data"
+  printf '%s\n' "- mate - fixture (home: $mate; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$mate/state/t-far.meta" \
+    "window=fmses:fm-t-far" "endpoint_task_id=t-far" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=scout"
+  claim_slot "$dir" t-far
+  printf '%s\n' "$dir/pool/1/project" > "$dir/cwd"
+  FM_FAKE_POOL_JSON=$(pool_json "$dir/pool/1/project" in-use)
+  out=$(run_audit "$dir" --all) || fail "audit across homes failed: $out"
+  assert_equals "slot-audit: t-far slot=$dir/pool/1/project claim=mine worker=in-slot pool=in-use verdict=ok" "$out" \
+    "a record from another home prints the exact line format, with no extra field"
+  if command -v jq >/dev/null 2>&1; then
+    out=$(run_audit "$dir" --all --json) || fail "json audit across homes failed: $out"
+    assert_equals "$(cd "$mate" && pwd -P)" "$(printf '%s' "$out" | jq -r '.[0].home')" "json carries the other home"
+  fi
+  pass "fm-slot-audit: another home's record keeps the exact line format and --json carries its home"
+}
+
 test_records_without_a_pool_slot_are_skipped() {
   local dir out
   dir=$(make_pool_case skipped)
@@ -257,6 +296,8 @@ test_available_pool_and_drifted_worker_combine
 test_pool_read_failure_and_no_pool_are_distinct
 test_endpoint_without_a_path_is_no_endpoint
 test_missing_slot_directory_is_slot_lost
+test_marked_stale_record_on_an_unclaimed_slot_stays_slot_lost
+test_other_home_lines_keep_the_exact_format_and_json_carries_the_home
 test_records_without_a_pool_slot_are_skipped
 test_json_output_carries_every_column
 test_usage_errors_and_unknown_task

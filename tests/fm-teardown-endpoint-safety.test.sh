@@ -1593,8 +1593,14 @@ test_claimed_slot_with_stale_other_record_tears_down_and_flags_it() {
   assert_absent "$dir/pool/1/.fm-slot-owner" "the claimant's spent claim was left behind"
   assert_absent "$dir/home/state/$id.meta" "the claimant's own record was left behind"
   assert_present "$dir/home/state/$other.meta" "the stale record was removed"
-  cmp -s "$dir/other.meta.before" "$dir/home/state/$other.meta" \
-    || fail "the stale record's bytes changed"
+  grep -v '^slot_stale' "$dir/home/state/$other.meta" | cmp -s "$dir/other.meta.before" - \
+    || fail "the stale record changed beyond its stale-slot marker: $(cat "$dir/home/state/$other.meta")"
+  grep -Eq '^slot_stale=[0-9]+$' "$dir/home/state/$other.meta" \
+    || fail "the stale record carries no slot_stale= marker: $(cat "$dir/home/state/$other.meta")"
+  grep -Fxq "slot_stale_by=$id" "$dir/home/state/$other.meta" \
+    || fail "the stale-slot marker does not name the claimant: $(cat "$dir/home/state/$other.meta")"
+  grep -Fxq "slot_stale_slot=$(cd "$dir/worktree" && pwd -P)" "$dir/home/state/$other.meta" \
+    || fail "the stale-slot marker does not name the slot: $(cat "$dir/home/state/$other.meta")"
   kill -0 "$worker" 2>/dev/null || fail "the stale task's worker was killed"
   assert_contains "$(cat "$dir/stderr")" "$other" "the warning should name the stale task"
   assert_contains "$(cat "$dir/stderr")" "stale" "the warning should call the record stale"
@@ -1704,6 +1710,8 @@ test_claimant_tears_down_first_then_stale_record_retires() {
     || fail "claimant teardown did not return its slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$id" "the claimant's warning should name the stale record"
   assert_contains "$(cat "$dir/stderr")" "stale" "the claimant's warning should call it stale"
+  grep -Fxq "slot_stale_by=$other" "$dir/home/state/$id.meta" \
+    || fail "the claimant's teardown did not mark the stale record: $(cat "$dir/home/state/$id.meta")"
 
   : > "$dir/runtime.log"
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
@@ -1775,6 +1783,33 @@ test_records_only_refuses_while_own_chain_runs_in_slot() {
   pass "fm-teardown --records-only: a task whose own chain still idles in its slot needs the full teardown"
 }
 
+test_records_only_refuses_unlanded_work_in_its_own_slot_even_with_force() {
+  local dir id=dirty-task rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case records-only-dirty)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" absent
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  claim_pool_slot "$dir" "$id"
+  printf 'unsaved\n' > "$dir/worktree/uncommitted-work"
+
+  set +e
+  run_case_flags "$dir" "$id" --force --records-only > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--records-only retired a ship record whose own slot holds uncommitted work"
+  assert_contains "$(cat "$dir/stderr")" "has uncommitted changes" "the refusal should be the ordinary unlanded-work refusal"
+  assert_contains "$(cat "$dir/stderr")" "--force does not lift this" "the refusal should say --force does not lift it"
+  assert_present "$dir/home/state/$id.meta" "--records-only removed the record before refusing"
+  assert_present "$dir/pool/1/.fm-slot-owner" "--records-only dropped the claim before refusing"
+  assert_present "$dir/worktree/uncommitted-work" "--records-only discarded the uncommitted work"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--records-only returned the slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown --records-only: unlanded work in the task's own slot refuses, and --force does not lift it"
+}
+
 test_records_only_refuses_without_dead_endpoint_proof() {
   local dir id=unproven-task rc
   dir=$(make_case records-only-unproven)
@@ -1828,6 +1863,7 @@ test_forced_teardown_does_not_override_foreign_process_refusal
 test_claimant_tears_down_first_then_stale_record_retires
 test_records_only_retires_dead_record_without_touching_slot
 test_records_only_refuses_while_own_chain_runs_in_slot
+test_records_only_refuses_unlanded_work_in_its_own_slot_even_with_force
 test_records_only_refuses_without_dead_endpoint_proof
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

@@ -21,13 +21,14 @@
 #   <task-id>  audit one record in this home (state/<task-id>.meta).
 #   --all      audit every record in this home, then every record in each local
 #              Firstmate home registered below the local root
-#              (bin/fm-wake-lib.sh's fm_local_firstmate_state_dirs); a record
-#              from another home carries a trailing ` home=<path>` field.
-#              When that walk cannot be proved, this home is audited alone and
+#              (bin/fm-wake-lib.sh's fm_local_firstmate_state_dirs). Every
+#              line keeps the exact format below; a record's home is carried
+#              only in --json (empty for this home). When that walk cannot be proved, this home is audited alone and
 #              the reason is printed on stderr.
 #   --json     print a JSON array of objects (task, slot, claim, claimant,
 #              worker, worker_cwd, pool, verdict, home) instead of lines;
-#              requires jq.
+#              home is the record's Firstmate home when it is not this one.
+#              Requires jq.
 #   --no-pool  skip the `treehouse status --json` read; pool= prints `skipped`
 #              and the verdict is computed from the claim and worker only.
 #              bin/fm-crew-state.sh uses this on every state read.
@@ -53,10 +54,15 @@
 #            missing: the recorded path no longer exists although its pool
 #            state file does.
 #   verdict  ok, or a comma-separated list of every hazard that applies:
-#            slot-lost          the claim names another task, or the slot path
-#                               is gone: the record is stale and the task
-#                               needs a fresh slot
+#            slot-lost          the claim names another task, the slot path
+#                               is gone (pool=missing), or the record carries
+#                               the slot_stale= marker a teardown wrote when
+#                               the slot's claimant proved this record stale
+#                               (bin/fm-teardown.sh, slot ownership): the
+#                               record is stale and the task needs a fresh slot
 #                               (bin/fm-control.sh <id> relaunch --fresh-slot).
+#                               With --no-pool a gone path still reads
+#                               pool=missing and slot-lost.
 #            slot-unprotected   the claim is absent, or treehouse lists the
 #                               slot as available: the next `treehouse get`
 #                               on the pool can hand it out while this record
@@ -202,7 +208,6 @@ emit_record() {  # <id> <slot> <claim> <claimant> <worker> <worker-cwd> <pool> <
   [ "$claim" != other ] || claim_field="other:$claimant"
   [ "$worker" != outside ] || worker_field="outside:$worker_cwd"
   line="slot-audit: $id slot=$slot claim=$claim_field worker=$worker_field pool=$pool verdict=$verdict"
-  [ -z "$home" ] || line="$line home=$home"
   if [ "$JSON" = 1 ]; then
     JSON_ROWS="$JSON_ROWS$(jq -n -c --arg task "$id" --arg slot "$slot" --arg claim "$claim" \
       --arg claimant "$claimant" --arg worker "$worker" --arg worker_cwd "$worker_cwd" \
@@ -259,7 +264,7 @@ audit_record() {  # <meta-path> <home-suffix>
       esac
     fi
   fi
-  if [ "$claim" = other ] || [ "$pool" = missing ]; then
+  if [ "$claim" = other ] || [ "$pool" = missing ] || fm_slot_stale_marker_names "$meta" "$slot"; then
     verdict="slot-lost"
   else
     verdict=

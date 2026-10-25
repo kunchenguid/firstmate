@@ -3175,7 +3175,6 @@ EOF
 #!/usr/bin/env bash
 printf 'slot-audit: parked slot=/pool/3/proj claim=other:claimant worker=outside:/proj pool=in-use verdict=slot-lost\n'
 printf 'slot-audit: healthy slot=/pool/4/proj claim=mine worker=in-slot pool=in-use verdict=ok\n'
-printf 'slot-audit: mate-task slot=/pool/5/proj claim=mine worker=in-slot pool=in-use verdict=ok home=/other/home\n'
 printf 'slot-audit: drifted slot=/pool/6/proj claim=absent worker=outside:/proj pool=available verdict=slot-unprotected,worker-outside-slot\n'
 SH
   chmod +x "$fakebin/fm-slot-audit-fake.sh"
@@ -3186,7 +3185,6 @@ SH
     "a slot-lost record should be listed verbatim"
   assert_contains "$out" "verdict=slot-unprotected,worker-outside-slot" "a combined hazard should be listed"
   assert_not_contains "$out" "slot-audit: healthy" "an ok record should be left out"
-  assert_not_contains "$out" "slot-audit: mate-task" "an ok record from another home should be left out"
 
   cat > "$fakebin/fm-slot-audit-fake.sh" <<'SH'
 #!/usr/bin/env bash

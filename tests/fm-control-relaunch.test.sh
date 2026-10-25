@@ -3037,6 +3037,32 @@ test_fresh_slot_refuses_before_stopping_when_the_slot_still_reads_as_the_tasks_o
   pass "fm-control relaunch --fresh-slot: a slot the task still owns refuses before anything is stopped"
 }
 
+test_fresh_slot_accepts_an_unclaimed_slot_only_when_the_record_is_marked_stale() {
+  local dir out rc=0 id=fs6
+  dir=$(make_fresh_slot_case fresh-slot-unmarked "$id")
+  rm -f "$dir/pool/1/.fm-slot-owner"
+  printf 'slot_stale=1\nslot_stale_by=finished\nslot_stale_slot=%s\n' "$dir/pool/9/proj" >> "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "move me") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--fresh-slot rebound an unclaimed slot no marker names"$'\n'"$out"
+  assert_contains "$out" "still reads as its own (claim: absent)" "the refusal should say the unclaimed slot is not proven lost"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent was stopped before the refusal"
+  [ ! -e "$dir/fake/treehouse.log" ] || fail "treehouse was called on a refusal: $(cat "$dir/fake/treehouse.log")"
+
+  rc=0
+  id=fs7
+  dir=$(make_fresh_slot_case fresh-slot-marked "$id")
+  rm -f "$dir/pool/1/.fm-slot-owner"
+  printf 'slot_stale=1\nslot_stale_by=finished\nslot_stale_slot=%s\n' "$dir/pool/1/proj" >> "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "your slot was returned after a restart") || rc=$?
+  expect_code 0 "$rc" "a fresh-slot relaunch of a record marked stale should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/2/proj" ] \
+    || fail "the marked record was not rebound to the fresh slot: $(meta_field "$dir" "$id" worktree)"
+  assert_grep "task=$id" "$dir/pool/2/.fm-slot-owner" "the fresh slot was not claimed for the task"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the old slot was claimed by the rebind"
+  assert_no_grep '^slot_stale' "$dir/home/state/$id.meta" "the rebind kept the stale-slot marker"
+  pass "fm-control relaunch --fresh-slot: an unclaimed slot rebinds only for a record marked stale on it, and the rebind drops the marker"
+}
+
 test_fresh_slot_failure_to_acquire_names_the_stopped_state() {
   local dir out rc=0 id=fs3
   dir=$(make_fresh_slot_case fresh-slot-pool-full "$id")
@@ -3224,5 +3250,6 @@ test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
 test_fresh_slot_relaunch_rebinds_the_record_and_leaves_the_old_slot_alone
 test_fresh_slot_refuses_before_stopping_when_the_slot_still_reads_as_the_tasks_own
+test_fresh_slot_accepts_an_unclaimed_slot_only_when_the_record_is_marked_stale
 test_fresh_slot_failure_to_acquire_names_the_stopped_state
 test_fresh_slot_relaunch_is_allowed_on_a_captain_held_item

@@ -110,7 +110,13 @@
 #              outcome names the old slot as left to its claimant. A slot
 #              whose claim still names this task or is absent refuses before
 #              anything is stopped, because nothing proves it lost: a plain
-#              relaunch re-enters the recorded copy. A recorded worktree path
+#              relaunch re-enters the recorded copy. The one exception is a
+#              record carrying the stale-slot marker naming that slot
+#              (slot_stale=, written by the teardown whose claim proved it
+#              stale before that teardown returned the slot; bin/fm-wake-lib.sh
+#              owns it); the rebind drops the marker, and a returned slot that
+#              treehouse hands straight back is then claimed as the fresh one.
+#              A recorded worktree path
 #              that no longer exists is rebound without that check. The leased
 #              slot is returned by the ordinary teardown. The launch is passed
 #              bin/fm-spawn.sh's --held-ok, because the parked, captain-held
@@ -1248,7 +1254,8 @@ fresh_slot_preflight() {
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     other) FRESH_SLOT_OLD_CLAIMANT=$FM_TREEHOUSE_SLOT_OWNER_ID ;;
     mine|absent)
-      die "task $ID's recorded slot $WT still reads as its own (claim: $FM_TREEHOUSE_SLOT_OWNER), so nothing proves it lost; a plain relaunch re-enters the recorded copy and teardown returns it - --fresh-slot is for a slot another task has claimed"
+      fm_slot_stale_marker_names "$META" "$WT" \
+        || die "task $ID's recorded slot $WT still reads as its own (claim: $FM_TREEHOUSE_SLOT_OWNER), so nothing proves it lost; a plain relaunch re-enters the recorded copy and teardown returns it - --fresh-slot is for a slot another task has claimed"
       ;;
     *)
       die "the owner claim on task $ID's recorded slot $WT cannot be read; inspect $(fm_treehouse_slot_owner_marker "$WT" 2>/dev/null || printf 'its .fm-slot-owner file') before rebinding"
@@ -1278,7 +1285,7 @@ fresh_slot_rebind() {
   fi
   new_real=$(cd "$new_wt" && pwd -P)
   old_real=$(cd "$FRESH_SLOT_OLD_WT" 2>/dev/null && pwd -P) || old_real=$FRESH_SLOT_OLD_WT
-  if [ "$new_real" = "$old_real" ]; then
+  if [ "$new_real" = "$old_real" ] && [ -n "$FRESH_SLOT_OLD_CLAIMANT" ]; then
     fm_lock_release "$lock"
     die "treehouse handed back $ID's old slot $new_wt, which task ${FRESH_SLOT_OLD_CLAIMANT:-another task} claims; the pool and the claim disagree, so nothing was rebound - inspect the slot (bin/fm-slot-audit.sh --all) before retrying"
   fi
@@ -1299,6 +1306,7 @@ fresh_slot_rebind() {
 fresh_slot_copy_presentation() {
   local src="$FRESH_SLOT_OLD_WT/.lavish" entry copied=0
   [ -d "$src" ] && [ -r "$src" ] && [ -x "$src" ] || return 0
+  [ ! "$FRESH_SLOT_OLD_WT" -ef "$FRESH_SLOT_NEW_WT" ] || return 0
   for entry in "$src/$ID"*; do
     [ -e "$entry" ] || continue
     mkdir -p "$FRESH_SLOT_NEW_WT/.lavish" 2>/dev/null || {
@@ -1315,7 +1323,8 @@ fresh_slot_copy_presentation() {
 }
 
 # Rewrite worktree= under the record's own metadata lock through the shared
-# publish path, so a concurrent reader sees the old record or the new one.
+# publish path, so a concurrent reader sees the old record or the new one; the
+# stale-slot marker named the old slot, so it goes with the old worktree=.
 fresh_slot_publish_worktree() {
   local lock tmp line
   if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
@@ -1333,6 +1342,7 @@ fresh_slot_publish_worktree() {
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       worktree=*) line="worktree=$FRESH_SLOT_NEW_WT" ;;
+      slot_stale=*|slot_stale_by=*|slot_stale_slot=*) continue ;;
     esac
     printf '%s\n' "$line" >> "$tmp" || {
       rm -f "$tmp"

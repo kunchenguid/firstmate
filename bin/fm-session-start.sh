@@ -969,7 +969,7 @@ done
 # runs in the read-only session too. FM_SLOT_AUDIT_BIN lets tests stub it.
 subsection "Slot audit (records whose pool slot disagrees with them)"
 SLOT_AUDIT_OUT=$(fm_run_timed "$ENDPOINT_TIMEOUT" "${FM_SLOT_AUDIT_BIN:-$SCRIPT_DIR/fm-slot-audit.sh}" --all 2>/dev/null \
-  | grep -Ev ' verdict=ok( home=.*)?$' || true)
+  | grep -Ev ' verdict=ok$' || true)
 if [ -n "$SLOT_AUDIT_OUT" ]; then
   printf '%s\n' "$SLOT_AUDIT_OUT"
 else

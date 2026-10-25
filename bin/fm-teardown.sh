@@ -124,7 +124,11 @@
 # proven stale and is downgraded from a refusal to a warning naming the fresh-slot
 # relaunch it needs (bin/fm-control.sh <id> relaunch --fresh-slot), with a
 # `check: slot-audit <id> stale-record` wake appended for each after the return;
-# their records and endpoints are never touched. Before that teardown proceeds,
+# their endpoints are never touched, and their records gain only the stale-slot
+# marker (slot_stale=<epoch>, slot_stale_by=<this task>, slot_stale_slot=<slot>,
+# written under each record's metadata lock before the slot is returned;
+# bin/fm-wake-lib.sh owns it), because the return drops the claim that proved
+# them stale and the fresh-slot relaunch needs that proof to outlive it. Before that teardown proceeds,
 # require_no_foreign_processes_in_slot lists every process whose cwd is inside
 # the slot, subtracts this task's own recorded endpoint chain (the pane shell
 # bin/fm-backend.sh resolves for the recorded backend, plus its descendants),
@@ -222,15 +226,19 @@
 #   names the reason), or when the claim names this task or is absent AND the
 #   recorded endpoint is proven dead or agent-less by bin/fm-backend.sh's
 #   recovery-grade classifier AND no process inside the slot belongs to this
-#   task's own endpoint chain; otherwise it refuses, because a task whose own
-#   chain still idles in its slot needs the full teardown. A claim naming this
+#   task's own endpoint chain AND the slot passes the same dirty and
+#   landed-work checks an ordinary teardown makes; otherwise it refuses, because
+#   a task whose own chain still idles in its slot, or whose unlanded work is
+#   still in it, needs the full teardown. A claim naming this
 #   task is dropped only when the slot holds no process at all, since nothing
 #   of the task then remains for the claim to protect; an absent claim is left
 #   absent. The teardown line and the backlog item's body both record
 #   `records-only: slot <path> left in place because <reason>`, and a
 #   `check: slot-audit <task-id> records-only` wake is appended so the slot's
 #   true state is re-read (bin/fm-slot-audit.sh owns that audit). --force does
-#   not change any of this: it never authorizes a records-only retirement.
+#   not change any of this: it never authorizes a records-only retirement and
+#   never lifts its landed-work checks. A claim naming another task is exempt
+#   from those checks, since the slot's work is then the claimant's.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -2097,7 +2105,7 @@ teardown_note_dirty_return() {
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
-  [ "$FORCE" != "--force" ] || return 0
+  [ "$FORCE" != "--force" ] || [ "$TEARDOWN_RECORDS_ONLY_SAFETY" = 1 ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
@@ -2554,11 +2562,15 @@ collect_local_firstmate_states() {
 # The records the last scan proved stale (header, slot ownership): other task
 # ids whose worktree= or home= names the slot this record's own claim covers.
 TEARDOWN_STALE_SLOT_RECORDS=()
+TEARDOWN_STALE_SLOT_METAS=()
+TEARDOWN_STALE_SLOT_PATH=
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot owner
-  local -a stale=()
+  local -a stale=() stale_metas=()
   TEARDOWN_STALE_SLOT_RECORDS=()
+  TEARDOWN_STALE_SLOT_METAS=()
+  TEARDOWN_STALE_SLOT_PATH=
   slot=$(canonical_existing_dir "$worktree") || return 0
   # The claim decides the scan's verdict (script header, slot ownership). A
   # claim naming another task means this record's teardown is records-only and
@@ -2588,6 +2600,7 @@ require_exclusive_worktree_slot_record() {
         [ "$other_slot" = "$slot" ] || continue
         if [ "$owner" = mine ]; then
           stale+=("$other_id")
+          stale_metas+=("$other")
           break
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
@@ -2600,6 +2613,8 @@ require_exclusive_worktree_slot_record() {
   [ "${#stale[@]}" -gt 0 ] || return 0
   require_no_foreign_processes_in_slot "$slot" "$record_id" || return 1
   TEARDOWN_STALE_SLOT_RECORDS=("${stale[@]}")
+  TEARDOWN_STALE_SLOT_METAS=("${stale_metas[@]}")
+  TEARDOWN_STALE_SLOT_PATH=$slot
   for other_id in "${stale[@]}"; do
     teardown_warn_stale_slot_record "$other_id" "$record_id" "$slot"
   done
@@ -2742,6 +2757,9 @@ TEARDOWN_SLOT_REASSIGNED_HOME=
 # this task's own claim on it may be dropped because the slot holds no process.
 TEARDOWN_RECORDS_ONLY_REASON=
 TEARDOWN_RECORDS_ONLY_DROP_CLAIM=0
+# Set for a claim naming this task or absent: the slot's work must then pass
+# validate_worktree_teardown_safety, and --force does not lift that.
+TEARDOWN_RECORDS_ONLY_SAFETY=0
 require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || {
@@ -2808,6 +2826,7 @@ require_records_only_allowed() {  # <slot>
 $slot_pids
 EOF
   TEARDOWN_RECORDS_ONLY_REASON="--records-only was given, the recorded endpoint reads $endpoint, and no process of this task is inside the slot (claim: $claim_word)"
+  TEARDOWN_RECORDS_ONLY_SAFETY=1
   if [ -z "$slot_pids" ] && [ "$claim_word" = mine ]; then
     TEARDOWN_RECORDS_ONLY_DROP_CLAIM=1
   fi
@@ -3744,6 +3763,8 @@ require_exclusive_task_worktree_slot || exit 1
 # The records the scan proved stale for THIS task's slot; the descendant scan
 # below resets the shared array per child, so keep the main task's own copy.
 TEARDOWN_TASK_STALE_SLOT_RECORDS=(${TEARDOWN_STALE_SLOT_RECORDS[@]+"${TEARDOWN_STALE_SLOT_RECORDS[@]}"})
+TEARDOWN_TASK_STALE_SLOT_METAS=(${TEARDOWN_STALE_SLOT_METAS[@]+"${TEARDOWN_STALE_SLOT_METAS[@]}"})
+TEARDOWN_TASK_STALE_SLOT_PATH=$TEARDOWN_STALE_SLOT_PATH
 require_owned_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
@@ -3854,17 +3875,22 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ] && { [ "$TEARDOWN_RECORDS_ONLY_SAFETY" = 1 ] \
+     || { teardown_owns_worktree && [ "$FORCE" != "--force" ]; }; }; then
   if validate_worktree_teardown_safety; then
-    :
+    safety_rc=0
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
+      safety_rc=0
+      validate_worktree_teardown_safety || safety_rc=$?
     fi
+  fi
+  if [ "$safety_rc" -ne 0 ]; then
+    [ "$TEARDOWN_RECORDS_ONLY_SAFETY" != 1 ] \
+      || echo "--records-only would leave that work in a slot whose claim it drops or never had, so it needs the full teardown once the work lands; --force does not lift this." >&2
+    exit 1
   fi
 fi
 
@@ -4001,6 +4027,13 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
+# Each record the scan proved stale gets its durable stale-slot marker before
+# the slot is returned or its claim dropped, because that drops the claim that
+# proved it (header, slot ownership; bin/fm-wake-lib.sh owns the marker).
+for teardown_stale_index in ${TEARDOWN_TASK_STALE_SLOT_METAS[@]+"${!TEARDOWN_TASK_STALE_SLOT_METAS[@]}"}; do
+  fm_slot_stale_marker_write "${TEARDOWN_TASK_STALE_SLOT_METAS[$teardown_stale_index]}" "$ID" "$TEARDOWN_TASK_STALE_SLOT_PATH" \
+    || echo "warning: could not mark task ${TEARDOWN_TASK_STALE_SLOT_RECORDS[$teardown_stale_index]}'s record stale; once this slot is returned its --fresh-slot relaunch reads the slot as unclaimed and refuses, so add slot_stale=, slot_stale_by=$ID, and slot_stale_slot=$TEARDOWN_TASK_STALE_SLOT_PATH to that record by hand" >&2
+done
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
