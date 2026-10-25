@@ -388,6 +388,7 @@ Two bounded residuals are accepted intent, each costing at most one extra contin
 A legacy build's lock-holding claim (recognizable by its `autoarm` role file) still defers or reclaims under the legacy abandonment proof.
 A live identity-verified stuck legacy owner is retired via TERM before its lock is removed, and an unverified pid is never signalled.
 An upgrade mid-session can therefore neither double-arm nor deadlock, and a failed reclaim re-blocks rather than allowing a blind stop.
+The one exception is the UTC pid-identity upgrade-window residual that `fm_pid_identity` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns: on a /proc-less host outside UTC, a pre-upgrade claim's recorded identity can read as reused until the post-update restart.
 
 #### Failure progression and block budget
 
