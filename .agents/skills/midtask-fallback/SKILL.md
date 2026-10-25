@@ -23,7 +23,9 @@ Later edits to the dispatch file do not replace it.
 Turning the setting off stops further switches.
 
 When `bin/fm-procevent-quota.sh` reports `exhausted_now` for a live task, run `bin/fm-midtask-fallback.sh consider <task-id> --snapshot <quota-json>`.
-Pass the quota document already captured for that check.
+The wake carries no quota document.
+In that turn, write the output of `quota-axi --json` to a file and pass that path as `--snapshot`.
+Do this for each live task that has a recorded array.
 Run that consider before `stuck-crewmate-recovery` relaunches the same profile.
 Status line text is not a signal.
 Pass `--pane-text-file` only when pane text was already captured and a limit-message adapter exists.

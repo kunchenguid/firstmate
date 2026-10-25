@@ -1948,7 +1948,7 @@ Bind the matched array after spawn.
 Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
 No eligible candidate stays on the current profile and is reported for a decision.
 A completed switch is stored on the task record and reported as an outcome.
-Consider switches when a quota snapshot marks the current profile `exhausted_now`, or when a version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` matches captured pane text. No adapter ships.
+Consider switches when a quota snapshot, written by firstmate from `quota-axi --json` on the quota wake and passed with `--snapshot`, marks the current profile `exhausted_now`, or when a version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` matches captured pane text. No adapter ships.
 Status line text is never a signal.
 Consider prints the outcome on stdout, and firstmate relays it to the captain.
 This path does not re-rank the array.
