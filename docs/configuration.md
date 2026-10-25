@@ -384,7 +384,7 @@ Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight 
 Either would place a row In flight without a task record, status file, or inbox, counting it as live work that nobody is doing.
 The wrapper still passes through the documented direct transition `tasks-axi start <id>`.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
-A completion records a merge only when it reads that merge from the forge in the same run, so a finished task whose pull request is still open, was closed unmerged, or cannot be read closes as a plain completion whose note keeps the link and the pending-merge fact ([`bin/fm-teardown.sh`](../bin/fm-teardown.sh)).
+A completion records a merge only when it reads that merge from the forge in the same run, so a finished task whose pull request is still open, was closed unmerged, or cannot be read closes as a plain completion whose note keeps the link and the pending-merge fact, and a captain-held row records the same note as its deliverable instead of a pull-request link ([`bin/fm-teardown.sh`](../bin/fm-teardown.sh)).
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 

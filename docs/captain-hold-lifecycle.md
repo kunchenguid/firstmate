@@ -150,6 +150,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
+  A pull request is copied only when the forge reports its merge in this run; otherwise the link is recorded in the deliverable line, because tasks-axi renders a closed row carrying a pull-request link as merged.
   A Gerrit change or GitLab merge request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
 - It runs `tasks-axi reopen`.
 

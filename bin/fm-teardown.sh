@@ -1825,11 +1825,13 @@ work_is_landed() {
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
 #
-# A close carrying `pr` is read back by tasks-axi as the verdict "merged", so the
-# link is passed only when pr_merge_fact read that merge from the forge in this
-# run; otherwise the same link goes into the note, which keeps the delivery
+# A transition carrying `pr` is read back by tasks-axi as the verdict "merged",
+# so the link is passed only when pr_merge_fact read that merge from the forge in
+# this run; otherwise the same link goes into the note, which keeps the delivery
 # visible and the verb honest - the row reads "done" and says what is still
-# awaited (backlog_pr_completion_args owns which shapes that applies to).
+# awaited (backlog_pr_completion_args owns which shapes that applies to). This
+# holds for the captain-held retention as well as the close, because a retained
+# row's `pr` link is what the captain's later answer closes as merged.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1843,18 +1845,14 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        if [ "$BACKLOG_TRANSITION" = close ]; then
-          backlog_pr_completion_args "$PR_URL"
-        else
-          BACKLOG_DONE_ARGS=(--pr "$PR_URL")
-        fi
+        backlog_pr_completion_args "$PR_URL"
       fi
       ;;
   esac
 }
 
-# The completion link for a ship whose record carries a PR, on the close that
-# replaces this task's record. Only a canonical pull request URL is a link
+# The completion link for a ship whose record carries a PR, on either transition
+# that replaces this task's record. Only a canonical pull request URL is a link
 # tasks-axi renders as "merged", so only that shape is gated on the merge fact
 # read in this run. Two other shapes keep the link as a `pr` argument and make no
 # claim here: a GitLab merge request or Gerrit change is what the backlog
@@ -1870,7 +1868,7 @@ backlog_pr_completion_args() {  # <pr-url>
   if [ "$FM_TEARDOWN_PR_MERGE" = merged ]; then
     BACKLOG_DONE_ARGS=(--pr "$1")
   else
-    BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1")
+    BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1. The link is a historical record whose merge was not verified in this run")
   fi
 }
 

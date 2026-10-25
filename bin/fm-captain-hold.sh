@@ -1224,6 +1224,10 @@ close_answered() {  # <task-id> <release-0-or-1>
     tasks_axi unhold "$1" >/dev/null
   else
     apply_pending_retained_artifact "$1" || return 1
+    case "${RETAINED_CLOSE_ARGS[0]-}" in
+      --pr) ;;
+      *) fm_backlog_pr_link_clear "$DATA" "$1" || return 1 ;;
+    esac
     tasks_axi "done" "$1" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
   fi
 }
