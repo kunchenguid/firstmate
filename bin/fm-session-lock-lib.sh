@@ -433,6 +433,15 @@ fm_proc_info() {  # <pid>
   out=$(ps -o comm= -p "$pid" 2>/dev/null) || rc=$?
   case $rc in
     0) ;;
+    1)
+      fm_win_boundary_applies || return 1
+      comm=$(fm_ps_comm "$pid") || return 1
+      args=$(fm_ps_args "$pid") || return 1
+      ppid=$(fm_ps_ppid "$pid") || return 1
+      case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+      FM_PROC_COMM=$comm FM_PROC_ARGS=$args FM_PROC_PPID=$ppid
+      return 0
+      ;;
     126 | 127)
       # Confirmed, once per process: only a ps binary that cannot
       # execute at all justifies the second provider.
@@ -680,7 +689,8 @@ fm_session_pid_identity() {  # <value>
 # that still matches holds the lock, an unreadable-but-live process is refused
 # rather than guessed at, and only a dead process frees the lock.
 fm_session_lock_pid_blocks_reclaim() {
-  case "$1" in ''|*[!0-9]*|0) return 1 ;; esac
+  fm_session_pid_valid "$1" || return 1
+  [ "$1" != 0 ] || return 1
   fm_session_lock_pid_verdict "$1"
   case "$FM_SESSION_LOCK_PID_VERDICT" in
     dead) return 1 ;;
