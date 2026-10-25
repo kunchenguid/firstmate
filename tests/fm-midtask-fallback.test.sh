@@ -204,19 +204,46 @@ assert_kept "no candidate"
 grep -Eq '^needs-decision \[at=[0-9]+\] \[key=midtask-fallback\]: ' "$CASE/state/$ID.status" \
   || fail "no candidate did not report the decision"
 grep -q '^midtask_switch=' "$CASE/state/$ID.meta" && fail "no candidate wrote a switch" || true
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+rc=$?
+[ "$rc" -eq 2 ] || fail "repeat no candidate exited $rc: $out"
+[ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 1 ] || fail "repeat no candidate reported twice"
+printf 'working [at=200]: resumed\n' >> "$CASE/state/$ID.status"
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+[ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "stall after a resume was not reported"
 ok "no eligible candidate does not relaunch and reports the decision"
 
-# An ordinary pause is not a usage limit.
+# Limit text on a status line is not a signal, with or without a snapshot.
 begin ordinary
 write_rules true
 write_meta
 invoke bind "$ID" --rule 0 >/dev/null
-printf 'paused [at=100]: waiting for review\n' > "$CASE/state/$ID.status"
+printf 'paused [at=100]: waiting for the GitHub API rate limit to reset\n' > "$CASE/state/$ID.status"
 out=$(invoke consider "$ID")
 rc=$?
 [ "$rc" -eq 0 ] || fail "ordinary pause exited $rc: $out"
 assert_no_control "ordinary pause"
-ok "ordinary pause does not relaunch"
+quota_doc "$CASE/snap.json" claude through_reset 40 grok through_reset 40 codex through_reset 40
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+rc=$?
+[ "$rc" -eq 0 ] || fail "ordinary pause with snapshot exited $rc: $out"
+[ -z "$out" ] || fail "ordinary pause printed: $out"
+assert_no_control "ordinary pause with snapshot"
+ok "status line limit text does not relaunch"
+
+# The current profile exhausted_now starts the switch with no status text at all.
+begin snapshot-trigger
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+rc=$?
+[ "$rc" -eq 0 ] || fail "snapshot trigger exited $rc: $out"
+[ "$out" = "relaunched: grok grok-4 high" ] || fail "snapshot trigger said: $out"
+assert_switch grok grok-4 high usage-limit
+ok "exhausted_now on the current profile relaunches"
 
 # A lower effort stays ineligible unless the setting allows it.
 begin lower-blocked
@@ -249,7 +276,7 @@ write_rules true
 write_meta
 invoke bind "$ID" --rule 0 >/dev/null
 printf 'paused [at=100]: waiting for review\n' > "$CASE/state/$ID.status"
-quota_doc "$CASE/snap.json" claude exhausted_now 0 grok exhausted_now 0 codex through_reset 40
+quota_doc "$CASE/snap.json" claude through_reset 40 grok exhausted_now 0 codex through_reset 40
 cat > "$CASE/limits/claude.sh" <<'EOF'
 fm_limit_message_versions() { printf '%s\n' '1.2.3'; }
 fm_limit_message_observed_version() { printf '%s\n' "${FM_LIMIT_OBS:-1.2.3}"; }
@@ -307,6 +334,7 @@ rc=$?
 [ "$rc" -eq 2 ] || fail "retry after failure exited $rc: $out"
 [ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "failed candidate was retried"
 assert_kept "retry after failure"
+[ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "later no-candidate stall was not reported"
 ok "failed relaunch is not retried"
 
 # The same recorded switch does not relaunch again while the pause line remains last.

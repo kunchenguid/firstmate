@@ -25,13 +25,14 @@
 # recorded array does nothing.
 #
 # Detection, in order:
-#   1. The task's last status line is paused and names a rate limit, a usage
-#      limit, exhausted credits, or being out of credits.
-#   2. Otherwise a quarantined per-harness adapter under bin/limit-messages
-#      (override with FM_LIMIT_MESSAGE_DIR) matches pane text, and only when
-#      that adapter's observed version is one of the versions it pins.
-#      An adapter whose version does not match is not a signal.
-# A quota snapshot, when passed, vetoes a candidate whose applicable runway
+#   1. A quota snapshot passed with --snapshot marks the runway of the task's
+#      current profile exhausted_now.
+#   2. Otherwise a per-harness adapter under FM_LIMIT_MESSAGE_DIR matches the
+#      text passed with --pane-text-file, and only when that adapter's observed
+#      version is one of the versions it pins. An adapter whose version does
+#      not match is not a signal. No adapter ships with firstmate.
+# Status line text is never a signal.
+# A quota snapshot, when passed, also vetoes a candidate whose applicable runway
 # is exhausted_now. A missing snapshot does not invent exhaustion. Unknown
 # quota stays eligible. A lower effort than the effort on the task record is
 # ineligible unless the setting is the allow_lower_reasoning_class object.
@@ -41,8 +42,8 @@
 # first candidate that passes those gates. It does not re-rank by spendPriority.
 # No such candidate appends one needs-decision line and exits 2.
 # A successful switch appends midtask_switch= (from, to, reason, at) and a
-# switched: status line. switched: is not a recognized status verb, so that
-# outcome stays visible. A control failure appends midtask_switch_failed= for
+# switched status line, and prints relaunched: <harness> <model> <effort> on
+# stdout for firstmate to relay to the captain. A control failure appends midtask_switch_failed= for
 # that candidate and a blocked: line, and a later consider does not retry it.
 #
 # Exit 0 is a no-op or a completed relaunch. Exit 2 is no eligible candidate.
@@ -115,9 +116,6 @@ fallback_mode() {
     elif (.mid_task_fallback | type) == "object"
       and ((.mid_task_fallback | keys) == ["allow_lower_reasoning_class"])
       and (.mid_task_fallback.allow_lower_reasoning_class == true) then "lower"
-    elif (.mid_task_fallback | type) == "object"
-      and ((.mid_task_fallback | keys) == ["allow_lower_reasoning_class"])
-      and (.mid_task_fallback.allow_lower_reasoning_class == false) then "same"
     else "invalid"
     end
   ' "$DISPATCH_FILE" 2>/dev/null) || die "config/crew-dispatch.json is not readable JSON"
@@ -131,16 +129,6 @@ last_status_line() {
   local f=$1
   [ -f "$f" ] || return 0
   awk 'NF { line = $0 } END { print line }' "$f"
-}
-
-is_limit_pause() {
-  local stripped
-  stripped=$(printf '%s' "$1" | sed -E 's/ \[at=[0-9]+\]//g')
-  case "$stripped" in
-    paused:*) ;;
-    *) return 1 ;;
-  esac
-  printf '%s\n' "$stripped" | grep -qiE 'rate[- ]limit|usage[- ]limit|exhausted credits|out of credits'
 }
 
 limit_adapter_matches() {
@@ -212,6 +200,20 @@ quota_exhausted() {
   printf '%s\n' "$evidence" | jq -e '(.runway.status // "") == "exhausted_now"' >/dev/null 2>&1
 }
 
+current_exhausted() {
+  local array_json=$1 snapshot=$2 harness=$3 model=$4 effort=$5 provider
+  provider=$(printf '%s\n' "$array_json" | jq -r \
+    --arg h "$harness" --arg m "$model" --arg e "$effort" '
+    [.[] | select(type == "object" and .harness == $h
+        and (.model // "default") == $m and (.effort // "default") == $e)
+      | .provider // ""] | first // ""
+  ' 2>/dev/null) || return 1
+  if [ -z "$provider" ]; then
+    provider=$(fm_quota_provider_for_harness "$harness" "$model" 2>/dev/null || true)
+  fi
+  quota_exhausted "$snapshot" "$provider" "$harness" "$model"
+}
+
 profile_rows() {
   local array_json=$1
   printf '%s\n' "$array_json" | jq -r '
@@ -263,12 +265,14 @@ failed_candidate() {
 }
 
 status_has_key() {
-  local id=$1 key=$2 statusf line
-  statusf=$(status_path "$id")
-  [ -f "$statusf" ] || return 1
-  line=$(grep -F "[key=$key]" "$statusf" | tail -n 1 || true)
+  local id=$1 key=$2 line
+  line=$(last_status_line "$(status_path "$id")")
   case "$line" in
-    needs-decision*|blocked*) return 0 ;;
+    needs-decision*|blocked*) ;;
+    *) return 1 ;;
+  esac
+  case "$line" in
+    *"[key=$key]"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -373,20 +377,20 @@ cmd_consider() {
     [ -f "$snapshot" ] || die "quota snapshot is missing: $snapshot"
     fm_quota_json_valid < "$snapshot" || die "quota snapshot is not a valid quota-axi document"
   fi
-  reason=''
-  if is_limit_pause "$(last_status_line "$(status_path "$id")")"; then
-    reason=usage-limit
-  elif [ -n "$pane" ] && limit_adapter_matches "$(fm_meta_get "$meta" harness)" "$pane"; then
-    reason=limit-message
-  else
-    return 0
-  fi
   cur_h=$(fm_meta_get "$meta" harness)
   cur_m=$(fm_meta_get "$meta" model)
   cur_e=$(fm_meta_get "$meta" effort)
   [ -n "$cur_h" ] || die "task $id has no harness on its record"
   [ -n "$cur_m" ] || cur_m=default
   [ -n "$cur_e" ] || cur_e=default
+  reason=''
+  if [ -n "$snapshot" ] && current_exhausted "$array" "$snapshot" "$cur_h" "$cur_m" "$cur_e"; then
+    reason=usage-limit
+  elif [ -n "$pane" ] && limit_adapter_matches "$cur_h" "$pane"; then
+    reason=limit-message
+  else
+    return 0
+  fi
   rows_file=$(mktemp "${TMPDIR:-/tmp}/fm-midtask-rows.XXXXXX") || die "cannot allocate a candidate list"
   lock=$STATE/.midtask-$id.lock
   if [ -d "$lock" ]; then
