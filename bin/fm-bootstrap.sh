@@ -1235,9 +1235,9 @@ crew_dispatch_validate() {
       .mid_task_fallback != true and .mid_task_fallback != false and (
         (.mid_task_fallback | type) != "object"
         or ((.mid_task_fallback | keys) != ["allow_lower_reasoning_class"])
-        or ((.mid_task_fallback.allow_lower_reasoning_class | type) != "boolean")
+        or (.mid_task_fallback.allow_lower_reasoning_class != true)
       )
-    ) then "mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class (a boolean)"
+    ) then "mid_task_fallback must be true, false, or {"allow_lower_reasoning_class": true}"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
