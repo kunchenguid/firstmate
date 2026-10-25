@@ -1938,7 +1938,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 Absent and `false` keep dispatch-time selection only.
 `true` opts every array in the file in, and refuses a candidate whose effort is lower than the effort recorded for the task.
 `{"allow_lower_reasoning_class": true}` opts in and allows that lower effort.
-Any other value is invalid.
+Any other value is invalid: `mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class set to true`.
 One file-wide key covers rule arrays and the default array.
 A per-rule key cannot attach to `default` without a second field.
 A switch can move the task onto a smaller model, so existing files stay on dispatch-time selection until this key is set.
