@@ -2578,6 +2578,32 @@ test_recovery_drops_a_close_for_a_newer_meta_incarnation() {
   pass "session start drops a close recorded for an older meta incarnation"
 }
 
+test_recovery_a_stale_record_never_touches_the_row() {
+  local case_dir id out url=https://github.com/example/repo/pull/21
+  id=atomic-heal-stale-untouched-b13
+  case_dir=$(make_home heal-stale-untouched)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the pull-request link the stale record names"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-two"
+  # A record for an older incarnation that cannot prove its own merge: dropping it
+  # must not rewrite the row it was recorded against.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "session start applied a record for an older incarnation: $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "dropping a stale record stripped the row's pull-request link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a stale recorded close was left to fire on a later restart"
+  pass "a stale recorded close never touches the row it names"
+}
+
 test_recovery_rejects_a_legacy_close_without_an_incarnation() {
   local case_dir id out
   id=atomic-heal-legacy-close-b13
@@ -3225,6 +3251,7 @@ test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
+test_recovery_a_stale_record_never_touches_the_row
 test_recovery_rejects_a_legacy_close_without_an_incarnation
 test_bootstrap_rechecks_worker_record_boundary_after_locking
 test_lifecycle_refuses_ancestor_symlinks_outside_home_roots
