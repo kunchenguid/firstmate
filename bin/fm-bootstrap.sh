@@ -1729,7 +1729,7 @@ detect_no_mistakes_agents() {
         block = 1
         next
       }
-      block && /^[[:space:]]+-/ { x = $0; sub(/^[[:space:]]+-[[:space:]]*/, "", x); x = clean(x); if (x != "") print x; next }
+      block && /^[[:space:]]*-/ { x = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", x); x = clean(x); if (x != "") print x; next }
       block && /^[[:space:]]*(#.*)?$/ { next }
       block { exit }
     ' "$config" 2>/dev/null)

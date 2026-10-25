@@ -367,34 +367,41 @@ ROWS
 # Each row: <label>^<config body, \n for newlines>^<expected output, exact>.
 # The fake toolchain has codex and acpx; nothing else named here is installed.
 test_no_mistakes_agents() {
-  local label body expect case_dir fakebin out n line
-  n=0
-  while IFS='^' read -r label body expect; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/nm-agents-$n"
-    mkdir -p "$case_dir/home" "$case_dir/nm"
-    fakebin=$(make_fake_toolchain "$case_dir")
-    fm_fake_exit0 "$fakebin" codex acpx
-    [ "$body" = - ] || printf '%b\n' "$body" > "$case_dir/nm/config.yaml"
-    expect=${expect//@NM@/$case_dir/nm}
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_BOOTSTRAP_NO_MISTAKES_HOME="$case_dir/nm" \
-      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
-      "$ROOT/bin/fm-bootstrap.sh")
-    line="NO_MISTAKES_AGENTS: @NM@/config.yaml agent: lists"
-    line=${line//@NM@/$case_dir/nm}
-    expect=${expect//@LINE@/$line}
-    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
-  done <<'ROWS'
+  local label body expect case_dir fakebin out n line location config
+  for location in global repository; do
+    n=0
+    while IFS='^' read -r label body expect; do
+      [ -n "$label" ] || continue
+      n=$((n + 1))
+      case_dir="$TMP_ROOT/nm-agents-$location-$n"
+      mkdir -p "$case_dir/home" "$case_dir/nm"
+      fakebin=$(make_fake_toolchain "$case_dir")
+      fm_fake_exit0 "$fakebin" codex acpx
+      if [ "$location" = global ]; then
+        config="$case_dir/nm/config.yaml"
+      else
+        config="$case_dir/home/.no-mistakes.yaml"
+      fi
+      [ "$body" = - ] || printf '%b\n' "$body" > "$config"
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        FM_BOOTSTRAP_NO_MISTAKES_HOME="$case_dir/nm" \
+        FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+        "$ROOT/bin/fm-bootstrap.sh")
+      line="NO_MISTAKES_AGENTS: $config agent: lists"
+      expect=${expect//@LINE@/$line}
+      [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+    done <<'ROWS'
 absent config is silent^-^
 installed flow list is silent^agent: [codex]^
 missing agent in a flow list^agent: [codex, "claude"]  # fallback order^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 missing agent in a block list^agent:\n  - codex\n  # comment\n  - grok\nci_timeout: 1h^@LINE@ grok, but grok is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+missing agent in an unindented block list^agent:\n- codex\n# comment\n\n- claude\nci_timeout: 1h\nother_list:\n- not-an-agent^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+installed unindented block list is silent^agent:\n- codex\nci_timeout: 1h\nother_list:\n- not-an-agent^
 scalar auto is never checked^agent: auto^
 rovodev resolves through acli^agent: rovodev^@LINE@ rovodev, but acli is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 acp targets need the configured acpx^agent: acp:gemini\nacpx_path: /nonexistent/acpx^@LINE@ acp:gemini, but /nonexistent/acpx is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
 ROWS
+  done
   pass "no-mistakes agent: entries that this host cannot run are reported"
 }
 
