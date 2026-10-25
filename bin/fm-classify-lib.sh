@@ -2082,6 +2082,15 @@ status_open_activities() {  # <status-file-or-dash>
 window_to_task() {
   local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t line
   if [ -n "$state" ]; then
+    # A caller-built window->meta index (bin/fm-backend.sh) answers without
+    # rescanning every meta; its miss falls through to the scan below.
+    if command -v fm_backend_meta_index_lookup >/dev/null 2>&1 \
+      && fm_backend_meta_index_lookup "$w" "$state"; then
+      t=${FM_BACKEND_META_INDEX_HIT##*/}
+      t=${t%.meta}
+      printf '%s' "$t"
+      return 0
+    fi
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue
       # The last window= and terminal= values, read in one pass without the
