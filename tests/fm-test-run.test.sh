@@ -1446,6 +1446,39 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
+# Suites outside backend-dispatch source the T3 fake and the T3 adapter, so a
+# change to either selects the suites that read them as well.
+test_changed_t3_sources_select_their_readers() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-t3.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$repo/bin/backends"
+  : >"$repo/bin/backends/t3code.sh"
+  : >"$repo/tests/t3-fake-lib.sh"
+  printf '#!/usr/bin/env bash\n# tests/lib.sh\n. tests/t3-fake-lib.sh\n' >"$repo/tests/fm-secondmate-restart.test.sh"
+  chmod +x "$repo/tests/fm-secondmate-restart.test.sh"
+  printf '# bin/backends/t3code.sh\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm t3
+
+  printf '\n' >>"$repo/tests/t3-fake-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-secondmate-restart.test.sh" \
+    "a changed T3 fake selects the suite that sources it"
+  git -C "$repo" checkout -q -- tests/t3-fake-lib.sh
+
+  printf '\n' >>"$repo/bin/backends/t3code.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" \
+    "a changed T3 adapter still selects backend-dispatch"
+  assert_contains "$listed" "tests/fm-daemon.test.sh" \
+    "a changed T3 adapter selects the curated family of a script that consumes it"
+
+  rm -rf "$tmp"
+  pass "a changed T3 fake or adapter selects the suites that read it beyond backend-dispatch"
+}
+
 # Workers are handed scripts in order, so the slowest script must start first or
 # it runs alone at the tail and throws away most of the concurrency.
 test_concurrent_runs_are_ordered_longest_first() {
@@ -1880,6 +1913,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
+test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom

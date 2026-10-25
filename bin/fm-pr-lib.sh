@@ -11,7 +11,9 @@
 # owner/repository pair can address one and the sidecar carries the whole path
 # instead. GitLab, Gerrit, and Forgejo all run on self-hosted instances, and
 # Gerrit runs nowhere else, so the host is part of that identity rather than a
-# constant. Every consumer re-derives the identity
+# constant. GitHub runs on github.com and on GitHub Enterprise (Cloud *.ghe.com
+# and Enterprise Server), so its host is part of that identity too. Every
+# consumer re-derives the identity
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
@@ -19,6 +21,8 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+
+_FM_PR_LIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -201,6 +205,43 @@ fm_pr_forgejo_segment_valid() {
   esac
 }
 
+# A GitHub pull request URL names its host, and github.com is the only GitHub
+# host accepted without being declared: every other host must be listed in this
+# home's config/github-hosts (fm_github_host_allowed), so a look-alike such as
+# github.com.evil or evilgithub.com is refused rather than armed as a watch that
+# can never succeed. That list is the captain's own statement that a host is a
+# GitHub host this home uses, which no URL shape can prove on its own.
+# docs/configuration.md "GitHub Enterprise hosts" owns the file format.
+# An unreadable list, an absent one, and a host it does not name all refuse.
+# Only an exact line match authorizes, so a malformed or comment line can never
+# authorize anything and needs no separate validation.
+fm_github_host_allowed() {  # <host>
+  local host=${1-} file line
+  local LC_ALL=C
+  [ -n "$host" ] || return 1
+  [ "$host" != github.com ] || return 0
+  fm_pr_forge_host_valid "$host" || return 1
+  file="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$_FM_PR_LIB_ROOT}/config}/github-hosts"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$host" ] && return 0
+  done < "$file"
+  return 1
+}
+
+# gh and gh-axi address the host in GH_HOST, from the pull request URL, or from
+# the clone's own origin, in that order of specificity. A GitHub Enterprise host
+# is not any tool's default one, so every GitHub call on a pull request path
+# exports it once through here and its children inherit it. github.com keeps the
+# ambient behavior it always had, byte for byte.
+fm_pr_github_host_export() {  # <host>
+  case ${1-} in
+    ''|github.com) return 0 ;;
+  esac
+  GH_HOST=$1
+  export GH_HOST
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
 # username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
@@ -221,20 +262,22 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    host=${BASH_REMATCH[1]}
+    fm_github_host_allowed "$host" || return 1
+    [[ "${BASH_REMATCH[2]}" != *--* ]] || return 1
+    [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
-    FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=${BASH_REMATCH[2]}
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -960,14 +1003,14 @@ fm_pr_poll_retirement_receipt_valid() {
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
 }
 
-fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 fields line total=0 named=0
+fm_pr_github_read_record_with_gh() {  # <host> <owner> <repo> <number>
+  local host=$1 owner=$2 repo=$3 number=$4 fields line total=0 named=0
   local state='' merged=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(GH_HOST=$host gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
     -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
@@ -998,11 +1041,11 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
-fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 output state
+fm_pr_github_read_record_with_gh_axi() {  # <host> <owner> <repo> <number>
+  local host=$1 owner=$2 repo=$3 number=$4 output state
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
-  if ! output=$(gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+  if ! output=$(GH_HOST=$host gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -1042,7 +1085,7 @@ fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
   esac
 }
 
-fm_pr_github_read_record() {  # <owner> <repo> <number>
+fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$@"; then
     return 0
   fi

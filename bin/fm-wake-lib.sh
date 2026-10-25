@@ -352,6 +352,23 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
     fm_pi_extension_loaded "$state/$marker" "$version" "$lock" "$phase" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
+  # A Windows-tagged holder is outside this process table, so kill -0 cannot
+  # see it. Only a win:-shaped value loads the session-lock library, so a POSIX
+  # home's verdict stays exactly the local liveness test below.
+  case "$session_pid" in
+    win:*)
+      if ! command -v fm_harness_pid_alive >/dev/null 2>&1; then
+        # An analysis boundary, as in fm-lease-lib.sh: the session-lock library
+        # is linted in its own right, and following it here would re-analyze it
+        # for every consumer of this widely sourced library.
+        # shellcheck source=/dev/null
+        . "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
+      fi
+      fm_session_pid_valid "$session_pid" || return 1
+      fm_harness_pid_alive "$session_pid"
+      return
+      ;;
+  esac
   fm_pid_alive "$session_pid"
 }
 

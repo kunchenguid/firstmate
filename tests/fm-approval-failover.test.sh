@@ -162,6 +162,17 @@ for harness in codex claude; do
   [ ! -e "$home/config/$setting" ] || fail 'remote refusal saved fallback'
   pass "$harness needs no detector state and refuses contradictory or remote records"
 
+  printf 'harness=%s\napproval_mode=bypass\nbackend=t3code\n' "$harness" > "$home/state/task.meta"
+  before=$(wc -l < "$home/control.log")
+  rc=0
+  run_apply > "$home/t3code.out" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "$harness t3code task was not refused"
+  [ -z "$(find "$home/config" -mindepth 1 -print)" ] || fail 't3code refusal changed configuration'
+  [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 't3code refusal reached lifecycle control'
+  assert_grep "T3's full-access runtime mode and cannot honor config/$setting=$fallback" "$home/t3code.out" 't3code refusal did not name the full-access runtime'
+  assert_grep 'approve the pending request in T3 Code itself' "$home/t3code.out" 't3code refusal did not name the remedy'
+  pass "$harness refuses a t3code task before saving a fallback T3 cannot honor"
+
   printf 'harness=%s\napproval_mode=bypass\n' "$harness" > "$home/state/task.meta"
   if run_apply FAIL_CONTROL=1 > "$home/failure.out" 2>&1; then fail 'failed lifecycle claimed success'; fi
   [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail 'lifecycle failure lost saved remedy'

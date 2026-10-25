@@ -4,7 +4,9 @@
 --   rex --autostart=false do -s <session-id> --for <N>s rex-eventwait.lua \
 --     --args '{"blocks":["block:<uuid>", ...]}'
 -- It streams one TAB-separated line per event on a watched block and leaves
--- every policy decision to the bash caller:
+-- every policy decision to the bash caller. A record Firstmate wrote itself
+-- (app=firstmate: attention marks, validation progress, the wedge alarm) is
+-- never streamed, so it can never read as the worker's own state.
 --   <block-id>\t<state>\t<kind>\t<app>\t<owner-pid>\t<msg>   program_status_changed
 --   <block-id>\tgone\t\t\t\t<why>                          child_exited, block_closed
 -- "@subscribed" is printed once the handlers are listening, so the caller's
@@ -34,6 +36,9 @@ rex.on("terminal.program_status_changed", function(ctx, ev)
     return
   end
   local record = ev.record or {}
+  if record.app == "firstmate" then
+    return
+  end
   local owner = record.owner or {}
   emit(ctx.block_id, record.state, record.kind, record.app, owner.pid, record.msg)
 end)

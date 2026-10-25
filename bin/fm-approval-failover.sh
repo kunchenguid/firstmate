@@ -11,7 +11,8 @@
 # resume the assigned work. Both fallbacks use a model reviewer.
 # Explicit settings, including invalid files, directories and dangling links,
 # are never overwritten. Publication uses an exact-destination atomic link;
-# a concurrent setting wins. Remote endpoints and non-bypass launches refuse.
+# a concurrent setting wins. Remote endpoints, non-bypass launches and T3 Code
+# tasks, which already run at T3's full-access mode, refuse.
 # The existing task lease guard protects configuration publication. Release its
 # command lock before invoking child lifecycle commands, which guard themselves.
 # A lifecycle failure leaves the setting saved and reports incomplete recovery.
@@ -63,6 +64,10 @@ case "$HARNESS" in
   claude) SETTING=claude-permission-mode; FALLBACK=auto ;;
   *) echo 'error: managed approval failover supports only Codex and Claude' >&2; exit 1 ;;
 esac
+[ "$(fm_backend_of_meta "$META")" != t3code ] || {
+  echo "error: backend=t3code already runs $HARNESS at T3's full-access runtime mode and cannot honor config/$SETTING=$FALLBACK; approve the pending request in T3 Code itself or choose another backend; nothing changed" >&2
+  exit 1
+}
 [ ! -e "$CONFIG/$SETTING" ] && [ ! -L "$CONFIG/$SETTING" ] || {
   echo "error: config/$SETTING already exists; nothing overwritten" >&2
   exit 1
