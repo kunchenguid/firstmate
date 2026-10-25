@@ -227,6 +227,20 @@ rc=$?
 [ "$out" = "relaunched: codex gpt-5.5 default" ] || fail "unset effort said: $out"
 ok "an unset array effort matches the recorded effort"
 
+# An exact row stays the current profile when a later row leaves the model unset.
+begin exact-first
+jq -n '{mid_task_fallback:true, rules:[{when:"work", use:[
+  {harness:"claude", model:"claude-sonnet-5", effort:"high"},
+  {harness:"claude", effort:"high"}]}]}' > "$CASE/config/crew-dispatch.json"
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+jq -n '{schemaVersion:5, providers:[{provider:"claude", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"model:claude-sonnet-5", status:"known", effectivePercentRemaining:0, runway:{status:"exhausted_now"}}]}}]}' > "$CASE/snap.json"
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
+rc=$?
+[ "$rc" -eq 0 ] || fail "exact-first exited $rc: $out"
+[ "$out" = "relaunched: claude default high" ] || fail "exact-first said: $out"
+ok "an exact row outranks a later unset row"
+
 # Limit text on a status line is not a signal, with or without a snapshot.
 begin ordinary
 write_rules true
