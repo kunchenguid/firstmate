@@ -1948,7 +1948,9 @@ Bind the matched array after spawn.
 Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
 No eligible candidate stays on the current profile and is reported for a decision.
 A completed switch is stored on the task record and reported as an outcome.
-Consider switches when a quota snapshot, written by firstmate from `quota-axi --json` on the quota wake, or when a bound worker stops on exhausted credits with no quota wake armed, and passed with `--snapshot`, marks the current profile `exhausted_now`, or when a version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` matches captured pane text. No adapter ships.
+Consider switches when a snapshot passed with `--snapshot` marks the current profile `exhausted_now`.
+Firstmate writes that snapshot from `quota-axi --json` on a quota wake, or when a bound worker stops on exhausted credits and no quota wake is armed.
+A version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` that matches captured pane text is the other trigger. No adapter ships.
 Status line text is never a signal.
 Consider skips a task whose last status verb is `done`, `failed`, `needs-decision`, or `blocked`.
 Consider prints the outcome on stdout, and firstmate relays it to the captain.
