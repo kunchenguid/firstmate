@@ -87,21 +87,16 @@ test_sync_replaces_files_atomically() {
   home=$(make_home sync-atomic)
   export_root="$TMP_ROOT/export-atomic"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
-  mkdir -p "$export_root/live/data" "$home/fakebin"
+  printf 'old bytes\n' > "$home/data/projects.md"
+  run_export "$home" sync > "$home/initial.out" 2> "$home/initial.err" \
+    || fail "atomic snapshot setup failed: $(cat "$home/initial.err")"
   printf 'new bytes\n' > "$home/data/projects.md"
-  printf 'old bytes\n' > "$export_root/live/data/projects.md"
-  cat > "$home/fakebin/cp" <<'SH'
-#!/usr/bin/env bash
-printf 'partial' > "${*: -1}"
-exit 1
-SH
-  chmod +x "$home/fakebin/cp"
-  PATH="$home/fakebin:$PATH" run_export "$home" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "sync accepted a failed staged copy"
+  chmod 000 "$home/data/projects.md"
+  run_export "$home" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
+  chmod 0644 "$home/data/projects.md"
+  [ "$rc" -ne 0 ] || fail "sync accepted an unreadable source"
   assert_grep 'old bytes' "$export_root/live/data/projects.md" "failed sync replaced the prior complete file"
-  [ "$(find "$export_root/live/data" -maxdepth 1 -name '.record-export.*' | wc -l | tr -d ' ')" = 0 ] \
-    || fail "failed sync left a staging file"
-  pass "record export sync stages before atomically replacing a live file"
+  pass "record export sync leaves the prior live snapshot intact when capture fails"
 }
 
 test_sync_accepts_an_absolute_export_root_with_spaces() {
@@ -161,6 +156,125 @@ test_sync_refuses_malformed_config_and_unsafe_paths() {
     assert_grep 'outside sentinel' "$outside/sentinel" "unsafe $case_name input changed its target"
   done
   pass "record export sync refuses malformed config, traversal-shaped names, symlinks, and non-regular files"
+}
+
+test_sync_requires_a_dedicated_disjoint_single_home_root() {
+  local scope home other export_root rc case_name
+  for case_name in home ancestor descendant nonempty; do
+    scope="$TMP_ROOT/root-boundary-$case_name"
+    mkdir -p "$scope"
+    home="$scope/home"
+    mkdir -p "$home/config" "$home/data" "$home/state"
+    printf 'projects\n' > "$home/data/projects.md"
+    case "$case_name" in
+      home) export_root=$home ;;
+      ancestor) export_root=$scope ;;
+      descendant) export_root="$home/export" ;;
+      nonempty)
+        export_root="$scope/export"
+        mkdir -p "$export_root"
+        printf 'unowned sentinel\n' > "$export_root/unowned"
+        ;;
+    esac
+    printf '%s\n' "$export_root" > "$home/config/record-export-root"
+    rc=0
+    run_export "$home" sync > "$scope/stdout" 2> "$scope/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "sync accepted a non-dedicated $case_name export root"
+    if [ "$case_name" = nonempty ]; then
+      assert_grep 'unowned sentinel' "$export_root/unowned" \
+        "sync changed an unknown artifact in an unowned root"
+    fi
+  done
+
+  scope="$TMP_ROOT/root-boundary-other-home"
+  home="$scope/home-one"
+  other="$scope/home-two"
+  export_root="$scope/export"
+  mkdir -p "$home/config" "$home/data" "$home/state" \
+    "$other/config" "$other/data" "$other/state"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf '%s\n' "$export_root" > "$other/config/record-export-root"
+  printf 'home one\n' > "$home/data/projects.md"
+  printf 'home two\n' > "$other/data/projects.md"
+  run_export "$home" sync > "$scope/first.out" 2> "$scope/first.err" \
+    || fail "first home could not initialize its dedicated export root: $(cat "$scope/first.err")"
+  rc=0
+  run_export "$other" sync > "$scope/second.out" 2> "$scope/second.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "sync accepted an export root owned by another home"
+  assert_grep 'home one' "$export_root/live/data/projects.md" \
+    "second home changed the first home's live snapshot"
+  pass "record export requires a dedicated root disjoint from and owned by exactly one home"
+}
+
+test_sync_retracts_stale_records_as_one_live_snapshot() {
+  local home export_root rc=0
+  home=$(make_home sync-converges)
+  export_root="$TMP_ROOT/export-sync-converges"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  mkdir -p "$home/state/task-a.inbox/handled"
+  printf 'meta\n' > "$home/state/task-a.meta"
+  printf 'status\n' > "$home/state/task-a.status"
+  printf 'pending\n' > "$home/state/task-a.inbox/001.msg"
+  run_export "$home" sync > "$home/first.out" 2> "$home/first.err" \
+    || fail "first convergent sync failed: $(cat "$home/first.err")"
+
+  mv "$home/state/task-a.inbox/001.msg" "$home/state/task-a.inbox/handled/001.msg"
+  rm "$home/state/task-a.meta" "$home/state/task-a.status"
+  run_export "$home" sync > "$home/second.out" 2> "$home/second.err" || rc=$?
+  expect_code 0 "$rc" "second convergent sync: $(cat "$home/second.err")"
+  assert_absent "$export_root/live/state/task-a.meta" "sync retained retired metadata"
+  assert_absent "$export_root/live/state/task-a.status" "sync retained retired status"
+  assert_absent "$export_root/live/state/task-a.inbox/001.msg" "sync retained a moved pending message"
+  assert_grep 'pending' "$export_root/live/state/task-a.inbox/handled/001.msg" \
+    "sync omitted the handled destination of a moved message"
+  pass "record export sync publishes the exact current allowlist as one live snapshot"
+}
+
+test_sync_detects_destination_parent_replacement() {
+  local home export_root outside pid rc=0 wait_count=0 stage= live_target prior_snapshot
+  home=$(make_home sync-destination-race)
+  export_root="$TMP_ROOT/export-sync-destination-race"
+  outside="$TMP_ROOT/outside-sync-destination-race"
+  mkdir -p "$outside"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'initial\n' > "$home/data/projects.md"
+  run_export "$home" sync > "$home/initial.out" 2> "$home/initial.err" \
+    || fail "destination-race setup sync failed: $(cat "$home/initial.err")"
+  live_target=$(readlink "$export_root/live" 2>/dev/null || true)
+  dd if=/dev/zero of="$home/data/projects.md" bs=1048576 count=64 status=none
+
+  run_export "$home" sync > "$home/race.out" 2> "$home/race.err" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    stage=$(find "$export_root/live/data" -maxdepth 1 -name '.record-export.*' -print -quit 2>/dev/null || true)
+    [ -n "$stage" ] || stage=$(find "$export_root/.live-generations" -maxdepth 1 -name '.stage-*' -print -quit 2>/dev/null || true)
+    [ -z "$stage" ] || break
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 500 ] || break
+    sleep 0.01
+  done
+  [ -n "$stage" ] || { wait "$pid" || true; fail "destination-race fixture never observed a staged snapshot"; }
+  kill -STOP "$pid"
+  case "$stage" in
+    "$export_root/live/data"/*)
+      mv "$export_root/live/data" "$export_root/live/data.saved"
+      ln -s "$outside" "$export_root/live/data"
+      prior_snapshot="$export_root/live/data.saved/projects.md"
+      ;;
+    "$export_root/.live-generations"/*)
+      mv "$export_root/.live-generations" "$export_root/.live-generations.saved"
+      ln -s "$outside" "$export_root/.live-generations"
+      prior_snapshot="$export_root/.live-generations.saved/${live_target#.live-generations/}/data/projects.md"
+      ;;
+    *) kill -CONT "$pid"; wait "$pid" || true; fail "destination-race fixture observed an unknown staging path" ;;
+  esac
+  kill -CONT "$pid"
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "sync committed after its destination parent was replaced"
+  assert_absent "$outside/projects.md" "sync wrote through a replacement destination symlink"
+  assert_grep 'initial' "$prior_snapshot" \
+    "failed destination-race sync changed the prior published snapshot"
+  pass "record export sync binds destination validation to descriptor-safe publication"
 }
 
 write_archive_fixture() {  # <home> <spawn-gen>
@@ -458,6 +572,9 @@ test_sync_copies_only_the_v1_allowlist
 test_sync_replaces_files_atomically
 test_sync_accepts_an_absolute_export_root_with_spaces
 test_sync_refuses_malformed_config_and_unsafe_paths
+test_sync_requires_a_dedicated_disjoint_single_home_root
+test_sync_retracts_stale_records_as_one_live_snapshot
+test_sync_detects_destination_parent_replacement
 test_archive_commits_manifest_last_with_integrity_metadata
 test_archive_is_off_before_any_state_read_when_config_is_absent
 test_archive_retry_is_idempotent_and_generations_never_overwrite

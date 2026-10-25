@@ -501,7 +501,10 @@ archive_task() {  # <task-id>
 command=$1
 shift
 case "$command:$#" in
-  sync:0) sync_records ;;
+  sync:0)
+    command -v python3 >/dev/null 2>&1 || die "record export requires python3"
+    exec python3 "$SCRIPT_DIR/fm-record-export.py" sync
+    ;;
   archive-task:1) archive_task "$1" ;;
   *) usage ;;
 esac
