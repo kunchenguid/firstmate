@@ -978,7 +978,7 @@ relaunch_rollback() {
       ;;
     rebound)
       journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-      echo "error: $ID's record now names its fresh slot $FRESH_SLOT_NEW_WT but no replacement was launched into it; a plain relaunch finishes the move (--fresh-slot is no longer needed)" >&2
+      echo "error: $ID's record now names its fresh slot $FRESH_SLOT_NEW_WT but no replacement was launched into it; $(fresh_slot_finish_hint)" >&2
       ;;
     exited|launching)
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
@@ -1362,19 +1362,31 @@ fresh_slot_publish_worktree() {
   fm_lock_release "$lock"
 }
 
+# The recovery once the record names the fresh slot but nothing was launched
+# there: the slot reads as this task's now, so --fresh-slot refuses, and a plain
+# relaunch refuses the captain-held lanes this path exists for; the launch owner
+# itself relaunches an already-stopped task and takes --held-ok.
+fresh_slot_finish_hint() {
+  local cmd="bin/fm-spawn.sh $ID --relaunch --harness $TARGET_HARNESS"
+  [ "$TARGET_MODEL" = default ] || cmd="$cmd --model $TARGET_MODEL"
+  [ "$TARGET_EFFORT" = default ] || cmd="$cmd --effort $TARGET_EFFORT"
+  printf "%s's agent is stopped and its record already names %s; put the endpoint's shell there (cd -- '%s'), then finish the move with the launch owner directly: %s --held-ok (a plain fm-control relaunch refuses a captain-held lane, and --fresh-slot no longer applies)" \
+    "$ID" "$FRESH_SLOT_NEW_WT" "$FRESH_SLOT_NEW_WT" "$cmd"
+}
+
 # Move the stopped endpoint's shell into the fresh slot and prove it arrived,
 # so the launch owner's own worktree check finds it there on every backend.
 fresh_slot_enter_endpoint() {
   local quoted new_real seen i
   quoted=${FRESH_SLOT_NEW_WT//\'/\'\\\'\'}
   fm_backend_source "$BACKEND" \
-    || die "the $BACKEND adapter cannot be loaded; $ID's record names $FRESH_SLOT_NEW_WT, and a plain relaunch finishes the move"
+    || die "the $BACKEND adapter cannot be loaded; $(fresh_slot_finish_hint)"
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$T" "cd -- '$quoted'" ;;
     herdr) fm_backend_herdr_send_text_line "$T" "cd -- '$quoted'" ;;
     rex) fm_backend_rex_send_text_line "$T" "cd -- '$quoted'" "$LABEL" ;;
     *) false ;;
-  esac || die "task $ID's endpoint could not be told to enter its fresh slot $FRESH_SLOT_NEW_WT; its record already names that slot, so a plain relaunch finishes the move"
+  esac || die "task $ID's endpoint could not be told to enter its fresh slot $FRESH_SLOT_NEW_WT; $(fresh_slot_finish_hint)"
   new_real=$(cd "$FRESH_SLOT_NEW_WT" && pwd -P)
   seen=
   for i in $(seq 1 20); do
@@ -1388,7 +1400,7 @@ fresh_slot_enter_endpoint() {
     fi
     [ "$i" -ge 20 ] || sleep "$POLL"
   done
-  die "task $ID's endpoint is in '${seen:-unknown}', not its fresh slot $FRESH_SLOT_NEW_WT, after being told to enter it; its record already names that slot, so a plain relaunch finishes the move"
+  die "task $ID's endpoint is in '${seen:-unknown}', not its fresh slot $FRESH_SLOT_NEW_WT, after being told to enter it; $(fresh_slot_finish_hint)"
 }
 
 do_relaunch() {

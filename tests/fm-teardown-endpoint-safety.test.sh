@@ -1530,7 +1530,7 @@ run_case_flags() {  # <case> <id> <flag>...
 # inventory per <mode>: `absent` lists no window (the endpoint reads missing),
 # `unreadable` fails the inventory without a definitive absence (the endpoint
 # reads unreadable).
-write_slot_tmux() {  # <case> <absent|unreadable>
+write_slot_tmux() {  # <case> <absent|unreadable|present>
   local dir=$1 mode=$2
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1538,10 +1538,12 @@ case "\${1:-}" in
   display-message)
     case "\$*" in
       *pane_pid*) [ ! -f '$dir/pane-pid' ] || cat '$dir/pane-pid' ;;
+      *pane_tty*) [ '$mode' != present ] || printf '/dev/ttysfake\n' ;;
     esac
     exit 0 ;;
   list-windows)
     if [ '$mode' = unreadable ]; then echo 'lost server' >&2; exit 1; fi
+    [ '$mode' != present ] || cat '$dir/windows'
     exit 0 ;;
 esac
 printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
@@ -1810,6 +1812,73 @@ test_records_only_refuses_unlanded_work_in_its_own_slot_even_with_force() {
   pass "fm-teardown --records-only: unlanded work in the task's own slot refuses, and --force does not lift it"
 }
 
+# A present, agent-less endpoint whose backend names no shell pid: the fake tmux
+# lists the window and reports a tty whose only foreground process is a shell
+# (a fake ps answers for that tty), but serves no pane_pid.
+test_records_only_refuses_when_the_endpoint_shell_pid_cannot_be_named() {
+  local dir id=unnamed-task worker rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case records-only-unnamed-shell)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" present
+  printf 'fm-%s\n' "$id" > "$dir/windows"
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -t ttysfake "*) printf '%s\n' '4242 4242 4242 zsh'; exit 0 ;;
+esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/ps"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case_flags "$dir" "$id" --records-only > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--records-only passed vacuously although the endpoint's shell pid could not be named"
+  kill -0 "$worker" 2>/dev/null || fail "--records-only killed the process inside the slot"
+  assert_present "$dir/home/state/$id.meta" "--records-only removed the record before refusing"
+  assert_present "$dir/pool/1/.fm-slot-owner" "--records-only dropped the claim before refusing"
+  assert_contains "$(cat "$dir/stderr")" "shell pid cannot be named" "the refusal should say the endpoint chain is unknown"
+  assert_contains "$(cat "$dir/stderr")" "$worker" "the refusal should name the processes inside the slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown --records-only: a present endpoint whose shell pid cannot be named refuses instead of passing vacuously"
+}
+
+test_records_only_stale_record_wake_says_the_slot_was_left_in_place() {
+  local dir id=stranded-owner other=parked-task
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case records-only-stale-wording)
+  mark_case_as_treehouse_pool "$dir"
+  write_slot_tmux "$dir" absent
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+
+  run_case_flags "$dir" "$id" --force --records-only > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "--records-only refused a dead, process-free record beside a stale one: $(cat "$dir/stderr")"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "--records-only returned the slot: $(cat "$dir/runtime.log")"
+  grep -F "slot-audit:$other" "$dir/home/state/.wake-queue" | grep -Fq "left in place" \
+    || fail "the stale-record wake does not say the slot was left in place: $(cat "$dir/home/state/.wake-queue" 2>/dev/null)"
+  ! grep -F "slot-audit:$other" "$dir/home/state/.wake-queue" | grep -Fq "returned to the pool" \
+    || fail "the stale-record wake claims a records-only slot was returned: $(cat "$dir/home/state/.wake-queue")"
+  grep -Fxq "slot_stale_by=$id" "$dir/home/state/$other.meta" \
+    || fail "the stale record was not marked before the claim was dropped: $(cat "$dir/home/state/$other.meta")"
+  pass "fm-teardown --records-only: the stale-record wake says the slot was left in place, not returned"
+}
+
 test_records_only_refuses_without_dead_endpoint_proof() {
   local dir id=unproven-task rc
   dir=$(make_case records-only-unproven)
@@ -1864,6 +1933,8 @@ test_claimant_tears_down_first_then_stale_record_retires
 test_records_only_retires_dead_record_without_touching_slot
 test_records_only_refuses_while_own_chain_runs_in_slot
 test_records_only_refuses_unlanded_work_in_its_own_slot_even_with_force
+test_records_only_refuses_when_the_endpoint_shell_pid_cannot_be_named
+test_records_only_stale_record_wake_says_the_slot_was_left_in_place
 test_records_only_refuses_without_dead_endpoint_proof
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

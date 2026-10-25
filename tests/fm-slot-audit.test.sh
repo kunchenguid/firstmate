@@ -210,6 +210,44 @@ test_other_home_lines_keep_the_exact_format_and_json_carries_the_home() {
   pass "fm-slot-audit: another home's record keeps the exact line format and --json carries its home"
 }
 
+test_unsafe_claim_is_unprotected() {
+  local dir out
+  dir=$(make_pool_case unsafe)
+  write_task "$dir" t-unsafe
+  mkdir "$dir/pool/1/.fm-slot-owner"
+  printf '%s\n' "$dir/pool/1/project" > "$dir/cwd"
+  FM_FAKE_POOL_JSON=$(pool_json "$dir/pool/1/project" in-use)
+  out=$(run_audit "$dir" t-unsafe) || fail "audit of an unsafe claim failed: $out"
+  assert_equals "slot-audit: t-unsafe slot=$dir/pool/1/project claim=unsafe worker=in-slot pool=in-use verdict=slot-unprotected" "$out" \
+    "a claim that cannot be read as one protects nothing and is surfaced"
+  pass "fm-slot-audit: an unsafe claim reads slot-unprotected, never ok"
+}
+
+test_herdr_record_with_a_stopped_server_never_starts_one() {
+  local dir out
+  command -v jq >/dev/null 2>&1 || { echo "skip - jq not installed"; return 0; }
+  dir=$(make_pool_case herdr-stopped)
+  fm_write_meta "$dir/home/state/t-herdr.meta" \
+    "window=fmses:pane-1" "endpoint_task_id=t-herdr" "backend=herdr" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=scout"
+  claim_slot "$dir" t-herdr
+  cat > "$dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+printf 'herdr %s\n' "\$*" >> '$dir/herdr.log'
+case "\${1:-}" in
+  status) printf '%s\n' '{"server":{"running":false}}'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+  FM_FAKE_POOL_JSON=$(pool_json "$dir/pool/1/project" in-use)
+  out=$(run_audit "$dir" t-herdr) || fail "audit of a stopped herdr record failed: $out"
+  assert_contains "$out" "worker=no-endpoint" "a stopped herdr session is no-endpoint"
+  ! grep -Eq '^herdr server( |$)' "$dir/herdr.log" \
+    || fail "the read-only audit started a herdr server: $(cat "$dir/herdr.log")"
+  pass "fm-slot-audit: a herdr record whose server is stopped reads no-endpoint without starting a server"
+}
+
 test_records_without_a_pool_slot_are_skipped() {
   local dir out
   dir=$(make_pool_case skipped)
@@ -292,6 +330,8 @@ SH
 test_own_claim_in_slot_reads_ok
 test_claim_by_another_task_is_slot_lost
 test_absent_claim_is_unprotected
+test_unsafe_claim_is_unprotected
+test_herdr_record_with_a_stopped_server_never_starts_one
 test_available_pool_and_drifted_worker_combine
 test_pool_read_failure_and_no_pool_are_distinct
 test_endpoint_without_a_path_is_no_endpoint

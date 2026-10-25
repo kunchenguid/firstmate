@@ -44,8 +44,9 @@
 #            endpoint's foreground process currently is, read through the
 #            backend's own current-path probe (tmux pane_current_path, Herdr
 #            foreground_cwd, the Rex, Zellij, cmux, and paseo probes). An
-#            endpoint that answers no path, or a record with no window, is
-#            no-endpoint. in-slot means the path is the slot or under it.
+#            endpoint that answers no path, a record with no window, or a
+#            Herdr record whose session server is not running (the probe never
+#            starts one), is no-endpoint. in-slot means the path is the slot or under it.
 #   pool     in-use | available | dirty | leased | <other treehouse word> |
 #            unlisted | unknown | missing | skipped - treehouse's own status
 #            word for the slot from `treehouse status --json` run in the
@@ -63,10 +64,12 @@
 #                               (bin/fm-control.sh <id> relaunch --fresh-slot).
 #                               With --no-pool a gone path still reads
 #                               pool=missing and slot-lost.
-#            slot-unprotected   the claim is absent, or treehouse lists the
-#                               slot as available: the next `treehouse get`
-#                               on the pool can hand it out while this record
-#                               still names it.
+#            slot-unprotected   the claim is absent or unsafe (a claim file
+#                               that cannot be read as one protects nothing
+#                               and cannot be rewritten by a later claim), or
+#                               treehouse lists the slot as available: the
+#                               next `treehouse get` on the pool can hand it
+#                               out while this record still names it.
 #            worker-outside-slot the recorded endpoint is somewhere other
 #                               than its slot, so its processes no longer
 #                               keep the pool from reusing the slot.
@@ -77,7 +80,7 @@
 # is not under a Treehouse pool state file.
 #
 # Read-only: nothing here takes a lock, writes a record, touches a slot, or
-# signals a process. `treehouse status` is read once per project per run.
+# signals or starts a process. `treehouse status` is read once per project per run.
 # Exit 0 after auditing (including when nothing was audited), 2 on a usage
 # error, 1 when this home's state directory cannot be read.
 set -u
@@ -159,7 +162,10 @@ audit_current_path() {  # <backend> <target> <label>
   fm_backend_source "$backend" 2>/dev/null || return 0
   case "$backend" in
     tmux) fm_backend_tmux_current_path "$target" 2>/dev/null ;;
-    herdr) fm_backend_herdr_current_path "$target" 2>/dev/null ;;
+    herdr)
+      fm_backend_herdr_target_observable "$target" 2>/dev/null || return 0
+      fm_backend_herdr_current_path "$target" 2>/dev/null
+      ;;
     zellij) fm_backend_zellij_current_path "$target" "$label" 2>/dev/null ;;
     cmux) fm_backend_cmux_current_path "$target" "$label" 2>/dev/null ;;
     paseo) fm_backend_paseo_current_path "$target" "$label" 2>/dev/null ;;
@@ -268,7 +274,7 @@ audit_record() {  # <meta-path> <home-suffix>
     verdict="slot-lost"
   else
     verdict=
-    if [ "$claim" = absent ] || [ "$pool" = available ]; then
+    if [ "$claim" = absent ] || [ "$claim" = unsafe ] || [ "$pool" = available ]; then
       verdict="slot-unprotected"
     fi
     if [ "$worker" = outside ]; then

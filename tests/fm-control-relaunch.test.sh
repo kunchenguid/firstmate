@@ -95,7 +95,7 @@ case "${1:-}" in
         # endpoint into its new slot before the launch owner checks it.
         "cd -- '"*"'")
           moved=${payload#cd -- \'}
-          printf '%s' "${moved%\'}" > "$D/cwd"
+          [ -e "$D/ignore-cd" ] || printf '%s' "${moved%\'}" > "$D/cwd"
           ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
@@ -3063,6 +3063,21 @@ test_fresh_slot_accepts_an_unclaimed_slot_only_when_the_record_is_marked_stale()
   pass "fm-control relaunch --fresh-slot: an unclaimed slot rebinds only for a record marked stale on it, and the rebind drops the marker"
 }
 
+test_fresh_slot_endpoint_that_never_arrives_names_a_recovery_that_works() {
+  local dir out rc=0 id=fs8
+  dir=$(make_fresh_slot_case fresh-slot-stuck-pane "$id")
+  : > "$dir/fake/ignore-cd"
+  out=$(run_control "$dir" "$id" relaunch --fresh-slot --note "move me") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--fresh-slot reported success although the endpoint never entered the fresh slot"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/pool/2/proj" ] \
+    || fail "the record should already name the fresh slot: $(meta_field "$dir" "$id" worktree)"
+  assert_contains "$out" "bin/fm-spawn.sh $id --relaunch --harness claude --held-ok" \
+    "the failure should name the launch owner's relaunch, which accepts a held lane"
+  assert_contains "$out" "cd -- '$dir/pool/2/proj'" "the failure should say where to put the endpoint's shell"
+  assert_not_contains "$out" "a plain relaunch finishes the move" "the failure should not point at a relaunch that refuses held lanes"
+  pass "fm-control relaunch --fresh-slot: an endpoint that never reaches the fresh slot names a recovery a held lane can use"
+}
+
 test_fresh_slot_failure_to_acquire_names_the_stopped_state() {
   local dir out rc=0 id=fs3
   dir=$(make_fresh_slot_case fresh-slot-pool-full "$id")
@@ -3251,5 +3266,6 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items
 test_fresh_slot_relaunch_rebinds_the_record_and_leaves_the_old_slot_alone
 test_fresh_slot_refuses_before_stopping_when_the_slot_still_reads_as_the_tasks_own
 test_fresh_slot_accepts_an_unclaimed_slot_only_when_the_record_is_marked_stale
+test_fresh_slot_endpoint_that_never_arrives_names_a_recovery_that_works
 test_fresh_slot_failure_to_acquire_names_the_stopped_state
 test_fresh_slot_relaunch_is_allowed_on_a_captain_held_item

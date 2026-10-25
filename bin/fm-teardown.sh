@@ -125,13 +125,15 @@
 # relaunch it needs (bin/fm-control.sh <id> relaunch --fresh-slot), with a
 # `check: slot-audit <id> stale-record` wake appended for each after the return;
 # their endpoints are never touched, and their records gain only the stale-slot
-# marker (slot_stale=<epoch>, slot_stale_by=<this task>, slot_stale_slot=<slot>,
-# written under each record's metadata lock before the slot is returned;
-# bin/fm-wake-lib.sh owns it), because the return drops the claim that proved
-# them stale and the fresh-slot relaunch needs that proof to outlive it. Before that teardown proceeds,
+# marker (slot_stale=<epoch>, slot_stale_by=<claimant>, slot_stale_slot=<slot>;
+# bin/fm-wake-lib.sh owns it), written under each record's metadata lock as soon
+# as the scan proves it and so before any slot is returned, because the return
+# drops the claim that proved them stale and the fresh-slot relaunch needs that
+# proof to outlive it. A forced secondmate teardown runs the same scan on each
+# descendant's slot, with that descendant as the claimant. Before proceeding,
 # require_no_foreign_processes_in_slot lists every process whose cwd is inside
-# the slot, subtracts this task's own recorded endpoint chain (the pane shell
-# bin/fm-backend.sh resolves for the recorded backend, plus its descendants),
+# the slot, subtracts the claimant's own recorded endpoint chain (the pane shell
+# bin/fm-backend.sh resolves for that record's backend, plus its descendants),
 # and refuses naming any remainder, because a foreign process inside the slot is
 # the one thing the claim cannot explain and the return would kill it. A claim
 # naming another task makes this teardown records-only (below) and skips the
@@ -2564,8 +2566,8 @@ collect_local_firstmate_states() {
 TEARDOWN_STALE_SLOT_RECORDS=()
 TEARDOWN_STALE_SLOT_METAS=()
 TEARDOWN_STALE_SLOT_PATH=
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+require_exclusive_worktree_slot_record() {  # <meta> <id> <state> <worktree> <backend> <target>
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 record_backend=$5 record_target=$6
   local slot state_dir other other_id field other_path other_slot owner
   local -a stale=() stale_metas=()
   TEARDOWN_STALE_SLOT_RECORDS=()
@@ -2611,7 +2613,7 @@ require_exclusive_worktree_slot_record() {
     done
   done
   [ "${#stale[@]}" -gt 0 ] || return 0
-  require_no_foreign_processes_in_slot "$slot" "$record_id" || return 1
+  require_no_foreign_processes_in_slot "$slot" "$record_id" "$record_backend" "$record_target" || return 1
   TEARDOWN_STALE_SLOT_RECORDS=("${stale[@]}")
   TEARDOWN_STALE_SLOT_METAS=("${stale_metas[@]}")
   TEARDOWN_STALE_SLOT_PATH=$slot
@@ -2624,20 +2626,21 @@ teardown_warn_stale_slot_record() {  # <stale-id> <owner-id> <slot>
   echo "warning: task $1's record still names pool slot $3, which task $2 claimed afterwards; that record is stale and $1 needs a fresh slot (bin/fm-control.sh $1 relaunch --fresh-slot --note <what happened>). Its record and endpoint are left untouched." >&2
 }
 
-# This task's recorded endpoint chain: the pane shell the recorded backend
-# resolves for its target, plus every descendant in the process table. Empty
-# when the record names no endpoint or the backend cannot name a shell pid, so
-# every process in the slot then reads as foreign and the caller refuses rather
-# than guesses. tmux reports the pane's shell as pane_pid; Herdr reports it as
-# process-info's shell_pid.
-teardown_endpoint_root_pid() {
-  local pid=
-  [ -n "${T:-}" ] || return 0
-  case "$BACKEND" in
-    tmux) pid=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || pid= ;;
+# A record's endpoint chain: the pane shell its recorded backend resolves for
+# its target, plus every descendant in the process table. Empty when the record
+# names no endpoint or the backend cannot name a shell pid, so every process in
+# the slot then reads as foreign and the caller refuses rather than guesses.
+# tmux reports the pane's shell as pane_pid; Herdr reports it as process-info's
+# shell_pid.
+teardown_endpoint_root_pid() {  # <backend> <target>
+  local backend=$1 target=$2 pid=
+  [ -n "$target" ] || return 0
+  case "$backend" in
+    tmux) pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || pid= ;;
     herdr)
+      { declare -F fm_backend_herdr_target_ready >/dev/null 2>&1 || fm_backend_source herdr >/dev/null 2>&1; } || true
       if declare -F fm_backend_herdr_target_ready >/dev/null 2>&1 \
-         && fm_backend_herdr_target_ready "$T" 2>/dev/null; then
+         && fm_backend_herdr_target_ready "$target" 2>/dev/null; then
         pid=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
           | jq -r '.result.process_info.shell_pid // empty | select(type == "number") | floor' 2>/dev/null) || pid=
       fi
@@ -2647,9 +2650,9 @@ teardown_endpoint_root_pid() {
   printf '%s\n' "$pid"
 }
 
-teardown_endpoint_chain_pids() {
+teardown_endpoint_chain_pids() {  # <backend> <target>
   local root table pids frontier next pid ppid
-  root=$(teardown_endpoint_root_pid)
+  root=$(teardown_endpoint_root_pid "$1" "$2")
   [ -n "$root" ] || return 0
   table=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || table=
   pids=" $root "
@@ -2673,8 +2676,8 @@ EOF
 # Refuse when a process whose cwd is inside <slot> is not part of this task's
 # own endpoint chain (header, slot ownership): the claim explains every stale
 # record naming the slot, but not a process the return would kill.
-require_no_foreign_processes_in_slot() {  # <slot> <record-id>
-  local slot=$1 record_id=$2 slot_pids own pid foreign='' comm
+require_no_foreign_processes_in_slot() {  # <slot> <record-id> <backend> <target>
+  local slot=$1 record_id=$2 backend=$3 target=$4 slot_pids own pid foreign='' comm
   if ! command -v lsof >/dev/null 2>&1; then
     echo "REFUSED: cannot prove that no other task's process is inside pool slot $slot (lsof is unavailable), so the stale records naming it cannot be downgraded safely; nothing was changed - not even with --force." >&2
     return 1
@@ -2684,7 +2687,7 @@ require_no_foreign_processes_in_slot() {  # <slot> <record-id>
     return 1
   fi
   [ -n "$slot_pids" ] || return 0
-  own=$(teardown_endpoint_chain_pids)
+  own=$(teardown_endpoint_chain_pids "$backend" "$target")
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     if printf '%s\n' "$own" | grep -qx "$pid"; then
@@ -2704,7 +2707,27 @@ EOF
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" "$BACKEND" "${T:-}"
+}
+
+# Every record a scan proved stale this run, with the slot it named and the
+# claimant that proved it (header, slot ownership): the main task's own scan and
+# each forced descendant's, kept beside each other because every scan resets
+# the shared arrays above. Each gets its durable stale-slot marker here, before
+# any slot is returned or claim dropped, because that drops the claim that
+# proved it (bin/fm-wake-lib.sh owns the marker).
+TEARDOWN_TASK_STALE_SLOT_RECORDS=()
+TEARDOWN_TASK_STALE_SLOT_PATHS=()
+TEARDOWN_TASK_STALE_SLOT_BYS=()
+teardown_collect_stale_slot_records() {  # <claimant-id>
+  local i
+  for i in ${TEARDOWN_STALE_SLOT_RECORDS[@]+"${!TEARDOWN_STALE_SLOT_RECORDS[@]}"}; do
+    TEARDOWN_TASK_STALE_SLOT_RECORDS+=("${TEARDOWN_STALE_SLOT_RECORDS[$i]}")
+    TEARDOWN_TASK_STALE_SLOT_PATHS+=("$TEARDOWN_STALE_SLOT_PATH")
+    TEARDOWN_TASK_STALE_SLOT_BYS+=("$1")
+    fm_slot_stale_marker_write "${TEARDOWN_STALE_SLOT_METAS[$i]}" "$1" "$TEARDOWN_STALE_SLOT_PATH" \
+      || echo "warning: could not mark task ${TEARDOWN_STALE_SLOT_RECORDS[$i]}'s record stale; once pool slot $TEARDOWN_STALE_SLOT_PATH is returned its --fresh-slot relaunch reads the slot as unclaimed and refuses, so add slot_stale=, slot_stale_by=$1, and slot_stale_slot=$TEARDOWN_STALE_SLOT_PATH to that record by hand" >&2
+  done
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -2814,7 +2837,11 @@ require_records_only_allowed() {  # <slot>
     echo "REFUSED: --records-only cannot list the processes inside pool slot $slot (lsof failed). Nothing was changed." >&2
     return 1
   fi
-  own=$(teardown_endpoint_chain_pids)
+  own=$(teardown_endpoint_chain_pids "$BACKEND" "${T:-}")
+  if [ "$endpoint" = dead ] && [ -n "$slot_pids" ] && [ -z "$own" ]; then
+    echo "REFUSED: --records-only: task $ID's endpoint is still present, but its shell pid cannot be named on the $BACKEND backend, so nothing proves that none of the processes inside pool slot $slot ($(printf '%s' "$slot_pids" | tr '\n' ' ')) is this task's own; it needs the full teardown. Nothing was changed." >&2
+    return 1
+  fi
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     if printf '%s\n' "$own" | grep -qx "$pid"; then
@@ -3383,7 +3410,9 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" \
+      "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" || return 1
+    teardown_collect_stale_slot_records "$task_id"
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
@@ -3760,11 +3789,7 @@ remove_secondmate_registry_entry() {
 }
 
 require_exclusive_task_worktree_slot || exit 1
-# The records the scan proved stale for THIS task's slot; the descendant scan
-# below resets the shared array per child, so keep the main task's own copy.
-TEARDOWN_TASK_STALE_SLOT_RECORDS=(${TEARDOWN_STALE_SLOT_RECORDS[@]+"${TEARDOWN_STALE_SLOT_RECORDS[@]}"})
-TEARDOWN_TASK_STALE_SLOT_METAS=(${TEARDOWN_STALE_SLOT_METAS[@]+"${TEARDOWN_STALE_SLOT_METAS[@]}"})
-TEARDOWN_TASK_STALE_SLOT_PATH=$TEARDOWN_STALE_SLOT_PATH
+teardown_collect_stale_slot_records "$ID"
 require_owned_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
@@ -4027,13 +4052,6 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
-# Each record the scan proved stale gets its durable stale-slot marker before
-# the slot is returned or its claim dropped, because that drops the claim that
-# proved it (header, slot ownership; bin/fm-wake-lib.sh owns the marker).
-for teardown_stale_index in ${TEARDOWN_TASK_STALE_SLOT_METAS[@]+"${!TEARDOWN_TASK_STALE_SLOT_METAS[@]}"}; do
-  fm_slot_stale_marker_write "${TEARDOWN_TASK_STALE_SLOT_METAS[$teardown_stale_index]}" "$ID" "$TEARDOWN_TASK_STALE_SLOT_PATH" \
-    || echo "warning: could not mark task ${TEARDOWN_TASK_STALE_SLOT_RECORDS[$teardown_stale_index]}'s record stale; once this slot is returned its --fresh-slot relaunch reads the slot as unclaimed and refuses, so add slot_stale=, slot_stale_by=$ID, and slot_stale_slot=$TEARDOWN_TASK_STALE_SLOT_PATH to that record by hand" >&2
-done
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -4110,8 +4128,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # records still name it so the operator sees them last (header, slot
   # ownership). The matching slot-audit wakes are appended once the record is
   # retired below.
-  for teardown_stale_id in ${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]+"${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]}"}; do
-    teardown_warn_stale_slot_record "$teardown_stale_id" "$ID" "$WT"
+  for teardown_stale_index in ${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]+"${!TEARDOWN_TASK_STALE_SLOT_RECORDS[@]}"}; do
+    [ "${TEARDOWN_TASK_STALE_SLOT_BYS[$teardown_stale_index]}" = "$ID" ] || continue
+    teardown_warn_stale_slot_record "${TEARDOWN_TASK_STALE_SLOT_RECORDS[$teardown_stale_index]}" "$ID" "$WT"
   done
 fi
 
@@ -4384,9 +4403,16 @@ fi
 # the scan proved stale, so supervision rebinds it instead of protecting it, and
 # one for a records-only retirement, so the slot's true state is re-read. The
 # record is gone, so these are appended after every per-task queue prune above.
-for teardown_stale_id in ${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]+"${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]}"}; do
+for teardown_stale_index in ${TEARDOWN_TASK_STALE_SLOT_RECORDS[@]+"${!TEARDOWN_TASK_STALE_SLOT_RECORDS[@]}"}; do
+  teardown_stale_id=${TEARDOWN_TASK_STALE_SLOT_RECORDS[$teardown_stale_index]}
+  teardown_stale_by=${TEARDOWN_TASK_STALE_SLOT_BYS[$teardown_stale_index]}
+  if [ "$teardown_stale_by" = "$ID" ] && ! teardown_owns_worktree; then
+    teardown_stale_fate="which task $teardown_stale_by claimed and this records-only teardown left in place"
+  else
+    teardown_stale_fate="which task $teardown_stale_by held and has now returned to the pool"
+  fi
   fm_wake_append check "slot-audit:$teardown_stale_id" \
-    "check: slot-audit $teardown_stale_id stale-record - its record still names pool slot $WT, which task $ID held and has now returned to the pool; relaunch it into a fresh slot (bin/fm-control.sh $teardown_stale_id relaunch --fresh-slot --note <what happened>)" \
+    "check: slot-audit $teardown_stale_id stale-record - its record still names pool slot ${TEARDOWN_TASK_STALE_SLOT_PATHS[$teardown_stale_index]}, $teardown_stale_fate; relaunch it into a fresh slot (bin/fm-control.sh $teardown_stale_id relaunch --fresh-slot --note <what happened>)" \
     || echo "warning: could not queue the slot-audit wake for $teardown_stale_id; run bin/fm-slot-audit.sh --all" >&2
 done
 if [ -n "$TEARDOWN_RECORDS_ONLY_REASON" ]; then
