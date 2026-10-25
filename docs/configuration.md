@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [launch environment hook](#launch-environment-hook-configlaunch-env-hook) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [model allow-lists](#model-allow-lists-configmodel-allow-listjson), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [launch environment hook](#launch-environment-hook-configlaunch-env-hook) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [host memory guard](#host-memory-guard-confighost-memory) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -160,6 +160,28 @@ The Pi extension reloads this preference on every Pi `session_start`, including 
 The Claude Code mod reloads it on every `session.start`, including same-process session replacement.
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+
+## Model allow-lists (config/model-allow-list.json)
+
+A home can limit any provider to a list of allowed models, so an off-list pick is refused instead of launched.
+The list is one JSON file, `config/model-allow-list.json`, one key per provider: `{"codex": ["gpt-5.6-sol"], "ollama-cloud": ["deepseek-v4.1-flash"]}`.
+It is the same file the `firstmate-addons` `model-gate` reads, so a home that already limits Ollama keeps that limit here too.
+A provider the file does not name is not limited, so the file only ever constrains a limit the captain wrote down.
+The key is the segment before the `/` of a qualified model id (`openai-codex`, `ollama-cloud`), and the harness name for a bare model id, which is how the harnesses that take one name their family (`claude`, `codex`, `cursor`).
+A `<provider>/` prefix is stripped before matching, and a model matches a listed entry when it is that entry or a pinned tag of it, so a listed `deepseek-v4.1-flash` also allows `deepseek-v4.1-flash:1017`.
+A provider named with no models refuses every model of that provider.
+
+`bin/fm-spawn.sh` refuses an off-list model on every launch, before any endpoint, local copy, or task record exists, whichever source the model came from: a `--model` flag, a dispatch profile, or a `config/crew-harness` and `config/secondmate-harness` token.
+An account-pool route is refused by the `model-gate` add-on against the same file.
+Every refusal is one line naming the provider, the model, the models it allows, and the command that allows it, and since a model can still start outside the launch gate, the fleet check reports any such model once, reading the launches this home actually made.
+
+```sh
+bin/fm-model-allowlist.sh                              # every provider and its models
+bin/fm-model-allowlist.sh allow codex gpt-5.6-sol      # allow models for one provider
+bin/fm-model-allowlist.sh check codex gpt-5.6-sol      # one pick, exit 0 allowed, 1 refused
+```
+
+The list is local to each home and not inherited by secondmates, so a secondmate home that should enforce the same limit keeps its own copy.
 
 ## Pi supervision branch
 
