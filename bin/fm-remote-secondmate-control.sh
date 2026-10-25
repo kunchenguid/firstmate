@@ -109,7 +109,10 @@ validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $
 if [ "${1:-}" = retire ] && [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then
   case "$#:${3:-}" in
     2:|3:|3:--force) validate_id "$2"; printf 'already-retired: %s\n' "$2"; exit 0 ;;
-    *) usage ;;
+    # Any other shape falls through to the retire dispatcher. An
+    # --expect-generation retry that left a pending record must reconcile that
+    # evidence instead of being answered as a plain already-retired replay.
+    *) : ;;
   esac
 fi
 
