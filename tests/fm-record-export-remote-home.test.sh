@@ -9,7 +9,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-record-export-remote-home)
-TASK=remote-child
+TASK='remote-child'
 
 make_remote_home() {  # <name>
   local name=$1 home="$TMP_ROOT/$1/home" project="$TMP_ROOT/$1/project"
