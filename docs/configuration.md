@@ -692,6 +692,12 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## Lane VM cleanup (config/lane-vm-cleanup)
+
+The optional local, gitignored `config/lane-vm-cleanup` presence flag opts this home into deleting a finished ship or scout task's Lima VMs during teardown, including a forced teardown.
+Teardown deletes only the VMs the worker recorded in its task meta's `lane_vms=` line with `bin/fm-lane-vm-record.sh`, and skips any recorded name that is not the task id or does not start with `<task-id>-`.
+When the flag is absent, teardown deletes no VM.
+
 ## No-mistakes home resolver (config/nm-home-resolver)
 
 The optional local, gitignored `config/nm-home-resolver` file opts this home into finding each task's no-mistakes home through a site-provided resolver, for sites that run one no-mistakes daemon per isolated workspace, each against its own `NM_HOME`.

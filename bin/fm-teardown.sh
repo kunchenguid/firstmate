@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# delete a ship or scout task's own Lima lane VMs (bin/fm-lane-vm-lib.sh),
+# delete a ship or scout task's recorded Lima lane VMs on an opted-in home,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -3815,9 +3815,9 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
 
-# The task is finished, landed or discarded, so its own Lima lane VMs
-# (bin/fm-lane-vm-lib.sh) are spent.
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+# The task is finished, landed or discarded, so its own recorded Lima lane VMs
+# (bin/fm-lane-vm-lib.sh) are spent; only an opted-in home deletes them.
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ -e "$CONFIG/lane-vm-cleanup" ]; then
   fm_lane_vm_cleanup "$ID" "$META"
 fi
 

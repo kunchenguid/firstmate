@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Record a Lima VM a worker created in its task meta, so teardown deletes it
 # (bin/fm-lane-vm-lib.sh owns the lane_vms= contract). Adding a name already
-# recorded is a no-op. The meta is rewritten atomically under its meta lock.
+# recorded is a no-op, and a name that is not the task id or does not start
+# with `<task-id>-` is refused. The meta is rewritten atomically under its meta
+# lock.
 # Usage: fm-lane-vm-record.sh <task-meta> <vm-name>
 set -eu
 
@@ -23,6 +25,11 @@ case "$VM" in
     exit 2
     ;;
 esac
+TASK_ID=$(basename "$META" .meta)
+if ! fm_lane_vm_name_owned "$VM" "$TASK_ID"; then
+  echo "error: Lima VM name $VM must be $TASK_ID or start with $TASK_ID-" >&2
+  exit 2
+fi
 META_LOCK=$(fm_meta_lock_path "$META") || {
   echo "error: not a task meta: $META" >&2
   exit 2

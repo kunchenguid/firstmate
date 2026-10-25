@@ -64,9 +64,9 @@
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
 #
-# Lane VMs: a landed ship, reported scout or --force discard deletes the Lima
-# VMs it recorded plus one named exactly its id, and nothing else; an absent
-# limactl is a quiet no-op.
+# Lane VMs: on a home with config/lane-vm-cleanup, a landed ship, reported
+# scout or --force discard deletes only the Lima VMs it recorded under its own
+# id; without the flag nothing is deleted, and an absent limactl is a no-op.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -701,9 +701,17 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
-# Lane VMs: teardown deletes exactly the VMs the task recorded with
-# bin/fm-lane-vm-record.sh plus one named exactly `task-x1`, never a VM that
-# only shares its id as a prefix or that it did not record.
+# Lane VMs: an opted-in home (config/lane-vm-cleanup) deletes exactly the VMs
+# the task recorded with bin/fm-lane-vm-record.sh, skipping a recorded name
+# that does not belong to `task-x1`; a home without the flag deletes nothing.
+lane_vm_record_case() {  # <case-dir>
+  local meta="$1/state/task-x1.meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-api
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  # A hand-edited foreign name the recorder would refuse.
+  sed -i.bak 's/^lane_vms=\(.*\)$/lane_vms=\1 pg-it/' "$meta" && rm -f "$meta.bak"
+}
+
 lane_vm_case() {  # <name> <kind>
   local case_dir
   case_dir=$(make_case "$1")
@@ -715,8 +723,8 @@ lane_vm_case() {  # <name> <kind>
     git -C "$case_dir/wt" push -q origin fm/task-x1
     git -C "$case_dir/project" fetch -q origin
   fi
-  "$ROOT/bin/fm-lane-vm-record.sh" "$case_dir/state/task-x1.meta" pg-it
-  "$ROOT/bin/fm-lane-vm-record.sh" "$case_dir/state/task-x1.meta" task-x1-api
+  lane_vm_record_case "$case_dir"
+  touch "$case_dir/config/lane-vm-cleanup"
   printf '%s\n' "$case_dir"
 }
 
@@ -727,7 +735,7 @@ lane_vm_teardown() {  # <case-dir> [teardown args...]
     run_teardown "$case_dir" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
 }
 
-LANE_VM_EXPECTED_DELETES=$'--force task-x1\n--force pg-it\n--force task-x1-api'
+LANE_VM_EXPECTED_DELETES=$'--force task-x1-api\n--force task-x1-it'
 
 test_landed_ship_teardown_deletes_only_its_own_lane_vms() {
   local case_dir rc
@@ -736,7 +744,9 @@ test_landed_ship_teardown_deletes_only_its_own_lane_vms() {
   expect_code 0 "$rc" "lane-vm-ship: teardown should succeed"
   assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
     "lane-vm-ship: deleted VMs"
-  pass "landed ship teardown deletes its recorded and exact-id lane VMs only"
+  assert_grep "skipping recorded Lima VM pg-it" "$case_dir/stderr" \
+    "lane-vm-ship: foreign recorded name was not reported as skipped"
+  pass "opted-in landed ship teardown deletes only its recorded, owned lane VMs"
 }
 
 test_scout_teardown_deletes_its_own_lane_vms() {
@@ -746,7 +756,7 @@ test_scout_teardown_deletes_its_own_lane_vms() {
   expect_code 0 "$rc" "lane-vm-scout: teardown should succeed"
   assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
     "lane-vm-scout: deleted VMs"
-  pass "scout teardown after its report deletes its own lane VMs"
+  pass "opted-in scout teardown after its report deletes its recorded lane VMs"
 }
 
 test_forced_teardown_deletes_its_own_lane_vms() {
@@ -754,13 +764,23 @@ test_forced_teardown_deletes_its_own_lane_vms() {
   case_dir=$(make_case lane-vm-force)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "unlanded work"
-  "$ROOT/bin/fm-lane-vm-record.sh" "$case_dir/state/task-x1.meta" pg-it
-  "$ROOT/bin/fm-lane-vm-record.sh" "$case_dir/state/task-x1.meta" task-x1-api
+  lane_vm_record_case "$case_dir"
+  touch "$case_dir/config/lane-vm-cleanup"
   set +e; lane_vm_teardown "$case_dir" --force; rc=$?; set -e
   expect_code 0 "$rc" "lane-vm-force: forced teardown should succeed"
   assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
     "lane-vm-force: deleted VMs"
-  pass "forced teardown of unlanded work deletes its own lane VMs"
+  pass "opted-in forced teardown of unlanded work deletes its recorded lane VMs"
+}
+
+test_teardown_without_the_flag_deletes_no_lane_vm() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-off ship)
+  rm "$case_dir/config/lane-vm-cleanup"
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-off: teardown should succeed"
+  assert_absent "$case_dir/lima-deletes" "lane-vm-off: a home without the flag deleted a VM"
+  pass "teardown without config/lane-vm-cleanup deletes no lane VM"
 }
 
 test_lane_vm_record_appends_each_name_once() {
@@ -768,15 +788,19 @@ test_lane_vm_record_appends_each_name_once() {
   dir="$TMP_ROOT/lane-vm-record"
   mkdir -p "$dir"
   meta="$dir/task-x1.meta"
-  printf '%s\n' "kind=ship" "lane_vms=old" > "$meta"
-  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" pg-it
-  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" pg-it
-  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-api
-  assert_equals $'kind=ship\nlane_vms=old pg-it task-x1-api' "$(cat "$meta")" \
+  printf '%s\n' "kind=ship" "lane_vms=task-x1-old" > "$meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  assert_equals $'kind=ship\nlane_vms=task-x1-old task-x1 task-x1-it' "$(cat "$meta")" \
     "lane-vm-record: meta lines"
-  set +e; "$ROOT/bin/fm-lane-vm-record.sh" "$meta" 'bad name' 2>/dev/null; rc=$?; set -e
-  expect_code 2 "$rc" "lane-vm-record: invalid VM name should be refused"
-  pass "lane VM record adds each name once to the task meta and refuses an invalid name"
+  for bad in 'bad name' pg-it task-x10 task-x1-; do
+    set +e; "$ROOT/bin/fm-lane-vm-record.sh" "$meta" "$bad" 2>/dev/null; rc=$?; set -e
+    expect_code 2 "$rc" "lane-vm-record: name '$bad' should be refused"
+  done
+  assert_equals $'kind=ship\nlane_vms=task-x1-old task-x1 task-x1-it' "$(cat "$meta")" \
+    "lane-vm-record: refused names changed the meta"
+  pass "lane VM record adds each owned name once and refuses names not owned by the task"
 }
 
 test_lane_vm_cleanup_without_limactl_is_quiet() {
@@ -6012,5 +6036,6 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_landed_ship_teardown_deletes_only_its_own_lane_vms
 test_scout_teardown_deletes_its_own_lane_vms
 test_forced_teardown_deletes_its_own_lane_vms
+test_teardown_without_the_flag_deletes_no_lane_vm
 test_lane_vm_record_appends_each_name_once
 test_lane_vm_cleanup_without_limactl_is_quiet
