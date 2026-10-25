@@ -671,7 +671,7 @@ Typed-plane text is typed once; only Enter is retried.
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
-It polls the composer for up to `FM_BACKEND_HERDR_PROOF_WAIT` seconds (default 8) for that proof, because a paged-out, waking, or heavily loaded Claude can take seconds to consume typed input, and its composer reads empty or partly rendered meanwhile.
+It polls the composer for up to `FM_BACKEND_HERDR_PROOF_WAIT` seconds (default 8) for that proof, because a paged-out, waking, or heavily loaded Claude can take seconds to consume typed input, and its composer reads empty, partly rendered, or unreadable meanwhile.
 Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail.
 An overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer is by definition inside the viewport.
 [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns the separate shared inbox pending-line confirmation read.

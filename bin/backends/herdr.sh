@@ -3498,24 +3498,25 @@ fm_backend_herdr_composer_clear_queued() {  # <target> <text>
 # was empty, poll the composer for up to FM_BACKEND_HERDR_PROOF_WAIT seconds
 # until it shows the payload. A target that is paged out, waking from sleep,
 # or streaming under load can take seconds to consume typed input, and its
-# composer reads empty, or as a leading part of the payload, meanwhile; those
-# reads mean "not yet", never refusal.
-# Returns 0 shown, 1 refused (the composer shows text that is not a leading
-# part of the payload, such as the head-truncated suffix, or cannot be read),
-# 2 still empty or partial at the deadline.
+# composer reads empty, or as a leading part of the payload, or fails to read
+# at all, meanwhile; those reads mean "not yet", never refusal.
+# Returns 0 shown, 1 refused (the composer shows readable text that is not a
+# leading part of the payload, such as the head-truncated suffix), 2 still
+# empty, partial or unreadable at the deadline.
 fm_backend_herdr_await_payload() {  # <target> <text>
   local target=$1 text=$2 want=$2 content got deadline
   fm_backend_herdr_proof_squash_var want
   deadline=$((SECONDS + FM_BACKEND_HERDR_PROOF_WAIT))
   while :; do
-    content=$(fm_backend_herdr_composer_content "$target") || return 1
-    fm_backend_herdr_composer_payload_shown "$text" "$content" && return 0
-    got=$content
-    fm_backend_herdr_proof_squash_var got
-    case "$want" in
-      "$got"*) ;;
-      *) return 1 ;;
-    esac
+    if content=$(fm_backend_herdr_composer_content "$target"); then
+      fm_backend_herdr_composer_payload_shown "$text" "$content" && return 0
+      got=$content
+      fm_backend_herdr_proof_squash_var got
+      case "$want" in
+        "$got"*) ;;
+        *) return 1 ;;
+      esac
+    fi
     [ "$SECONDS" -lt "$deadline" ] || return 2
     sleep 0.25
   done
