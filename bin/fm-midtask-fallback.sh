@@ -205,7 +205,8 @@ current_exhausted() {
   provider=$(printf '%s\n' "$array_json" | jq -r \
     --arg h "$harness" --arg m "$model" --arg e "$effort" '
     [.[] | select(type == "object" and .harness == $h
-        and (.model // "default") == $m and (.effort // "default") == $e)
+        and ((.model // "default") as $rm | $rm == "default" or $rm == $m)
+        and ((.effort // "default") as $re | $re == "default" or $re == $e))
       | .provider // ""] | first // ""
   ' 2>/dev/null) || return 1
   if [ -z "$provider" ]; then
@@ -413,7 +414,9 @@ cmd_consider() {
   fi
   [ -s "$rows_file" ] || die "task $id dispatch array is empty"
   while IFS=$'\t' read -r idx harness model effort provider; do
-    if [ "$harness" = "$cur_h" ] && [ "$model" = "$cur_m" ] && [ "$effort" = "$cur_e" ]; then
+    if [ "$harness" = "$cur_h" ] \
+      && { [ "$model" = default ] || [ "$model" = "$cur_m" ]; } \
+      && { [ "$effort" = default ] || [ "$effort" = "$cur_e" ]; }; then
       last_match=$idx
     fi
   done < "$rows_file"
