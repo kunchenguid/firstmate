@@ -1,0 +1,34 @@
+---
+name: midtask-fallback
+description: >-
+  Load when config/crew-dispatch.json sets mid_task_fallback and a matched profile array must be recorded after spawn, and when a worker stops on a rate limit or exhausted credits or a quota process event reports exhausted_now for a live task.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# midtask-fallback
+
+`docs/configuration.md` (Crew dispatch profiles) owns the `mid_task_fallback` setting.
+`bin/fm-midtask-fallback.sh` owns the record, the detection, the next profile, and the relaunch.
+Its header owns the commands, the exit codes, and the limit-message adapter contract.
+
+After spawn, while the setting is on, record the array that was matched.
+Use `bin/fm-midtask-fallback.sh bind <task-id> --rule <index>` for a rule array.
+Use `--default` for the top-level default array.
+Run bind only after the task record exists.
+A fresh spawn rewrites that record, so bind again after a spawn that replaces it.
+The recorded array stays the original match.
+Later edits to the dispatch file do not replace it.
+Turning the setting off stops further switches.
+
+When the latest status line pauses on a rate limit, a usage limit, or exhausted credits, run `bin/fm-midtask-fallback.sh consider <task-id>`.
+Run that consider before `stuck-crewmate-recovery` relaunches the same profile.
+Do the same when `bin/fm-procevent-quota.sh` reports `exhausted_now` for that live task.
+Pass `--snapshot` with the quota document already captured for that check.
+Pass `--pane-text-file` only when pane text was already captured.
+Do not launch a harness to read a limit message.
+The script relaunches through `bin/fm-control.sh` and keeps the local copy.
+No eligible next profile is a decision.
+It is not a relaunch of the same profile.
+The watcher also runs consider once per status change when the task record says the fallback is on.
