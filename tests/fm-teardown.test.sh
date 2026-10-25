@@ -64,8 +64,9 @@
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
 #
-# Lane VMs: a landed ship or reported scout deletes its own Lima VMs only;
-# --force keeps them and an absent limactl is a quiet no-op.
+# Lane VMs: a landed ship, reported scout or --force discard deletes its own
+# Lima VMs only, sparing one a live task in this home or a registered local
+# secondmate home also matches; an absent limactl is a quiet no-op.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -702,7 +703,7 @@ make_path_without_lsof() {  # <case-dir>
 
 # Lane VMs: teardown deletes exactly the task's own Lima VMs (`task-x1` and
 # `task-x1-*`) once its work has landed, never a VM another live task's id
-# matches, and none on a --force discard.
+# matches, here or in a registered local secondmate home.
 lane_vm_case() {  # <name> <kind>
   local case_dir
   case_dir=$(make_case "$1")
@@ -745,15 +746,38 @@ test_scout_teardown_deletes_its_own_lane_vms() {
   pass "scout teardown after its report deletes its own lane VMs"
 }
 
-test_forced_teardown_keeps_lane_vms() {
+test_forced_teardown_deletes_its_own_lane_vms() {
   local case_dir rc
   case_dir=$(make_case lane-vm-force)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "unlanded work"
+  printf '%s\n' "window=firstmate:fm-task-x1-b" > "$case_dir/state/task-x1-b.meta"
   set +e; lane_vm_teardown "$case_dir" --force; rc=$?; set -e
   expect_code 0 "$rc" "lane-vm-force: forced teardown should succeed"
-  assert_absent "$case_dir/lima-deletes" "lane-vm-force: a forced discard deleted a VM"
-  pass "forced teardown of unlanded work keeps its lane VMs"
+  assert_equals $'--force task-x1\n--force task-x1-it' "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-force: deleted VMs"
+  pass "forced teardown of unlanded work deletes its own lane VMs, sparing another live task's"
+}
+
+test_lane_vm_cleanup_spares_secondmate_home_live_task() {
+  local case_dir rc
+  case_dir=$(make_case lane-vm-secondmate)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "unlanded work"
+  mkdir -p "$case_dir/sm-home/state" "$case_dir/data"
+  printf '%s\n' "window=firstmate:fm-task-x1-c" > "$case_dir/sm-home/state/task-x1-c.meta"
+  printf -- '- sm-a - local secondmate (home: %s; scope: tests; projects: none; added 2026-10-25)\n' \
+    "$case_dir/sm-home" > "$case_dir/data/secondmates.md"
+  set +e
+  FM_FAKE_LIMA_VMS=$'task-x1\ntask-x1-c\ntask-x1-c-it\ntask-x1-it' \
+  FM_FAKE_LIMA_DELETE_LOG="$case_dir/lima-deletes" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "lane-vm-secondmate: forced teardown should succeed"
+  assert_equals $'--force task-x1\n--force task-x1-it' "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-secondmate: deleted VMs"
+  pass "lane VM cleanup spares a VM a live task in a local secondmate home matches"
 }
 
 test_lane_vm_cleanup_without_limactl_is_quiet() {
@@ -5986,5 +6010,6 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_landed_ship_teardown_deletes_only_its_own_lane_vms
 test_scout_teardown_deletes_its_own_lane_vms
-test_forced_teardown_keeps_lane_vms
+test_forced_teardown_deletes_its_own_lane_vms
+test_lane_vm_cleanup_spares_secondmate_home_live_task
 test_lane_vm_cleanup_without_limactl_is_quiet

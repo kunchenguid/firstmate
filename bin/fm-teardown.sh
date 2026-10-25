@@ -3815,11 +3815,10 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
 
-# The landed-work or scout-report gate has passed, so the task's own Lima lane
-# VMs (bin/fm-lane-vm-lib.sh) are spent. A --force run has proven nothing
-# landed, so it keeps them.
-if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$FORCE" != "--force" ]; then
-  fm_lane_vm_cleanup "$ID" "$STATE"
+# The task is finished, landed or discarded, so its own Lima lane VMs
+# (bin/fm-lane-vm-lib.sh) are spent.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  fm_lane_vm_cleanup "$ID" "$STATE" "$SECONDMATE_REG"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
