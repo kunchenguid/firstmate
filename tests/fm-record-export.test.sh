@@ -207,7 +207,7 @@ test_sync_requires_a_dedicated_disjoint_single_home_root() {
 }
 
 test_sync_retracts_stale_records_as_one_live_snapshot() {
-  local home export_root rc=0
+  local home export_root first_generation rc=0
   home=$(make_home sync-converges)
   export_root="$TMP_ROOT/export-sync-converges"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
@@ -217,6 +217,7 @@ test_sync_retracts_stale_records_as_one_live_snapshot() {
   printf 'pending\n' > "$home/state/task-a.inbox/001.msg"
   run_export "$home" sync > "$home/first.out" 2> "$home/first.err" \
     || fail "first convergent sync failed: $(cat "$home/first.err")"
+  first_generation=$(readlink "$export_root/live")
 
   mv "$home/state/task-a.inbox/001.msg" "$home/state/task-a.inbox/handled/001.msg"
   rm "$home/state/task-a.meta" "$home/state/task-a.status"
@@ -227,6 +228,8 @@ test_sync_retracts_stale_records_as_one_live_snapshot() {
   assert_absent "$export_root/live/state/task-a.inbox/001.msg" "sync retained a moved pending message"
   assert_grep 'pending' "$export_root/live/state/task-a.inbox/handled/001.msg" \
     "sync omitted the handled destination of a moved message"
+  assert_present "$export_root/$first_generation" \
+    "sync removed the prior immutable generation before a consumer could finish it"
   pass "record export sync publishes the exact current allowlist as one live snapshot"
 }
 
@@ -250,7 +253,7 @@ test_sync_refuses_unknown_managed_artifacts_before_publication() {
 }
 
 test_sync_detects_destination_parent_replacement() {
-  local home export_root outside pid rc=0 wait_count=0 stage= live_target prior_snapshot
+  local home export_root outside pid rc=0 wait_count=0 stage='' live_target prior_snapshot
   home=$(make_home sync-destination-race)
   export_root="$TMP_ROOT/export-sync-destination-race"
   outside="$TMP_ROOT/outside-sync-destination-race"
@@ -521,6 +524,40 @@ test_archive_retry_removes_stale_files_from_a_partial_generation() {
   pass "teardown archive retry publishes a fresh generation without stale partial files"
 }
 
+test_archive_revalidates_sources_immediately_before_publication() {
+  local home export_root archive archive_pid rc=0 wait_count=0 index
+  home=$(make_home archive-final-revalidate)
+  export_root="$TMP_ROOT/export-archive-final-revalidate"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" final-revalidate-generation
+  run_export "$home" sync > "$home/sync.out" 2> "$home/sync.err" \
+    || fail "final revalidation setup could not initialize its root: $(cat "$home/sync.err")"
+  archive="$export_root/archive/task-a/final-revalidate-generation"
+  mkdir -p "$archive/inbox"
+  index=0
+  while [ "$index" -lt 10000 ]; do
+    printf 'stale %s\n' "$index" > "$archive/inbox/$(printf '%05d' "$index").msg"
+    index=$((index + 1))
+  done
+
+  run_export "$home" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" &
+  archive_pid=$!
+  while [ -e "$archive/inbox/00000.msg" ]; do
+    kill -0 "$archive_pid" 2>/dev/null || break
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 1000 ] || break
+    sleep 0.01
+  done
+  [ ! -e "$archive/inbox/00000.msg" ] \
+    || { wait "$archive_pid" || true; fail "archive did not begin replacing its stale partial generation"; }
+  printf 'changed after final comparison\n' >> "$home/state/task-a.status"
+  wait "$archive_pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "archive committed after a source changed during stale-generation replacement"
+  assert_absent "$archive/manifest.v1.json" "archive committed a manifest after its final source comparison"
+  assert_present "$home/state/task-a.meta" "final comparison race removed live metadata"
+  pass "teardown archive revalidates sources immediately before publication"
+}
+
 test_archive_waits_for_the_task_lock_before_enumerating_sources() {
   local home export_root archive lock holder_pid archive_pid rc=0 wait_count=0
   home=$(make_home archive-source-lock)
@@ -705,6 +742,7 @@ test_archive_refuses_a_corrupt_committed_manifest
 test_archive_detects_a_source_change_during_capture
 test_archive_repairs_only_an_uncommitted_same_generation
 test_archive_retry_removes_stale_files_from_a_partial_generation
+test_archive_revalidates_sources_immediately_before_publication
 test_archive_waits_for_the_task_lock_before_enumerating_sources
 test_archive_allows_missing_optional_records
 test_archive_refuses_unsafe_sources_and_destinations

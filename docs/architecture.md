@@ -261,15 +261,17 @@ Ordinary child teardown uses its own home's configuration; retiring a whole home
 ### Read-only record exports
 
 [Record export](configuration.md#record-export-configrecord-export-root) is an opt-in publication boundary for a fixed versioned subset of Firstmate-owned files.
-`bin/fm-record-export.sh sync` copies the allowlist into an external `live/` tree without modifying sources, while teardown calls the same owner to commit one immutable archive generation before retiring metadata, status, or steering records.
+`bin/fm-record-export.sh sync` builds an immutable allowlisted generation without modifying sources and atomically replaces an external `live` pointer, while teardown calls the same owner to publish one immutable archive generation before retiring metadata, status, or steering records.
 The task's `spawn_gen` is the archive generation key, so a reused ID cannot replace an earlier incarnation.
-The manifest is the commit marker, is published last, and gives a read-only consumer byte counts and SHA-256 values for completeness checks.
+The strict manifest gives a read-only consumer byte counts and SHA-256 values for completeness checks, and the generation directory appears only after its files and manifest have been flushed.
 
 The export root is cold output rather than operational state.
 No presentation, wake, classification, spawn, or fleet snapshot path reads it, and the versioned schema is not a command API.
-The exporter rejects unsafe objects and containment failures, never follows symlinks, and performs no network access or redaction.
+One canonical home owns each dedicated disjoint root through a versioned marker.
+The filesystem engine binds checks and operations to directory descriptors, refuses unsafe source and managed destination objects, and performs no network access or redaction.
 [`bin/fm-record-export.sh`](../bin/fm-record-export.sh) owns the exact schema and copy mechanics, while `bin/fm-teardown.sh` owns when the pre-retirement transaction runs.
-[`tests/fm-record-export.test.sh`](../tests/fm-record-export.test.sh), [`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh), and [`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) cover allowlist safety, cold-reader isolation, local and nested retirement, and the remote-home path.
+[`tests/fm-record-export.test.sh`](../tests/fm-record-export.test.sh) covers allowlist, transaction, manifest, retention, race, and cold-reader safety.
+[`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh) covers local and nested retirement, while [`tests/fm-record-export-remote-home.test.sh`](../tests/fm-record-export-remote-home.test.sh) independently reaches remote-home commit and fail-closed preservation without depending on the broad remote lifecycle fixture.
 
 ## Busy state is semantic, per adapter
 

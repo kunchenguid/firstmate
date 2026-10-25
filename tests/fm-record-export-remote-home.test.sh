@@ -46,7 +46,8 @@ make_remote_home() {  # <name>
 }
 
 run_remote_teardown() {  # <home> <output-prefix>
-  local home=$1 output=$2 base=${home%/home}
+  local home=$1 output=$2 base
+  base=${home%/home}
   FM_HOME="$home" \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$home/state" \

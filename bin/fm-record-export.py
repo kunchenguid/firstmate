@@ -1009,13 +1009,13 @@ def archive_task(home: str, config: str, data: str, state: str, task: str) -> No
                 try:
                     entries = [copy_archive_source(source, stage_fd) for source in sources]
                     write_archive_manifest(stage_fd, task, spawn_gen, entries)
-                    revalidate_archive_sources(state_fd, task, sources, entries)
                     current_task = os.stat(task, dir_fd=archive_fd, follow_symlinks=False)
                     if not stat.S_ISDIR(current_task.st_mode) \
                             or stat_identity(current_task) != fd_identity(task_fd):
                         fail("record export archive task directory changed before publication")
                     if existing_fd >= 0:
                         remove_tree_at(task_fd, spawn_gen)
+                    revalidate_archive_sources(state_fd, task, sources, entries)
                     os.rename(stage_name, spawn_gen, src_dir_fd=task_fd, dst_dir_fd=task_fd)
                     os.fsync(task_fd)
                     os.fsync(archive_fd)
@@ -1103,6 +1103,10 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
                     continue
                 if not (GENERATION_NAME.fullmatch(name) or STAGE_NAME.fullmatch(name)):
                     fail(f"unknown record export live generation artifact: {name}")
+                if GENERATION_NAME.fullmatch(name):
+                    info = os.stat(name, dir_fd=generations_fd, follow_symlinks=False)
+                    if info.st_mtime >= time.time() - 30 * 24 * 60 * 60:
+                        continue
                 try:
                     remove_tree_at(generations_fd, name)
                 except ExportError as exc:
