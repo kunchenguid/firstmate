@@ -1691,8 +1691,8 @@ SH
   out=$(run_captain "$home" reconcile list)
   assert_contains "$out" "sample-source-reconcile" \
     "the bound captured reconcile selection did not create a request"
-  assert_contains "$out" "captain note: re-check latest publication" \
-    "the annotated reconcile selection lost its note provenance"
+  assert_contains "$out" "	captain_note=re-check latest publication" \
+    "the annotated reconcile selection lost its captain note"
   show=$(tasks_in "$home" show sample-old-shape --full)
   assert_contains "$show" "state: done" "an ordinary legacy board choice did not close its task"
   assert_contains "$show" "Resolution mode: answered" \
@@ -1710,7 +1710,7 @@ SH
   assert_contains "$show" "held: yes" "a bare captured reconcile selection released its task"
   printf 'The captured call is moot.\n' > "$home/source-reconcile-evidence.txt"
   run_captain "$home" reconcile close sample-source-reconcile \
-    --evidence-file "$home/source-reconcile-evidence.txt" >/dev/null \
+    --evidence-file "$home/source-reconcile-evidence.txt" --captain-note-handled >/dev/null \
     || fail "the annotated captured request did not authorize evidence-backed closure"
   run_captain "$home" reconcile close sample-bare-reconcile \
     --evidence-file "$home/source-reconcile-evidence.txt" >/dev/null \
@@ -1948,6 +1948,130 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   list=$(run_captain "$home" reconcile list)
   assert_contains "$list" "reconcile-requests: 0" "the verified requests were not retired: $list"
   pass "reconcile closes a moot call with evidence and keeps an active one open with a note"
+}
+
+# A captain who picks Reconcile and types their decision into its note has
+# still not answered: the selection stays a re-check request. The typed words
+# ride that request as its captain note, and neither non-answer retirement may
+# drop them unread: firstmate records them through `answer`, or states that it
+# handled them before it closes the call as moot or keeps it open.
+test_reconcile_note_keeps_the_captains_words_until_handled() {
+  local home id raw adapter_root out rc show list
+  home=$(make_home reconcile-captain-note)
+  for id in demo-deploy-call demo-later-call demo-access-work demo-recheck-call; do
+    tasks_in "$home" add "$id" "Captain call $id" --repo sample >/dev/null \
+      || fail "could not create $id"
+    run_captain "$home" hold "$id" --reason "waiting for the captain" >/dev/null \
+      || fail "could not hold $id"
+  done
+
+  raw="$home/board-result.toon"
+  cat > "$raw" <<'EOF'
+session:
+  file: /bearings-board.html
+  status: feedback
+  session_ended: false
+  ended_by: none
+prompts[4]{uid,prompt,selector,tag,text}:
+  "1","Captain's Call answer - Deploy the demo build: reconcile - yes, deploy it\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"demo-deploy-call\",\n  \"selection\": \"reconcile\",\n  \"note\": \"yes, deploy it\"\n}","section#call > form:nth-of-type(1)",choice,"Deploy the demo build -> reconcile - yes, deploy it"
+  "2","Captain's Call answer - Pick the demo layout: reconcile - keep it open for later\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"demo-later-call\",\n  \"selection\": \"reconcile\",\n  \"note\": \"keep it open for later\"\n}","section#call > form:nth-of-type(2)",choice,"Pick the demo layout -> reconcile - keep it open for later"
+  "3","Captain's Call answer - Grant the demo access: reconcile - you have access\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"demo-access-work\",\n  \"selection\": \"reconcile\",\n  \"note\": \"you have access\",\n  \"close\": \"release\"\n}","section#call > form:nth-of-type(3)",choice,"Grant the demo access -> reconcile - you have access"
+  "4","Captain's Call answer - Check the demo release: reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"demo-recheck-call\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(4)",choice,"Check the demo release -> reconcile"
+next_step: Feedback is queued for the agent.
+EOF
+
+  # Feed the capture exactly as the runner does for a bound board source.
+  adapter_root="$home/adapter-root"
+  mkdir -p "$adapter_root/bin"
+  cat > "$adapter_root/bin/fm-procevent-notechan.sh" <<SH
+#!/usr/bin/env bash
+case "\${1-}" in
+  answers) exec "$ROOT/bin/fm-procevent-lavish.sh" answers "\${2-}" ;;
+  reconciles) exec "$ROOT/bin/fm-procevent-lavish.sh" reconciles "\${2-}" ;;
+esac
+exit 2
+SH
+  chmod +x "$adapter_root/bin/fm-procevent-notechan.sh"
+  run_captain "$home" bind note-src >/dev/null || fail "could not bind the board source"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$adapter_root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" register notechan note-src -- cat "$raw" >/dev/null \
+    || fail "could not register the board source"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$adapter_root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" start note-src >/dev/null 2>&1
+  assert_present "$home/state/procevent-inbox/note-src.1.result" "the runner captured no board result"
+
+  # Reconcile is still never an answer, note or no note.
+  for id in demo-deploy-call demo-later-call demo-access-work demo-recheck-call; do
+    show=$(tasks_in "$home" show "$id" --full)
+    assert_contains "$show" "state: queued" "a noted reconcile selection closed $id"
+    assert_contains "$show" "held: yes" "a noted reconcile selection released $id"
+    assert_not_contains "$show" "Resolution recorded by" "a noted reconcile selection resolved $id"
+  done
+
+  # Neither non-answer retirement may drop the captain's words unread.
+  printf 'Re-checked: the demo build is still waiting.\n' > "$home/still-open.txt"
+  set +e
+  out=$(run_captain "$home" reconcile note demo-deploy-call --note-file "$home/still-open.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile note kept a call open over the captain's unread words"
+  assert_contains "$out" "yes, deploy it" "the refusal did not show the captain's own words: $out"
+  assert_contains "$out" "answer demo-deploy-call" "the refusal did not name the answer path: $out"
+  printf 'The demo build was already deployed.\n' > "$home/moot.txt"
+  set +e
+  out=$(run_captain "$home" reconcile close demo-deploy-call --evidence-file "$home/moot.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile close retired a call over the captain's unread words"
+  assert_contains "$out" "yes, deploy it" "the close refusal did not show the captain's own words: $out"
+  show=$(tasks_in "$home" show demo-deploy-call --full)
+  assert_contains "$show" "held: yes" "a refused retirement changed the captain call"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "demo-deploy-call" "a refused retirement dropped the pending request: $list"
+
+  # The typed words are surfaced as the captain's own note, apart from provenance.
+  list=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  assert_contains "$list" "reconcile-requests: 4" "a reconcile selection filed no request: $list"
+  printf '%s\n' "$list" | grep -F 'demo-deploy-call' | grep -qF "	captain_note=yes, deploy it" \
+    || fail "the reconcile request did not surface the captain's note as its own field: $list"
+  printf '%s\n' "$list" | grep -F 'demo-recheck-call' | grep -qF 'captain_note=' \
+    && fail "a bare reconcile request invented a captain note: $list"
+
+  # Words that decide the call are recorded verbatim through the native answer.
+  printf 'yes, deploy it\n' > "$home/deploy-answer.txt"
+  run_captain "$home" answer demo-deploy-call --decision-file "$home/deploy-answer.txt" >/dev/null \
+    || fail "the captain's own words could not be recorded through answer"
+  show=$(tasks_in "$home" show demo-deploy-call --full)
+  assert_contains "$show" "state: done" "recording the captain's words did not close the call"
+  assert_contains "$show" "Captain decision:" "the captain's words were not recorded as their decision"
+  printf 'you have access\n' > "$home/access-answer.txt"
+  run_captain "$home" answer demo-access-work --decision-file "$home/access-answer.txt" --release >/dev/null \
+    || fail "the captain's words could not release the gated work"
+  show=$(tasks_in "$home" show demo-access-work --full)
+  assert_contains "$show" "held: no" "recording the captain's words did not release the gated work"
+
+  # Words handled another way still let firstmate keep the call open, on record.
+  run_captain "$home" hold demo-later-call --reason "waiting for the captain" --until 2099-01-01 >/dev/null \
+    || fail "could not defer the call the captain asked to keep for later"
+  printf 'Deferred as the captain asked.\n' > "$home/later.txt"
+  run_captain "$home" reconcile note demo-later-call --note-file "$home/later.txt" \
+    --captain-note-handled >/dev/null \
+    || fail "a handled captain note could not keep its call open"
+  show=$(tasks_in "$home" show demo-later-call --full)
+  assert_contains "$show" "held: yes" "keeping a handled call open released it"
+  assert_contains "$show" "Captain note: keep it open for later" \
+    "the kept-open record dropped the captain's own words"
+
+  # A bare re-check request needs no acknowledgement.
+  run_captain "$home" reconcile note demo-recheck-call --note-file "$home/still-open.txt" >/dev/null \
+    || fail "a bare reconcile request now demands a captain-note acknowledgement"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" "a handled reconcile request stayed pending: $list"
+  pass "a reconcile note keeps the captain's words on the request until firstmate handles them"
 }
 
 test_reconcile_outcomes_retry_partial_failures_once() {
@@ -4787,6 +4911,7 @@ test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
 test_reconcile_closes_with_evidence_or_keeps_the_call_open
+test_reconcile_note_keeps_the_captains_words_until_handled
 test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working

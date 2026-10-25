@@ -270,7 +270,7 @@ The Lavish adapter splits each capture between two commands:
 | Command | What it emits |
 | --- | --- |
 | `bin/fm-procevent-lavish.sh answers` | An exact non-reconcile selection, or a bare note when no option was selected. |
-| `reconciles` | Only task ids whose structured selection is Reconcile, carrying their notes as request provenance. |
+| `reconciles` | Only task ids whose structured selection is Reconcile, carrying any typed note as the request's captain note. |
 
 Current rows require the versioned shape and the `choice` tag.
 A time-limited rollout branch accepts ordinary answers from the old question/answer shape.
@@ -285,6 +285,7 @@ Failures remain best-effort and never acknowledge or suppress the captured resul
 
 This captured-source intake records a durable reconcile request under `state/reconcile-requests/`.
 There is one private record per task, carrying the requesting provenance and a UTC timestamp.
+A note the captain typed beside the selection is kept on the record as its captain note, apart from that provenance.
 The record exists so the obligation to re-check cannot be lost between the wake that carried the answer and the turn that acts on it.
 It is idempotent per task: repeating a reconcile keeps one request and its original timestamp.
 The supported creator is the runner carrying the captain's board selection.
@@ -299,12 +300,17 @@ Each outcome requires both the pending board-created request and the operator in
   It writes a resolution record whose mode is `reconciled` and whose body is the supplied EVIDENCE under a `Reconciliation evidence:` label, then closes the task.
   The distinct mode and label are what keep the record honest: it says the call dissolved against verified evidence, and it never claims the captain answered.
 - `reconcile note <task-id> --note-file <path>` is the still-active outcome.
-  It appends one dated `Captain hold reconciled:` note to the task body, leaves the hold in place, and retires the request.
+  It appends one dated `Captain hold reconciled:` note to the task body, carrying any captain note under a `Captain note:` label, leaves the hold in place, and retires the request.
   The call stays the captain's, now carrying what the re-check found.
   A marker bound to the request timestamp, provenance, and note digest lets a matching retry finish retirement without appending again.
   A later request with the same finding still receives its own dated note.
 
-`reconcile list` is the read-only enumeration of pending requests filed by board answers.
+A captain note is the captain's own words, while the Reconcile beside it is still not an answer.
+Both outcomes therefore refuse a request carrying one and print those words, unless `--captain-note-handled` states that firstmate already acted on them.
+Words that decide the call are recorded through `answer`, which also retires the request.
+No script reads the note to choose between those paths; that judgment stays with firstmate.
+
+`reconcile list` is the read-only enumeration of pending requests filed by board answers, showing each captain note as its own field.
 A successful normal answer also retires any pending request, because an answered call has no remaining re-check obligation.
 
 Every retirement is checked.
@@ -594,6 +600,7 @@ Around those outcomes, it proves:
 - Every failed retirement is surfaced with its pending request retained.
 - Incompatible resolution modes cannot replay as captain answers.
 - Normal close, release, and replay paths retire pending requests.
+- A runner-fed Reconcile selection with a typed note stays open, lists that note as its own field, and refuses both outcomes until the note is recorded through `answer` or declared handled.
 
 The captured-source coverage proves:
 
@@ -610,7 +617,7 @@ The captured-source coverage proves:
 
 The board's half is pinned in `tests/fm-bearings-board.test.sh`:
 
-- Every published decision card carries exactly one reconcile option.
+- Every published decision card carries exactly one reconcile option, whose hint says it is not an answer.
 - Authored options reserve that value across every card type.
 - Recommendations name authored options.
 - A decision card whose structured subject appears in the payload's landed rows is dropped.
