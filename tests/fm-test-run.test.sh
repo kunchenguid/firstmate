@@ -1516,11 +1516,8 @@ test_concurrent_runs_are_ordered_longest_first() {
   pass "a concurrent run starts the longest-hint script first"
 }
 
-# --max-wall-ms is checked after the run, so it cannot end a run that never
-# finishes. A hung script has to become a bounded failure, because an unbounded
-# suite is exactly what silently outruns its caller's invocation budget.
 test_stop_is_scoped_to_one_run() {
-  local tmp repo runner sleeper a_out b_out a_id b_pid w
+  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid w
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stop.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -1534,6 +1531,7 @@ test_stop_is_scoped_to_one_run() {
   a_out="$tmp/a.out"
   b_out="$tmp/b.out"
   TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
+  a_pid=$!
   TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
   b_pid=$!
   w=0
@@ -1541,23 +1539,28 @@ test_stop_is_scoped_to_one_run() {
     sleep 0.1
     w=$((w + 1))
   done
-  a_id=$(TMPDIR="$tmp" "$runner" --stop | head -1 | awk '{print $1}')
-  [ -n "$a_id" ] || fail "--stop listed no live runs"
+  a_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
+  b_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$b_pid" '$2 == p {print $1}')
+  [ -n "$a_id" ] && [ -n "$b_id" ] || fail "--stop did not list both live runs"
   TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
   w=0
   while ! grep -q FM_TEST_ABORTED "$a_out" "$b_out" 2>/dev/null && [ "$w" -lt 100 ]; do
     sleep 0.1
     w=$((w + 1))
   done
-  [ "$(grep -l FM_TEST_ABORTED "$a_out" "$b_out" | wc -l | tr -d ' ')" = 1 ] \
-    || fail "exactly one run must abort: $(cat "$a_out" "$b_out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$a_id" "$a_out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$a_out")"
+  ! grep -q FM_TEST_ABORTED "$b_out" || fail "sibling run aborted: $(cat "$b_out")"
   kill -0 "$b_pid" 2>/dev/null || fail "sibling run died"
-  TMPDIR="$tmp" "$runner" --stop "$(TMPDIR="$tmp" "$runner" --stop | head -1 | awk '{print $1}')" >/dev/null 2>&1 || true
+  TMPDIR="$tmp" "$runner" --stop "$b_id" >/dev/null 2>&1 || true
   wait
   rm -rf "$tmp"
   pass "--stop kills one run, emits FM_TEST_ABORTED, spares siblings"
 }
 
+# --max-wall-ms is checked after the run, so it cannot end a run that never
+# finishes. A hung script has to become a bounded failure, because an unbounded
+# suite is exactly what silently outruns its caller's invocation budget.
 test_per_script_timeout_bounds_a_hang() {
   local tmp repo runner hang rc began ended grandchild_pid grandchild waited
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")

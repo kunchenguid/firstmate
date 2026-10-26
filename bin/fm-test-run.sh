@@ -248,7 +248,11 @@ stop_runs() {
     [ -f "$f" ] || continue
     id=$(basename "$f" .pid)
     pid=$(cat "$f" 2>/dev/null)
-    if ! kill -0 "$pid" 2>/dev/null; then
+    case $(ps -o command= -p "$pid" 2>/dev/null) in
+      *fm-test-run*) ;;
+      *) pid= ;;
+    esac
+    if [ -z "$pid" ]; then
       rm -f "$f"
       continue
     fi
