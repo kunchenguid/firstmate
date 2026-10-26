@@ -113,9 +113,7 @@ home="$case_dir/home"
 proj="$case_dir/source"
 wt="$case_dir/worker"
 fm_test_spawn_home "$home" vibe
-fm_git_init_commit "$proj"
-fm_git_add_origin "$proj" "$case_dir/origin.git"
-fm_git_init_commit "$wt"
+fm_git_worktree "$proj" "$wt" fm/vibe-default
 fm_test_spawn_brief "$home" vibe-default
 out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch" fm_test_run_spawn "$home" "$wt" "$fakebin" vibe-default "$proj" --scout --harness vibe --backend tmux) || fail "default spawn refused: $out"
 launch=$(cat "$case_dir/launch")
