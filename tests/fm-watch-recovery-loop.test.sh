@@ -169,14 +169,15 @@ EOF
 # reconciles, including simultaneous publishers; an idle source is the
 # empty-queue control. Only a genuinely new result may wake the successor.
 run_repeated_rearm_case() {
-  local mode=$1 dir repo home fakebin out status
+  local mode=$1 dir repo home claims fakebin out status
   dir=$(make_case "repeated-rearm-$mode")
   repo="$dir/root"
   home="$dir/home"
+  claims="$home/procevent-claims"
   fakebin="$dir/fakebin"
   mkdir -p "$home/state" "$home/config"
   fm_test_track_watcher_state "$home/state"
-  fm_test_track_procevent_home "$home"
+  fm_test_track_procevent_home "$home" "$claims"
   install_pi_watch_extension_fixture "$repo"
   cat > "$repo/bin/fm-watch-arm.sh" <<SH
 #!/usr/bin/env bash
@@ -192,12 +193,14 @@ exit 1
 SH
   chmod +x "$dir/idle-source.sh"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_PROCEVENT_CLAIM_ROOT="$claims" \
     "$ROOT/bin/fm-procevent.sh" register lavish idle -- "$dir/idle-source.sh" \
     >/dev/null || fail "could not register idle source"
   out=$(
     TEST_MODE="$mode" PRODUCTION_ROOT="$ROOT" \
       PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STATE_OVERRIDE="$home/state" \
+      FM_PROCEVENT_CLAIM_ROOT="$claims" \
       PATH="$fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
       node --input-type=module 2>&1 <<'EOF'
