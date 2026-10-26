@@ -11,7 +11,6 @@ Use Vibe's own configured model alias, discovered through its `/model` picker or
 The packaged Python entrypoint and its interpreter must remain installed beside the Rust TUI.
 A stale or unavailable account catalog can therefore require opening Vibe normally to refresh its configuration before retrying.
 Omitting the model uses Vibe's configured default.
-Mistral-hosted models execute in Vibe, not through Polytoken.
 
 Effort pinning is unsupported: omit effort or use `default` to retain Vibe's configured reasoning level.
 An explicit non-default effort refuses rather than pretending the requested level applied.
