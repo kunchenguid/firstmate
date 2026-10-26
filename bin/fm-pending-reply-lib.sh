@@ -956,7 +956,7 @@ fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-
 # instruction. Applied only where the fence is used, so the durable
 # request_summary field itself keeps the operator's original characters.
 fm_pending_reply_quote_inert() {  # <text>
-  printf '%s' "$1" | sed -e 's/>>>/> > >/g' -e 's/<<</< < </g'
+  printf '%s' "$1" | sed -e ':a' -e 's/>>/> >/g' -e 's/<</< </g' -e 'ta'
 }
 
 # Build the one automatic recovery message for a pending record.
