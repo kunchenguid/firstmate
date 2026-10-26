@@ -4942,7 +4942,11 @@ EOF
       # A durable lease (bin/fm-home-seed.sh's pattern): there is no pane to run
       # the interactive `treehouse get` in, and a slot a live T3 thread points at
       # must never be handed on while that thread could re-create it.
-      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+      T3CODE_POOL_ROOT=$(fm_treehouse_home_root "$FM_HOME") || {
+        echo "error: could not resolve the Treehouse worktree root for home $FM_HOME" >&2
+        exit 1
+      }
+      WT=$(cd "$PROJ_ABS" && treehouse --root "$T3CODE_POOL_ROOT" get --lease --lease-holder "$ID") || {
         echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
         exit 1
       }
