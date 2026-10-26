@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-fork-free-helpers.test.sh - the pure-bash stand-ins that the
 # watcher, drain, and lock paths use instead of forking small external
-# commands every cycle. Each case compares the helper with the command it
-# replaces on the same input, under every available Bash (stock macOS
+# commands every cycle, plus the whole-file decision fold that runs without a
+# command substitution per status line. Each case compares the helper with the
+# form it replaces on the same input, under every available Bash (stock macOS
 # /bin/bash 3.2 included) and under both the C and a UTF-8 locale, so an edge
 # case where the two disagree fails here instead of drifting silently.
 set -u
@@ -225,6 +226,78 @@ SH
   pass "classify stat helpers resolve the kernel name once per process"
 }
 
+test_whole_file_decision_fold_matches_the_per_line_substitution_fold() {
+  local script="$TMP_ROOT/fold.sh" status="$TMP_ROOT/fold.status" i k
+  # A long multi-key stream like a busy secondmate's: every transition verb,
+  # both key positions, readable and numeric stamps, correlation tags, reserved
+  # keys inside and outside their vocabulary, keyless and continuation lines,
+  # multibyte and glob-looking notes, and many decisions left open at once.
+  : > "$status"
+  i=0
+  while [ "$i" -lt 40 ]; do
+    k="k$((i % 13))"
+    {
+      printf 'needs-decision [key=%s] [at=%s]: corr=c%s pick caf\303\251 * ? [a] \\n %s\n' "$k" "$((1700000000 + i))" "$i" "$i"
+      printf 'done [at=%s]: shipped part %s\n' "$((1700000100 + i))" "$i"
+      printf 'blocked: [key=%s] waiting on %s  \n' "k$((i % 7))" "$i"
+      printf '  continuation prose without a colon %s\n' "$i"
+      case $((i % 5)) in
+        0) printf 'resolved [key=%s]: answered %s\n' "$k" "$i" ;;
+        1) printf 'captain-held [key=k%s] [at=10:30]: held %s\n' "$((i % 7))" "$i" ;;
+        2) printf 'needs-decision [corr=x%s] [key=pending-reply-%s]: unrelated %s\n' "$i" "$i" "$i" ;;
+        3) printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=m %s\n' "$((i - 1))" "$i" ;;
+        4) printf 'needs-decision: keyless ask %s\n\nfailed: run %s\n' "$i" "$i" ;;
+      esac
+    } >> "$status"
+    i=$((i + 1))
+  done
+  cat > "$script" <<'SH'
+. "$1/bin/fm-classify-lib.sh"
+probe=
+# Record the subshell depth each fold helper runs at; the whole-file fold must
+# keep every one in the caller's shell rather than one substitution per line.
+for fn in _fm_decision_fold_line _fm_decision_drop _fm_decision_key status_line_note; do
+  eval "$(declare -f "$fn" | sed "1s/^$fn /__probe_orig_$fn /")"
+  eval "$fn() { [ -z \"\$probe\" ] || printf '%s\n' \"\$BASH_SUBSHELL\" >> \"\$probe\"; __probe_orig_$fn \"\$@\"; }"
+done
+# The fold as it was written before it forked nothing: the same one-line rule,
+# printed and captured per line.
+reference_fold() {  # <status-file> <kind>
+  local line verb open=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    case "$verb" in
+      needs-decision|blocked|done|failed|resolved|captain-held)
+        open=$(_fm_decision_fold_line "$open" "$line" resolved captain-held "$2") ;;
+    esac
+  done < "$1"
+  printf '%s' "$open"
+}
+for noglob in off on; do
+  [ "$noglob" = on ] && set -f
+  for kind in secondmate ship unknown; do
+    reference_fold "$2" "$kind" > "$3.want"
+    : > "$3.probe"
+    ifs_before=$IFS flags_before=$-
+    probe="$3.probe"
+    status_open_decisions "$2" "$kind" > "$3.got"
+    probe=
+    cmp -s "$3.want" "$3.got" || printf '%s fold differs (noglob %s):\n%s\n' "$kind" "$noglob" "$(diff "$3.want" "$3.got")"
+    [ "$IFS" = "$ifs_before" ] || printf '%s fold changed IFS\n' "$kind"
+    [ "$-" = "$flags_before" ] || printf '%s fold changed shell flags %s -> %s\n' "$kind" "$flags_before" "$-"
+    [ -s "$3.probe" ] || printf '%s fold never reached its helpers\n' "$kind"
+    if grep -qv '^0$' "$3.probe"; then
+      printf '%s fold ran a helper in a subshell %s times\n' "$kind" "$(grep -cv '^0$' "$3.probe")"
+    fi
+  done
+  set +f
+done
+[ -s "$3.want" ] || printf 'the stream folded to nothing; the case proves no open set\n'
+SH
+  run_everywhere "whole-file decision fold" "$script" "$status" "$TMP_ROOT/fold-out"
+  pass "the whole-file decision fold matches the per-line substitution fold without forking per line"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
 else
@@ -234,4 +307,5 @@ else
   test_recovery_marker_read_accepts_exactly_one_newline
   test_window_to_task_matches_the_meta_pipeline
   test_classify_stat_helpers_read_the_kernel_name_once
+  test_whole_file_decision_fold_matches_the_per_line_substitution_fold
 fi

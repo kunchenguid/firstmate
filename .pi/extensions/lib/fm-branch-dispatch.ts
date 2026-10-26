@@ -102,7 +102,8 @@ export interface UnreadWakeScope {
   /**
    * The exact task ids the eligible signal/stale rows name (a signal row by
    * its status-log key, a stale row through the task metadata recording that
-   * endpoint). The branch may report only these tasks while it handles the
+   * endpoint), and the child an attended host's eligible inactive-outcome row
+   * names. The branch may report only these tasks while it handles the
    * wake; `fleet` or a task it merely remembers is refused (docs/
    * pi-supervision-branch.md "Components and their owners"). Empty for a
    * heartbeat, which is not scoped by task.
@@ -143,6 +144,12 @@ export interface UnreadWakeScope {
    */
   heartbeatSeqs: string[];
   taskByWakeKey: Record<string, string>;
+  /**
+   * True when a row bin/fm-inactive-reconcile.sh queued (an `inactive-` key)
+   * stays main's, so a `check: inactive-outcome` close that may name it is
+   * main's too (branchOfferForWake).
+   */
+  inactiveLeftForMain: boolean;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -156,6 +163,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   checkSeqs: [],
   heartbeatSeqs: [],
   taskByWakeKey: {},
+  inactiveLeftForMain: false,
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -168,6 +176,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   checkSeqs: [],
   heartbeatSeqs: [],
   taskByWakeKey: {},
+  inactiveLeftForMain: false,
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -184,7 +193,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // starves by being left behind.
 //
 // A signal row marked "needs-decision:" by the watcher, a second-mate signal
-// whose presented span owns a decision (spanIsDecisionOwned), or a stale row
+// whose presented span owns a decision (spanDecisionVerdict), or a stale row
 // for a task with an open needs-decision or a current captain-held declaration
 // gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
 // and forced to main on its own triggering close (fm-primary-pi-watch.ts's
@@ -264,10 +273,15 @@ function statusLineNote(rawLine: string): string {
   return match ? note.slice(match[0].length).trimStart() : note;
 }
 
-interface StaleDecisionCacheEntry {
+interface StaleDecisionVerdict {
+  decisionOwned: boolean;
+  /** A second mate's span explains a watcher needs-decision mark away. */
+  explainsMark: boolean;
+}
+
+interface StaleDecisionCacheEntry extends StaleDecisionVerdict {
   version: string;
   config: string;
-  decisionOwned: boolean;
 }
 
 const staleDecisionCache = new Map<string, StaleDecisionCacheEntry>();
@@ -289,6 +303,7 @@ function openDecisions(
   heldVerb: string,
   reservedPrefixes: readonly string[],
   open = new Map<string, "needs-decision" | "blocked">(),
+  notes?: Map<string, string>,
 ): Map<string, "needs-decision" | "blocked"> {
   for (const line of lines) {
     const unstamped = statusLineUnstamped(line);
@@ -300,14 +315,77 @@ function openDecisions(
     const note = statusLineNote(line);
     const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
     if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
-    if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
-    else open.delete(key);
+    if (verb === "needs-decision" || verb === "blocked") {
+      open.set(key, verb);
+      notes?.set(key, note);
+    } else {
+      open.delete(key);
+      notes?.delete(key);
+    }
   }
   return open;
 }
 
 function nonBlankLines(text: string): string[] {
   return text.split(/\r?\n/).filter((line) => /\S/.test(line));
+}
+
+// A non-blank status line with the byte range its text occupies in the log, so
+// a span line can be matched against bin/fm-classify-lib.sh's home-appends
+// ledger, which records ranges in bytes.
+interface SpanLine {
+  text: string;
+  start: number;
+  end: number;
+}
+
+function spanLines(contents: Buffer, from: number): SpanLine[] {
+  const lines: SpanLine[] = [];
+  let start = from;
+  while (start < contents.length) {
+    const newline = contents.indexOf(0x0a, start);
+    const stop = newline < 0 ? contents.length : newline;
+    const text = contents.subarray(start, stop).toString("utf8").replace(/\r$/, "");
+    if (/\S/.test(text)) lines.push({ text, start, end: stop });
+    start = stop + 1;
+  }
+  return lines;
+}
+
+// The byte ranges this home itself appended to <task>'s status log, read from
+// bin/fm-classify-lib.sh's home-appends ledger (state/.<task>.home-appends,
+// whose header there owns the format and its only writer,
+// fm_wake_status_append_self_announced). A ledger that is absent, malformed,
+// or written for another incarnation of the log proves nothing, so it yields
+// no ranges and every line stays foreign.
+function homeAppendRanges(state: string, task: string, statusPath: string): Array<[number, number]> {
+  try {
+    const path = `${state}/.${task}.home-appends`;
+    if (!lstatSync(path).isFile()) return [];
+    const [version, identLine, ...rows] = readFileSync(path, "utf8").split("\n");
+    if (version !== "v1" || !identLine?.startsWith("ident=")) return [];
+    if (identLine.slice("ident=".length) !== statusFileIdentity(statusPath)) return [];
+    const ranges: Array<[number, number]> = [];
+    for (const row of rows) {
+      const match = row.match(/^([0-9]+)\t([0-9]+)$/);
+      if (match && Number(match[2]) > Number(match[1])) ranges.push([Number(match[1]), Number(match[2])]);
+    }
+    return ranges;
+  } catch {
+    return [];
+  }
+}
+
+// bin/fm-classify-lib.sh's status_home_appends_covers: one ascending walk, so
+// a ledger written out of order proves nothing rather than too much.
+function homeAppendsCover(ranges: ReadonlyArray<[number, number]>, start: number, end: number): boolean {
+  let reached = start;
+  for (const [rangeStart, rangeEnd] of ranges) {
+    if (rangeStart > reached) continue;
+    if (rangeEnd > reached) reached = rangeEnd;
+    if (reached >= end) return true;
+  }
+  return reached >= end;
 }
 
 // bin/fm-classify-lib.sh's _fm_open_decisions_file_ident, which stamps each
@@ -345,29 +423,112 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
   }
 }
 
+interface SpanVerdict {
+  /** The span owns a decision, so its row is main's. */
+  owned: boolean;
+  /** The span re-recorded an open decision unchanged (a re-recorded hold). */
+  reRecorded: boolean;
+}
+
 // Walk the presented span in order: a resolution must close a decision that
 // was open immediately before that line, not one opened later in the span.
+// Two lines that only echo what main already holds are not decision-owned: a
+// needs-decision that re-records an open decision with the same key and note,
+// and a resolution this home appended itself (main's own fm-send
+// --resolve-key close, recorded in the home-appends ledger).
 // docs/pi-supervision-branch.md owns the routing contract.
-function spanIsDecisionOwned(
+function spanDecisionVerdict(
   open: ReadonlyMap<string, string>,
   presented: readonly string[],
-  span: readonly string[],
+  span: readonly SpanLine[],
+  homeAppends: ReadonlyArray<[number, number]>,
   resolveVerb: string,
   heldVerb: string,
   reservedPrefixes: readonly string[],
-): boolean {
-  const before = openDecisions(presented, resolveVerb, heldVerb, reservedPrefixes);
-  for (const line of span) {
+): SpanVerdict {
+  const notes = new Map<string, string>();
+  const before = openDecisions(presented, resolveVerb, heldVerb, reservedPrefixes, undefined, notes);
+  let reRecorded = false;
+  for (const { text: line, start, end } of span) {
     const verb = statusLineVerb(line);
-    if (["needs-decision", "blocked", heldVerb].includes(verb)) return true;
+    if (verb === "needs-decision") {
+      const key = decisionKey(line);
+      if (key !== null && before.get(key) === "needs-decision" && notes.get(key) === statusLineNote(line)) {
+        reRecorded = true;
+        continue;
+      }
+    }
+    if (["needs-decision", "blocked", heldVerb].includes(verb)) return { owned: true, reRecorded };
     const resolved = verb === resolveVerb ? decisionKey(line) : null;
     const wasOpen = resolved !== null && before.has(resolved);
-    openDecisions([line], resolveVerb, heldVerb, reservedPrefixes, before);
-    if (resolved !== null && wasOpen && !before.has(resolved)) return true;
+    openDecisions([line], resolveVerb, heldVerb, reservedPrefixes, before, notes);
+    if (resolved !== null && wasOpen && !before.has(resolved)) {
+      if (homeAppendsCover(homeAppends, start, end)) continue;
+      return { owned: true, reRecorded };
+    }
     const key = declaredDecisionKey(line);
-    if (key !== undefined && open.has(key)) return true;
+    if (key !== undefined && open.has(key)) return { owned: true, reRecorded };
   }
-  return false;
+  return { owned: false, reRecorded };
+}
+
+// bin/fm-inactive-reconcile.sh's main-home presentation payload for a done
+// child (its queue_presentation row, keyed inactive-outcome:<fingerprint>).
+const INACTIVE_DONE_PAYLOAD =
+  /^inactive terminal outcome awaiting captain presentation: child=([A-Za-z0-9._-]+) state=done(?: pr=\S+)?$/;
+
+// The child an attended host's branch may take an inactive-outcome row for,
+// or null when the row stays main's: the row says a done child still awaits
+// presentation, and the outcome store (bin/fm-branch-outcome.sh owns its
+// format) already holds a captain outcome for that child, recorded on its
+// current status log at or after the log's last done line. That captain
+// outcome reached MAIN (the drain's BRANCH OUTCOMES section presents it until
+// MAIN acknowledges it), so the row repeats a presented result; the branch
+// prompt has it confirm that before it reports. A failed child, a done child
+// no captain outcome covers, and anything unreadable stay main's.
+function inactiveDoneAlreadyReported(
+  state: string,
+  payload: string,
+  metadata: ReadonlyMap<string, string>,
+  storeRows: () => unknown[] | null,
+): string | null {
+  const child = payload.match(INACTIVE_DONE_PAYLOAD)?.[1];
+  if (!child || !metadata.get(child)) return null;
+  const statusPath = `${state}/${child}.status`;
+  try {
+    if (!lstatSync(statusPath).isFile()) return null;
+    const contents = readFileSync(statusPath);
+    const lines = spanLines(contents, 0);
+    let doneEnd: number | undefined;
+    for (let index = lines.length - 1; index >= 0 && doneEnd === undefined; index -= 1) {
+      if (statusLineVerb(lines[index].text) === "done") doneEnd = lines[index].end;
+    }
+    if (doneEnd === undefined) return null;
+    const ident = statusFileIdentity(statusPath);
+    const rows = storeRows();
+    if (!rows) return null;
+    const covered = rows.some((row) => {
+      const outcome = row as { task?: unknown; verdict?: unknown; statusIdent?: unknown; statusEndpoint?: unknown };
+      return outcome.task === child && outcome.verdict === "captain" && outcome.statusIdent === ident &&
+        typeof outcome.statusEndpoint === "number" && outcome.statusEndpoint >= doneEnd &&
+        outcome.statusEndpoint <= contents.length;
+    });
+    return covered ? child : null;
+  } catch {
+    return null;
+  }
+}
+
+// Every row of the outcome store, or null when it is absent or any line fails
+// to parse.
+function readOutcomeStore(state: string): unknown[] | null {
+  try {
+    const path = `${state}/branch-outcomes.jsonl`;
+    if (!lstatSync(path).isFile()) return null;
+    return nonBlankLines(readFileSync(path, "utf8")).map((line) => JSON.parse(line) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
@@ -418,7 +579,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const needsDecisionKeys: string[] = [];
   const checkSeqs: string[] = [];
   const heartbeatSeqs: string[] = [];
-  const staleDecisionOwnership = new Map<string, boolean>();
+  const staleDecisionOwnership = new Map<string, StaleDecisionVerdict>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
   const reservedPrefixes = (process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES || "pending-reply-")
@@ -426,6 +587,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     .filter(Boolean);
   const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
   let presentationCursor: ReturnType<typeof readPresentationCursor> | undefined;
+  let outcomeStore: unknown[] | null | undefined;
+  let inactiveLeftForMain = false;
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -445,17 +608,38 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       // Main-owned while attended: excluded from what the branch may claim,
       // never a reason to reject the rest of the queue and never a reason to
       // send an otherwise-eligible heartbeat review to main. Away, the branch
-      // is the only actor, so the row is claimed unscoped.
+      // is the only actor, so the row is claimed unscoped. The one attended
+      // exception is below.
       if (afk) {
         eligibleSeqs.push(seq);
         checkSeqs.push(seq);
+        continue;
+      }
+      // On the attended supervision host, an inactive-outcome row that only
+      // repeats a done result MAIN already has is the branch's, scoped to
+      // that child (inactiveDoneAlreadyReported).
+      const child = attendedHost && key.startsWith("inactive-outcome:")
+        ? inactiveDoneAlreadyReported(state, fields[4] ?? "", metadata, () => {
+          if (outcomeStore === undefined) outcomeStore = readOutcomeStore(state);
+          return outcomeStore;
+        })
+        : null;
+      if (child) {
+        projects.add(metadata.get(child)!);
+        eligibleTasks.add(child);
+        eligibleSeqs.push(seq);
+      } else if (key.startsWith("inactive-")) {
+        inactiveLeftForMain = true;
       }
       continue;
     }
     let project = "";
     let task = "";
+    let marked = false;
     if (kind === "signal") {
       const payload = fields[4] ?? "";
+      task = key.replace(/\.(?:status|turn-ended)$/, "");
+      project = metadata.get(task) ?? "";
       if (/^needs-decision:/.test(payload)) {
         // Main-owned exactly like a check-kind row above while attended: a
         // needs-decision status append surfaced through the actionable signal
@@ -463,11 +647,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         // scan (docs/pi-supervision-branch.md "Autonomy"). Away, the branch
         // takes the decision row like any other task-local row; the guarded
         // scripts decide what it may do about it (bin/fm-lease-lib.sh).
-        needsDecisionKeys.push(key);
-        if (!afk) continue;
+        // A second mate's marked row is judged by its span below instead,
+        // which keeps it main's unless that span explains the mark as an
+        // unchanged re-recorded hold.
+        marked = true;
+        if (!(secondmates.has(task) && project)) {
+          needsDecisionKeys.push(key);
+          if (!afk) continue;
+        }
       }
-      task = key.replace(/\.(?:status|turn-ended)$/, "");
-      project = metadata.get(task) ?? "";
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(task) ?? "";
@@ -488,30 +676,38 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       const ownershipKey = `${kind}\0${statusPath}`;
       if (!staleDecisionOwnership.has(ownershipKey)) {
         let version: string | null;
+        let ledgerVersion: string | null = null;
         try {
           version = statusFileVersion(statusPath);
+          if (spanRule) ledgerVersion = statusFileVersion(`${state}/.${task}.home-appends`);
         } catch {
           return UNSAFE_SCOPE;
         }
-        let decisionOwned = false;
+        let verdict: StaleDecisionVerdict = { decisionOwned: false, explainsMark: false };
         if (version) {
           let cursor: { ident: string; offset: number } | null | undefined;
           if (spanRule) {
             if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
             cursor = presentationCursor?.get(task);
           }
-          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
+          const config = spanRule
+            ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}\0${ledgerVersion ?? ""}`
+            : decisionConfig;
           const cached = staleDecisionCache.get(ownershipKey);
           if (cached?.version === version && cached.config === config) {
-            decisionOwned = cached.decisionOwned;
+            verdict = cached;
           } else {
             let contents: Buffer;
             let spanOffset = 0;
+            let bounded = false;
             try {
               contents = readFileSync(statusPath);
               if (cursor && cursor.offset <= contents.length) {
                 try {
-                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+                  if (cursor.ident === statusFileIdentity(statusPath)) {
+                    spanOffset = cursor.offset;
+                    bounded = true;
+                  }
                 } catch {
                   // No identity to match: the span is the whole log.
                 }
@@ -522,17 +718,27 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             }
             const statusLines = nonBlankLines(contents.toString("utf8"));
             const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
-            decisionOwned = spanRule
-              ? spanIsDecisionOwned(
+            if (spanRule) {
+              const span = spanDecisionVerdict(
                 open,
                 nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
-                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
+                spanLines(contents, spanOffset),
+                homeAppendRanges(state, task, statusPath),
                 resolveVerb,
                 heldVerb,
                 reservedPrefixes,
-              )
-              : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
-            staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
+              );
+              // Only a cursor-bounded span may explain the watcher's mark: the
+              // whole log read in its place says nothing about which line the
+              // mark was for.
+              verdict = { decisionOwned: span.owned, explainsMark: !span.owned && span.reRecorded && bounded };
+            } else {
+              verdict = {
+                decisionOwned: [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb,
+                explainsMark: false,
+              };
+            }
+            staleDecisionCache.set(ownershipKey, { version, config, ...verdict });
             if (staleDecisionCache.size > 512) {
               staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
             }
@@ -540,9 +746,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         } else {
           staleDecisionCache.delete(ownershipKey);
         }
-        staleDecisionOwnership.set(ownershipKey, decisionOwned);
+        staleDecisionOwnership.set(ownershipKey, verdict);
       }
-      if (staleDecisionOwnership.get(ownershipKey)) {
+      const ownership = staleDecisionOwnership.get(ownershipKey)!;
+      if (ownership.decisionOwned || (marked && !ownership.explainsMark)) {
         needsDecisionKeys.push(key);
         if (!afk) continue;
       }
@@ -570,6 +777,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     checkSeqs,
     heartbeatSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
+    inactiveLeftForMain,
   };
 }
 
@@ -587,11 +795,13 @@ export interface BranchOfferVerdict {
 // The offer rule for one actionable close: whether a branch may take it, in
 // either posture. The Pi watcher (fm-primary-pi-watch.ts) and the supervision
 // host off Pi (bin/fm-branch-dispatch.mjs offer) both route through this one
-// owner, so a close reaches main off Pi exactly when it would on Pi.
+// owner; docs/pi-supervision-branch.md "Wake dispatch" owns the routing
+// contract, including the attended host's inactive-outcome exception below.
 //
 // A check-kind close (merge-confirmation polls, Relay mentions,
 // credential/auth failures, and every other legitimately main-only class -
-// docs/pi-supervision-branch.md) is never routed to the branch while attended,
+// docs/pi-supervision-branch.md) stays main's while attended except for that
+// host-only exception,
 // even when other currently-unread rows are individually eligible: this
 // watcher cycle's own triggering event stays on main, exactly as before
 // scopeForUnreadWake stopped letting a co-present check row veto the whole
@@ -605,12 +815,19 @@ export interface BranchOfferVerdict {
 // row: until that row is read, a later signal or stale trigger for the same
 // task stays on main. Other tasks and heartbeat handling remain independent.
 //
+// On the attended supervision host, `check: inactive-outcome` is judged by
+// the rows bin/fm-inactive-reconcile.sh queued: the branch may take it only
+// when every such row is one scopeForUnreadWake lets the branch claim (a done
+// result MAIN already has), so a row that still needs MAIN keeps the close on
+// main. The Pi watcher (attendedHost false) keeps it main's.
+//
 // The away posture collapses that partition: every actionable row is
 // branch-eligible and the trigger class no longer forces anything to main
 // (scopeForUnreadWake owns the per-row rule).
 export function branchOfferForWake(state: string, message: string, afk: boolean, attendedHost = false): BranchOfferVerdict {
   const heartbeat = /^heartbeat($|:)/.test(message);
-  const isCheckTrigger = /^check:/.test(message);
+  const isHostInactiveOutcome = attendedHost && message.trim() === "check: inactive-outcome";
+  const isCheckTrigger = /^check:/.test(message) && !isHostInactiveOutcome;
   const scope = scopeForUnreadWake(state, heartbeat, afk, attendedHost && !afk);
   const triggerKeys = /^signal:/.test(message)
     ? message
@@ -625,8 +842,9 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
     scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
   const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
   const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
+  const attendedScope = afk ? scopeForUnreadWake(state, heartbeat, false) : scope;
   const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
-    afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
+    attendedScope.eligible && !(isHostInactiveOutcome && attendedScope.inactiveLeftForMain)
   );
   const eligible = afk ? scope.eligible : attendedEligible;
   return { scope, heartbeat, eligible, awayOnly: Boolean(eligible && !attendedEligible) };

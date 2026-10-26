@@ -868,7 +868,10 @@ if [ -n "$ACK_THROUGH" ]; then
     # the inactive-outcome and notice receipts carried by the exact granted
     # sequences it consumes. Otherwise the receipt stays pending and every
     # later reconcile scan re-queues the same fingerprint. Attended, a grant
-    # names no check row and both scans find nothing.
+    # names a check row only on the supervision host, for an inactive-outcome
+    # row repeating a done result MAIN already has
+    # (.pi/extensions/lib/fm-branch-dispatch.ts), and that receipt retires the
+    # same way.
     ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:' "$ELIGIBLE_ROWS_FILE") || exit 1
     ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:' "$ELIGIBLE_ROWS_FILE") || exit 1
   else
