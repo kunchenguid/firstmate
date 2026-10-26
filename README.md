@@ -6,15 +6,10 @@
       alt="Platform"
       src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
   /></a>
-  <a href="https://x.com/kunchenguid"
+  <a href="https://x.com/umership"
     ><img
       alt="X"
-      src="https://img.shields.io/badge/X-@kunchenguid-black?style=flat-square"
-  /></a>
-  <a href="https://discord.gg/Wsy2NpnZDu"
-    ><img
-      alt="Discord"
-      src="https://img.shields.io/discord/1439901831038763092?style=flat-square&label=discord"
+      src="https://img.shields.io/badge/X-@umership-black?style=flat-square"
   /></a>
 </p>
 
