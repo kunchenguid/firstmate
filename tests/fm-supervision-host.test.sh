@@ -1289,6 +1289,25 @@ assert_rewoke_main() {  # <home> <label>
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$1/state/.claude-autoarm-epoch" "$2: the auto-arm ledger must record the rewake"
 }
 
+# The rewake must leave the episode deliverable: still in downtime for main's own
+# drain (the plain banner), or in handling under the pending turn-end
+# acknowledgement of a pre-drained wake that names its generation
+# (docs/watcher-continuity.md "Pre-drained wakes and the turn-end acknowledgement").
+assert_deliverable_episode() {  # <home> <label>
+  local marker recorded
+  marker=$(cat "$1/state/.watcher-down" 2>/dev/null)
+  if [ -e "$1/state/.wake-ack-pending" ]; then
+    recorded=$(sed -n 's/^recovery_generation=//p' "$1/state/.wake-ack-pending")
+    assert_re '^(pending|announced):handling:' "$1/state/.watcher-down" \
+      "$2: a pre-drained rewake must begin handling the episode it presented"
+    [ -n "$recorded" ] && [ "${marker##*:}" = "$recorded" ] \
+      || fail "$2: the pending acknowledgement must name the live episode (marker=$marker recorded=$recorded)"
+  else
+    assert_re '^(pending|announced):downtime:' "$1/state/.watcher-down" \
+      "$2 must leave a deliverable downtime episode"
+  fi
+}
+
 # The live failure (2026-09-27): a main-only pass-through confirmed a handling
 # handoff before the close reached main's re-arm owner, so the Stop hook's
 # rewake commit refused and it exited 0 in silence. An idle primary was never
@@ -1484,8 +1503,7 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
   wait_until 600 hook_exited "$home" || fail "closed successor: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
   assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the host must hand its captain outcome to main"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
-    "the closed handling successor must leave a deliverable downtime episode"
+  assert_deliverable_episode "$home" "the closed handling successor"
   pass "host+hook: a successor closed before exit_to_main does not suppress the branch-outcome rewake"
 }
 
@@ -1568,8 +1586,7 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$home/state/.claude-autoarm-epoch" \
     "the hand-back must commit the rewake"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
-    "the closed handling successor must leave a deliverable downtime episode"
+  assert_deliverable_episode "$home" "the closed handling successor"
   pass "host+hook: a successor that closes during a held engine turn does not suppress the branch-outcome rewake"
 }
 

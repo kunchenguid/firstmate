@@ -225,6 +225,7 @@ An unprocessed captain outcome is never adopted as processed, including across a
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
 Main runs the printed acknowledgement for every presented outcome, settled and handled open ones alike.
+On a Claude primary the Stop hook delivers that presentation inside the wake and runs the acknowledgement itself when the handling turn ends, held open only by `bin/fm-wake-ack.sh hold` ([watcher-continuity.md](watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)).
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.
@@ -321,6 +322,7 @@ But a host absorbs its own wakes, so it ends its park itself before that registr
 
 `FM_SUPERVISION_HOST_PARK_SECONDS` sets that boundary (default 27,000).
 A value that is not a positive integer below 28,800 is treated as the default.
+The Claude Stop hook re-parks the host inside the same process after it absorbs an empty plumbing close, and bounds that re-park to what is left of its own registered timeout ([watcher-continuity.md](watcher-continuity.md#pre-drained-wakes-and-the-turn-end-acknowledgement)); the cycle boundary itself is never absorbed, because it exists to end the hook before that timeout.
 The OpenCode, omp, and Grok owners have no hook timeout and keep the same default, so their parks end on the same cadence.
 
 ### At the boundary

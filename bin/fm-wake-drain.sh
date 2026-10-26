@@ -16,6 +16,30 @@
 # locked drain rotates such leftovers away before doing anything else.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
+#
+# Staged presentation (docs/watcher-continuity.md "Pre-drained wakes"):
+#   fm-wake-drain.sh --stage <receipt>
+#     A main-actor presentation that commits nothing a later drain would not
+#     present again: it claims rows and publishes a missing downtime generation
+#     as an ordinary drain does, but it does not begin handling the recovery
+#     episode, does not advance the status-presentation cursor behind UNREAD
+#     STATUS, does not mark branch outcomes read, prints no WAKE_ACK_REQUIRED
+#     line, and skips the liveness assertion (the staging caller owns the arm).
+#     It writes <receipt> (mode 0600, atomically) for the acknowledgement that
+#     commits it: "schema=fm-wake-stage.v1", "ack_through=N",
+#     "recovery_generation=G" (empty when no episode needs acknowledging),
+#     "marker=<token>", "outcomes_read_through=T", "outcomes_processed_target=P",
+#     one "status<TAB>task<TAB>endpoint<TAB>ident" line per status log in the
+#     presented snapshot, and one "backstop<TAB>task<TAB>endpoint" line per
+#     STATUS OUTCOME BACKSTOP line shown. Presented output is on stdout exactly
+#     as a plain drain prints it; an empty stdout means nothing was presented.
+#   fm-wake-drain.sh --ack-through N --recovery-generation G --commit-stage <receipt>
+#     The ordinary acknowledgement, then the staged presentation's commit: the
+#     status-presentation cursor advances to the staged endpoints (never
+#     backwards, and never for a status log whose identity changed), branch
+#     outcomes are marked read through T and processed through P, and the
+#     receipt is removed. A commit step that cannot be applied is reported on
+#     stderr and is not fatal: whatever it covered is simply presented again.
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -50,6 +74,9 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 BRANCH_OUTCOMES_RC=0
+STAGE_RECEIPT=
+STAGE_TMP=
+COMMIT_STAGE=
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -217,8 +244,27 @@ presented_max_row() { # <rows-file>
   fi
 }
 
+usage_exit() {
+  echo "usage: fm-wake-drain.sh [--stage RECEIPT | --commit-stage RECEIPT | --ack-through SEQUENCE --recovery-generation GENERATION [--commit-stage RECEIPT]]" >&2
+  exit 2
+}
+
 case "${1:-}" in
   '') ;;
+  --commit-stage)
+    # Commit alone: the staged presentation needed no row or episode
+    # acknowledgement (nothing was queued and no episode was open).
+    COMMIT_STAGE=${2:-}
+    [ -n "$COMMIT_STAGE" ] || { echo "wake drain: --commit-stage requires a receipt path" >&2; exit 2; }
+    [ "$#" -eq 2 ] || { echo "wake drain: unexpected commit arguments" >&2; exit 2; }
+    [ "$ACTOR" = main ] || { echo "wake drain: only the main actor commits a staged presentation" >&2; exit 2; }
+    ;;
+  --stage)
+    STAGE_RECEIPT=${2:-}
+    [ -n "$STAGE_RECEIPT" ] || { echo "wake drain: --stage requires a receipt path" >&2; exit 2; }
+    [ "$#" -eq 2 ] || { echo "wake drain: unexpected staging arguments" >&2; exit 2; }
+    [ "$ACTOR" = main ] || { echo "wake drain: only the main actor stages a presentation" >&2; exit 2; }
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -226,10 +272,171 @@ case "${1:-}" in
       || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
     ACK_GENERATION=${4:-}
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    if [ "$#" -eq 6 ] && [ "${5:-}" = --commit-stage ]; then
+      COMMIT_STAGE=${6:-}
+      [ -n "$COMMIT_STAGE" ] || { echo "wake drain: --commit-stage requires a receipt path" >&2; exit 2; }
+      [ "$ACTOR" = main ] || { echo "wake drain: only the main actor commits a staged presentation" >&2; exit 2; }
+    elif [ "$#" -ne 4 ]; then
+      echo "wake drain: unexpected acknowledgement arguments" >&2
+      exit 2
+    fi
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) usage_exit ;;
 esac
+
+# --- staged presentation (header "Staged presentation") -----------------------
+# The stage scratch directory collects what the presenters would have committed;
+# stage_write_receipt folds it into the one receipt file at the end.
+stage_begin() {
+  STAGE_TMP=$(mktemp -d "$STATE/.wake-stage.tmp.XXXXXX") || return 1
+  chmod 0700 "$STAGE_TMP" || return 1
+}
+
+stage_write_receipt() {  # <ack-through> <recovery-generation> <marker-token>
+  local tmp read_through=0 processed_target=0
+  [ -n "$STAGE_TMP" ] || return 1
+  [ -s "$STAGE_TMP/outcomes-read" ] && read_through=$(cat "$STAGE_TMP/outcomes-read")
+  [ -s "$STAGE_TMP/outcomes-processed" ] && processed_target=$(cat "$STAGE_TMP/outcomes-processed")
+  case "$read_through" in ''|*[!0-9]*) read_through=0 ;; esac
+  case "$processed_target" in ''|*[!0-9]*) processed_target=0 ;; esac
+  tmp=$(mktemp "$STATE/.wake-stage.receipt.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! {
+    printf 'schema=fm-wake-stage.v1\n'
+    printf 'ack_through=%s\n' "$1"
+    printf 'recovery_generation=%s\n' "$2"
+    printf 'marker=%s\n' "$3"
+    printf 'outcomes_read_through=%s\n' "$read_through"
+    printf 'outcomes_processed_target=%s\n' "$processed_target"
+    if [ -s "$STAGE_TMP/status-snapshot" ]; then
+      awk -F '\t' 'NF == 3 && $1 != "" { printf "status\t%s\t%s\t%s\n", $1, $2, $3 }' "$STAGE_TMP/status-snapshot"
+    fi
+    if [ -s "$STAGE_TMP/status-backstop" ]; then
+      awk -F '\t' 'NF == 2 && $1 != "" { printf "backstop\t%s\t%s\n", $1, $2 }' "$STAGE_TMP/status-backstop"
+    fi
+  } > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  _fm_atomic_replace "$tmp" "$STAGE_RECEIPT" || { rm -f -- "$tmp"; return 1; }
+  rm -rf -- "$STAGE_TMP"
+  STAGE_TMP=
+}
+
+# Commit a staged presentation after the rows it covered were acknowledged.
+# Each step reports its own failure and the commit carries on, because the
+# safe side of every failure is one more presentation of the same lines.
+commit_stage_receipt() {  # <receipt>
+  local receipt=$1 line key value staged='' backstop='' read_through=0 processed_target=0 tab
+  tab=$(printf '\t')
+  if [ ! -f "$receipt" ] || [ -L "$receipt" ]; then
+    printf 'wake drain: staged presentation receipt %s is missing; nothing further was committed\n' "$receipt" >&2
+    return 1
+  fi
+  if [ "$(sed -n '1p' "$receipt" 2>/dev/null)" != schema=fm-wake-stage.v1 ]; then
+    printf 'wake drain: staged presentation receipt %s has an unsupported schema; it was left in place\n' "$receipt" >&2
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "status$tab"*) staged="$staged${line#status"$tab"}
+" ;;
+      "backstop$tab"*) backstop="$backstop${line#backstop"$tab"}
+" ;;
+      *=*)
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+          outcomes_read_through) read_through=$value ;;
+          outcomes_processed_target) processed_target=$value ;;
+        esac
+        ;;
+    esac
+  done < "$receipt"
+  case "$read_through" in ''|*[!0-9]*) read_through=0 ;; esac
+  case "$processed_target" in ''|*[!0-9]*) processed_target=0 ;; esac
+  if [ -n "$staged" ]; then
+    commit_staged_status_cursor "$staged" "$backstop" \
+      || printf 'wake drain: the staged UNREAD STATUS presentation could not be committed; those lines are presented again on the next drain\n' >&2
+  fi
+  if [ "$read_through" -gt 0 ]; then
+    "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$read_through" >/dev/null 2>&1 \
+      || printf 'wake drain: branch outcomes could not be marked read through %s; they are presented again on the next drain\n' "$read_through" >&2
+  fi
+  if [ "$processed_target" -gt 0 ]; then
+    commit_staged_processed "$processed_target" || true
+  fi
+  rm -f -- "$receipt"
+}
+
+# mark-processed refuses a target at or below the processed marker; after a
+# manual acknowledgement in the same turn that refusal is the expected no-op.
+commit_staged_processed() {  # <target>
+  local err
+  if err=$("$SCRIPT_DIR/fm-branch-outcome.sh" mark-processed --through "$1" 2>&1 >/dev/null); then
+    return 0
+  fi
+  case "$err" in
+    *"already processed"*) return 0 ;;
+  esac
+  printf 'wake drain: branch outcomes could not be marked processed through %s (%s); they are presented again on the next drain\n' "$1" "${err:-no detail}" >&2
+  return 1
+}
+
+# Advance the status-presentation cursor to the staged endpoints, never
+# backwards: the commit snapshot is rebuilt from the status logs as they are
+# now, every task keeps at least its current cursor, a staged task advances to
+# its staged endpoint only while its identity is unchanged, and the backstop
+# receipts advance the same way.
+commit_staged_status_cursor() {  # <staged task/endpoint/ident lines> <backstop task/endpoint lines>
+  local staged=$1 backstop=$2 lock="$STATE/.status-presentation-lock" rc=0 tab
+  local snapshot commit='' task size ident current staged_endpoint staged_ident found
+  local acknowledged='' b_task b_endpoint b_current
+  tab=$(printf '\t')
+  fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT" || return 1
+  snapshot=$(status_presentation_snapshot "$STATE") || { fm_lock_release "$lock"; return 1; }
+  while IFS=$tab read -r task size ident; do
+    [ -n "$task" ] || continue
+    current=$(status_presentation_cursor_offset "$STATE/$task.status") || { rc=1; break; }
+    case "$current" in ''|*[!0-9]*) current=0 ;; esac
+    staged_endpoint=
+    staged_ident=
+    while IFS=$tab read -r found staged_endpoint staged_ident; do
+      [ "$found" = "$task" ] && break
+      staged_endpoint=
+      staged_ident=
+    done <<STAGED
+$staged
+STAGED
+    case "$staged_endpoint" in ''|*[!0-9]*) staged_endpoint=0 ;; esac
+    [ "$staged_ident" = "$ident" ] || staged_endpoint=0
+    [ "$staged_endpoint" -le "$size" ] || staged_endpoint=$size
+    [ "$staged_endpoint" -ge "$current" ] || staged_endpoint=$current
+    commit="$commit$task$tab$staged_endpoint$tab$ident
+"
+  done <<SNAPSHOT
+$snapshot
+SNAPSHOT
+  if [ "$rc" -eq 0 ]; then
+    while IFS=$tab read -r b_task b_endpoint; do
+      [ -n "$b_task" ] || continue
+      case "$b_endpoint" in ''|*[!0-9]*) continue ;; esac
+      [ -f "$STATE/$b_task.status" ] || continue
+      b_current=$(status_outcome_backstop_cursor_offset "$STATE/$b_task.status") || continue
+      case "$b_current" in ''|*[!0-9]*) b_current=0 ;; esac
+      [ "$b_endpoint" -gt "$b_current" ] || continue
+      acknowledged="$acknowledged$b_task$tab$b_endpoint
+"
+    done <<BACKSTOP
+$backstop
+BACKSTOP
+    if [ -n "$commit" ]; then
+      STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=$acknowledged status_commit_presentation_snapshot "$STATE" "$commit" || rc=1
+    fi
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
+}
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
@@ -713,6 +920,13 @@ ROWS
   if [ -n "$text" ]; then
     printf '%s' "$text" || return 1
   fi
+  if [ -n "$STAGE_TMP" ]; then
+    # Staged: the read cursor and the processed target move only when the
+    # acknowledgement commits this presentation (header "Staged presentation").
+    printf '%s\n' "$through" > "$STAGE_TMP/outcomes-read" || return 1
+    printf '%s\n' "$target" > "$STAGE_TMP/outcomes-processed" || return 1
+    return 0
+  fi
   [ "$through" -gt 0 ] || return 0
   if ! "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$through" >/dev/null 2>&1; then
     printf 'BRANCH OUTCOMES: the store could not record this presentation, so these outcomes are presented again on the next drain and an acknowledgement above is refused until then.\n' >&2
@@ -770,7 +984,15 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
-  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+  if [ -n "$STAGE_TMP" ]; then
+    # Staged: record what this presentation would have committed, for the
+    # acknowledgement that commits it (header "Staged presentation").
+    if ! printf '%s\n' "$acknowledged" > "$STAGE_TMP/status-snapshot" \
+      || ! printf '%s' "${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}" > "$STAGE_TMP/status-backstop"; then
+      rm -f -- "$prepared"
+      return 1
+    fi
+  elif ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
     rm -f -- "$prepared"
     return 1
   fi
@@ -814,6 +1036,7 @@ cleanup() {
   local status=$?
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
+  [ -z "$STAGE_TMP" ] || rm -rf -- "$STAGE_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -823,6 +1046,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ -n "$COMMIT_STAGE" ] && [ -z "$ACK_THROUGH" ]; then
+  commit_stage_receipt "$COMMIT_STAGE"
+  exit $?
+fi
 
 if [ -n "$ACK_THROUGH" ]; then
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -956,6 +1184,7 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  [ -z "$COMMIT_STAGE" ] || commit_stage_receipt "$COMMIT_STAGE" || true
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
     # Nothing at or below the cutoff was this actor's to consume, while a
     # presented row above it is still waiting: the caller acknowledged an
@@ -981,18 +1210,28 @@ if [ -n "$ACK_THROUGH" ]; then
   exit 0
 fi
 
+if [ -n "$STAGE_RECEIPT" ]; then
+  stage_begin || { echo "wake drain: staged presentation scratch could not be created" >&2; exit 1; }
+fi
+
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in
     pending:downtime:*|announced:downtime:*)
-      fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
-        echo "wake drain: decision recovery could not begin handling safely" >&2
-        exit 1
-      }
-      RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
-      RECOVERY_ACK_REQUIRED=true
+      if [ -n "$STAGE_TMP" ]; then
+        # Staged: the episode begins handling only once the staging caller
+        # commits its delivery (header "Staged presentation").
+        RECOVERY_ACK_REQUIRED=true
+      else
+        fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+          echo "wake drain: decision recovery could not begin handling safely" >&2
+          exit 1
+        }
+        RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+        RECOVERY_ACK_REQUIRED=true
+      fi
       ;;
     pending:handling:*|announced:handling:*) RECOVERY_ACK_REQUIRED=true ;;
   esac
@@ -1000,6 +1239,14 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+  if [ -n "$STAGE_TMP" ]; then
+    if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
+      stage_write_receipt 0 "${RECOVERY_MARKER_TOKEN##*:}" "$RECOVERY_MARKER_TOKEN" || exit 1
+    else
+      stage_write_receipt 0 '' "$RECOVERY_MARKER_TOKEN" || exit 1
+    fi
+    exit "$BRANCH_OUTCOMES_RC"
+  fi
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -1022,6 +1269,11 @@ if [ "$ACTOR" = main ]; then
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+    if [ -n "$STAGE_TMP" ]; then
+      fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
+      stage_write_receipt 0 '' "$FM_RECOVERY_MARKER_TOKEN" || exit 1
+      exit "$BRANCH_OUTCOMES_RC"
+    fi
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
   fi
@@ -1044,11 +1296,13 @@ elif [ "${RECOVERY_MARKER_TOKEN%%:*}" = acked ]; then
     exit 1
   }
 fi
-fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
-  echo "wake drain: durable wakes could not begin handling safely" >&2
-  exit 1
-}
-RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+if [ -z "$STAGE_TMP" ]; then
+  fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+    echo "wake drain: durable wakes could not begin handling safely" >&2
+    exit 1
+  }
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+fi
 
 DRAIN_VIEW_TMP=$(mktemp "$STATE/.wake-queue.actor-view.XXXXXX") || exit 1
 if [ "$ACTOR" = branch ]; then
@@ -1080,6 +1334,12 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+if [ -n "$STAGE_TMP" ]; then
+  (print_status_presentation "$RAW_ROWS") || true
+  print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+  stage_write_receipt "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" "$RECOVERY_MARKER_TOKEN" || exit 1
+  exit "$BRANCH_OUTCOMES_RC"
+fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
