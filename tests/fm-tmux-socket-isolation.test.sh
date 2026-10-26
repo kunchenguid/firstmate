@@ -985,6 +985,105 @@ EOF
   wait "$argvholder" 2>/dev/null || true
 }
 
+# Round 3 (review): a disguised lsof that answers the cwd scan but FAILS
+# the +D open-file scan must read as UNPROVABLE, never as "no open-file
+# holders" - each lsof criterion exposes a survivor class the other cannot
+# see, so any unusable取证 source voids the absence claim (B1's class).
+test_open_file_scan_failure_fails_closed() {
+  local dir wt meta sock="fmfake-disg-$$" verdict pids real_lsof
+  dir="$TMP_ROOT/disg"; wt="$TMP_ROOT/disg-wt"
+  rm -rf "$dir" "$wt"; mkdir -p "$dir/home/state" "$dir/fake" "$wt"
+  make_socket_stub "$dir"
+  meta="$dir/home/state/disg.meta"
+  cat > "$meta" <<EOF
+window=fmses:fm-disg
+endpoint_task_id=disg
+worktree=$wt
+project=$TMP_ROOT
+socket=$sock
+EOF
+  real_lsof=$(command -v lsof)
+  : > "$wt/holdfile"
+  # A real process holding an fd inside the worktree, cwd elsewhere - it is
+  # visible ONLY through the +D criterion.
+  ( cd "$TMP_ROOT" && exec 9<"$wt/holdfile" && sleep 60 ) &
+  local fdholder=$!
+  sleep 1
+  trap 'kill "$fdholder" 2>/dev/null || true' RETURN
+
+  run_disg_verdict() {  # <shim-dir>
+    local shimdir=$1
+    (
+      PATH="$shimdir:$dir/fakebin:$PATH"
+      FM_FAKE_DIR="$dir/fake"
+      export PATH FM_FAKE_DIR
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-disg" "$meta"
+    )
+  }
+
+  # Shape 1 (positive control): the shim answers every mode - the holder is
+  # attributed and the reclaim refuses.
+  local okdir="$dir/lsof-ok"; mkdir -p "$okdir"
+  cat > "$okdir/lsof" <<SH
+#!/usr/bin/env bash
+exec "$real_lsof" "\$@"
+SH
+  chmod +x "$okdir/lsof"
+  pids=$(
+    PATH="$okdir:$PATH" bash -c '
+      . "$1/bin/fm-tmux-lib.sh"
+      fm_tmux_worktree_live_pids "$2"
+    ' _ "$ROOT" "$wt"
+  )
+  case "$pids" in
+    *"$fdholder"*) : ;;
+    *) kill "$fdholder" 2>/dev/null; fail "a working lsof must attribute the open-file holder, got '$pids'" ;;
+  esac
+  verdict=$(run_disg_verdict "$okdir")
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill "$fdholder" 2>/dev/null; fail "a visible open-file holder must refuse the reclaim, got '$verdict'" ;;
+  esac
+  pass "disguised-lsof: a fully working lsof attributes the open-file holder"
+
+  # Shape 2 (the reviewer's repro): cwd scan answers, +D fails empty. The
+  # holder is now INVISIBLE to the surviving criterion, so the absence claim
+  # itself is unproven - this must refuse, never `gone`.
+  local baddir="$dir/lsof-plusd-fail"; mkdir -p "$baddir"
+  cat > "$baddir/lsof" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *' +D '*) exit 1 ;;
+  *) exec "$real_lsof" "\$@" ;;
+esac
+SH
+  chmod +x "$baddir/lsof"
+  verdict=$(run_disg_verdict "$baddir")
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill "$fdholder" 2>/dev/null; fail "a failed +D scan must refuse as unproven even when the cwd scan was clean, got '$verdict'" ;;
+  esac
+  pass "disguised-lsof: cwd-clean + +D-failed refuses (the +D survivor class is invisible)"
+
+  # Shape 3: every lsof mode fails - unproven as well.
+  local alldir="$dir/lsof-all-fail"; mkdir -p "$alldir"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$alldir/lsof"
+  chmod +x "$alldir/lsof"
+  verdict=$(run_disg_verdict "$alldir")
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill "$fdholder" 2>/dev/null; fail "a fully failing lsof must refuse as unproven, got '$verdict'" ;;
+  esac
+  pass "disguised-lsof: a fully failing lsof refuses"
+
+  kill "$fdholder" 2>/dev/null || true
+  wait "$fdholder" 2>/dev/null || true
+  trap - RETURN
+}
+
 # --- E. real-script screen read and doorbell through the recorded socket -----
 
 test_real_socket_peek_and_doorbell_end_to_end() {
@@ -1118,6 +1217,7 @@ test_real_tmux_death_proof_primitives
 test_verdict_real_socket_gone_and_refusal_cases
 test_proof_fails_closed_when_evidence_tools_fail
 test_worktree_liveness_covers_open_files_and_argv
+test_open_file_scan_failure_fails_closed
 test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint
