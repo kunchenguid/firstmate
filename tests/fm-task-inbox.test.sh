@@ -309,6 +309,138 @@ test_ring_skips_dead_agent() {
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
+# A `-L`-aware fake tmux for socket-scoped ring cases: the recorded socket
+# (FM_FAKE_SOCKET) holds a live claude window (or a dead/missing one per the
+# same knobs make_watch_stubs uses), while the AMBIENT server and any other
+# socket answer "no server running", so an unscoped read sees the worker as
+# missing exactly as a fleet worker on a dedicated socket would.
+make_socket_ring_stub() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+sock=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) sock=${2:-}; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}; shift || true
+case "$cmd" in
+  send-keys)
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in -t) shift 2 ;; -l) literal=1; shift ;; *) break ;; esac
+    done
+    if [ "$literal" = 1 ]; then printf '%s %s\n' "$sock" "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"; fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*)
+          [ "$sock" = "${FM_FAKE_SOCKET:-}" ] || exit 0
+          [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '%s\n' "$FM_FAKE_TMUX_AGENT"; exit 0; }
+          printf 'claude\n'; exit 0 ;;
+        *pane_tty*) exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
+  list-windows)
+    if [ "$sock" = "${FM_FAKE_SOCKET:-}" ]; then
+      [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf 'fm-t1\n'
+      exit 0
+    fi
+    echo "no server running on /tmp/tmux-1000/${sock:-default}" >&2
+    exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  make_fake_crew_state "$fb" >/dev/null
+  printf '%s\n' "$fb"
+}
+
+# Socket scope must reach the doorbell: a live worker on a non-default socket
+# is rung through its recorded socket, while a dead or missing endpoint on that
+# socket still skips (nothing typed), and a legacy record (empty socket) stays
+# on the ambient server. This pins the regression where the ring's liveness
+# read ignored the socket, saw every fleet worker as missing, and never rang.
+test_ring_carries_the_recorded_socket() {
+  local dir state rec log rc
+  dir="$TMP_ROOT/ring-socket"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_socket_ring_stub "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"
+
+  # Live worker on the dedicated socket: the ring must reach it.
+  : > "$log"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_SOCKET=fleet \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 fleet || rc=$?
+  [ "$rc" = 0 ] || fail "a live worker on the recorded socket should ring, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || fail "the doorbell never reached the socket-scoped worker:"$'\n'"$(cat "$log")"
+  grep -qF 'fleet : Firstmate instruction waiting' "$log" \
+    || fail "the doorbell was not addressed through the recorded socket:"$'\n'"$(cat "$log")"
+
+  # Dead agent on that same socket: still skipped, nothing typed.
+  : > "$log"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_SOCKET=fleet FM_FAKE_TMUX_AGENT=zsh \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 fleet || rc=$?
+  [ "$rc" = 3 ] || fail "a dead agent on the recorded socket should return 3, got $rc"
+  [ ! -s "$log" ] || fail "a dead socket-scoped pane was typed into:"$'\n'"$(cat "$log")"
+
+  # Missing endpoint on that socket: still skipped.
+  : > "$log"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_SOCKET=fleet FM_FAKE_TMUX_MISSING=1 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 fleet || rc=$?
+  [ "$rc" = 3 ] || fail "a missing endpoint on the recorded socket should return 3, got $rc"
+  [ ! -s "$log" ] || fail "a missing socket-scoped endpoint was typed into:"$'\n'"$(cat "$log")"
+
+  # Legacy record (empty socket): the worker is NOT on the ambient server, so
+  # the ring reads it as missing and skips - ambient addressing unchanged.
+  : > "$log"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_SOCKET=fleet \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 3 ] || fail "a legacy (empty-socket) record should stay on the ambient server and skip, got $rc"
+  [ ! -s "$log" ] || fail "a legacy record reached the fleet socket:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring carries the recorded socket (live rings; dead/missing/legacy skip)"
+}
+
+# The watcher's re-ring addresses the recorded socket too: a socket-isolated
+# worker whose doorbell was swallowed is re-rung through its own socket rather
+# than read as missing from the ambient server and escalated.
+test_watcher_rerings_a_socket_isolated_worker() {
+  local dir state rec
+  dir="$TMP_ROOT/watcher-socket"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_socket_ring_stub "$dir" >/dev/null
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=grok" "socket=fleet"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SEND_LOG="$dir/send.log" \
+    FM_FAKE_SOCKET=fleet FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=99 \
+    bash -c '. "$1" && inbox_steer_check sess:fm-t1 t1' _ "$WATCH" > "$dir/check.out" 2>&1
+  grep -qF 'fleet : Firstmate instruction waiting' "$dir/send.log" \
+    || fail "the watcher did not re-ring through the recorded socket:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a healthy socket-scoped re-ring must not wake firstmate:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a socket-isolated worker is re-rung through its recorded socket"
+}
+
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
 # between rules, and Enter submits it (logged as SUBMIT) unless
@@ -1197,6 +1329,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_carries_the_recorded_socket
 test_ring_submits_its_own_stuck_doorbell
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -1209,6 +1342,7 @@ test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
+test_watcher_rerings_a_socket_isolated_worker
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces

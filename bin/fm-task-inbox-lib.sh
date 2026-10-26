@@ -371,8 +371,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+# The optional trailing <socket> is the recorded dedicated tmux socket name:
+# every backend read below (liveness, composer, busy) and the submit itself
+# must address that same server, or a fleet worker reads as `missing` from the
+# ambient server and the doorbell never lands. Empty (a legacy record) keeps
+# ambient addressing verbatim, exactly where pre-isolation spawns put the pane.
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [socket]
+  local backend=$1 target=$2 rec=$3 label=${4:-} socket=${5:-} line cstate verdict
+  local FM_TMUX_SOCKET
+  # shellcheck disable=SC2034 # Read dynamically by fm_tmux() in every backend call below.
+  FM_TMUX_SOCKET=$socket
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac

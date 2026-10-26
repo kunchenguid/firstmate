@@ -1426,6 +1426,43 @@ SH
 
 # --- entrypoint ---------------------------------------------------------------
 
+# The doorbell regression this suite guards against in the other direction: the
+# send-side ring must address the RECORDED socket, or a live fleet worker reads
+# as missing from the ambient server and its steer is never announced. A dead or
+# missing endpoint on the recorded socket must still NOT be typed into, while the
+# durable record still lands for recovery.
+test_send_rings_the_doorbell_on_the_recorded_socket() {
+  local dir out rc sock="fmfake-sendring-$$"
+  dir=$(new_socket_case sendring r1)
+  add_socket_ship_task "$dir" r1 "$sock"
+  # The endpoint is alive on the RECORDED socket.
+  : > "$dir/fake/server-$sock-alive"
+  printf 'fm-r1\n' > "$dir/fake/windows-$sock"
+
+  out=$(run_socket_cmd "$dir" "$ROOT/bin/fm-send.sh" r1 "please continue"); rc=$?
+  expect_code 0 "$rc" "fm-send to a live socket-isolated worker must succeed"$'\n'"$out"
+  assert_grep "$sock : Firstmate instruction waiting" "$dir/fake/literal" \
+    "the doorbell must be typed on the recorded socket"
+  if grep -q 'Firstmate instruction waiting' "$dir/fake/literal" \
+     && ! grep -q "^$sock : Firstmate instruction waiting" "$dir/fake/literal"; then
+    fail "the doorbell leaked to a socket other than the recorded one:"$'\n'"$(cat "$dir/fake/literal")"
+  fi
+  pass "fm-send: the doorbell addresses the recorded socket"
+
+  # Reverse: the recorded socket holds no such window -> the doorbell is NOT
+  # typed (dead/missing), while the durable record still lands for recovery.
+  rm -f "$dir/fake/windows-$sock"
+  : > "$dir/fake/literal"
+  out=$(run_socket_cmd "$dir" "$ROOT/bin/fm-send.sh" r1 "another steer"); rc=$?
+  expect_code 0 "$rc" "fm-send must still exit 0 when the durable record lands"$'\n'"$out"
+  [ -f "$dir/home/state/r1.inbox/002.msg" ] \
+    || fail "the second steer must still be durably recorded for recovery"
+  if grep -q 'Firstmate instruction waiting' "$dir/fake/literal"; then
+    fail "a missing socket-scoped endpoint must not be typed into:"$'\n'"$(cat "$dir/fake/literal")"
+  fi
+  pass "fm-send: a missing socket-scoped endpoint is not typed into"
+}
+
 test_fm_tmux_routes_every_invocation_through_one_owner
 test_fm_tmux_fleet_socket_resolution
 test_socket_meta_round_trip_and_validation
@@ -1444,4 +1481,5 @@ test_relaunch_refuses_a_dead_socket_legacy_record_unchanged
 test_relaunch_refuses_when_the_worktree_survived_the_server
 test_secondmate_spawn_uses_the_dedicated_socket
 test_secondmate_duplicate_corridor_scopes_the_recorded_socket
+test_send_rings_the_doorbell_on_the_recorded_socket
 test_teardown_closes_the_window_on_the_recorded_socket
