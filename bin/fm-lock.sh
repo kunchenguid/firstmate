@@ -13,8 +13,10 @@
 # POSIX. Line 1 keeps its whole-line pid format because every other reader
 # takes the first line as the pid.
 #
-# The trusted id and publisher pid are lines 1 and 2 of state/.lock-session, a
-# sidecar written only here and only under the claim lock: refreshed on every
+# The trusted id, the publisher pid and that pid's fm_pid_identity
+# (bin/fm-wake-lib.sh) are lines 1 to 3 of state/.lock-session; a publisher
+# whose identity cannot be computed is not recorded, leaving the id alone. The
+# sidecar is written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition at SessionStart or an owned Stop with a stale
 # publisher, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
@@ -178,22 +180,26 @@ remember_lock_session() {
 # naming this id and publisher is left untouched. An ancestry-confirmed owner
 # upgrades an id-only sidecar at SessionStart or an owned Stop before detaching.
 publish_lock_session() {
-  local trusted recorded publisher recorded_publisher tmp
+  local trusted recorded publisher identity='' recorded_publisher recorded_identity tmp
   if trusted=$(fm_session_lock_trusted_session_id); then
     publisher=$me
+    fm_session_lock_pid_identity "$STATE" "$me" identity || publisher=
     recorded=
     recorded_publisher=
+    recorded_identity=
     if fm_session_lock_read_record "$STATE"; then
       recorded=$FM_SESSION_LOCK_RECORDED_ID
       recorded_publisher=$FM_SESSION_LOCK_RECORDED_PUBLISHER
+      recorded_identity=$FM_SESSION_LOCK_RECORDED_IDENTITY
     fi
-    if [ "$recorded" = "$trusted" ] && [ "$recorded_publisher" = "$publisher" ]; then
+    if [ "$recorded" = "$trusted" ] && [ "$recorded_publisher" = "$publisher" ] \
+      && [ "$recorded_identity" = "$identity" ]; then
       return 0
     fi
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
     if ! {
-      printf '%s\n%s\n' "$trusted" "$publisher" > "$tmp" \
+      { printf '%s\n' "$trusted" && { [ -z "$publisher" ] || printf '%s\n%s\n' "$publisher" "$identity"; }; } > "$tmp" \
         && { [ "${recorded:-}" != "$trusted" ] || touch -r "$LOCK_SESSION" "$tmp"; } \
         && mv -f "$tmp" "$LOCK_SESSION"
     } 2>/dev/null; then
@@ -256,14 +262,14 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded trusted
+  local recorded remedy
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
     echo "error: another live firstmate session holds the lock (pid $1); operate read-only until resolved" >&2
   fi
-  if trusted=$(fm_session_lock_trusted_session_id) && [ "$trusted" = "$recorded" ]; then
-    echo "error: $(fm_session_lock_refusal_advice "$STATE")" >&2
+  if remedy=$(fm_session_lock_same_id_remedy "$STATE"); then
+    echo "error: $remedy" >&2
   fi
   exit 1
 }

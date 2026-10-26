@@ -288,8 +288,9 @@ block_stop() {
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.
 if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely. %s"}\n' \
-    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID" "$(fm_session_lock_refusal_advice "$STATE")"
+  SAME_ID_REMEDY=$(fm_session_lock_same_id_remedy "$STATE") && SAME_ID_REMEDY=" $SAME_ID_REMEDY"
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision.%s"}\n' \
+    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID" "$SAME_ID_REMEDY"
   exit 0
 fi
 

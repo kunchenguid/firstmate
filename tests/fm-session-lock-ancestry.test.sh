@@ -43,13 +43,15 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # makes every pid dead). The suite itself may run inside a Claude session whose
 # CLAUDE_CODE_SESSION_ID and CLAUDE_PID would leak into the expression, so both
 # are scrubbed and only FM_TEST_SESSION_ID and FM_TEST_CLAUDE_PID reach it.
+# Process identities come from the fake ps too, never from this host's /proc.
+NO_PROC="$TMP_ROOT/no-proc"
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
-    PATH="$fakebin:$PATH" bash -c "
+    PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$NO_PROC" FM_STATE_OVERRIDE="$TMP_ROOT/lib-eval-state" bash -c "
     . \"\$0\"
     kill() { [ \"\${2:-}\" != \"\${FM_TEST_DEAD_PID:-}\" ] && return \${FM_TEST_KILL_RC:-0}; return 1; }
     $expr
@@ -282,7 +284,9 @@ SH
 # transient daemon gone the pty-host is reparented to launchd, so the contiguous
 # claude-named run from the hook ends at 720 and the live front-end 700 that
 # holds the lock is no longer an ancestor at all. FM_TEST_DAEMON_PRESENT=1 puts
-# the daemon (730) back between 720 and 700: the healthy topology.
+# the daemon (730) back between 720 and 700: the healthy topology. A process
+# identity is its `ps -o lstart= -o command=` line; FM_TEST_REUSED_PID gives
+# that pid number to a later process with a different identity.
 write_background_session_ps() {  # <fakebin>
   cat > "$1/ps" <<'SH'
 #!/usr/bin/env bash
@@ -295,8 +299,9 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-[ "$pid" != "${FM_TEST_PS_FAIL_PID:-}" ] || exit 2
 case "$pid:$field:${FM_TEST_DAEMON_PRESENT:-0}" in
+  "${FM_TEST_REUSED_PID:-}":command=:*) printf '%s\n' "start-2 claude $pid" ;;
+  *:command=:*) printf '%s\n' "start-1 claude $pid" ;;
   700:comm=:*) printf '%s\n' claude ;;
   700:args=:*) printf '%s\n' 'claude --resume' ;;
   700:ppid=:*) printf '%s\n' 1 ;;
@@ -318,6 +323,12 @@ SH
   chmod +x "$1/ps"
 }
 
+# Write the sidecar bin/fm-lock.sh publishes for <id> and publisher <pid> in
+# that process table.
+bg_sidecar() {  # <state> <id> <pid>
+  printf '%s\n%s\nstart-1 claude %s\n' "$2" "$3" "$3" > "$1/.lock-session"
+}
+
 owned() {  # <fakebin> <state>
   lib_eval "$1" "fm_session_lock_owned_by_self '$2'"
 }
@@ -334,7 +345,7 @@ test_same_session_id_owns_a_recycled_background_chain() {
   mkdir -p "$state"
   write_background_session_ps "$fakebin"
   printf '700\n' > "$state/.lock"
-  printf 'S1\n710\n' > "$state/.lock-session"
+  bg_sidecar "$state" S1 710
 
   # The divergence itself, so none of the verdicts below can be vacuous: with
   # the daemon gone the front-end is not an ancestor, with it back it is.
@@ -353,36 +364,33 @@ test_same_session_id_owns_a_recycled_background_chain() {
   # A conversation id is shareable; only a recorded publisher in this run
   # distinguishes a detached owner from a second live model loop.
   for publisher in 700 '' invalid; do
-    printf 'S1\n%s\n' "$publisher" > "$state/.lock-session"
+    bg_sidecar "$state" S1 "$publisher"
     if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
       fail "a foreign, missing, or malformed publisher claimed the live lock"
     fi
     FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
       || fail "a foreign publisher suppressed the ownership diagnostic"
   done
-  printf 'S1\n730\n' > "$state/.lock-session"
+  printf 'S1\n710\n' > "$state/.lock-session"
+  if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+    fail "a publisher recorded without its process identity claimed the live lock"
+  fi
+  # A later process given the recorded publisher's pid number in a new same-id
+  # chain recomputes a different identity, so the live frontend keeps its lock.
+  bg_sidecar "$state" S1 710
+  if FM_TEST_REUSED_PID=710 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+    fail "a reused publisher pid number claimed the live frontend's lock"
+  fi
+  got=$(FM_TEST_REUSED_PID=710 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state") \
+    || fail "a reused publisher pid number hid the live frontend"
+  [ "$got" = 700 ] || fail "the reused pid number's foreign owner was '$got', expected 700"
+  bg_sidecar "$state" S1 730
   if FM_TEST_DEAD_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
     fail "an exited publisher granted ownership over the live frontend"
   fi
   FM_TEST_DEAD_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
     || fail "an exited publisher hid the foreign live frontend"
-  # An unavailable process lookup is not evidence that the publisher exited.
-  if FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 \
-    lib_eval "$fakebin" 'fm_harness_pid_alive 730'; then
-    fail "the publisher-only ps failure was not exercised"
-  fi
-  if FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
-    fail "a failed publisher lookup granted ownership over the live frontend"
-  fi
-  FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
-    || fail "a failed publisher lookup hid the foreign live frontend"
-  got=$(FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 \
-    lib_eval "$fakebin" "fm_session_lock_refusal_advice '$state'")
-  case "$got" in *'second process resuming'*'exit this session'*) ;; *) fail "unknown publisher liveness did not keep the second-process advice" ;; esac
-  if lib_eval "$fakebin" 'kill() { echo "Operation not permitted" >&2; return 1; }; fm_session_lock_publisher_exited 730'; then
-    fail "a permission error was reported as publisher exit"
-  fi
-  printf 'S1\n710\n' > "$state/.lock-session"
+  bg_sidecar "$state" S1 710
   # 2. A different id: the existing refusal, naming the live owner.
   if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
     fail "a different session id claimed a live owner's lock"
@@ -396,7 +404,7 @@ test_same_session_id_owns_a_recycled_background_chain() {
   fi
   FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=700 foreign_owner "$fakebin" "$state" >/dev/null \
     || fail "an untrusted id suppressed the foreign-owner verdict"
-  printf 'S1:x\n710\n' > "$state/.lock-session"
+  bg_sidecar "$state" 'S1:x' 710
   FM_TEST_SESSION_ID='S1:x' FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state" \
     || fail "a trusted id containing a colon did not own the lock"
   if FM_TEST_SESSION_ID='S1:x' FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null; then
@@ -408,7 +416,7 @@ test_same_session_id_owns_a_recycled_background_chain() {
   fi
   FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
     || fail "a carriage-return sidecar suppressed the foreign-owner verdict"
-  printf 'S1\n710\n' > "$state/.lock-session"
+  bg_sidecar "$state" S1 710
   # 4. No id at all: the legacy ancestry verdict, unchanged.
   if owned "$fakebin" "$state"; then
     fail "with no session id the recycled chain claimed the lock"
@@ -429,13 +437,13 @@ test_same_session_id_owns_a_recycled_background_chain() {
   if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
     fail "a lock with no recorded session id was owned through the environment id"
   fi
-  printf 'S1\n' > "$dir/elsewhere"
+  printf 'S1\n710\nstart-1 claude 710\n' > "$dir/elsewhere"
   ln -s "$dir/elsewhere" "$state/.lock-session"
   if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
     fail "a symlinked sidecar was trusted"
   fi
   rm -f "$state/.lock-session"
-  printf 'S1\n710\n' > "$state/.lock-session"
+  bg_sidecar "$state" S1 710
   if FM_TEST_KILL_RC=1 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
     fail "a same-session lock whose recorded pid is dead was owned instead of left for reclaim"
   fi
@@ -704,12 +712,14 @@ test_windows_clear_rekeys_the_lock_under_the_same_pid() {
   printf 'S1\n' > "$home/state/.lock-session"
   touch -t 202001010000 "$home/state/.lock-session"
   cp -p "$home/state/.lock-session" "$home/state/legacy-sidecar"
-  out=$(win_lock S1) || fail "the ancestry owner could not upgrade its legacy sidecar: $out"
-  [ "$(sed -n '2p' "$home/state/.lock-session")" = 'win:7204' ] \
-    || fail "the legacy sidecar did not record its tagged publisher"
+  # A tagged pid has no computable process identity, so no publisher is
+  # recorded and the id-only sidecar is already current: ancestry only.
+  out=$(win_lock S1) || fail "the ancestry owner could not confirm its id-only sidecar: $out"
+  cmp -s "$home/state/.lock-session" "$home/state/legacy-sidecar" \
+    || fail "a tagged Windows publisher without a process identity was recorded: $(cat "$home/state/.lock-session")"
   [ ! "$home/state/.lock-session" -nt "$home/state/legacy-sidecar" ] \
     && [ ! "$home/state/.lock-session" -ot "$home/state/legacy-sidecar" ] \
-    || fail "a publisher-only upgrade changed the session-id timestamp"
+    || fail "an unchanged id-only sidecar changed the session-id timestamp"
 
   # /clear keeps the Claude process, so CLAUDE_PID stays while the session id
   # changes. As on POSIX the session keeps its lock and the sidecar is re-keyed.
@@ -1285,11 +1295,12 @@ test_stops_under_shared_ancestor_do_not_rekey_the_sidecar() {
   for id in S1 S2 S1 S2; do
     pid=710
     [ "$id" != S2 ] || pid=730
-    env PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_DAEMON_PRESENT=1 \
+    env PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_DAEMON_PRESENT=1 FM_PROC_ROOT_OVERRIDE="$NO_PROC" \
       CLAUDE_CODE_SESSION_ID="$id" CLAUDE_PID="$pid" \
       bash "$dir/bin/fm-claude-stop-autoarm.sh" </dev/null > "$dir/stop-$id.out" 2>&1
     [ "$(sidecar_id "$dir/state/.lock-session")" = S1 ] || fail "an alternating Stop re-keyed the recorded id"
-    [ "$(sed -n '2p' "$dir/state/.lock-session")" = 710 ] || fail "the same-id Stop did not upgrade its publisher, or the other id replaced it"
+    [ "$(sed -n '2,3p' "$dir/state/.lock-session")" = "$(printf '710\nstart-1 claude 710')" ] \
+      || fail "the same-id Stop did not upgrade its publisher and identity, or the other id replaced them"
     [ "$(cat "$dir/state/.lock")" = 700 ] || fail "a Stop re-anchored the shared line-1 owner"
     if [ "$dir/state/.lock-session" -nt "$dir/sidecar-time" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-time" ]; then
       fail "an alternating Stop moved the session-id time boundary"
@@ -1620,7 +1631,7 @@ test_reanchor_keeps_task_leases_live() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      printf "S1\n%s\n" "$$" > "$FM_HOME/state/.lock-session"
+      printf "S1\n%s\n%s\n" "$$" "$(. "${FM_LOCK%/*}/fm-wake-lib.sh"; fm_pid_identity "$$")" > "$FM_HOME/state/.lock-session"
       CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
       printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
@@ -1681,7 +1692,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      printf "S1\n%s\n" "$$" > "$FM_HOME/state/.lock-session"
+      printf "S1\n%s\n%s\n" "$$" "$(. "${FM_LOCK%/*}/fm-wake-lib.sh"; fm_pid_identity "$$")" > "$FM_HOME/state/.lock-session"
       CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
       printf "%s\n" "$$" > "$FM_HOME/state/model-pid"

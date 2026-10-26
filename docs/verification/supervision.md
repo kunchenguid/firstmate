@@ -346,8 +346,9 @@ Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a sess
 Its Stop-only phase upgrades a legacy publisher before bridge recycling, and the post-recycle Stop is admitted before SessionStart re-anchors the lock.
 A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh leaves a still-owned Stop free to arm, with its warning reaching the session only when that Stop rewakes.
 Alternating shared-ancestor Stops preserve the recorded id, lock anchor and mtime; a failed publisher write restores the sidecar mtime.
-It also covers Windows pid tags, publication failures, missing or malformed publisher evidence, and refusal of an exited or unverified publisher over a live lock.
+It also covers Windows pid tags, publication failures, missing, malformed or identity-less publisher evidence, refusal of an exited or unverified publisher over a live lock, and refusal of a reused publisher pid number in a new same-id chain.
 `tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
+It repeats those checks with an exited publisher and with a new same-id process whose pid number is recorded beside an exited publisher's identity, and checks that only same-id refusals print the remedy line.
 These portable tests use synthetic harness processes; the real Claude resume test and its limits are recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
 
 The following dated records are retained for the platform and re-anchor evidence.
@@ -394,6 +395,9 @@ bash tests/fm-turnend-foreign-owner-arm-fix.test.sh
 
 Observed output, bounded to the affected guarantees:
 The refresh-failure line below came from a Stop that rewoke; it does not establish warning delivery on exit-0 Stops.
+The reused-pid line came from a later run on the same date with the same tool versions.
+That run executed the repro from a copy outside the validation checkout, because the watcher refuses to arm from a disposable checkout.
+Its ancestry-suite run accepted a user-session subreaper in place of pid 1 for the pty-host reparent check.
 
 ```text
 ok - session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime
@@ -406,6 +410,7 @@ ok - session-lock: a failed lock write restores the previous sidecar and mtime
 ok - session-lock: a re-anchor keeps both supervision actors' task leases live
 FIXED a second live model loop remains foreign after resuming the owner's conversation
 FIXED an exited publisher cannot transfer a live frontend's lock, leases, or rewake
+FIXED a reused publisher pid number cannot transfer a live frontend's lock, leases, or rewake
 COMPLETE
 ```
 
