@@ -12,8 +12,8 @@ The packaged Python entrypoint and its interpreter must remain installed beside 
 A stale or unavailable account catalog can therefore require opening Vibe normally to refresh its configuration before retrying.
 Omitting the model uses Vibe's configured default.
 
-Effort pinning is unsupported: omit effort or use `default` to retain Vibe's configured reasoning level.
-An explicit non-default effort refuses rather than pretending the requested level applied.
+Effort pinning is unsupported: omit effort to retain Vibe's configured reasoning level.
+Any explicit effort refuses rather than pretending the requested level applied.
 Authentication stays in Vibe's own credential sources; inspect presence or login status without printing keys or reading credential values.
 
 ## Launch and control

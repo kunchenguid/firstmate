@@ -47,7 +47,7 @@ error: Vibe model pin could not be verified with its installed Python config loa
 ```
 
 Sparse reasoning-model environment overrides did not apply in two real trials, and the installed environment layer ignored the unparseable override.
-Effort pinning is unsupported and explicit non-default requests refuse.
+Effort pinning is unsupported and any explicit effort request refuses.
 The configured GLM reasoning default remained high; no effort-selection guarantee is claimed.
 
 ## Signals
