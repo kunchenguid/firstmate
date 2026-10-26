@@ -164,7 +164,10 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "empty words cancel no standing grant and add none" "the away tail must keep standing authority under empty words"
   assert_contains "$out" "bin/fm-spawn.sh dispatches queued work whose holds, blockers, and date gates cleared within the spend cap, whether or not the words name it, plus work the words or a standing order recorded in data/captain.md (and data/captain-shared.md where present) say to start now" \
     "the away tail must dispatch queued work and recorded standing orders without a sentence of the words"
-  assert_contains "$out" "what the words leave unsaid falls back to standing authority for dispatch, never to a hold on it" "the away tail must not read unsaid words as a hold"
+  assert_contains "$out" "what the words leave unsaid falls back to standing authority, never to a hold on it, while a merge neither the words nor a task's standing merge permission calls for still holds for the return" "the away tail must not read unsaid words as a hold"
+  assert_contains "$out" "a task's standing merge permission (yolo=on in state/<task>.meta) merges its green, in-scope pull request whether or not the words name it" \
+    "the away tail must merge a green PR the standing merge permission covers under empty words"
+  assert_contains "$out" "refuses a red one or --allow-red" "the away tail must keep the green gate beside the standing merge permission"
   assert_not_contains "$out" "(already queued, or filed by you from the words)" "the away tail still conditions dispatch on the words"
   assert_contains "$out" "  your words: (none)" "the away tail must still end with the empty read-back"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"

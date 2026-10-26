@@ -169,7 +169,7 @@ test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
     "a backlog item already queued whose holds, blockers, and date gates have cleared dispatches within the record's spend cap, as MAIN would dispatch it attended;" \
     "branch prompt does not dispatch already-queued work without a sentence of the words"
   assert_contains "$prompt" \
-    "a standing order recorded in this home's captain preference files (\`data/captain.md\`, and \`data/captain-shared.md\` where present) that names work and the moment it starts, also while away, is carried out at that moment: file the item under the \`backlog\` lease with a note citing the preference, then dispatch it." \
+    "a standing order recorded in this home's captain preference files (\`data/captain.md\`, and \`data/captain-shared.md\` where present) that names work and the moment it starts, also while away, is carried out at that moment: file the item under the \`backlog\` lease with a note citing the preference, then dispatch it;" \
     "branch prompt does not carry out a recorded standing order while away"
   assert_contains "$prompt" \
     "Read those files from disk when a wake could be such a moment" \
@@ -178,8 +178,19 @@ test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
     "a queued backlog item whose holds, blockers, and date gates cleared is dispatched within the record's spend cap whether or not the words name it" \
     "the spawn rule still requires the words to name queued work"
   assert_contains "$prompt" \
-    "what they leave unsaid falls back to standing authority for dispatch, never to a hold on it, while a merge the words do not call for still holds for the return." \
-    "the never-by-analogy rule still reads unsaid words as a hold, or widened to merges"
+    "what they leave unsaid falls back to standing authority, never to a hold on it, while a merge neither the words nor a task's standing merge permission calls for still holds for the return." \
+    "the never-by-analogy rule still reads unsaid words as a hold, or holds a merge the standing merge permission covers"
+  # The comparer PR of the same window: green, on a project with the captain's
+  # standing merge permission, held because the words were empty.
+  assert_contains "$prompt" \
+    "a project's standing merge permission, recorded as \`yolo=on\` in the task record (\`state/<task>.meta\`), merges that task's green, in-scope pull request as MAIN would merge it attended; \`yolo=off\` or an absent field keeps the merge for the return unless the words call for it." \
+    "branch prompt still holds a green PR the standing merge permission covers under empty words"
+  assert_contains "$prompt" \
+    "a merge the words call for, or a task's standing merge permission covers, proceeds when the pull request is green at its live head" \
+    "the merge rule still requires the words to name a PR the standing merge permission covers"
+  assert_contains "$prompt" \
+    "A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say" \
+    "the standing merge permission widened past the green gate"
   assert_contains "$prompt" \
     "an action taken under standing authority alone names the queued item or the preference sentence instead and never claims that opener." \
     "a standing-authority action may claim the away-instructions opener the return brief accounts by"
