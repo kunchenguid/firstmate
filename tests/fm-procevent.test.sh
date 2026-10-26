@@ -360,11 +360,9 @@ kill "$shared_sibling" 2>/dev/null || true
 wait "$shared_launcher" || fail "shared caller-group fixture did not exit cleanly"
 pass "public start never claims an inherited caller process group"
 
-# --- an unhandled result remains eligible for re-announcement on restart ----
-# A result is durable but nothing has ever acknowledged handling it. Every
-# reconcile call - not just the first restart after a crash - must keep
-# re-announcing it, because the only thing that stops re-announcement is an
-# explicit handled acknowledgement, never a prior publication.
+# --- an unhandled result is re-announced after its queued wake is consumed ---
+# A prior publication suppresses duplicates only while its queue row remains
+# unacknowledged; a consumed row is republished until the result is handled.
 H2="$TMP_ROOT/h2"; new_home "$H2"
 future_status=0
 future_out=$(pe "$H2" handled src-cut 7 2>&1) || future_status=$?
@@ -379,27 +377,33 @@ out=$(pe "$H2" reconcile)
 assert_contains "$out" "published=1" "a durably captured but unhandled result is announced after restart"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "durable adapter identity survives without a registration"
 assert_absent "$H2/state/procevent-inbox/src-cut.7.handled" "recovery alone never marks the recovered result handled"
+queued_before=$(cat "$H2/state/.wake-queue")
+out=$(pe "$H2" reconcile)
+assert_contains "$out" "published=0" "an unhandled result is not republished while its wake remains queued"
+queued_after=$(cat "$H2/state/.wake-queue")
+[ "$queued_after" = "$queued_before" ] || fail "reconcile changed the queued row while suppressing a duplicate"
+[ "$(printf '%s\n' "$queued_after" | grep -c .)" = 1 ] || fail "reconcile left duplicate rows for one queued result"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-1"
 out=$(pe "$H2" reconcile)
-assert_contains "$out" "published=1" "an unhandled result is re-announced on every reconcile, not only the first"
-assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the repeat wake preserves its deduplication identity"
+assert_contains "$out" "published=1" "a consumed wake is republished while its result remains unhandled"
+assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the republished wake preserves its deduplication identity"
+[ "$(printf '%s\n' "$(wake_payloads "$H2")" | grep -c .)" = 1 ] || fail "republication after consume created duplicate rows"
 [ "$(count_results "$H2" src-cut)" = 1 ] || fail "repeat re-announcement created a second durable copy"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-2"
 
 ack_out=$(pe "$H2" handled src-cut 7)
 assert_contains "$ack_out" "handled: src-cut 7" "the owned handling interface newly authorizes the first acknowledgement"
 assert_present "$H2/state/procevent-inbox/src-cut.7.handled" "acknowledgement durably records handling"
-before=$(wake_payloads "$H2" | wc -l | tr -d ' ')
 out=$(pe "$H2" reconcile)
-assert_contains "$out" "published=0" "reconcile stops re-announcing once a result is durably handled"
-[ "$(wake_payloads "$H2" | wc -l | tr -d ' ')" = "$before" ] || fail "a handled result was announced again"
+assert_contains "$out" "published=0" "an acknowledged result is not re-announced with an empty queue"
+assert_absent "$H2/state/.wake-queue" "an acknowledged result leaves the empty queue quiet"
 
 repeat_out=$(pe "$H2" handled src-cut 7)
 assert_contains "$repeat_out" "already-handled: src-cut 7" "repeated acknowledgement is safe and reports the repeat distinctly"
 case "$repeat_out" in
   handled:*) fail "a repeat acknowledgement re-authorized a second handled effect: $repeat_out" ;;
 esac
-pass "an unhandled result survives restart and repeat drains, and only explicit acknowledgement stops its re-announcement"
+pass "queued wakes publish once, consumed unhandled wakes are restored, and acknowledged results stay quiet"
 
 HRACE="$TMP_ROOT/hrace"; new_home "$HRACE"
 mkdir -p "$HRACE/state/procevent-inbox"
@@ -582,7 +586,7 @@ TERMINAL_RESULT=$(first_result "$HTERM" ends-src || true)
 assert_grep 'terminal payload' "$TERMINAL_RESULT" "automatic retirement retains the captured output verbatim"
 out=$(pe_adapter "$HTERM" reconcile)
 assert_contains "$out" "started=0" "a retired terminal source is never restarted"
-assert_contains "$out" "published=1" "an unhandled terminal result is still re-announced until acknowledged"
+assert_contains "$out" "published=0" "a queued terminal result is not republished before it is consumed"
 [ "$(count_results "$HTERM" ends-src)" = 1 ] || fail "a retired terminal source ran its poll again"
 out=$(pe_adapter "$HTERM" retire ends-src)
 assert_contains "$out" "retired: ends-src" "explicit retirement stays supported and idempotent after automatic retirement"
@@ -590,7 +594,7 @@ ack_out=$(pe_adapter "$HTERM" handled ends-src 1)
 assert_contains "$ack_out" "handled: ends-src 1" "a terminal result is acknowledged through the owned interface"
 out=$(pe_adapter "$HTERM" reconcile)
 assert_contains "$out" "published=0" "an acknowledged terminal result stops being re-announced"
-pass "an adapter-classified terminal result is captured once, announced, and retires its source automatically"
+pass "an adapter-classified terminal result is captured once, announced once while queued, and retires its source automatically"
 
 HOPEN="$TMP_ROOT/hopen"; new_home "$HOPEN"
 fm_test_track_procevent_home "$HOPEN"

@@ -65,9 +65,10 @@
 #            A task-owned source instead keeps its terminal round open and
 #            registered until its owner concludes it with `handled`.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
-#            republish every durably captured result with no handled
-#            acknowledgement yet - regardless of any earlier publication - and
-#            start a runner for any registered source that has no live owner and
+#            publish each durably captured result with no handled acknowledgement
+#            only when its prior wake row has been consumed, so each
+#            (source, sequence) has at most one queued check at a time. Start a
+#            runner for any registered source that has no live owner and
 #            no open task-owned round. This is liveness repair only - it never
 #            discovers results by
 #            polling the source, because the child blocks on the source itself.
@@ -100,7 +101,7 @@
 #            "already-handled: id seq" on every repeat call, atomically
 #            deduplicated so a paired external effect is never authorized
 #            twice. Until this is called, the result stays eligible for
-#            bounded re-announcement on every reconcile. Marking a result
+#            re-announcement after its queued wake is consumed. Marking a result
 #            handled does not retire its source registration or claim, with one
 #            exception: acknowledging the terminal round of a task-owned source
 #            is that board's conclude step, so it also drops the registration
@@ -175,8 +176,8 @@
 # announcement and a byte-identical replay produces none at all. Every other
 # adapter keeps the strict publish-before-apply order, because without a
 # declared downstream channel an applied-and-acknowledged result would otherwise
-# go silent. An unhandled result stays eligible for bounded re-announcement on
-# every reconcile in both modes, exactly as before.
+# go silent. An unhandled result stays eligible for re-announcement after its
+# queued wake is consumed in both modes.
 #
 # Polling again is adapter-owned through the same kind of seam. An adapter that
 # answers exit 0 to `bin/fm-procevent-<adapter>.sh relisten` keeps this runner
@@ -238,8 +239,8 @@
 # claim without starting a replacement.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
-# before publication and bounded re-announcement until handled, and nothing
-# about the source side of the handoff.
+# before publication and re-announcement after queued wakes are consumed until
+# handled, and nothing about the source side of the handoff.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -802,14 +803,14 @@ cmd_register_extension() {
   printf 'retire: bin/fm-procevent.sh retire %s --if-owner %s\n' "$id" "$registration_token"
 }
 
-# Publish every durably captured result with no handled acknowledgement yet.
+# Publish a durably captured result with no handled acknowledgement yet.
 # Capture already happened, so this only turns durable state into durable
-# events - and it republishes on every call regardless of any earlier
-# publication, so a result stays eligible for re-announcement across restarts
-# and drains until `fm_procevent_mark_handled` records it.
+# events. The queue is the publication ledger: while its row is queued, do not
+# append another; after the row is consumed, the result remains eligible for
+# re-announcement until `fm_procevent_mark_handled` records it.
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
-  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
+  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record wake_key
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -889,8 +890,14 @@ EOF
       esac
     fi
     unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
-    if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
-      status=0
+    wake_key="procevent:$id:$seq"
+    if fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+      if ! fm_wake_queued_keys_locked check | grep -Fxq "$wake_key"; then
+        if fm_wake_append_locked check "$wake_key" "check: $line"; then
+          status=0
+        fi
+      fi
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
     fi
   fi
   fm_procevent_source_lock_release "$id"
