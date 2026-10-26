@@ -696,7 +696,8 @@ An existing ledger is left untouched while recording is disabled.
 
 The optional local, gitignored `config/lane-vm-cleanup` presence flag opts this home into deleting a finished ship or scout task's Lima VMs during teardown, including a forced teardown.
 Teardown deletes only the VMs the worker recorded in its task meta's `lane_vms=` line with `bin/fm-lane-vm-record.sh`, and skips any recorded name that is not the task id or does not start with `<task-id>-`.
-When the flag is absent, teardown deletes no VM.
+Only an opted-in home's ship and scout briefs tell the worker to name and record its Lima VMs.
+When the flag is absent, teardown deletes no VM and briefs carry no lane VM rule.
 
 ## No-mistakes home resolver (config/nm-home-resolver)
 
