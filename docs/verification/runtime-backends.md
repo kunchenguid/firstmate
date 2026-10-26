@@ -1127,7 +1127,7 @@ All three render the banner as `Error: Codex error: The usage limit has been rea
 The guard no longer sets `FM_COMPOSER_PI_ADAPTER_VERSION`, so it exercises the adapter's own `pi --version` read that production callers use.
 On a release outside the pin set it now proves the adapter's refusal instead of failing the build: with the pin set forced to `0.85.1`, pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
 The guard exercises the adapter's own `pi --version` read that production callers use.
-On a release outside the immutable pin set it proves the adapter's refusal instead of failing the build: pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
+On a release outside the immutable pin set, the guard proves the adapter's refusal instead of failing the build; the installed release remains unverified and stale `working` and `unknown` statuses stay `unknown`, while `idle` retains the ordinary `empty` verdict.
 
 ```text
 # pi (1.0.0): rendered banner row: Error: Codex error: The usage limit has been reached
