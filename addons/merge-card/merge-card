@@ -35,6 +35,11 @@
 #     filers: the newest valid proof stays and the rest are archived, never deleted.
 #     A PR whose Checks block says `screen: none` gets a text-only Evidence card when its
 #     task folder has a sealed clean done-done receipt; the same key makes repeated posts no-ops.
+#     No capture is demanded of it, and the gate says so in one line at the top of its own output.
+#     A claim that cites an evidence file the sealed run does not hold is not refused whole: one
+#     line names the run's own capture, and the claim is checked against that file instead (the
+#     text-only card names it too). A claim no sealed run supports is still refused.
+#     Every refusal names the command that clears it.
 #     Feedback trail: for a PR, each sign-off card the task's brief ($FM_HOME/data/<task-id>/brief.md)
 #     or the PR body names on a line `sign-off cards: <key>[, <key>...]` is marked acted on, with
 #     `sign-off-axi feedback <key> <board.json> --acted --link <pr-url>` (or `--reply "<text>"` when a
@@ -79,6 +84,75 @@ resolve_evidence() {
     if test("^\\s*evidence\\s*:") and (test("^\\s*evidence\\s*:\\s*not proven"; "i") | not)
     then sub("(?<k>^\\s*evidence\\s*:)(?<v>.*)$"; "\(.k)\(.v | gsub("(?<p>(^|[\\s,])[`\\x27\"(]*)(?<f>[^\\s,`\\x27\"(/][^\\s,`\\x27\"]*\\.\\w{1,10})(?=[`\\x27\"),.;]*([\\s,]|$))"; "\(.p)\($base)/\(.f)"))")
     else . end'
+}
+
+# checks_claim <task-id> <pr-url|->: the Checks block's own claim (its `outcome:` line), which a
+# citation redirect checks again against the sealed run's capture.
+checks_claim() {
+  { [ "$2" != - ] && gh pr view "$2" --json body --jq .body 2>/dev/null || cat -- "$FM_HOME/data/$1/checks.md" 2>/dev/null; } |
+    sed -n 's/^outcome: *//p' | head -n 1
+}
+
+# verdict_of <exit-code> <output> <done-done version>: done-done's result in plain words. An exit 2 is a
+# usage or config stop, not a proof result, so it is reported as not checked.
+verdict_of() {
+  local reason
+  case $1 in
+    0) echo pass ;;
+    1) echo fail ;;
+    3) echo inconclusive ;;
+    *) case $2 in
+         *"no judge is set"*) echo "not checked: no judge is set" ;;
+         *"Unknown option '--citation-base'"*) echo "not checked: installed done-done${3:+ $3} rejects --citation-base" ;;
+         *) reason=$(not_checked_reason "$2")
+            [ -n "$reason" ] && echo "not checked: $reason" || echo "error (exit $1)" ;;
+       esac ;;
+  esac
+}
+
+# run_files <task-id> <head>: the sealed clean done-done run's own file names at <head>, one per line
+# (nothing when there is no such run). The card's passed-test receipt names only files it holds.
+run_files() {
+  receipt_run "$1" "$2" /dev/null 2>/dev/null | jq -r '(.files // [])[]' 2>/dev/null
+}
+
+# run_capture <task-id> <head>: the absolute path of that run's first file, else nothing.
+run_capture() {
+  local f root
+  f=$(run_files "$1" "$2" | head -n 1)
+  [ -n "$f" ] || return 0
+  for root in "$FM_HOME/data/$1" "$(dd_root)"; do
+    [ -z "$root" ] || [ ! -f "$root/$f" ] || { printf '%s' "$root/$f"; return 0; }
+  done
+}
+
+# redirect_evidence <task-id> <head> <evidence>: <evidence> with every name the sealed clean run at
+# <head> does not hold replaced by the run's own file name, one line naming each substitution, so a
+# claim that cites a file outside the run record still posts its card instead of being refused whole.
+# Unchanged when there is no such run: nothing can be redirected, so the card is refused as before.
+redirect_evidence() {
+  local files first base f name out='' matched
+  files=$(run_files "$1" "$2")
+  [ -n "$files" ] || { printf '%s' "$3"; return 0; }
+  first=${files%%$'\n'*}
+  while IFS= read -r name; do
+    name=${name#"${name%%[![:space:]]*}"}; name=${name%"${name##*[![:space:]]}"}
+    [ -n "$name" ] || continue
+    base=${name##*/} matched=1
+    # Only a file name can be outside the run: prose ("sealed done-done run") stays as it is.
+    if [[ $base =~ \.[A-Za-z0-9]{1,10}$ ]]; then
+      matched=0
+      while IFS= read -r f; do
+        [ "${f##*/}" = "$base" ] && { matched=1; break; }
+      done <<<"$files"
+    fi
+    if [ "$matched" -eq 0 ]; then
+      echo "merge-card: $name is not in the sealed run record; using its own capture ${first##*/}" >&2
+      name=${first##*/}
+    fi
+    out=${out:+"$out, "}$name
+  done <<<"$(printf '%s' "$3" | tr ',' '\n')"
+  printf '%s' "$out"
 }
 
 # shellcheck source=account-pool/bin/fm-pool-claude-env.sh
@@ -145,7 +219,7 @@ check() {
   [ $# -eq 4 ] || { echo "usage: merge-card check [--claim-id <id>] [--judge <route>] <task-id> <worktree|-> <head|-> <pr-url|->"; return; }
   [ -n "${FM_HOME:-}" ] || { echo "merge-card: FM_HOME is not set, so done-done did not run"; return; }
   local id=$1 wt=$2 head=$3 pr=$4 src out='' rc=0 verdict signoff=''
-  local record=$FM_HOME/data/$id/merge-card.json dd_v='' args body reason fallback=0
+  local record=$FM_HOME/data/$id/merge-card.json dd_v='' args body fallback=0
   local signoff_board=${signoff_board:-$FM_HOME/data/$id/merge-card-media/signoff-board.json}
   src=$pr
   [ "$pr" != - ] || src=$FM_HOME/data/$id/checks.md
@@ -184,18 +258,20 @@ check() {
         out=$body
       fi
     fi
-    case $rc in
-      0) verdict=pass ;;
-      1) verdict=fail ;;
-      3) verdict=inconclusive ;;
-      # An exit 2 is a usage or config stop, not a proof result: report it as not checked.
-      *) case $out in
-           *"no judge is set"*) verdict="not checked: no judge is set" ;;
-           *"Unknown option '--citation-base'"*) verdict="not checked: installed done-done${dd_v:+ $dd_v} rejects --citation-base" ;;
-           *) reason=$(not_checked_reason "$out")
-              [ -n "$reason" ] && verdict="not checked: $reason" || verdict="error (exit $rc)" ;;
-         esac ;;
-    esac
+    verdict=$(verdict_of "$rc" "$out" "$dd_v")
+    # A claim that cites a file outside the sealed run record is redirected to the run's own capture: one
+    # line names that file, and the claim is checked against it, so the card is not refused whole.
+    if [ "$verdict" != pass ] && printf '%s' "$out" | grep -q 'not in any done-done run record'; then
+      local cap claim_c
+      cap=$(run_capture "$id" "$head")
+      claim_c=$(checks_claim "$id" "$pr")
+      if [ -n "$cap" ] && [ -n "$claim_c" ]; then
+        echo "merge-card: the claim cites a file outside the sealed run record; checking it against its own capture ${cap##*/}"
+        rc=0
+        out=$(pool_env_run "$wt" done-done check --outcome "$claim_c" "$cap" --json "${claim_id[@]}" "${judge[@]}" 2>&1) || rc=$?
+        verdict=$(verdict_of "$rc" "$out" "$dd_v")
+      fi
+    fi
     # A done-done verify run at this exact head brings its own sign-off message and captures.
     # Its board is named, never found from the work copy: with the post opt-in done-done would
     # otherwise file into the nearest .sign-off/ board and dirty the project clone.
@@ -208,7 +284,8 @@ check() {
     jq -n --arg head "$head" --arg pr "$pr" --arg verdict "$verdict" --arg signoff "$signoff" --argjson check "$out" \
       '{$head, $pr, $verdict, $signoff, $check}' > "$record.$$" && mv "$record.$$" "$record"
   echo "done-done check: $verdict ($src)"
-  printf '%s' "$out" | jq -r '(.findings // [])[:3][].why, (.error // empty)' | sed 's/^/  /'
+  # The findings and the fix done-done names (a step record, a judge) so a lead acts on one refusal.
+  printf '%s' "$out" | jq -r '((.findings // [])[:3][].why), (.error // empty), ((.help // [])[0] // empty)' | sed 's/^/  /'
 }
 
 gate() {
@@ -221,7 +298,9 @@ gate() {
   [ "$4" != - ] && [ "$3" != - ] || return 0
   # Row: <time> <src> <head> pass|fail <why>, one per fm-checks-lint.sh run.
   awk -F'\t' -v h="$3" '$3 == h && $4 == "pass" { f = 1 } END { exit !f }' "$FM_HOME/data/checks-gate.log" 2>/dev/null && return 0
-  echo "merge refused: no checks-lint PASS row for head $3 in data/checks-gate.log; run fm-checks-lint.sh on this PR until PASS"
+  local lint=${FM_CHECKS_LINT:-${XDG_DATA_HOME:-$HOME/.local/share}/fm-merge-on-green/checks-lint.sh}
+  [ -x "$lint" ] || lint=${FM_MAIN_HOME:-$HOME/firstmate}/config/fm-checks-lint.sh
+  echo "merge refused: no checks-lint PASS row for head $3; log one with: FM_HOME=$FM_HOME $lint $4 $FM_HOME/data/$1"
   return 1
 }
 
@@ -245,7 +324,7 @@ receipt_run() {
   jq -cs --arg head "$2" --arg claim "$claim" --arg ev "$evidence" '
     map(select(.schema == 1 and .exit == 0 and .dirty == false and .commit == $head and (.files | length) > 0 and (.run_id // "") != ""))
     | .[0] // empty
-    | {run_id, commit, outcome: $claim, repro: "see the merge note", proof: "done-done run \(.run_id)", evidence: $ev}' "$FM_HOME"/data/"$1"/.done-done/runs/*.json "${ddruns[@]}" 2>/dev/null
+    | {run_id, commit, files: [.files[]? | if type == "object" then .path else . end], outcome: $claim, repro: "see the merge note", proof: "done-done run \(.run_id)", evidence: $ev}' "$FM_HOME"/data/"$1"/.done-done/runs/*.json "${ddruns[@]}" 2>/dev/null
 }
 
 # screen_none <task-id> <pr-url|->: the merge's Checks block declares `screen: none`.
@@ -290,13 +369,14 @@ mark_acted() {
 
 post() {
   local board='' id wt head pr record key link title about kind media run receipt=null media_dir out rc n=0 f verdict claim
-  local claim_id=() judge=()
+  local claim_id=() judge=() self
   [ "${1:-}" = --board ] && [ -n "${2:-}" ] && board=$2 && shift 2
   [ "${1:-}" = --claim-id ] && [ -n "${2:-}" ] && claim_id=(--claim-id "$2") && shift 2
   [ "${1:-}" = --judge ] && [ -n "${2:-}" ] && judge=(--judge "$2") && shift 2
   [ -n "$board" ] && [ $# -eq 4 ] || die "usage: merge-card post --board <board.json> [--claim-id <id>] [--judge <route>] <task-id> <worktree|-> <head|-> <pr-url|->"
   [ -n "${FM_HOME:-}" ] || die "FM_HOME is not set"
   id=$1 wt=$2 head=$3 pr=$4 record=$FM_HOME/data/$1/merge-card.json
+  self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/merge-card
   case $board in /*) ;; *) board=$PWD/$board ;; esac
   # The cards live on the board and in the home's data folder, never in the project clone. A board
   # left in the work copy by an earlier run is reported and left alone.
@@ -338,7 +418,12 @@ post() {
   if screen_none "$id" "$pr"; then
     local text_run
     text_run=$(receipt_run "$id" "$head" "$record")
-    [ -n "$text_run" ] || { echo "merge-card: no passed-test receipt for $key"; return 1; }
+    [ -n "$text_run" ] || {
+      local seal="cd '$wt' && done-done run -- <the command that proves it>"
+      [ "$wt" != - ] || seal="in the copy at $head: done-done run -- <the command that proves it>"
+      echo "merge-card: no passed-test receipt for $key: seal a clean done-done run at $head with $seal; a screen: none card needs no capture"
+      return 1
+    }
     local outcome evidence body capture command exit_code excerpt note
     outcome=$(jq -r '.check.claim // empty' "$record")
     evidence=$(jq -r '[.check.evidence[]? | split("/") | last] | join(", ")' "$record")
@@ -349,8 +434,10 @@ post() {
       [ -n "$evidence" ] || evidence='sealed done-done run'
     fi
     outcome=${outcome:0:1000}
-    text_run=$(jq -c --arg outcome "$outcome" --arg evidence "$evidence" '.outcome=$outcome | .evidence=$evidence' <<<"$text_run")
-    [ -n "$outcome" ] || { echo "merge-card: no Checks outcome for $key"; return 1; }
+    # A cited file the sealed run does not hold becomes the run's own file, one line naming it.
+    evidence=$(redirect_evidence "$id" "$head" "$evidence")
+    text_run=$(jq -c --arg outcome "$outcome" --arg evidence "$evidence" '.outcome=$outcome | .evidence=$evidence | del(.files)' <<<"$text_run")
+    [ -n "$outcome" ] || { echo "merge-card: no Checks outcome for $key: add an \"outcome: <what a user can now do>\" line to the pull request's ## Checks block"; return 1; }
     # Include a bounded excerpt from a text capture in the sealed run folder, when present.
     capture=''
     local root run_record run_id
@@ -397,11 +484,11 @@ post() {
   # back to the lane owner to fix the proof and re-run the post. Never fail the
   # merge over it.
   if [ "$verdict" != pass ]; then
-    echo "merge-card: no evidence card for $key: done-done verdict is ${verdict:-unknown}; the lane owner must fix the proof (real screens or a clip that done-done passes) and re-run merge-card post"
+    echo "merge-card: no evidence card for $key: done-done verdict is ${verdict:-unknown}; the lane owner must fix the proof (real screens or a clip that done-done passes) and re-post it with: FM_HOME=$FM_HOME $self post --board $board $id $wt $head $pr"
     return 0
   fi
   if [ -z "$claim" ]; then
-    echo "merge-card: no evidence card for $key: the passed check names no claim; the lane owner must fix the proof (real screens or a clip that done-done passes) and re-run merge-card post"
+    echo "merge-card: no evidence card for $key: the passed check names no claim; the lane owner must fix the proof (a Checks \"outcome: <what a user can now do>\" line) and re-post it with: FM_HOME=$FM_HOME $self post --board $board $id $wt $head $pr"
     return 0
   fi
   title=$claim
@@ -427,6 +514,7 @@ post() {
   else
     run=null
     receipt=$(receipt_run "$id" "$head" "$record"); receipt=${receipt:-null}
+    [ "$receipt" = null ] || receipt=$(jq -c 'del(.files)' <<<"$receipt")
     media=$(jq -r '.check.evidence[]? | select(test("\\.(png|jpe?g|webp|mp4|webm)$"; "i"))' "$record")
   fi
   while IFS= read -r f; do
@@ -435,7 +523,7 @@ post() {
   done <<< "$media"
   media=$(cd "$media_dir" && for f in $(seq 1 "$n"); do printf '%s\n' "$f".*; done | jq -R . | jq -s .)
   if [ "$n" -eq 0 ] && [ "$run" = null ]; then
-    echo "merge-card: no evidence card for $key: no passed proof media; the lane owner must fix the proof (real screens or a clip that done-done passes) and re-run merge-card post"
+    echo "merge-card: no evidence card for $key: no passed proof media; the lane owner must fix the proof (real screens or a clip that done-done passes, or a Checks \"screen: none\" line when there is no user-visible screen) and re-post it with: FM_HOME=$FM_HOME $self post --board $board $id $wt $head $pr"
     return 0
   fi
   kind=evidence

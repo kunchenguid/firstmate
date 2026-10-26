@@ -12,6 +12,14 @@ Run `bash merge-card/tests/merge-card-e2e.sh` from the repository root. It posts
 
 The `new head`, `two PRs` and `internal title` assertions print `ok`; the run ends with `all assertions held`.
 
+## The no-screen path and a citation outside the run
+
+Run `bash merge-card/tests/merge-card-e2e.sh` and `bash owner-rules/tests/owner-rules-gate.test.sh`.
+A PR whose Checks block declares `screen: none` and whose task folder holds a sealed clean run posts a text-only card with no capture (the `internal` assertions).
+The gate's output opens with the one line saying it took that path (the `screen: none: the text-only line is the gate's first line` assertion).
+A claim that cites a file the sealed run does not hold is redirected to the run's own capture with one line naming it: `internal: the card cites the run's own capture` and `hand capture: the claim is checked against the run's capture` print `ok`.
+A claim no sealed run supports is still refused (`no supporting run`, `run without a capture` and `no run to redirect to`).
+
 ## Real sign-off-axi
 
 Run `bash merge-card/tests/real-board.test.sh`. It runs the real `merge-card post` against the real `sign-off-axi` on a seeded temp board (its own `SIGN_OFF_HOME`), posts a PR's card at one head and again at a new head, and prints `all assertions held` when exactly one card is live, the old one is archived with its history kept, and a repeat post adds nothing.

@@ -220,7 +220,11 @@ Every merge runs done-done and, only with passed proof, posts one evidence card 
   `merge-card gate`, `merge-card check` and `merge-card post` all take `--judge <route>`, which reaches `done-done check --judge <route>` for that call alone: a lane whose configured judge route is rate limited names another one instead of waiting on done-done's fallback. Without the flag nothing changes.
   `merge-card check <task-id> <worktree|-> <head|-> <pr-url|->` runs the gate's check alone: it saves and prints the verdict and posts nothing.
 - `merge-card post --board <board.json> <task-id> <worktree|-> <head|-> <pr-url|->` keeps one live evidence card per PR: a post at a new head archives the earlier card (kept under Archived); only real, passed proof is posted. A screen-free card includes up to 40 lines of captured `.txt`, `.log`, `.out`, `.stdout` or `.stderr` command output in its 500-character note when available; oversized excerpts get a visible full-run pointer.
-  A merge whose Checks block has a `screen: none` line (an internal fleet tool with no user-visible screen) is skipped instead: exit 0, one skip line pointing to the merge note for the passed-test receipt, no done-done run.
+  A merge whose Checks block has a `screen: none` line (an internal fleet tool with no user-visible screen) posts a text-only card from its sealed clean run and demands no capture.
+  That card carries the receipt, the Checks outcome and a bounded excerpt of the run's text output, and done-done is not run for it.
+  The owner-rules gate says so in one line at the top of its output.
+  A claim that cites an evidence file the sealed run does not hold is not refused whole: one line names the run's own capture, and the claim is checked against that file (or the card names it) instead.
+  A claim no sealed run supports is still refused, and every refusal names the command that clears it.
   A merge posts only an evidence card: the plain outcome as the title and the passed proof on the card.
   A merge with missing or unconfirmed proof posts no card; the gap goes back to the lane owner to fix the proof and re-run the post.
   The card carries the Checks claim (what a user can now do) as the title, done-done's verdict in plain words, the pull request link (the merged commit when there is no PR), and the passed proof media (at most 12 screens or recordings), or those of a verify run at the merged head.

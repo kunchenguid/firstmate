@@ -43,14 +43,18 @@ seal() { printf '{"schema":1,"exit":0,"dirty":false,"commit":"%s","files":["a.pn
 is "installed: previous gate moved aside" "$([ -x "$home/config/merge-gate.pre-owner-rules" ] && echo yes)" yes
 "$addons/owner-rules/install.sh" "$home" >/dev/null && ok "install is idempotent" || no "second install failed"
 
-REFUSAL="owner-rules: no passed-proof receipt for $pr; run the done-done check and post the evidence to the sign-off Evidence tab first"
+REFUSAL="owner-rules: no passed-proof receipt for $pr: seal a clean done-done run at $head with: done-done run -- <the command that proves it> in the copy at $head"
 is "refusal: no receipt" "$(gate)" "$REFUSAL
 rc=1"
+# The exact command that clears it, naming the ship's own copy when the gate has one.
+mkdir -p "$work/ship"
+with_wt=$(PATH=$work/bin:$PATH XDG_DATA_HOME=$work/data FM_HOME=$home FM_FLEET_BOARD=$work/board.json "$home/config/merge-gate" lane "$work/ship" "$head" "$pr" 2>&1)
+is "refusal: no receipt names the copy to seal from" "$with_wt" "owner-rules: no passed-proof receipt for $pr: seal a clean done-done run at $head with: cd '$work/ship' && done-done run -- <the command that proves it>"
 seal other; is "refusal: a run at a different head" "$(gate | tail -1)" "rc=1"
 seal "$head"; printf '{"schema":1,"exit":0,"dirty":true,"commit":"%s","files":["a"],"run_id":"r1"}\n' "$head" > "$run"
 is "refusal: a dirty run" "$(gate | tail -1)" "rc=1"
 seal "$head"
-LINT="owner-rules: no checks-lint PASS for $pr at $head; run FM_HOME=$home $work/data/fm-merge-on-green/checks-lint.sh $pr <evidence folder> first"
+LINT="owner-rules: no checks-lint PASS for $pr at $head; run FM_HOME=$home $work/data/fm-merge-on-green/checks-lint.sh $pr $home/data/lane then merge again"
 is "refusal: receipt but no checks-lint row" "$(gate)" "$LINT
 rc=1"
 log=$home/data/checks-gate.log
@@ -59,7 +63,7 @@ is "refusal: lint row for another head, or failed" "$(gate | tail -1)" "rc=1"
 printf 't\t%s\t%s\tpass\tok\n' "$pr" "$head" >> "$log"
 card_refusal=$(gate)
 is "refusal: receipt and lint but missing board card" "$(printf '%s\n' "$card_refusal" | tail -1)" "rc=1"
-card_command=$(printf '%s\n' "$card_refusal" | sed -n 's|.*; run FM_HOME=[^ ]* \(/[^ ]*\) post .*|\1|p')
+card_command=$(printf '%s\n' "$card_refusal" | sed -n 's|.*; post it with: FM_HOME=[^ ]* \(/[^ ]*\) post .*|\1|p')
 [ -n "$card_command" ] && [ -x "$card_command" ] && ok "card hint names an executable absolute path" || no "card hint command is not an executable absolute path: $card_command"
 # Guard gate/check script hints against bare add-on executables (a path is required in every home).
 if grep -REn --include='*.sh' --exclude-dir=tests 'run[[:space:]]+(FM_HOME=[^[:space:]]+[[:space:]]+)?(merge-card|fm-[[:alnum:]_-]+\.sh|checks-lint\.sh)([[:space:]]|$)' \
@@ -77,7 +81,7 @@ printf '%s\n' "$work/own-board.json" > "$home/config/fleet-board"
 printf '{"schema":1,"answers_only":false,"items":[]}\n' > "$work/own-board.json"
 is "refusal: lead board takes precedence over main board" "$(gate_inherit | tail -1)" "rc=1"
 rm -f "$home/config/fleet-board" "$main/config/fleet-board"
-expected_board="owner-rules: fleet board is not configured (set FM_FLEET_BOARD or $home/config/fleet-board or $main/config/fleet-board) for $pr"
+expected_board="owner-rules: fleet board is not configured for $pr (set FM_FLEET_BOARD, or write its path with: echo <board.json> > $home/config/fleet-board; the main home's $main/config/fleet-board is the fallback)"
 is "refusal: all three board sources missing" "$(gate_inherit | tail -2)" "$expected_board
 rc=1"
 cardkey=merge-umeranjum17-firstmate-addons-pull-9
@@ -101,13 +105,25 @@ rm -f "$run"; printf 'screen: none\noutcome: checks passed\nevidence: sealed rec
 printf '{"schema":1,"answers_only":false,"items":[]}\n' > "$work/board.json"
 is "refusal: screen: none without receipt refuses" "$(gate | tail -1)" "rc=1"
 seal other; is "refusal: screen: none with a sealed run at another head refuses" "$(gate | tail -1)" "rc=1"
+# A home the canary has not reached keeps today's behavior: a screen-free merge there still skips the receipt.
+printf '%s\n' "$work/not-this-home" > "$home/config/owner-rules-canary"
+skip_card=$(gate)
+is "screen: none on a non-canary home: the receipt stays skipped" "$skip_card" "owner-rules: $pr declares screen: none, so it takes the text-only Evidence card path; no capture is needed
+prev gate ran: lane - $head $pr
+rc=0"
+rm -f "$home/config/owner-rules-canary"
 seal "$head"
 printf '{"verdict":"pass","check":{"claim":"checks passed","evidence":[]}}\n' > "$home/data/lane/merge-card.json"
 jq -n '{schema:1,answers_only:false,items:[]}' > "$work/board.json"
-is "pass: screen: none and receipt auto-posts text card" "$(gate)" "merge-card: posted text-only $cardkey evidence card
+text_card=$(gate)
+is "pass: screen: none and receipt auto-posts text card" "$text_card" "owner-rules: $pr declares screen: none, so it takes the text-only Evidence card path; no capture is needed
+merge-card: posted text-only $cardkey evidence card
 prev gate ran: lane - $head $pr
 rc=0"
+case $text_card in "owner-rules: $pr declares screen: none, so it takes the text-only Evidence card path; no capture is needed"*) ok "screen: none: the text-only line is the gate's first line" ;; *) no "screen: none: no text-only card line at the top" ;; esac
 jq -e --arg k "$cardkey" '.items | any(.[]; .key==$k and .kind=="evidence" and .media==null and .run.commit!=null)' "$work/board.json" >/dev/null && ok "auto-post: text-only receipt card exists" || no "auto-post: text-only receipt card missing"
+# A capture is never demanded of a screen-free merge: the card carries no media and no media path is posted.
+jq -e --arg k "$cardkey" '.items | any(.[]; .key==$k and (.media // []) == [])' "$work/board.json" >/dev/null && ok "screen: none: the card carries no capture" || no "screen: none: the card names a capture"
 printf '{"schema":1,"answers_only":false,"items":[]}\n' > "$work/board.json"
 is "refusal: unreadable board refuses" "$(gate "$head" "$pr" "$work/missing-board" | tail -1)" "rc=1"
 rm -f "$log"; is "refusal: screen: none still needs lint" "$(gate | tail -1)" "rc=1"

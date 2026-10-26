@@ -75,11 +75,17 @@ if [ -n "${ROUTE_LOG:-}" ]; then
     echo '{"error":"429 quota exhausted"}'; exit 2
   fi
 fi
-src='' base='' flag=0
+shift # drop `check`
+src='' base='' flag=0 outcome='' pos=()
 while [ $# -gt 0 ]; do
   case $1 in
     --from) src=$2; shift 2 ;;
+    --outcome) outcome=$2; shift 2 ;;
+    --claim-id) shift 2 ;;
+    --from=*) src=${1#--from=}; shift ;;
     --citation-base) flag=1 base=$2; shift 2 ;;
+    -*) shift ;;
+    *) pos+=("$1"); shift ;;
     --judge) # done-done 0.4.1: a route is required, so a bare flag is ambiguous
       case ${2:-} in "" | --*) jq -n '{error: "Option --judge argument is ambiguous"}'; exit 2 ;; esac
       shift 2 ;;
@@ -87,30 +93,44 @@ while [ $# -gt 0 ]; do
   esac
 done
 case $MODE in
-  newer | inconclusive | nomedia | noclaim) ;;
+  newer | inconclusive | nomedia | noclaim | handcapture) ;;
   *)
     if [ "$flag" = 1 ]; then
       jq -n '{error: "Unknown option \u0027--citation-base\u0027."}'
       exit 2
     fi ;;
 esac
-# The Checks evidence names as done-done reads them, each resolved and checked to exist.
+# The Checks evidence names as done-done reads them, each resolved and checked to exist. A claim done-done
+# re-checks by name (--outcome with its own files) cites the positional files instead of a Checks block.
 ev=() missing=()
-case $src in
-  -) body=$(cat) ;;
-  http*) body=$(gh pr view "$src" --json body | jq -r .body) ;;
-  *) body=$(cat -- "$src") ;;
-esac
-for n in $(printf '%s\n' "$body" | sed -n 's/^evidence: *//p' | tr ',' ' '); do
-  case $n in /*) ;; *) [ -z "$base" ] || n=$base/$n ;; esac
-  ev+=("$n")
-  [ -f "$n" ] || missing+=("$n: missing (ENOENT)")
-done
+if [ -n "$outcome" ]; then
+  ev=("${pos[@]}")
+else
+  case $src in
+    -) body=$(cat) ;;
+    http*) body=$(gh pr view "$src" --json body | jq -r .body) ;;
+    *) body=$(cat -- "$src") ;;
+  esac
+  for n in $(printf '%s\n' "$body" | sed -n 's/^evidence: *//p' | tr ',' ' '); do
+    case $n in /*) ;; *) [ -z "$base" ] || n=$base/$n ;; esac
+    ev+=("$n")
+    [ -f "$n" ] || missing+=("$n: missing (ENOENT)")
+  done
+fi
 if [ ${#missing[@]} -gt 0 ]; then
   jq -n '{result:"fail",claim:"a stopped worker moves to the next live route",evidence:$ARGS.positional[:1],findings:($ARGS.positional[1:] | map({level:"fail",why:.}))}' --args "${ev[0]}" "${missing[@]}"
   exit 1
 fi
 case $MODE in
+  # Like done-done 0.6.7: a file no run record lists is not tied to a commit (inconclusive), while the same claim
+  # checked against the sealed run's own capture passes.
+  handcapture)
+    if [ -n "$outcome" ]; then
+      jq -n '{result:"pass",claim:$o,evidence:$ARGS.positional}' --arg o "$outcome" --args "${ev[@]}"
+    else
+      jq -n '{result:"inconclusive",claim:"a stopped worker moves to the next live route",findings:[{level:"inconclusive",why:"\($ARGS.positional[0]): not in any done-done run record, so it is not tied to a commit"}]}' --args "${ev[0]}"
+      exit 3
+    fi ;;
   inconclusive)
     jq -n '{result:"inconclusive",claim:"a stopped worker moves to the next live route",evidence:[]}'
     exit 3 ;;
@@ -482,7 +502,10 @@ holds "internal: card captured" "$work/card-internal/card.json"
 is "internal: card has no media" "$(jq -c 'has("media")' "$work/card-internal/card.json")" false
 is "internal: card carries receipt" "$(jq -r '.run.run_id' "$work/card-internal/card.json")" 20261020T000000Z-internal0001
 is "internal: missing claim uses Checks outcome" "$(jq -r '.run.outcome' "$work/card-internal/card.json")" "a stopped worker moves to the next live route"
-is "internal: missing citation uses Checks evidence" "$(jq -r '.run.evidence' "$work/card-internal/card.json")" shot.png
+# The claim cites shot.png but the sealed run holds only its command output, so the card names the run's own
+# file and merge-card says so in one line instead of refusing the whole card.
+case $out in *"shot.png is not in the sealed run record; using its own capture stdout.log"*) ok "internal: the redirect line names the run's own capture" ;; *) no "internal: redirect line missing: [$out]" ;; esac
+is "internal: the card cites the run's own capture" "$(jq -r '.run.evidence' "$work/card-internal/card.json")" stdout.log
 is "internal: output excerpt is shown" "$(jq -r .about "$work/card-internal/card.json" | grep -c 'command proof line')" 2
 is "internal: command and exit code are shown" "$(jq -r .about "$work/card-internal/card.json" | grep -c 'exit code 0')" 1
 # A capture beyond the text field cap is called out rather than silently clipped.
@@ -508,6 +531,48 @@ is "no capture: receipt-only text remains" "$(jq -r .about "$work/card-nocapture
 so_before=$(wc -l < "$SO_LOG")
 PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" post --board "$work/board.json" internal "$wt" "$head_c" - >/dev/null
 is "internal: repeat post is deduped" "$(wc -l < "$SO_LOG")" "$so_before"
+
+# A claim whose Checks block cites a file outside the sealed run record is not refused whole: one line names the
+# run's own capture and the claim is checked against it, so the card posts with that file as its receipt.
+MODE=handcapture DD_LOG=$work/args.log SO_CAPTURE=$work/card-handcapture
+export MODE DD_LOG SO_CAPTURE
+jq '.items=[]' "$work/board.json" > "$work/board.tmp" && mv "$work/board.tmp" "$work/board.json"
+checks handcapture cited.png && cp "$shot" "$home/data/handcapture/cited.png"
+mk_run handcapture 20261020T000000Z-handcapture01 0
+mkdir -p "$home/data/handcapture/handcapture"
+printf 'one proof line\n' > "$home/data/handcapture/handcapture/proof.log"
+jq '.files=[{path:"handcapture/proof.log"}]' "$home/data/handcapture/.done-done/runs/20261020T000000Z-handcapture01.json" > "$work/run.json" && mv "$work/run.json" "$home/data/handcapture/.done-done/runs/20261020T000000Z-handcapture01.json"
+out=$(PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" check handcapture "$wt" "$head_c" - 2>&1)
+case $out in *"the claim cites a file outside the sealed run record; checking it against its own capture proof.log"*) ok "hand capture: one line names the run's own capture" ;; *) no "hand capture: redirect line missing: [$out]" ;; esac
+is "hand capture: the claim is checked against the run's capture" "$(jq -r '.check.evidence[0]' "$home/data/handcapture/merge-card.json")" "$home/data/handcapture/handcapture/proof.log"
+is "hand capture: the redirected check passes" "$(jq -r .verdict "$home/data/handcapture/merge-card.json")" pass
+# The redirected card path itself is proven by the internal text card above; here the claim's own citations
+# are what matter, so the refusal for a text capture (no media) is left as it was.
+out=$(PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" post --board "$work/board.json" handcapture "$wt" "$head_c" - 2>&1)
+case $out in *"no passed proof media"*) ok "hand capture: a text capture alone still asks for a screen or screen: none" ;; *) no "hand capture: unexpected post outcome: [$out]" ;; esac
+
+# A claim no sealed run supports is still refused: no run at the head, or a run that captured no file.
+MODE=newer DD_LOG=$work/args.log SO_CAPTURE=$work/card-nosupport
+export MODE DD_LOG SO_CAPTURE
+checks nosupport cited.png && printf 'screen: none\n' >> "$home/data/nosupport/checks.md" && cp "$shot" "$home/data/nosupport/cited.png"
+rm -rf "$work/card-nosupport"
+out=$(PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" post --board "$work/board.json" nosupport "$wt" "$head_c" - 2>&1); rc=$?
+is "no supporting run: the text-only card is refused" "$rc" 1
+case $out in *"no passed-test receipt for merge-$head_c"*"done-done run"*) ok "no supporting run: the refusal names the command that seals one" ;; *) no "no supporting run: refusal misses the seal command: [$out]" ;; esac
+if [ -e "$work/card-nosupport" ]; then no "no supporting run: no card posted"; else ok "no supporting run: no card posted"; fi
+mk_run emptycapture 20261020T000000Z-emptycapture01 0
+jq '.files=[]' "$home/data/emptycapture/.done-done/runs/20261020T000000Z-emptycapture01.json" > "$work/run.json" && mv "$work/run.json" "$home/data/emptycapture/.done-done/runs/20261020T000000Z-emptycapture01.json"
+checks emptycapture cited.png && printf 'screen: none\n' >> "$home/data/emptycapture/checks.md" && cp "$shot" "$home/data/emptycapture/cited.png"
+out=$(PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" post --board "$work/board.json" emptycapture "$wt" "$head_c" - 2>&1); rc=$?
+is "run without a capture: the text-only card is refused" "$rc" 1
+# A claim done-done will not tie to any run is refused on the screen path too, where no run exists to redirect to.
+MODE=handcapture SO_CAPTURE=$work/card-nosupport2
+export MODE SO_CAPTURE
+checks nosupport2 cited.png && cp "$shot" "$home/data/nosupport2/cited.png"
+rm -rf "$work/card-nosupport2"
+out=$(run_check_and_post nosupport2 2>&1)
+case $out in *"no evidence card for merge-$head_c"*"the lane owner must fix the proof"*) ok "no run to redirect to: the card is refused" ;; *) no "no run to redirect to: gap line missing: [$out]" ;; esac
+if [ -e "$work/card-nosupport2" ]; then no "no run to redirect to: no card posted"; else ok "no run to redirect to: no card posted"; fi
 
 # A dismissed card stays archived and the new card goes up beside it; an identical live card remains deduped.
 key=merge-$head_c

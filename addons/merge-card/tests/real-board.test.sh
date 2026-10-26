@@ -37,6 +37,8 @@ live_keys() { sign-off-axi list "$board" --json --full | jq -r '[.decisions[] | 
 lane_post "Lane proof before the merge" || fails=$((fails + 1))
 post_at 20261022T000000Z-first0001 "$h1" >/dev/null || fails=$((fails + 1))
 is "first head: one live card" "$(live)" 20261022T000000Z-first0001
+# The Checks block cites x.png, which the sealed run does not hold: the real board's card names the run's own file.
+is "first head: the card cites the sealed run's own capture" "$(sign-off-axi list "$board" --json --full | jq -r '.decisions[] | select(.evidence.run_id == "20261022T000000Z-first0001") | .evidence.evidence')" a.log
 is "first head: the other filer's older card is archived" "$(live_keys)" merge-o-r-pull-12
 out=$(post_at 20261022T000000Z-second0001 "$h2") || { echo "$out"; fails=$((fails + 1)); }
 is "new head: exactly one live card, the newest" "$(live)" 20261022T000000Z-second0001

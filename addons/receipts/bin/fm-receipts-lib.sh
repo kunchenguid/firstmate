@@ -72,7 +72,7 @@ fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
   fi
   if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
     [ "$required" != 1 ] && return 0
-    echo "completion receipt missing for $id"
+    echo "completion receipt missing for $id: publish one with: FM_HOME=${FM_HOME:-${FM_ROOT:-}} ${FM_ADDONS_DIR:-${FM_HOME:-${FM_ROOT:-}}/projects/firstmate-addons}/receipts/bin/fm-run-receipt.sh $id PASS <evidence-file>"
     return 1
   fi
   mode=$(fm_dod_meta_value "$meta" mode)
@@ -91,7 +91,7 @@ fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
       return 0
     fi
   fi
-  echo "completion receipt refused for $id: FAIL, mismatched candidate/incarnation, malformed or absent evidence"
+  echo "completion receipt refused for $id: FAIL, mismatched candidate/incarnation, malformed or absent evidence; publish one for this head with: FM_HOME=${FM_HOME:-${FM_ROOT:-}}${pr:+ FM_RECEIPT_PR=$pr} ${FM_ADDONS_DIR:-${FM_HOME:-${FM_ROOT:-}}/projects/firstmate-addons}/receipts/bin/fm-run-receipt.sh $id PASS <evidence-file>"
   return 1
 }
 

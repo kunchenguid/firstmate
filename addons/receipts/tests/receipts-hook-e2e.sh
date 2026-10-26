@@ -67,8 +67,19 @@ bound FAIL "$h" "$pr1"; ! gate || { echo "FAIL: FAIL receipt refuses" >&2; exit 
 bound PASS "$stale" "$pr1"; ! gate || { echo "FAIL: stale head refuses" >&2; exit 1; }
 bound PASS "$h" "$pr2"; ! gate || { echo "FAIL: other PR refuses" >&2; exit 1; }
 bound PASS "$h" ""; ! gate || { echo "FAIL: unbound receipt refuses" >&2; exit 1; }
+# A refusal names the exact command that fixes it, including the PR the receipt must name.
+msg=$( { bound PASS "$h" ""; fm_dod_receipt_accept "$st" t "$st/t.meta" "$h"; } 2>&1 || true)
+case $msg in
+  *"FM_RECEIPT_PR=$pr1"*"/receipts/bin/fm-run-receipt.sh t PASS"*) ;;
+  *) echo "FAIL: refusal does not name the receipt command: $msg" >&2; exit 1 ;;
+esac
 rm "$st/t.run-receipt.json"; echo "evidence card: PASS $h $pr1" > "$st/t.evidence-card"
 ! gate || { echo "FAIL: card without receipt refuses" >&2; exit 1; }
+msg=$(fm_dod_receipt_accept "$st" t "$st/t.meta" "$h" 2>&1 || true)
+case $msg in
+  *"receipt missing for t: publish one with: "*"/receipts/bin/fm-run-receipt.sh t PASS"*) ;;
+  *) echo "FAIL: missing-receipt refusal does not name the publisher: $msg" >&2; exit 1 ;;
+esac
 rm "$st/t.evidence-card"
 
 # Next PR of a lane: when meta pr= is merge-notified (fm-pr-merge's proof) and the
