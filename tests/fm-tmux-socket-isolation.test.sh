@@ -1084,6 +1084,56 @@ SH
   trap - RETURN
 }
 
+# Round 4 (review): the proof must NEVER write into the project worktree.
+# The earlier in-worktree canary could truncate a same-named project file or
+# follow an attacker-planted symlink; the calibration-lab design closes both
+# by construction, and these cases pin that against regression.
+test_proof_never_writes_into_the_worktree() {
+  local wt before after victim
+  wt="$TMP_ROOT/nowrite-wt"
+  rm -rf "$wt"; mkdir -p "$wt"
+  # Case 1: a project file already carries the old canary name.
+  printf 'precious uncommitted data\n' > "$wt/.fm-proof-canary"
+  # Case 2: a symlink with that name points OUTSIDE the worktree at a victim.
+  victim="$TMP_ROOT/nowrite-victim"
+  printf 'victim data\n' > "$victim"
+  ln -s "$victim" "$wt/.fm-proof-canary-link" 2>/dev/null || true
+  before=$(ls -A "$wt" | sort)
+
+  (
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_worktree_live_pids "$wt"
+  ) >/dev/null 2>&1
+
+  after=$(ls -A "$wt" | sort)
+  [ "$before" = "$after" ] \
+    || fail "the proof must not add or remove worktree files (before: $before; after: $after)"
+  [ "$(cat "$wt/.fm-proof-canary")" = 'precious uncommitted data' ] \
+    || fail "a same-named project file must survive the proof untouched"
+  [ "$(cat "$victim")" = 'victim data' ] \
+    || fail "a symlinked name must never be followed to a target outside the worktree"
+  [ -L "$wt/.fm-proof-canary-link" ] \
+    || fail "the pre-existing symlink must not be replaced"
+  pass "proof writes nothing into the worktree (collision and symlink attacks closed)"
+
+  # And the proof still detects a real cwd survivor in the same worktree.
+  ( cd "$wt" && exec sleep 30 ) &
+  local sleeper=$!
+  sleep 1
+  local pids
+  pids=$(
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_worktree_live_pids "$wt"
+  )
+  case "$pids" in
+    *"$sleeper"*) : ;;
+    *) kill "$sleeper" 2>/dev/null; fail "the no-write design must still attribute a cwd survivor, got '$pids'" ;;
+  esac
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "proof still attributes survivors with zero project writes"
+}
+
 # --- E. real-script screen read and doorbell through the recorded socket -----
 
 test_real_socket_peek_and_doorbell_end_to_end() {
@@ -1218,6 +1268,7 @@ test_verdict_real_socket_gone_and_refusal_cases
 test_proof_fails_closed_when_evidence_tools_fail
 test_worktree_liveness_covers_open_files_and_argv
 test_open_file_scan_failure_fails_closed
+test_proof_never_writes_into_the_worktree
 test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint

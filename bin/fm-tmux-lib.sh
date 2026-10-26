@@ -312,67 +312,85 @@ fm_tmux_server_evidence() {  # <name>
 # daemon that only holds an open file, or a wrapper whose argv names the
 # checkout while its cwd lives elsewhere):
 #   1. cwd is <dir> or a subdirectory (lsof -a -d cwd -F pn);
-#   2. ANY open file under <dir>        (lsof -t +D <dir> - catches editors,
+#   2. ANY open file under <dir>        (lsof +D <dir> - catches editors,
 #      watchers, and log-holding daemons);
 #   3. the command line names <dir>     (pgrep -f - catches wrappers and
 #      runners whose cwd is elsewhere).
-# ABSENCE AUTHORITY and FAIL-CLOSED shape (reviews B1 + round 3): BOTH lsof
-# criteria are independently necessary - each exposes a survivor class the
-# other cannot see - so if EITHER lsof scan is unusable (missing, failed
-# with no output, or timed out), the whole check returns rc 2 UNPROVABLE,
-# even when the other scan was clean and pgrep ran clean. A disguised lsof
-# that answers the cwd scan but fails the +D scan must never read as "no
-# open-file holders": a plain `sleep` started in the checkout names nothing
-# in its argv and holds no open file, so a pgrep-only negative would be a
-# false `gone` (reproduced by review). macOS lsof exits 1 on walk errors
-# even while printing matches, so output-present is usable; only an EMPTY
-# nonzero result is an unusable source. pgrep can only ADD pids here, never
-# prove absence. Every caller must read rc 2 as `unproven`, never as `gone`.
-# A <dir> that no longer exists cannot hold anything, so it returns 0 with
-# no output. This is the reclaim proof's orphan guard: a tmux server death
-# usually takes its pane processes with it, but a reparented survivor
-# (launchd under jetsam) is exactly what relaunching a second agent would
-# duplicate.
+# TOOL CALIBRATION (round 4): a HEALTHY macOS `lsof +D` on a holderless
+# directory exits 1 with no output - byte-for-byte identical to a disguised
+# lsof that fakes the scan - so before ANY lsof result is believed, the
+# tool is proven honest inside a PRIVATE LAB: a mktemp -d directory (0700,
+# this process's own), holding OUR fd on a RANDOM-UNPREDICTABLE-NAME file
+# the lab created, scanned by both lsof forms. If the lab scan does not
+# report the canary path the tool did not walk the tree, and the check
+# returns rc 2 UNPROVABLE. NOTHING is ever written into the project
+# worktree: a fixed-name canary there could truncate a same-named project
+# file or follow an attacker-planted symlink (both reproduced by review);
+# a private lab with a random name closes the collision, symlink, and
+# forgery attack surfaces by construction. ABSENCE AUTHORITY stays with
+# lsof alone and stays fail-closed: a TIMEOUT (rc 2) on either worktree
+# scan is unusable even when calibrated, because a truncated walk can miss
+# survivors; any other failure of EITHER scan is already caught by the lab.
+# pgrep can only ADD pids here, never prove absence. Every caller must
+# read rc 2 as `unproven`, never as `gone`. A <dir> that no longer exists
+# cannot hold anything, so it returns 0 with no output. This is the
+# reclaim proof's orphan guard: a tmux server death usually takes its pane
+# processes with it, but a reparented survivor (launchd under jetsam) is
+# exactly what relaunching a second agent would duplicate.
 fm_tmux_worktree_live_pids() {  # <dir>
-  local dir=$1 out rc pids='' cwd_usable=0 open_usable=0 escaped
+  local dir=$1 out rc pids='' lab canary escaped tmpbase
   [ -d "$dir" ] || return 0
   if command -v lsof >/dev/null 2>&1; then
+    # Private calibration lab: prove THIS lsof walks trees before any
+    # worktree result is believed. Random dir + random file name, our own
+    # fd, nothing project-visible. ${TMPDIR%/}: macOS TMPDIR carries a
+    # trailing slash and lsof normalizes the doubled separator away, so
+    # the lab path must be built without it or the canary grep misses.
+    tmpbase=${TMPDIR%/}
+    lab=$(mktemp -d "${tmpbase:-/tmp}/fm-lsof-lab.XXXXXX" 2>/dev/null) || lab=
+    if [ -n "$lab" ]; then
+      chmod 700 "$lab" 2>/dev/null || true
+      canary="$lab/c.$$.$(date +%s).$RANDOM"
+      : > "$canary" 2>/dev/null || true
+      cal=0
+      # Criterion-1 honesty: a cwd scan run INSIDE the lab must report the
+      # lab path.
+      out=$( ( cd "$lab" && fm_tmux_bounded env LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null ) ) || true
+      printf '%s\n' "$out" | grep -qF "$lab" || cal=1
+      # Criterion-2 honesty: a +D walk of the lab must report the canary WE
+      # hold open, whatever the rc.
+      rc=0
+      exec 9<"$canary" 2>/dev/null || true
+      out=$(fm_tmux_bounded env LC_ALL=C lsof +D "$lab" 2>/dev/null) || rc=$?
+      exec 9<&- 2>/dev/null || true
+      if [ "$rc" -eq 2 ] || [ "$cal" -ne 0 ]; then
+        cal=1
+      elif printf '%s\n' "$out" | grep -qF "$canary"; then
+        cal=0
+      else
+        cal=1
+      fi
+      rm -rf "$lab" 2>/dev/null || true
+      [ "$cal" -eq 0 ] || return 2
+    else
+      return 2
+    fi
     rc=0
     out=$(fm_tmux_bounded env LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null) || rc=$?
-    if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
-      cwd_usable=1
-      pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" '
-        /^p/ { pid = substr($0, 2); next }
-        /^n/ {
-          cwd = substr($0, 2)
-          if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
-        }
-      ')
-    fi
-    # +D self-check (round 3): a HEALTHY macOS `lsof -t +D` on a holderless
-    # directory exits 1 with NO output - byte-for-byte identical to a
-    # disguised lsof that fakes the scan - so rc and output cannot separate
-    # them. Hold a canary fd on a file inside the worktree for the duration
-    # of the scan and require the canary's NAME in the full +D output: a
-    # scan that does not see it did not actually walk the tree, whatever
-    # its rc, and the source is unusable.
-    : > "$dir/.fm-proof-canary" 2>/dev/null || true
-    exec 9<"$dir/.fm-proof-canary" 2>/dev/null || true
+    [ "$rc" -eq 2 ] && return 2
+    pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" '
+      /^p/ { pid = substr($0, 2); next }
+      /^n/ {
+        cwd = substr($0, 2)
+        if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
+      }
+    ')
     rc=0
     out=$(fm_tmux_bounded env LC_ALL=C lsof +D "$dir" 2>/dev/null) || rc=$?
-    exec 9<&- 2>/dev/null || true
-    if printf '%s\n' "$out" | awk '$NF ~ /\.fm-proof-canary$/ { found = 1 } END { exit !found }'; then
-      open_usable=1
-      # The canary line names the scanning shell itself (it held the fd
-      # only for the probe); every OTHER line is a real attribution.
-      pids=$pids$(printf '%s\n' "$out" | awk '$NF !~ /\.fm-proof-canary$/ && $2 ~ /^[0-9]+$/ { print $2 }')
-    fi
-    rm -f "$dir/.fm-proof-canary" 2>/dev/null || true
+    [ "$rc" -eq 2 ] && return 2
+    # Header line filtered; only numeric pid fields are attributions.
+    pids=$pids$(printf '%s\n' "$out" | awk '$2 ~ /^[0-9]+$/ { print $2 }')
   fi
-  # Either lsof criterion being unusable leaves a survivor class invisible,
-  # so the absence claim itself is unproven - refuse regardless of the
-  # other sources' cleanliness.
-  [ "$cwd_usable" -eq 1 ] && [ "$open_usable" -eq 1 ] || return 2
   if command -v pgrep >/dev/null 2>&1; then
     escaped=$(printf '%s' "$dir" | sed 's/[][(){}.^$*+?|]/\\&/g')
     rc=0
