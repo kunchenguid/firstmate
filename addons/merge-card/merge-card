@@ -7,9 +7,11 @@
 #     with done-done's judge and each relative Checks evidence name resolved against
 #     $FM_HOME/data/<task-id> before done-done checks it exists (--citation-base on done-done
 #     0.3.1+; on an older one merge-card resolves the names itself), prints the verdict and
-#     saves it for the card in $FM_HOME/data/<task-id>/merge-card.json.
-#     done-done's verdict is report only. A PR merge is refused (exit 1) when
-#     $FM_HOME/data/checks-gate.log has no pass row for the head from fm-checks-lint.sh.
+#     saves it for the card in $FM_HOME/data/<task-id>/merge-card.json with the head it judged and a key of
+#     the newest Checks block: a post reuses that verdict only while both are unchanged and it is a pass, so a
+#     lane that fixed its evidence after a fail is checked again instead of refused by the old verdict.
+#     done-done's verdict is report only. A PR merge is refused (exit 1) when the newest
+#     checks-gate.log row for the head, from fm-checks-lint.sh, is not a pass.
 #   merge-card check [--judge <route>] <task-id> <worktree|-> <head|-> <pr-url|->
 #     The gate's check alone: run done-done, save and print the verdict, post nothing.
 #     gate, check and post all take `--judge <route>`: it reaches `done-done check --judge <route>`
@@ -137,6 +139,22 @@ CONFIG
   )
 }
 
+# checks_key <task-id> <pr-url|->: a short key of the newest Checks block, so a recorded verdict is reused
+# only while the block it judged is unchanged. An unreadable block gets a unique key, never a reusable one.
+checks_key() {
+  local body
+  if [ "$2" != - ]; then
+    body=$(gh pr view "$2" --json body --jq .body 2>/dev/null) || { printf 'unread-%s' "$$-$RANDOM"; return 0; }
+  else
+    body=$(cat -- "$FM_HOME/data/$1/checks.md" 2>/dev/null) || { printf 'unread-%s' "$$-$RANDOM"; return 0; }
+  fi
+  printf '%s' "$body" | awk '
+    /^##[[:space:]]*Checks[[:space:]]*$/ { blk = ""; grab = 1; next }
+    /^##[[:space:]]/ { grab = 0 }
+    grab { blk = blk $0 "\n" }
+    END { printf "%s", blk }' | sha256sum | cut -c1-16
+}
+
 # check [--claim-id <id>] [--judge <route>] <task-id> <worktree|-> <head|-> <pr-url|->: run done-done, save and print the verdict.
 check() {
   local claim_id=() judge=()
@@ -145,7 +163,8 @@ check() {
   [ $# -eq 4 ] || { echo "usage: merge-card check [--claim-id <id>] [--judge <route>] <task-id> <worktree|-> <head|-> <pr-url|->"; return; }
   [ -n "${FM_HOME:-}" ] || { echo "merge-card: FM_HOME is not set, so done-done did not run"; return; }
   local id=$1 wt=$2 head=$3 pr=$4 src out='' rc=0 verdict signoff=''
-  local record=$FM_HOME/data/$id/merge-card.json dd_v='' args body reason fallback=0
+  local record=$FM_HOME/data/$id/merge-card.json dd_v='' args body reason fallback=0 ck=''
+  ck=$(checks_key "$id" "$pr")
   local signoff_board=${signoff_board:-$FM_HOME/data/$id/merge-card-media/signoff-board.json}
   src=$pr
   [ "$pr" != - ] || src=$FM_HOME/data/$id/checks.md
@@ -205,8 +224,8 @@ check() {
   fi
   printf '%s' "$out" | jq -e 'type == "object"' >/dev/null 2>&1 || out=$(jq -n --arg e "$out" 'if $e == "" then {} else {error: $e} end')
   mkdir -p "${record%/*}" &&
-    jq -n --arg head "$head" --arg pr "$pr" --arg verdict "$verdict" --arg signoff "$signoff" --argjson check "$out" \
-      '{$head, $pr, $verdict, $signoff, $check}' > "$record.$$" && mv "$record.$$" "$record"
+    jq -n --arg head "$head" --arg pr "$pr" --arg verdict "$verdict" --arg signoff "$signoff" --arg ck "$ck" --argjson check "$out" \
+      '{$head, $pr, $verdict, $signoff, checks: $ck, $check}' > "$record.$$" && mv "$record.$$" "$record"
   echo "done-done check: $verdict ($src)"
   printf '%s' "$out" | jq -r '(.findings // [])[:3][].why, (.error // empty)' | sed 's/^/  /'
 }
@@ -220,8 +239,8 @@ gate() {
   echo "merge-card: report only; done-done's verdict never refuses this merge"
   [ "$4" != - ] && [ "$3" != - ] || return 0
   # Row: <time> <src> <head> pass|fail <why>, one per fm-checks-lint.sh run.
-  awk -F'\t' -v h="$3" '$3 == h && $4 == "pass" { f = 1 } END { exit !f }' "$FM_HOME/data/checks-gate.log" 2>/dev/null && return 0
-  echo "merge refused: no checks-lint PASS row for head $3 in data/checks-gate.log; run fm-checks-lint.sh on this PR until PASS"
+  awk -F'\t' -v h="$3" '$3 == h && $4 != "card" { f = ($4 == "pass") } END { exit !f }' "$FM_HOME/data/checks-gate.log" 2>/dev/null && return 0
+  echo "merge refused: the newest checks-lint row for head $3 is not a PASS in data/checks-gate.log; run fm-checks-lint.sh on this PR until PASS"
   return 1
 }
 
@@ -387,8 +406,11 @@ post() {
     echo "merge-card: posted text-only $card_key evidence card"
     return 0
   fi
-  # The gate's verdict for this merge, else run done-done now (a merge the gate never saw).
-  [ "${#claim_id[@]}" -eq 0 ] && [ "${#judge[@]}" -eq 0 ] && jq -e --arg pr "$pr" --arg head "$head" '.pr == $pr and ($pr != "-" or .head == $head)' "$record" >/dev/null 2>&1 || {
+  # The gate's verdict for this merge, else run done-done now (a merge the gate never saw). A recorded
+  # verdict is reused only while it is a pass for this same candidate and the same Checks block: a lane
+  # that fixed its evidence list after a fail, or edited the block, is checked again instead of refused.
+  [ "${#claim_id[@]}" -eq 0 ] && [ "${#judge[@]}" -eq 0 ] && jq -e --arg pr "$pr" --arg head "$head" --arg ck "$(checks_key "$id" "$pr")" \
+    '.pr == $pr and .head == $head and .verdict == "pass" and .checks == $ck' "$record" >/dev/null 2>&1 || {
     check "${claim_id[@]}" "${judge[@]}" "$id" "$wt" "$head" "$pr"
   }
   verdict=$(jq -r '.verdict // empty' "$record")

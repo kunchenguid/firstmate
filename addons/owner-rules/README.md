@@ -38,8 +38,8 @@ A refusal exits 1 before `fm-brief.sh` writes `data/<id>/brief.md`, with a one-l
    `owner-rules: no passed-proof receipt for <PR url>; run the done-done check and post the evidence to the sign-off Evidence tab first`.
    Exempt: a merge whose Checks block says `screen: none`; it still needs a sealed receipt for its text-only Evidence card (`merge-card screen-none`).
    A no-op without `config/owner-rules`. Needs the sibling `merge-card/` of this checkout.
-4. **Checks-lint PASS.** After the receipt, the gate reads `$FM_HOME/data/checks-gate.log` (never reruns lint) and refuses unless a
-   `pass` row names the PR url at the merge head (a local merge matches the report-file rows of its own task folder; they carry no head).
+4. **Checks-lint PASS.** After the receipt, the gate reads `$FM_HOME/data/checks-gate.log` (never reruns lint) and refuses unless the
+   newest row naming the PR url at the merge head is a `pass`, so a later fail takes the verdict back and a `card` row is not a verdict (a local merge matches the report-file rows of its own task folder; they carry no head).
    `screen: none` exempts the receipt only. PR merges also require a passed-proof Evidence card on the fleet board, configured by `FM_FLEET_BOARD`, then the one-line `$FM_HOME/config/fleet-board`, then the main home board (`${FM_MAIN_HOME:-$HOME/firstmate}/config/fleet-board`); a screen-free PR with a sealed receipt gets a text-only card automatically. Local merges keep the existing receipt/lint behavior. Refusal:
    `owner-rules: no checks-lint PASS for <pr> at <head>; run FM_HOME=<home> <XDG_DATA_HOME>/fm-merge-on-green/checks-lint.sh <pr-url> <evidence folder> first`.
 - Test: `tests/owner-rules-gate.test.sh` covers receipt and lint refusals, verifies the Evidence-card hint is an executable absolute path, and scans gate/check scripts for bare add-on command hints. `tests/gate-contract.test.sh` uses installed `sign-off-axi` to post a merge-card-shaped Evidence card, then proves matching commits pass and mismatches refuse; it skips only when the CLI is absent.

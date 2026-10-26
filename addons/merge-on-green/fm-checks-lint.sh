@@ -14,9 +14,13 @@
 # A PR over gh's 100-file view cap and over its 300-file diff cap is still measured: every page of the
 # pull-files API counts the added lines, and the diff comes from the compare API (else a local checkout).
 # An API or diff failure keeps the full count, so it can never turn a big PR into a PASS.
-# One gh call per run (plus one per 100 files past the 100-file view cap, the compare/upstream diffs and one or two per moved file). Each run appends a row to $FM_HOME/data/checks-gate.log. A FAIL for a task of this home
-# also publishes a FAIL completion receipt (receipts/bin/fm-run-receipt.sh in firstmate-addons), so bin/fm-pr-merge.sh and fm-merge-local.sh
-# refuse the merge (bin/fm-dod-lib.sh fm_dod_receipt_accept) until the worker re-lints to PASS and republishes PASS.
+# A non-conforming evidence list (a stray comma, a name written twice, a path instead of a name, a doubled or
+# missing evidence/ prefix) fails naming the exact line and the name to write instead.
+# One gh call per run (plus one per 100 files past the 100-file view cap, the compare/upstream diffs and one or two per moved file). Each run appends a row to $FM_HOME/data/checks-gate.log, and the newest row for a head is
+# that head's verdict (readers take the last row, never any older pass). A run for a task of this home also publishes its own verdict
+# as the task's completion receipt (receipts/bin/fm-run-receipt.sh in firstmate-addons), so a lane that fixes its evidence and re-lints
+# to PASS republishes PASS over its earlier FAIL for the same candidate with no hand-posted record; bin/fm-pr-merge.sh and
+# fm-merge-local.sh read that receipt (bin/fm-dod-lib.sh fm_dod_receipt_accept), so a still-failing head keeps refusing. Rows are never removed.
 import os, re, sys, json, time, hashlib, subprocess, tempfile
 from collections import Counter
 
@@ -149,24 +153,48 @@ def lane_task(home, src, ev, fallback=''):
             return rel
     return fallback
 
+def publish(ok, why):
+    """Publish this run's verdict as the task's completion receipt, so the merge path reads the newest verdict
+    (header): a PASS overwrites the earlier FAIL for the same candidate, and a standing PASS for that same
+    candidate keeps its fuller evidence rather than being replaced by this one line."""
+    meta = f'{home}/state/{task}.meta'
+    if not task or not os.path.isfile(meta):
+        return
+    wt = ([l[9:].strip() for l in open(meta) if l.startswith('worktree=')] or [''])[-1]
+    repo = wt if os.path.isdir(wt) else home
+    try:
+        cand = subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', 'HEAD^{commit}'], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        cand = ''
+    if ok:
+        try:
+            cur = json.load(open(f'{home}/state/{task}.run-receipt.json'))
+        except (OSError, ValueError):
+            cur = None
+        if isinstance(cur, dict) and cand and cur.get('verdict') == 'PASS' and cur.get('head') == cand:
+            print('checks-lint: receipt: this candidate already holds a PASS receipt')
+            return
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as t:
+        t.write(f'checks-lint {"PASS" if ok else "FAIL"} {src} head {head}: {why}\n')
+    try:
+        r = subprocess.run([f"{os.environ.get('FM_ADDONS_DIR') or ROOT}/receipts/bin/fm-run-receipt.sh", task, 'PASS' if ok else 'FAIL', t.name, repo],
+                           env={**os.environ, 'FM_HOME': home}, capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            print('checks-lint: receipt PASS published for this candidate, superseding an earlier FAIL' if ok
+                  else 'checks-lint: receipt FAIL published: the merge is refused until a newer PASS receipt')
+        else:
+            print(f'checks-lint: receipt not {"published" if ok else "revoked"}: ' + (r.stderr.strip() or '?')[-200:])
+    except subprocess.TimeoutExpired:
+        print('checks-lint: receipt not ' + ('published' if ok else 'revoked') + ': fm-run-receipt.sh timed out')
+    finally:
+        os.unlink(t.name)
+
+
 def done(ok, why, head='-'):
     with open(LOG, 'a') as f:
         f.write(f'{time.strftime("%FT%TZ", time.gmtime())}\t{src}\t{head}\t{"pass" if ok else "fail"}\t{why}\n')
     print(f'checks-lint: {"PASS" if ok else "FAIL"}: {why}')
-    meta = f'{home}/state/{task}.meta'
-    if not ok and task and os.path.isfile(meta):  # revoke the merge key (header)
-        wt = ([l[9:].strip() for l in open(meta) if l.startswith('worktree=')] or [''])[-1]
-        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as t:
-            t.write(f'checks-lint FAIL {src} head {head}: {why}\n')
-        try:
-            r = subprocess.run([f"{os.environ.get('FM_ADDONS_DIR') or ROOT}/receipts/bin/fm-run-receipt.sh", task, 'FAIL', t.name, wt if os.path.isdir(wt) else home],
-                               env={**os.environ, 'FM_HOME': home}, capture_output=True, text=True, timeout=60)
-            print('checks-lint: receipt FAIL published: merge refused until a new PASS receipt' if r.returncode == 0
-                  else 'checks-lint: receipt not revoked: ' + (r.stderr.strip() or '?')[-160:])
-        except subprocess.TimeoutExpired:
-            print('checks-lint: receipt not revoked: fm-run-receipt.sh timed out')
-        finally:
-            os.unlink(t.name)
+    publish(ok, why)
     sys.exit(0 if ok else 1)
 
 if os.path.isfile(src):  # local-only lane: the report file its done line names
@@ -228,8 +256,32 @@ if re.match(r'(fix|bugfix|hotfix)\b', title, re.I) and re.match(r'n/?a\b', F['re
 if re.match(r'not proven\s*:\s*\S', F['evidence'], re.I):
     done(True, 'not-proven: ' + F['evidence'][:120], head)
 
-names = [n.strip(' `"\'') for n in re.split(r'[,\s]+', F['evidence']) if re.search(r'\.\w{1,10}$', n.strip(' `"\''))]  # .stdout etc. (8 Oct, ownvoice PR 175)
-if not names: done(False, 'evidence: names no files (or write "not proven: <cause>")', head)
+def ev_hint(n, p):
+    """Why one evidence name did not resolve, naming the line and the name to write instead: the evidence list
+    takes names relative to the evidence folder, so a path, a doubled or missing evidence/ prefix is the slip."""
+    base = os.path.basename(n)
+    if n.startswith('evidence/'):
+        rest = n[len('evidence/'):]
+        tries = [(rest, f'drop the duplicated "evidence/" prefix and write {rest}')]
+    else:
+        tries = [('evidence/' + n, f'the file sits under evidence/, so write evidence/{n}')]
+        if base != n:
+            tries.append((base, f'write just its name in the evidence folder: {base}'))
+    for cand, fix in tries:
+        alt = os.path.join(ev, cand)
+        if os.path.isfile(alt) and os.path.getsize(alt):
+            return f'evidence: "{n}" is missing ({p}); {fix}'
+    return f'evidence: "{n}" is missing ({p}); write each name relative to the evidence folder {ev}'
+
+
+toks = [n.strip(' `"\'') for n in re.split(r'[,\s]+', F['evidence'])]  # .stdout etc. (8 Oct, ownvoice PR 175)
+names = [n for n in toks if re.search(r'\.\w{1,10}$', n)]
+eline = f'evidence: {F["evidence"]}'
+if '' in toks:  # consecutive, leading or trailing separator
+    done(False, f'{eline} has a stray comma; separate the names with one space and no trailing comma', head)
+if len(set(names)) < len(names):
+    done(False, f'{eline} names "{[n for n in names if names.count(n) > 1][0]}" twice; name each file once', head)
+if not names: done(False, f'{eline} names no file; write each one relative to the evidence folder {ev} (e.g. shot.png), or change it to "evidence: not proven: <cause>"', head)
 born = 0
 if os.path.isdir(f'{home}/data/{task}'):
     out = subprocess.run(['stat', '-c', '%W', f'{home}/data/{task}'], capture_output=True, text=True).stdout.strip()
@@ -242,7 +294,7 @@ if os.path.exists(HASHES):
 fresh, mine = False, []
 for n in names:
     p = n if os.path.isabs(n) else os.path.join(ev, n)
-    if not os.path.isfile(p) or os.path.getsize(p) == 0: done(False, f'evidence file missing or empty: {p}', head)
+    if not os.path.isfile(p) or os.path.getsize(p) == 0: done(False, ev_hint(n, p), head)
     if born and os.path.getmtime(p) < born: done(False, f'evidence file older than the lane launch: {p}', head)
     hsh = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     mine.append(hsh)

@@ -2,7 +2,7 @@
 # fm-owner-rules-gate.sh <task-id> <worktree|-> <head|-> <pr-url|-> - the merge-gate half of owner-rules.
 # config/merge-gate runs this first, with the gate args and FM_HOME set. It refuses (exit 1, one line naming
 # the PR) a merge with no passed-proof receipt: no sealed clean done-done run at the merge head in the task's
-# folder, or no checks-lint `pass` row (data/checks-gate.log) for the PR at the merge head. `screen: none` exempts
+# folder, or no newest checks-lint `pass` row (data/checks-gate.log) for the PR at the merge head. `screen: none` exempts
 # the receipt only. PR merges also require their passed-proof Evidence card on the fleet board. A no-op when config/owner-rules is absent. Reuses merge-card's own checks.
 set -u
 [ "$#" -eq 4 ] || { echo "usage: fm-owner-rules-gate.sh <task-id> <worktree|-> <head|-> <pr-url|->" >&2; exit 2; }
@@ -15,12 +15,13 @@ if [ "$none" -eq 0 ] && ! { [ "$3" != - ] && "$mc" receipt "$1" "$3"; }; then
   echo "owner-rules: no passed-proof receipt for $what; run the done-done check and post the evidence to the sign-off Evidence tab first"
   exit 1
 fi
-# Lint: a `pass` row in the checks-gate log for this PR url at this head (read, never rerun). A local merge's rows
+# Lint: the newest checks-gate row for this PR url at this head, from checks-lint (read, never rerun), must be a
+# `pass`: a later fail takes the verdict back, and a `card` row is not a verdict. A local merge's rows
 # name the report file and carry head `-`, so they match on the task's own folder instead.
 awk -F'\t' -v pr="$4" -v head="$3" -v task="$1" '
-  $4 != "pass" { next }
-  pr != "-" { if ($2 == pr && $3 == head) f = 1; next }
-  $3 == head || ($3 == "-" && $2 !~ /^https?:/ && $2 ~ ("/" task "/[^/]*$")) { f = 1 }
+  $4 == "card" { next }
+  pr != "-" { if ($2 == pr && $3 == head) f = ($4 == "pass"); next }
+  $3 == head || ($3 == "-" && $2 !~ /^https?:/ && $2 ~ ("/" task "/[^/]*$")) { f = ($4 == "pass") }
   END { exit !f }' "$FM_HOME/data/checks-gate.log" 2>/dev/null || {
   src=$4; [ "$4" != - ] || src="<report file>"
   lint=${FM_CHECKS_LINT:-${XDG_DATA_HOME:-$HOME/.local/share}/fm-merge-on-green/checks-lint.sh}

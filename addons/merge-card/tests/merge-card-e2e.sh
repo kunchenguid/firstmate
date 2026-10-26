@@ -410,6 +410,21 @@ PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" check gone "$wt" "$he
 is "gone: recorded verdict" "$(jq -r .verdict "$home/data/gone/merge-card.json")" fail
 is "gone: missing at its resolved path" "$(jq -r '.check.findings[0].why' "$home/data/gone/merge-card.json")" "$home/data/gone/gone.png: missing (ENOENT)"
 
+# A lane that fixes its evidence list after a fail is checked again instead of being refused by the verdict
+# recorded before the fix: only a pass for the same candidate and the same Checks block is reused.
+: >"$DD_LOG"
+checks stale gone.png
+PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" check stale "$wt" "$head_c" - >/dev/null 2>&1
+is "stale: the broken list records fail" "$(jq -r .verdict "$home/data/stale/merge-card.json")" fail
+cp "$shot" "$home/data/stale/shot.png" # the lane adds the proof and fixes the name
+checks stale shot.png
+SO_CAPTURE=$work/card-stale
+: >"$DD_LOG"
+PATH="$work/bin:$PATH" FM_HOME=$home "$here/../merge-card" post --board "$work/board-stale.json" stale "$wt" "$head_c" - >"$work/stale.out" 2>&1 || true
+is "stale: the fixed block is checked again" "$(grep -c '^check --from' "$DD_LOG")" 1
+is "stale: the fixed block records pass" "$(jq -r .verdict "$home/data/stale/merge-card.json")" pass
+holds "stale: the card is posted after the fix" "$work/card-stale/card.json"
+
 # A done-done that lies: the flag is passed and rejected, so the verdict names the
 # real reason instead of a bare exit code.
 MODE=liar DD_LOG=$work/args.log SO_CAPTURE=$work/card-liar

@@ -23,6 +23,14 @@ block itself (filing the proof gap stays with the lead). Then it runs, in this o
    No `--auto` is ever passed, `gh merge` is never called directly, and a refusal is never
    bypassed.
 
+Each lint run also publishes its own verdict as the task's completion receipt, so a lane that
+fixes its `## Checks` evidence and re-lints to PASS republishes PASS over its earlier FAIL for
+that candidate, and nobody has to hand-post a record. The newest row for a head in
+`data/checks-gate.log` is that head's verdict (a `card` row is not one), so a head whose latest
+run still fails keeps refusing even when an older row passed, and no row is ever removed.
+A non-conforming evidence list (a stray comma, a name written twice, a path instead of a name, a
+doubled or missing `evidence/` prefix) fails naming the exact line and the name to write instead.
+
 Any refusal or FAIL prints one wake line naming the task, the PR URL and the first refusal reason,
 so the lead acts (the line ends with the routing: the lead merges through `bin/fm-pr-merge.sh` once it clears, and only a genuine hold — owner review, red CI, missing proof, security, destructive — goes to Main); the refusal is remembered per task+head+reason+receipt state in
 `<home>/data/fm-merge-on-green/<task>.refused` (never in `state/`), and repeats stay silent until
