@@ -796,9 +796,11 @@ SH
   esac
   pass "proof fail-closed: an exit-1 lsof (live process in the worktree) refuses"
 
-  # Shape 2: lsof hanging past the proof timeout.
+  # Shape 2: lsof hanging past the proof timeout. The shim blocks in a
+  # distinctive child sleep; the bound must kill AND reap promptly (M-a) -
+  # after the verdict, that sleep must be gone.
   local slowdir="$dir/slow-lsof"; mkdir -p "$slowdir"
-  printf '#!/usr/bin/env bash\nsleep 30\n' > "$slowdir/lsof"
+  printf '#!/usr/bin/env bash\nsleep 31337\n' > "$slowdir/lsof"
   chmod +x "$slowdir/lsof"
   verdict=$(run_b1_verdict "$slowdir" 2)
   case "$verdict" in
@@ -806,6 +808,17 @@ SH
     *) kill_sleeper; fail "a timing-out lsof must refuse as unproven, got '$verdict'" ;;
   esac
   pass "proof fail-closed: a timing-out lsof refuses within the bound"
+  reaped=
+  for _i in $(seq 1 20); do
+    if pgrep -f 'sleep 31337' >/dev/null 2>&1; then
+      sleep 0.2
+    else
+      reaped=1
+      break
+    fi
+  done
+  [ -n "$reaped" ] || { kill_sleeper; fail "a timed-out probe's child must be reaped promptly (review M-a)"; }
+  pass "bounded probe: the timed-out probe and its child are reaped promptly"
 
   # Shape 3: lsof absent from PATH - a minimal tool dir (pgrep still present,
   # it is a legitimate independent source) plus the fakebin tmux.
@@ -898,6 +911,78 @@ test_real_tmux_socket_path_under_tmux_tmpdir() {
   fi
   rm -rf "$tdir"
   pass "server evidence: lsof-only detection works end to end under TMUX_TMPDIR"
+}
+
+# M-b (review): the worktree orphan guard must catch more than a cwd match.
+# A survivor that only HOLDS AN OPEN FILE in the checkout (cwd elsewhere) and
+# one whose ARGV merely NAMES the checkout must both refuse the reclaim.
+test_worktree_liveness_covers_open_files_and_argv() {
+  local dir wt meta sock="fmfake-wide-$$" verdict pids
+  dir="$TMP_ROOT/wide"; wt="$TMP_ROOT/wide-wt"
+  rm -rf "$dir" "$wt"; mkdir -p "$dir/home/state" "$dir/fake" "$wt"
+  make_socket_stub "$dir"
+  meta="$dir/home/state/wide.meta"
+  cat > "$meta" <<EOF
+window=fmses:fm-wide
+endpoint_task_id=wide
+worktree=$wt
+project=$TMP_ROOT
+socket=$sock
+EOF
+  : > "$wt/holdfile"
+  # Survivor A: cwd in TMP_ROOT, holds an open fd on a file inside the worktree.
+  ( cd "$TMP_ROOT" && exec 9<"$wt/holdfile" && sleep 60 ) &
+  local fdholder=$!
+  # Survivor B: cwd in TMP_ROOT, its argv names the worktree.
+  ( cd "$TMP_ROOT" && bash -c 'sleep 60' "holder-$wt" ) &
+  local argvholder=$!
+  sleep 1
+
+  pids=$(
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_worktree_live_pids "$wt"
+  )
+  case "$pids" in
+    *"$fdholder"*) : ;;
+    *) kill "$fdholder" "$argvholder" 2>/dev/null; fail "an open-file survivor must be attributed to the worktree, got '$pids'" ;;
+  esac
+  pass "worktree liveness: a process holding an open file in the checkout counts"
+
+  verdict=$(
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-wide" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill "$fdholder" "$argvholder" 2>/dev/null; fail "an open-file survivor must refuse the reclaim, got '$verdict'" ;;
+  esac
+  pass "worktree liveness: an open-file survivor refuses the reclaim"
+
+  kill "$fdholder" 2>/dev/null || true
+  sleep 1
+  verdict=$(
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-wide" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill "$argvholder" 2>/dev/null; fail "an argv-named survivor must refuse the reclaim, got '$verdict'" ;;
+  esac
+  pass "worktree liveness: an argv-named survivor refuses the reclaim"
+
+  kill "$argvholder" 2>/dev/null || true
+  wait "$fdholder" 2>/dev/null || true
+  wait "$argvholder" 2>/dev/null || true
 }
 
 # --- E. real-script screen read and doorbell through the recorded socket -----
@@ -1032,6 +1117,7 @@ test_real_tmux_scoped_addressing_isolates_servers
 test_real_tmux_death_proof_primitives
 test_verdict_real_socket_gone_and_refusal_cases
 test_proof_fails_closed_when_evidence_tools_fail
+test_worktree_liveness_covers_open_files_and_argv
 test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint

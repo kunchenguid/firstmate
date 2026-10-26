@@ -159,18 +159,28 @@ fm_tmux_socket_path() {  # <name>
 }
 
 # fm_tmux_bounded: run <cmd...> under a wait bound (FM_TMUX_PROOF_TIMEOUT,
-# default 15s). A proof primitive must never hang the control plane: on
-# expiry the child is killed and rc 2 is returned, which every proof caller
-# reads as `unproven` - a取证超时 is "no usable evidence", never "no
-# evidence found". The child's own status rides a sentinel file: bash reaps
-# fast background jobs before `wait $pid` can read them, so `wait` alone
-# cannot carry the rc.
+# default 15s); the command's stdout is this function's stdout when it
+# completes in bound, and the rc is the child's (0/child-status) or 2 on
+# timeout. A proof primitive must never hang the control plane:
+# - TIMEOUT teardown is two-level and prompt (review M-a): the probe, its
+#   direct children, and one further generation are killed and reaped - a
+#   shim script blocked in a child (e.g. a `sleep`) would otherwise leave
+#   an orphan behind, and the orphan would ALSO hold the capture pipe open
+#   and stall the caller.
+# - The probe writes to a FILE, not the inherited pipe: a timed-out
+#   grandchild then holds only that file (partial output is discarded), so
+#   the caller's command substitution can return while the reaper finishes.
+# The child's status rides a sentinel file because bash reaps fast
+# background jobs before `wait $pid` can read them. rc 2 reads as
+# `unproven` at every proof caller - a取证超时 is "no usable evidence",
+# never "no evidence found".
 fm_tmux_bounded() {
-  local timeout=${FM_TMUX_PROOF_TIMEOUT:-15} rc pid rcfile
+  local timeout=${FM_TMUX_PROOF_TIMEOUT:-15} rc pid rcfile outfile child
   case "$timeout" in ''|*[!0-9]*) timeout=15 ;; esac
   rcfile=$(mktemp "${TMPDIR:-/tmp}/fm-tmux-bounded.XXXXXX") || return 2
+  outfile=$rcfile.out
   (
-    "$@"
+    "$@" >"$outfile" 2>/dev/null
     printf '%s' "$?" > "$rcfile"
   ) &
   pid=$!
@@ -183,12 +193,20 @@ fm_tmux_bounded() {
     sleep 0.2
     timeout=$((timeout - 1))
     if [ "$timeout" -lt 0 ]; then
+      # Two-level teardown: the probe's children first (while their parent
+      # still exists to name them), then the probe, then reap.
+      for child in $(pgrep -P "$pid" 2>/dev/null); do
+        pkill -P "$child" 2>/dev/null || true
+        kill "$child" 2>/dev/null || true
+      done
       kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
       rc=2
       break
     fi
   done
-  rm -f "$rcfile"
+  cat "$outfile" 2>/dev/null || true
+  rm -f "$rcfile" "$outfile"
   case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
   return "$rc"
 }
@@ -232,9 +250,12 @@ fm_tmux_server_evidence() {  # <name>
     *) private_path=$path ;;
   esac
   if command -v lsof >/dev/null 2>&1; then
+    # macOS lsof exits 1 on a walk with any error even while printing
+    # matches, so output-present is usable; only an EMPTY nonzero result
+    # leaves this source unusable (a clean pgrep can still prove absence).
     rc=0
-    out=$(export LC_ALL=C; fm_tmux_bounded lsof -U 2>/dev/null) || rc=$?
-    if [ "$rc" -eq 0 ]; then
+    out=$(fm_tmux_bounded env LC_ALL=C lsof -U 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
       clean=1
       holder_pid=$(printf '%s\n' "$out" \
         | awk -v p="$path" -v pp="$private_path" '
@@ -284,32 +305,66 @@ fm_tmux_server_evidence() {  # <name>
   return 2
 }
 
-# fm_tmux_worktree_live_pids: pids whose current working directory is <dir>
-# or a subdirectory of it, one pid per line; empty output with rc 0 proves
-# nothing is running out of that checkout. rc 2 means the check is UNPROVABLE
-# - lsof missing, failed, or timed out (B1, review 2026-10-17: a failed lsof
-# must NEVER read as "no live process", or the composed verdict returns
-# `gone` against a live agent and the relaunch duplicates it) - which every
-# caller must read as `unproven`, never as `gone`. A <dir> that no longer
-# exists cannot hold a cwd, so it returns 0 with no output. This is the
-# reclaim proof's orphan guard: a tmux server death usually takes its pane
-# processes with it, but a reparented survivor (launchd under jetsam) keeps
-# its cwd, and relaunching a second agent into that worktree would duplicate
-# it.
+# fm_tmux_worktree_live_pids: pids attributable to the checkout at <dir>,
+# one pid per line, deduplicated. A process counts as live-in-the-worktree
+# under THREE independent criteria (review M-b: cwd alone is too narrow -
+# a reparented agent can keep running with its cwd here, but so can a build
+# daemon that only holds an open file, or a wrapper whose argv names the
+# checkout while its cwd lives elsewhere):
+#   1. cwd is <dir> or a subdirectory (lsof -a -d cwd -F pn);
+#   2. ANY open file under <dir>        (lsof -t +D <dir> - catches editors,
+#      watchers, and log-holding daemons);
+#   3. the command line names <dir>     (pgrep -f - catches wrappers and
+#      runners whose cwd is elsewhere).
+# ABSENCE AUTHORITY sits with lsof alone: criteria 1-2 are the
+# filesystem-truth scans, so if BOTH lsof scans are unusable (missing,
+# failed, timed out) the check returns rc 2 UNPROVABLE even when pgrep ran
+# clean - a plain `sleep` started in the checkout names nothing in its argv
+# and holds no open file, so a pgrep-only negative would be a false `gone`
+# (B1, review 2026-10-17). pgrep can only ADD pids here, never prove
+# absence. Every caller must read rc 2 as `unproven`, never as `gone`. A
+# <dir> that no longer exists cannot hold anything, so it returns 0 with no
+# output. This is the reclaim proof's orphan guard: a tmux server death
+# usually takes its pane processes with it, but a reparented survivor
+# (launchd under jetsam) is exactly what relaunching a second agent would
+# duplicate.
 fm_tmux_worktree_live_pids() {  # <dir>
-  local dir=$1 out rc
+  local dir=$1 out rc pids='' lsof_clean=0 escaped
   [ -d "$dir" ] || return 0
-  command -v lsof >/dev/null 2>&1 || return 2
-  rc=0
-  out=$(export LC_ALL=C; fm_tmux_bounded lsof -a -d cwd -F pn 2>/dev/null) || rc=$?
-  [ "$rc" -eq 0 ] || return 2
-  printf '%s\n' "$out" | awk -v dir="$dir" '
-    /^p/ { pid = substr($0, 2); next }
-    /^n/ {
-      cwd = substr($0, 2)
-      if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
-    }
-  '
+  if command -v lsof >/dev/null 2>&1; then
+    # macOS lsof exits 1 when the walk hit any error even while printing
+    # matches, so output-present is usable; only an EMPTY nonzero result is
+    # an unusable source.
+    rc=0
+    out=$(fm_tmux_bounded env LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
+      lsof_clean=1
+      pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" '
+        /^p/ { pid = substr($0, 2); next }
+        /^n/ {
+          cwd = substr($0, 2)
+          if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
+        }
+      ')
+    fi
+    rc=0
+    out=$(fm_tmux_bounded env LC_ALL=C lsof -t +D "$dir" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
+      lsof_clean=1
+      pids=$pids$(printf '%s\n' "$out")
+    fi
+  fi
+  [ "$lsof_clean" -eq 1 ] || return 2
+  if command -v pgrep >/dev/null 2>&1; then
+    escaped=$(printf '%s' "$dir" | sed 's/[][(){}.^$*+?|]/\\&/g')
+    rc=0
+    out=$(fm_tmux_bounded pgrep -f "$escaped" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0|1) pids=$pids$(printf '%s\n' "$out") ;;
+    esac
+  fi
+  [ -n "$pids" ] || return 0
+  printf '%s\n' "$pids" | awk 'NF > 0' | sort -n -u 2>/dev/null || printf '%s\n' "$pids"
 }
 
 
