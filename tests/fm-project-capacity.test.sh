@@ -77,6 +77,14 @@ make_case() {  # <name> [task-id...]
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FAKE_CALL_LOG"
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+# after logging so the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 window_file="$FM_FAKE_CALL_LOG.window"
 case "$*" in
   *"#{pane_current_path}"*)

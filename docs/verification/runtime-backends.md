@@ -137,6 +137,21 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Dedicated fleet socket and the server-death proof (2026-10-17, tmux 3.8, macOS)
+
+Socket-isolated worker addressing and the reclaim proof were verified with `tests/fm-tmux-socket-isolation.test.sh` (real tmux on private `-L` sockets only; the command refreshes this record):
+
+```sh
+bash tests/fm-tmux-socket-isolation.test.sh
+```
+
+Empirical facts this record pins:
+
+- macOS keeps a tmux server's ORIGINAL client argv (`tmux -L <name> new-session ...`), so `pgrep -f "tmux -L <name>"` finds the server; a rewritten `tmux: server (...)` proctitle is matched as a second, independent source.
+- A plain `lsof <socket-path>` matches NOTHING even for a live server; `lsof -U` is the only holder read, it reports the `/private`-prefixed path on macOS, and it keeps listing a just-exited server's binding for a second or two - so a holder line only counts as alive evidence after a pid-liveness check (`kill -0`, excluding zombies).
+- A clean `kill-server` can leave the socket file behind, and destroying a session's last window takes the whole server down (tmux `exit-empty` default) - so the socket file proves nothing either way and "window destroyed, server alive" needs a companion session to exist as a state.
+- The reclaim verdict is three-conjunct and fail-closed: definitive window absence on the recorded socket, no live server evidence for that socket, and no live process in the recorded worktree; `gone` requires all three, and any positive contrary evidence refuses naming what it saw.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

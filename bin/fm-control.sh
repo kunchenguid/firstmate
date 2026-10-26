@@ -42,19 +42,23 @@
 #              plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. Herdr proves absence by
-#              reading the session the record names; REX proves it because its
-#              never-reused ids answer a structured not-found from the server
-#              the record names.
-#              Proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              is merely unreachable from this seat. On herdr - whose reads
+#              are scoped to the session the record names - and on tmux WITH a
+#              recorded socket= identity, proven gone reports `endpoint-gone`
+#              rather than `already-stopped`, because the endpoint this verb
+#              normally preserves did not survive; a pane that turns out to be
+#              there and idle is the ordinary `already-stopped`; one whose
+#              agent is back takes the ordinary interrupt-then-exit path. A
+#              tmux `missing` WITHOUT socket= - every record written before
+#              socket isolation - always REFUSES exactly as it always did: the
+#              record carries no socket identity for its endpoint, so this
+#              verb cannot tell a destroyed window from one on a tmux server
+#              it cannot address, and it will not claim a stop it cannot see.
+#              The tmux socket-death proof is three-conjunct and fail-closed:
+#              the window reads definitively absent on the recorded socket,
+#              the recorded socket's server has no process left, and the
+#              recorded worktree holds no live process (fm_control_endpoint_
+#              absence_verdict owns it).
 #              Refused on t3code before anything is sent: T3's `/mcp` tools
 #              have no session stop (bin/fm-control-lib.sh
 #              fm_control_backend_exit_supported); interrupt ends its turn.
@@ -70,9 +74,12 @@
 #              placement), and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              answer. The same reclaim exists for tmux endpoints whose record
+#              carries socket=: the re-created window goes on the recorded
+#              socket, never the ambient server. A tmux record WITHOUT socket=
+#              refuses reclaim for the reason `exit` gives above: its missing
+#              endpoint cannot be proven absent, so it stays as deadlocked as
+#              it was before socket isolation - deliberately.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -398,10 +405,17 @@ if [ "$BACKEND" = t3code ]; then
   fm_backend_runtime_check t3code || exit 1
 fi
 
+# The tmux socket scope every endpoint read below must use: the recorded
+# socket for a socket-isolated record, empty for a legacy record (ambient
+# addressing - the exact behavior every read had before isolation) and for
+# every non-tmux backend, which ignores the scope entirely. Set once here so
+# no dispatch in this plane can drift into reading the wrong server.
+CONTROL_SOCKET=$(fm_backend_tmux_socket_of_meta "$META")
+
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_agent_state "$BACKEND" "$T"
 }
 
 busy_verdict() {
@@ -445,7 +459,7 @@ refuse_blocking_prompt() {  # <dialog-name>
 # An unreadable viewport is a no, so every caller treats it as missing proof.
 rendered_matches() {  # <ere>
   local screen
-  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
+  screen=$(FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
   printf '%s\n' "$screen" | grep -Eq -- "$1"
 }
 
@@ -469,7 +483,7 @@ dismiss_interrupt_hazard() {  # <key> <ere>
   gap=$(fm_control_interrupt_press_gap "$HARNESS")
   sleep "$gap"
   rendered_matches "$hazard" || return 0
-  fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+  FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
     || die "task $ID shows the $HARNESS revert picker after its interrupt, and the $key that closes it was not delivered; nothing else was typed. Close it with $key, never Enter, before any other action"
   sleep "$gap"
   ! rendered_matches "$hazard" \
@@ -503,7 +517,7 @@ send_interrupt_keys() {
   INTERRUPT_ARMED=yes
   INTERRUPT_HAZARD=none
   while [ "$i" -lt "$repeat" ]; do
-    fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+    FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
     i=$((i + 1))
     [ "$i" -lt "$repeat" ] || break
@@ -514,7 +528,7 @@ send_interrupt_keys() {
     fi
   done
   [ -z "$hazard" ] || dismiss_interrupt_hazard "$key" "$hazard"
-  [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
+  [ -z "$clear" ] || FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
@@ -610,7 +624,7 @@ deliver_interrupt() {
 
 verify_interrupt_running() {
   local proof after
-  fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
+  FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
   proof=endpoint
   if fm_control_backend_state_verified "$BACKEND"; then

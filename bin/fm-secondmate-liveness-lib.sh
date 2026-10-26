@@ -218,11 +218,14 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     return 0
   fi
 
-  local backend target
+  local backend target socket
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  # The recorded socket scope for the probe (empty for a legacy record - the
+  # ambient-server read this sweep always made - and for non-tmux backends).
+  socket=$(fm_backend_tmux_socket_of_meta "$meta")
+  agent_state=$(FM_TMUX_SOCKET=$socket fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
@@ -313,13 +316,14 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     return 1
   fi
   if [ "$FM_SM_LIVE_KILL" = 1 ]; then
-    local backend target window
+    local backend target window socket
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     if [ -z "$target" ]; then
       window=$(fm_meta_get "$meta" window)
       target=$window
     fi
+    socket=$(fm_backend_tmux_socket_of_meta "$meta")
     if [ "$backend" != t3code ]; then
       if [ -n "$target" ]; then
         if [ "$backend" = rex ]; then
@@ -328,10 +332,10 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
           [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
           ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" STATE="$home/state" fm_backend_kill "$backend" "$target" ) 2>/dev/null || true
         else
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          FM_TMUX_SOCKET=$socket fm_backend_kill "$backend" "$target" 2>/dev/null || true
         fi
       fi
-    elif [ -n "$target" ] && ! fm_backend_kill "$backend" "$target" 2>/dev/null; then
+    elif [ -n "$target" ] && ! FM_TMUX_SOCKET=$socket fm_backend_kill "$backend" "$target" 2>/dev/null; then
       fm_secondmate_liveness_ledger_add "$id" failed || true
       FM_SM_LIVE_STATUS=skipped
       fm_lock_release "$relaunch_lock" || true

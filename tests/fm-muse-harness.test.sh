@@ -72,6 +72,14 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it so
+# the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -468,6 +476,14 @@ make_send_case() {  # <name> <harness>
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-scoped probes carry a leading `-L <socket>` (fm_tmux); strip it so
+# the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "${1:-}" in
   display-message) printf 'fakepane\n'; exit 0 ;;
   has-session) exit 0 ;;

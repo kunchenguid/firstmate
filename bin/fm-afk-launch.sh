@@ -150,6 +150,8 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
 # fm-afk-start.sh provides the daemon-lock liveness helpers and
@@ -473,7 +475,9 @@ fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
       ;;
     tmux)
       # target is the dedicated daemon session name - kill exactly it.
-      tmux kill-session -t "$target" 2>/dev/null
+      # The daemon terminal is deliberately ambient (the captain's own tmux
+      # server), so this stays unscoped through fm_tmux.
+      fm_tmux kill-session -t "$target" 2>/dev/null
       ;;
     none)
       return 0
@@ -503,7 +507,7 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
       [ "$code" = pane_not_found ]
       ;;
     tmux)
-      out=$(tmux has-session -t "$target" 2>&1)
+      out=$(fm_tmux has-session -t "$target" 2>&1)
       result=$?
       [ "$result" -eq 1 ] || return 1
       printf '%s' "$out" | grep -Eq "can't find session"
@@ -541,7 +545,7 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
       fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     tmux)
-      tmux has-session -t "$target" 2>/dev/null
+      fm_tmux has-session -t "$target" 2>/dev/null
       ;;
     *) return 1 ;;
   esac
@@ -754,7 +758,11 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
   fi
-  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
+  # The daemon terminal lives on the ambient server BY DESIGN: if the fleet
+  # socket's server dies, away-mode supervision must survive to drive the
+  # reclaim, so the daemon must not die with it. fm_tmux with no scope routes
+  # this exactly like the bare call it replaces.
+  if ! fm_tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
     fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
     if ! rm -f "$FM_AFK_LAUNCH_RECORD"; then
       fm_afk_launch_log "failed to remove planned tmux daemon record after creation failure"

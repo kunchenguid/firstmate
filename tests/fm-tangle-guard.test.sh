@@ -226,6 +226,19 @@ make_spawn_record_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Log the FULL invocation (socket routing included) first, then strip a leading
+# `-L <socket>` pair and log the sequence form the construction assertions
+# below pin. Socket-scoped addressing itself is asserted from the full log by
+# the socket-isolation suite and the addressing assertions at the bottom of
+# this file; the command-construction contract these assertions own is the
+# subcommand sequence, unchanged by socket routing.
+[ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC.full"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 window_file="$(dirname "$0")/.spawn-window"
 case "$*" in
@@ -298,6 +311,16 @@ test_spawn_tmux_window_construction() {
     "treehouse get must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
+
+  # Socket isolation: every invocation in the full log is scoped to the
+  # dedicated fleet socket - a worker endpoint is never addressed on the
+  # captain's ambient server.
+  [ -s "$rec.full" ] || fail "the full recording must exist"
+  if grep -vF "tmux -L firstmate " "$rec.full" | grep -q '^tmux '; then
+    fail "no tmux invocation may escape the fleet socket scope"
+  fi
+  assert_grep "tmux -L firstmate new-window" "$rec.full" \
+    "every invocation must carry the default fleet socket scope"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }

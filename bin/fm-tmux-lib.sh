@@ -51,6 +51,151 @@ _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_TMUX_LIB_DIR
 
+# --- socket addressing owner -------------------------------------------------
+#
+# fm_tmux is the ONE owner of every tmux invocation firstmate makes. Every
+# call site in bin/ goes through it, in one of two addressing modes:
+#
+#   Fleet     - FM_TMUX_SOCKET=<name> set in the caller's dynamic scope (the
+#               bash `VAR=value fn args` prefix reaches every nested function,
+#               so one prefix covers a whole dispatch tree). The command runs
+#               against the named dedicated socket (`tmux -L <name>`), where
+#               every newly spawned worker endpoint lives, physically isolated
+#               from the captain's interactive tmux server (the 2026-10-16
+#               jetsam incident: three tmux server deaths each took one
+#               worker; the idle dedicated server dying no longer touches the
+#               interactive one, and its death is provable - see
+#               fm_control_endpoint_absence_verdict). Task-recorded endpoints
+#               read their scope from the record's socket= field; a record
+#               without socket= is a LEGACY record on the ambient server and
+#               must stay unscoped.
+#   Ambient   - no FM_TMUX_SOCKET: the bare command addresses whatever server
+#               the process's own TMUX/TMUX_TMPDIR resolves - the captain's
+#               interactive server. Reserved for endpoints that are BY DESIGN
+#               the operator's own: the away-daemon terminal (bin/
+#               fm-afk-launch.sh), the supervisor pane (bin/
+#               fm-supervise-daemon.sh), and Orca's launch-env snapshot of the
+#               operator's tmux session (bin/backends/orca.sh). These never
+#               name worker endpoints, so a worker window can never be
+#               addressed ambiently once spawned fleet-side.
+#
+# Socket identity and its death proof: fm-spawn.sh writes socket=<name> into
+# every new tmux task record. fm_tmux_socket_path, fm_tmux_server_evidence,
+# and fm_tmux_worktree_live_pids own the primitives the control plane's
+# reclaim proof composes (bin/fm-control-lib.sh).
+
+fm_tmux() {
+  # No `command` prefix: tests and adapters may override tmux as a shell
+  # FUNCTION (tests/fm-kimi-harness.test.sh's busy-signature seam does), and
+  # that seam must keep working through this owner.
+  if [ -n "${FM_TMUX_SOCKET:-}" ]; then
+    tmux -L "$FM_TMUX_SOCKET" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
+# fm_tmux_fleet_socket: print the socket name NEW worker endpoints spawn into:
+# FM_FLEET_TMUX_SOCKET (tests, the real-socket smoke), else the first line of
+# config/fleet-tmux-socket under <config-dir> when given, else `firstmate`.
+# A name must be a plain atom - it becomes a socket filename - so a malformed
+# config or env value refuses loudly here instead of failing inside tmux.
+fm_tmux_fleet_socket() {  # [config-dir]
+  local name dir=${1:-}
+  name=${FM_FLEET_TMUX_SOCKET:-}
+  if [ -z "$name" ] && [ -n "$dir" ] && [ -f "$dir/fleet-tmux-socket" ]; then
+    name=$(tr -d '[:space:]' <"$dir/fleet-tmux-socket" 2>/dev/null || true)
+  fi
+  [ -n "$name" ] || name=firstmate
+  case "$name" in
+    ?[A-Za-z0-9_-]*[A-Za-z0-9_-])
+      [ "${#name}" -le 64 ] || { echo "error: tmux fleet socket name is ${#name} chars (max 64)" >&2; return 1; } ;;
+    *) echo "error: malformed tmux fleet socket name '$name' (want [A-Za-z0-9_-]{1,64})" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$name"
+}
+
+# fm_tmux_socket_path: the filesystem path of named socket <name>, derived
+# with the same rule the spawning server used (TMUX_TMPDIR wins, else the
+# per-user default). Note macOS resolves /tmp to /private/tmp: callers
+# comparing lsof output must normalize both sides (fm_tmux_server_evidence
+# does).
+fm_tmux_socket_path() {  # <name>
+  printf '%s/%s\n' "${TMUX_TMPDIR:-/tmp/tmux-$(id -u)}" "$1"
+}
+
+# fm_tmux_server_evidence: POSITIVE evidence that a tmux server for <name> is
+# running, one evidence line per source on stdout; rc 0 when any exists, 1
+# when none does (which is itself only half the death proof - the caller also
+# needs the worktree check). Sources, each independent because no single one
+# is reliable everywhere:
+#   lsof -U   a process holding the socket (the bracket-free path is matched
+#             with and without macOS's /private prefix). Verified 2026-10-17:
+#             a plain `lsof <socket-path>` matches NOTHING on macOS even for a
+#             live server - the -U table is the only holder read.
+#   pgrep     a `tmux -L <name>` argv (macOS keeps the client's original argv
+#             for the server process) or a rewritten `tmux: server (... <name>)`
+#             proctitle (Linux). The [r] bracket keeps the pattern from
+#             matching this shell's own command line.
+# The socket FILE's existence is deliberately NOT evidence either way:
+# verified 2026-10-17 that a clean `kill-server` can leave the file behind for
+# a while, and jetsam leaves it forever - so a lingering file must not block
+# reclaim, and a missing file must not prove death by itself.
+fm_tmux_server_evidence() {  # <name>
+  local name=$1 path private_path found=0 holder_pid holder_stat
+  path=$(fm_tmux_socket_path "$name")
+  case "$path" in /tmp/*) private_path=/private$path ;; *) private_path=$path ;; esac
+  if command -v lsof >/dev/null 2>&1; then
+    # The holder line names a pid in column 2. Verified 2026-10-17: macOS
+    # lsof -U keeps listing a JUST-EXITED server's socket binding for a
+    # second or two, so a holder line alone is not alive evidence - the pid
+    # must still exist and not be a zombie (kill -0 succeeds on zombies).
+    holder_pid=$(lsof -U 2>/dev/null \
+      | awk -v p="$path" -v pp="$private_path" '$1 != "" && (index($0, p) > 0 || index($0, pp) > 0) { print $2; exit }')
+    case "$holder_pid" in
+      ''|*[!0-9]*) : ;;
+      *)
+        if kill -0 "$holder_pid" 2>/dev/null; then
+          holder_stat=$(ps -o stat= -p "$holder_pid" 2>/dev/null || true)
+          case "$holder_stat" in
+            Z*|'') : ;;
+            *) printf 'lsof-pid:%s\n' "$holder_pid"; found=1 ;;
+          esac
+        fi
+        ;;
+    esac
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -fl "tmux -L $name" 2>/dev/null | head -1 | grep -q . \
+      && { printf 'pgrep:%s\n' "$(pgrep -fl "tmux -L $name" 2>/dev/null | head -1)"; found=1; } || true
+    pgrep -fl "tmux: serve[r].*$name" 2>/dev/null | head -1 | grep -q . \
+      && { printf 'pgrep:%s\n' "$(pgrep -fl "tmux: serve[r].*$name" 2>/dev/null | head -1)"; found=1; } || true
+  fi
+  [ "$found" -eq 1 ]
+}
+
+# fm_tmux_worktree_live_pids: pids whose current working directory is <dir>
+# or a subdirectory of it, one pid per line; empty output with rc 0 proves
+# nothing is running out of that checkout. rc 2 means the check is
+# unprovable (lsof unavailable), which every caller must read as `unproven`,
+# never as `gone`. A <dir> that no longer exists cannot hold a cwd, so it
+# returns 0 with no output. This is the reclaim proof's orphan guard: a tmux
+# server death usually takes its pane processes with it, but a reparented
+# survivor (or an editor the captain opened in the checkout) keeps its cwd,
+# and relaunching a second agent into that worktree would duplicate it.
+fm_tmux_worktree_live_pids() {  # <dir>
+  local dir=$1
+  [ -d "$dir" ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 2
+  LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null | awk -v dir="$dir" '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ {
+      cwd = substr($0, 2)
+      if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
+    }
+  '
+}
+
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -74,13 +219,13 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # capture is consumed internally by the classifier and is NEVER surfaced
 # (fm-peek and every human/LLM-facing path stay plain).
 fm_tmux_composer_capture() {  # <target>
-  tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
+  fm_tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
 }
 
 # fm_tmux_composer_cursor_row: the pane's cursor row, zero-based, relative to
 # the visible pane - tmux's genuine primitive that no other backend has.
 fm_tmux_composer_cursor_row() {  # <target>
-  tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
+  fm_tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
 }
 
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
@@ -113,7 +258,7 @@ fm_tmux_composer_caps() {
 # polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  tty=$(fm_tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
       while read -r _ pgid tpgid comm; do
@@ -131,7 +276,7 @@ EOF
       ;;
   esac
   if [ -z "$owner" ]; then
-    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+    comm=$(fm_tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) owner=pi ;;
       polytoken) owner=polytoken ;;
@@ -232,7 +377,7 @@ EOF
 # no Cursor foreground process and gets no reclassification.
 fm_tmux_pane_is_cursor() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  tty=$(fm_tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
   case "$tty" in /dev/*) ;; *) return 1 ;; esac
   while read -r pid pgid tpgid comm; do
     [ -n "$comm" ] || continue
@@ -257,7 +402,7 @@ fm_pane_input_pending() {  # <target>
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local win=$1 harness=${2:-} tail40 visible
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+  tail40=$(fm_tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
   [ -n "$visible" ] || { printf 'unknown'; return 0; }
@@ -303,7 +448,7 @@ fm_pane_is_busy() {  # <target> [harness]
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
   local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fm_tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     # The first Enter can open a picker. A later Enter would confirm it.
@@ -363,7 +508,7 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   [ "$baseline_state" = idle ] && baseline_idle=1
   # A failed literal send replays tmux's stderr (for example "command too
   # long") so the caller can log why nothing was typed.
-  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+  if ! err=$(fm_tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
     [ -z "$err" ] || printf '%s\n' "$err" >&2
     printf 'send-failed'
     return 0

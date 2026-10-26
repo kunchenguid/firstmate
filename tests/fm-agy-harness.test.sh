@@ -453,7 +453,15 @@ make_agy_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+# after logging so the subcommand dispatch below keeps working.
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 state=$(cat "$FM_FAKE_AGY_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
@@ -737,8 +745,9 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
 # Bare Enter key presses only: shell setup rides its Enter on the typed text
 # (`send-keys -t <target> export X=Y Enter`), while the launch submit and the
 # trust-dialog answer are lone key sends (`send-keys -t <target> Enter`).
+# Socket-isolated spawns log a leading `-L <socket>` before the subcommand.
 count_enter_sends() {  # <tmux-call-log>
-  grep -c '^send-keys -t [^ ]* Enter$' "$1" || true
+  grep -cE '^(send-keys -t [^ ]* Enter|-L [^ ]+ send-keys -t [^ ]* Enter)$' "$1" || true
 }
 
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {

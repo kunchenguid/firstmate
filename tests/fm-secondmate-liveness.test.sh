@@ -51,6 +51,13 @@ make_probe_tmux() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+# A socket-scoped probe carries a leading `-L <socket>` (fm_tmux); strip it.
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
@@ -272,6 +279,13 @@ make_liveness_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# A socket-scoped probe carries a leading `-L <socket>` (fm_tmux); strip it.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 mode=${FM_TEST_PANE_CMD:-zsh}
 windows="${FM_TMUX_CALL_LOG:?}.windows"
 case "${1:-}" in

@@ -1308,9 +1308,12 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
+  # this cosmetic extra rather than attempting an unsupported call. This
+  # addresses the SUPERVISOR pane (the captain's own), never a worker window:
+  # it stays unscoped (ambient server) by design - fm_tmux routes it exactly
+  # like the bare call it replaces.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    fm_tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every endpoint and
@@ -1566,7 +1569,19 @@ window_for_task() {  # <task-key> [state]
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] && { printf '%s' "$w"; return 0; }
   done
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
+  # Live-window fallback: enumerate the fleet server AND the ambient server.
+  # Socket-isolated workers live on the dedicated fleet socket (config/fleet-
+  # tmux-socket, default `firstmate`); every legacy record's window is on the
+  # ambient server. Sweeping only one would make the other's windows
+  # unfindable here. A server that is not running contributes no windows.
+  for w in $(
+    { fm_tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null || true
+      fleet_socket=$(fm_tmux_fleet_socket "$FM_HOME/config" 2>/dev/null || true)
+      if [ -n "$fleet_socket" ]; then
+        FM_TMUX_SOCKET=$fleet_socket fm_tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null || true
+      fi
+    } | grep ':fm-' || true
+  ); do
     t=$(window_to_task "$w" "$state")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done

@@ -442,23 +442,89 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   tmux proves it ONLY for a record that carries its socket= identity (every
+#     tmux task spawned since socket isolation does; fm-spawn.sh writes it).
+#     The proof is deliberately the SERVER-death proof, not a window
+#     re-inventory, and it composes three independent conjuncts, each fail-
+#     closed:
+#       1. The recorded window reads definitively ABSENT on its recorded
+#          socket - a scoped inventory answered with one of tmux's own
+#          no-session/no-server/no-socket responses (fm_backend_tmux_
+#          window_inventory owns that classification). An inventory that
+#          merely failed, or a server that answered with the window present
+#          after all, refuses.
+#       2. The recorded socket's SERVER is provably not running - no process
+#          holds the socket and no tmux server process names it
+#          (fm_tmux_server_evidence, bin/fm-tmux-lib.sh). A server that is
+#          alive but has lost the session proves nothing and refuses: a live
+#          server can still hold the pane's processes even when the window is
+#          gone, so only its death licenses reclaim.
+#       3. The recorded worktree holds NO live process (fm_tmux_worktree_live_
+#          pids) - the orphan guard for a pane process that survived its
+#          server (reparented by launchd under jetsam) and would be duplicated
+#          by a relaunch. A worktree that still has anything running in it, or
+#          one that cannot be checked at all (no lsof), refuses.
+#     Only all three together print `gone`. A tmux record WITHOUT socket= -
+#     every record written before socket isolation - keeps the historic
+#     answer verbatim: `unproven`, because an unscoped inventory describes
+#     only the server this process happens to address, so a window absent
+#     from it may still be alive on another. That legacy refusal is the
+#     compatibility contract, not a gap.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   local backend=${1-} target=${2-} meta=${3-}
+  local socket session worktree windows inventory_status evidence pids
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      socket=
+      if [ -n "$meta" ]; then
+        socket=$(fm_meta_get "$meta" socket)
+      fi
+      if [ -z "$socket" ]; then
+        printf 'unproven\ttmux absence cannot be proven from a task record without its socket identity: a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+        return 0
+      fi
+      case "$target" in
+        *:*:*|'':*|*:'') printf 'unproven\tthe recorded tmux endpoint is malformed, so its socket cannot be scoped' ; return 0 ;;
+        *:*) ;;
+        *) printf 'unproven\tthe recorded tmux endpoint is malformed, so its socket cannot be scoped' ; return 0 ;;
+      esac
+      session=${target%%:*}
+      windows=$(FM_TMUX_SOCKET=$socket fm_backend_tmux_window_inventory "=$session")
+      inventory_status=$?
+      case "$inventory_status" in
+        0)
+          if printf '%s\n' "$windows" | grep -Fqx -- "${target#*:}"; then
+            printf 'alive\t'
+          else
+            printf 'unproven\tthe recorded tmux server is running but the window is gone from it; only a provably dead server licenses reclaim, and a live server can still hold this endpoint'"'"'s processes outside the window'
+          fi
+          return 0
+          ;;
+        1)
+          printf 'unproven\tthe recorded tmux socket could not be read, so the endpoint'"'"'s absence cannot be established'
+          return 0
+          ;;
+      esac
+      evidence=$(fm_tmux_server_evidence "$socket")
+      if [ -n "$evidence" ]; then
+        printf 'unproven\tthe recorded tmux socket still has a live server (window absent, server present), so the endpoint'"'"'s processes may still be running on it'
+        return 0
+      fi
+      worktree=$(fm_meta_get "$meta" worktree)
+      pids=$(fm_tmux_worktree_live_pids "$worktree") || {
+        printf 'unproven\tthe recorded tmux server is provably dead, but lsof is unavailable, so the worktree cannot be checked for a surviving agent process'
+        return 0
+      }
+      if [ -n "$pids" ]; then
+        printf 'unproven\tthe recorded tmux server is provably dead, but the worktree still has live processes (%s), so an agent may have survived it' "$(printf '%s' "$pids" | paste -sd, - 2>/dev/null || printf '%s' "$pids")"
+        return 0
+      fi
+      printf 'gone\t'
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is

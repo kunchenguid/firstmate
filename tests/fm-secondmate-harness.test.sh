@@ -607,6 +607,14 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it so
+# the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n' ;;
@@ -848,6 +856,14 @@ make_launch_capturing_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it so
+# the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac

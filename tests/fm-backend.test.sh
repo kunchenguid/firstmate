@@ -1013,6 +1013,14 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+# after logging so the subcommand dispatch below keeps working.
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
@@ -1093,6 +1101,14 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> <
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+# after logging so the subcommand dispatch below keeps working.
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)

@@ -53,6 +53,11 @@
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
 # spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex, or
 # t3code, or tern, carries an explicit `backend=` line.
+# The same compatibility shape governs `socket=` (fm_backend_tmux_socket_of_meta):
+# every tmux task spawned since socket isolation carries `socket=<name>` for
+# the dedicated fleet server it lives on, while a record WITHOUT the field is
+# a legacy record whose endpoint stays on the ambient server, addressed with
+# no FM_TMUX_SOCKET scope - so old records keep their old behavior verbatim.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -440,6 +445,18 @@ fm_backend_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
+# fm_backend_tmux_socket_of_meta: the dedicated tmux socket name a task
+# record's endpoint lives on (socket=), or EMPTY for every record without the
+# field. Empty is meaningful: it is the legacy-compatibility answer, and the
+# caller must leave FM_TMUX_SOCKET unset for it, so the endpoint is addressed
+# on the ambient server exactly where pre-isolation spawns put it. Records
+# written since socket isolation always carry the field for backend=tmux;
+# non-tmux records never do.
+fm_backend_tmux_socket_of_meta() {  # <meta-file>
+  [ "$(fm_backend_of_meta "$1")" = tmux ] || return 0
+  fm_meta_get "$1" socket
+}
+
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
@@ -493,7 +510,7 @@ fm_backend_endpoint_u64_valid() {  # <value>
 }
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
+  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding socket_count socket
   local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
@@ -549,6 +566,37 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: endpoint metadata belongs to task $binding, not $id; preserving task state." >&2
     return 1
   fi
+  # socket= is optional and names the dedicated tmux socket the endpoint was
+  # spawned on (absent = legacy record on the ambient server - the
+  # compatibility contract every reader of fm_backend_tmux_socket_of_meta
+  # depends on). Like every identity field it must be exactly one nonempty
+  # atom, and a non-tmux record carrying it is malformed: no other backend's
+  # endpoint lives on a tmux socket.
+  socket_count=$(grep -c '^socket=' "$meta" 2>/dev/null || true)
+  case "$socket_count" in
+    0) ;;
+    1)
+      socket=$(fm_backend_meta_exact_value "$meta" socket) || socket=
+      case "$socket" in
+        ''|*[!A-Za-z0-9_-]*)
+          echo "REFUSED: task $id has a malformed tmux socket identity; preserving task state." >&2
+          return 1
+          ;;
+      esac
+      [ "${#socket}" -le 64 ] || {
+        echo "REFUSED: task $id's tmux socket identity is too long; preserving task state." >&2
+        return 1
+      }
+      [ "$backend" = tmux ] || {
+        echo "REFUSED: task $id records a tmux socket but names backend '$backend'; preserving task state." >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "REFUSED: task $id has an ambiguous tmux socket identity; preserving task state." >&2
+      return 1
+      ;;
+  esac
 
   case "$backend" in
     tmux)

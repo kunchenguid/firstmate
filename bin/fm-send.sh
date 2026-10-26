@@ -288,7 +288,7 @@ fm_send_clear_after_interrupt() { # <key>
   clear=$(fm_control_interrupt_clear_key "$family") || return 0
   [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+  if ! FM_TMUX_SOCKET=$TARGET_SOCKET fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -447,6 +447,15 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+
+# The tmux socket scope for every dispatch below: the recorded socket when the
+# resolved target came from a task meta (empty for a legacy record - ambient
+# addressing, exactly the delivery path pre-isolation spawns used), empty for
+# explicit ad hoc targets and non-tmux backends, which ignore the scope.
+TARGET_SOCKET=
+if [ -n "$TARGET_META" ]; then
+  TARGET_SOCKET=$(fm_backend_tmux_socket_of_meta "$TARGET_META")
+fi
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -787,7 +796,7 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+  elif ! FM_TMUX_SOCKET=$TARGET_SOCKET fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -1143,7 +1152,7 @@ else
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
   send_rc=0
-  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if verdict=$(FM_TMUX_SOCKET=$TARGET_SOCKET fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?

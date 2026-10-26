@@ -128,8 +128,10 @@
 #   paseo and tern markers leak into every descendant process).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, and tern do not support
-#   --secondmate spawns.
+#   absent backend= means tmux. They DO write socket=<name> for the dedicated
+#   fleet server the endpoint lives on (absent socket= means a legacy record
+#   on the ambient server; docs/configuration.md "tmux fleet socket" owns the
+#   config). Orca, cmux, paseo, and tern do not support --secondmate spawns.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
@@ -2190,7 +2192,8 @@ fi
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# so the default path keeps its no-backend= shape. The socket= line written
+# for tmux tasks below is what lets a later reclaim prove a dead fleet server.
 if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
@@ -2239,6 +2242,16 @@ if [ "$RELAUNCH" -eq 0 ]; then
     elif [ -n "$LAUNCH_ENV_NAMES" ]; then
       echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
     fi
+  fi
+  # The tmux socket scope for every endpoint read and write a fresh spawn
+  # makes: the configured fleet socket, where every new worker window lives,
+  # physically separate from the captain's interactive tmux server. A
+  # malformed config/fleet-tmux-socket refuses here, before anything exists.
+  # A relaunch instead resolves its scope from the record (the adoption gate
+  # below), so this only ever governs fresh spawns.
+  SPAWN_TMUX_SOCKET=
+  if [ "$BACKEND" = tmux ]; then
+    SPAWN_TMUX_SOCKET=$(fm_tmux_fleet_socket "$CONFIG") || exit 1
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -2313,7 +2326,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR and REX can prove it:
+  # inferred from a failed read:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
@@ -2325,18 +2338,28 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           `unreadable` is rechecked too, because a stopped Rex server
   #           reads as unreachable to a read that never starts it
   #           (fm_control_absence_recheck_applies owns that rule).
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
+  #   tmux  - reclaims ONLY when the record carries socket=: the window is
+  #           definitively absent on that socket, the socket's server has no
+  #           process left, and the recorded worktree holds no live process.
+  #           A record without socket= refuses exactly as it always did - an
+  #           unscoped inventory describes only the server this process
+  #           addresses, so no read available here can tell "gone" from "on a
+  #           server I cannot see". That legacy refusal is the compatibility
+  #           contract, not a gap.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  # The socket scope for every endpoint read and write this relaunch makes:
+  # the recorded socket for a socket-isolated record, empty for a legacy
+  # record (ambient addressing, exactly the reads a pre-isolation relaunch
+  # made) and for every non-tmux backend. Read once here, before the adoption
+  # gate, so the state classification and any rebind creation cannot drift
+  # onto different servers.
+  RELAUNCH_SOCKET=$(fm_backend_tmux_socket_of_meta "$RELAUNCH_META")
+  SPAWN_TMUX_SOCKET=$RELAUNCH_SOCKET
+  RELAUNCH_STATE=$(FM_TMUX_SOCKET=$RELAUNCH_SOCKET fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
@@ -3272,14 +3295,14 @@ muse_worker_meta_api_key_present() {
     esac
   fi
   [ "$BACKEND" = tmux ] || return 1
-  if [ -n "${TMUX:-}" ]; then
-    fm_backend_source tmux >/dev/null 2>&1 || return 1
-    session=$(fm_backend_tmux_own_session 2>/dev/null) || return 1
-  else
-    tmux has-session -t firstmate 2>/dev/null || return 1
-    session=firstmate
-  fi
-  worker_env=$(tmux show-environment -t "$session" META_API_KEY 2>/dev/null) || return 1
+  # The worker session lives on the spawn's tmux socket (the fleet socket for
+  # every new spawn; the recorded socket for a relaunch - SPAWN_TMUX_SOCKET is
+  # resolved before any harness preflight runs). Scoped, the session is always
+  # the dedicated "firstmate" one, exactly the shape container_ensure creates;
+  # the ambient-session branch would read the captain's own server.
+  FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_tmux has-session -t firstmate 2>/dev/null || return 1
+  session=firstmate
+  worker_env=$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_tmux show-environment -t "$session" META_API_KEY 2>/dev/null) || return 1
   case "$worker_env" in
   META_API_KEY=?*) return 0 ;;
   esac
@@ -4532,10 +4555,12 @@ EOF
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
-    # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument). tmux and every secondmate were already refused, and rex
-    # took the branch above, so there is no dispatch left to make.
+  # Only herdr and tmux reach here: the gate above rebinds only on a
+  # PROVEN-gone endpoint, and absence is provable only on herdr (reads scoped
+  # to the recorded session) and on tmux WITH a recorded socket= (the
+  # server-death proof, fm_control_endpoint_absence_verdict owns both
+  # arguments). A tmux record without socket= was refused at the gate, and
+  # every secondmate was refused there too, so there is no other dispatch.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4555,6 +4580,25 @@ EOF
     # session from a seat that is not in it would silently relocate the task
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
+    if [ "$BACKEND" = tmux ]; then
+      # Re-create the window under the RECORDED session ON THE RECORDED
+      # SOCKET, never the ambient server: the socket name came from the
+      # record, and scoping every call with it is what keeps a reclaim on a
+      # dedicated-socket task from silently relocating the task onto the
+      # captain's interactive server. The recorded session is ensured (it died
+      # with its server), then the ordinary create_task path mints the window
+      # exactly as a fresh spawn would.
+      TMUX_REBIND_SES=${RELAUNCH_TARGET%%:*}
+      FM_TMUX_SOCKET=$RELAUNCH_SOCKET fm_tmux has-session -t "=$TMUX_REBIND_SES" 2>/dev/null \
+        || FM_TMUX_SOCKET=$RELAUNCH_SOCKET fm_tmux new-session -d -s "$TMUX_REBIND_SES" || {
+        echo "error: task $ID's endpoint could not be re-created: its recorded session '$TMUX_REBIND_SES' does not exist on recorded socket '$RELAUNCH_SOCKET' and could not be re-created there" >&2
+        exit 1
+      }
+      T="$TMUX_REBIND_SES:$W"
+      WID=$(FM_TMUX_SOCKET=$RELAUNCH_SOCKET fm_backend_tmux_create_task "$TMUX_REBIND_SES" "$W" "$PROJ_ABS") || exit 1
+      SES=$TMUX_REBIND_SES
+      WT_TARGET=$WID
+    else
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
     HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
       fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
@@ -4595,11 +4639,12 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     SES=$HERDR_SES
     WT_TARGET=$T
+    fi
   fi
 else
   case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
+    SES=$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_container_ensure)
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
@@ -4607,7 +4652,7 @@ else
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -4987,7 +5032,7 @@ fi
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() { # <target> <text>
   case "$BACKEND" in
-  tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
+  tmux) FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_send_text_line "$1" "$2" ;;
   herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
@@ -5000,7 +5045,7 @@ spawn_send_text_line() { # <target> <text>
 }
 spawn_current_path() { # <target>
   case "$BACKEND" in
-  tmux) fm_backend_tmux_current_path "$1" ;;
+  tmux) FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_current_path "$1" ;;
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
@@ -5011,7 +5056,7 @@ spawn_current_path() { # <target>
 }
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
-  tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
+  tmux) FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_send_literal "$1" "$2" ;;
   herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
   zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
@@ -5024,7 +5069,7 @@ spawn_send_literal() { # <target> <text>
 }
 spawn_send_key() { # <target> <key>
   case "$BACKEND" in
-  tmux) fm_backend_tmux_send_key "$1" "$2" ;;
+  tmux) FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_tmux_send_key "$1" "$2" ;;
   herdr) fm_backend_herdr_send_key "$1" "$2" ;;
   zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_key "$1" "$2" ;;
@@ -5072,7 +5117,7 @@ spawn_assert_agent_worktree() {
 }
 
 kimi_capture() {
-  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+  FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
 # Trust decisions read the visible pane only. The dialog is a TUI frame, so a
@@ -5096,7 +5141,7 @@ kimi_visible_capture() {
 # claude's did. The banner and brief-echo greps below are launch-progress
 # signals, not composer shapes, so they stay here.
 kimi_composer_is_empty() {
-  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+  [ "$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
 # The folder-prompt predicates (complete dialog, any dialog marker, paged
@@ -5229,11 +5274,11 @@ kimi_spawn_fail() { # <detail>
 # like kimi. The banner and context-usage greps are launch-progress signals, not
 # composer shapes.
 rovo_capture() {
-  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+  FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
 rovo_composer_is_empty() {
-  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+  [ "$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
 rovo_wait_for_ready() {
@@ -5305,7 +5350,7 @@ rovo_endpoint_cleanup() {
   fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
 # OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
@@ -5370,7 +5415,7 @@ AGY_TRUST_DIALOG='Do you trust the contents of this project?'
 AGY_TRUST_ANSWERED=0
 
 agy_capture() {
-  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+  FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
 agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
@@ -6602,7 +6647,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend socket herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6648,9 +6693,15 @@ preserve_relaunch_meta() {
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path keeps its no-backend= shape (absent backend= means tmux;
+  # data/fm-backend-design-d7's P1 compatibility contract). socket= is the
+  # exception now written on the default path: every tmux task records the
+  # dedicated socket its endpoint lives on, which is what makes a dead fleet
+  # server provable and reclaimable (fm_control_endpoint_absence_verdict).
+  # A relaunch rewrites it from the record itself, so a legacy record without
+  # the field stays without it - the ambient-server compatibility contract.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  [ "$BACKEND" != tmux ] || [ -z "$SPAWN_TMUX_SOCKET" ] || echo "socket=$SPAWN_TMUX_SOCKET"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -7318,7 +7369,7 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
-  if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+  if ! KIMI_SUBMIT_VERDICT=$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
     kimi_spawn_fail "kimi brief pointer could not be submitted"
@@ -7342,7 +7393,7 @@ if [ "$HARNESS" = rovo ]; then
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
   ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}
-  if ! ROVO_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+  if ! ROVO_SUBMIT_VERDICT=$(FM_TMUX_SOCKET=$SPAWN_TMUX_SOCKET fm_backend_send_text_submit \
     "$BACKEND" "$T" "$ROVO_POINTER" "$ROVO_SUBMIT_RETRIES" \
     "$ROVO_SUBMIT_SLEEP" "$ROVO_SUBMIT_SETTLE" "$W"); then
     rovo_spawn_fail "rovo brief pointer could not be submitted into window $T"

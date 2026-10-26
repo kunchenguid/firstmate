@@ -1243,6 +1243,10 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# The recorded socket scope for every endpoint probe and close below (empty
+# for a legacy record - the ambient-server behavior teardown has always had -
+# and for non-tmux backends, which ignore the scope).
+TEARDOWN_SOCKET=$(fm_backend_tmux_socket_of_meta "$META")
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -1305,7 +1309,7 @@ if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
   if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
     TEARDOWN_LEGACY_ENDPOINT=missing
   else
-    TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+    TEARDOWN_LEGACY_ENDPOINT=$(FM_TMUX_SOCKET=$TEARDOWN_SOCKET fm_backend_agent_state "$BACKEND" "$T")
     case "$TEARDOWN_LEGACY_ENDPOINT" in
       dead|missing) ;;
       *)
@@ -2330,7 +2334,7 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
     return 0
   fi
-  leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
+  leader=$(FM_TMUX_SOCKET=$TEARDOWN_SOCKET fm_tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
   case "$leader" in ''|*[!0-9]*)
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
     return 0
@@ -3825,7 +3829,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    FM_TMUX_SOCKET=$TEARDOWN_SOCKET fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"

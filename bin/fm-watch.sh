@@ -509,6 +509,18 @@ window_backend() {
   echo tmux
 }
 
+# window_tmux_socket: the dedicated socket scope for <w>'s recorded endpoint:
+# the meta's socket= value, or EMPTY for a legacy record (ambient addressing -
+# the server every pre-isolation endpoint lives on) and for non-tmux backends.
+# Every watcher dispatch that addresses a window prefixes this, so a fleet
+# window can never be read through the ambient server or vice versa.
+window_tmux_socket() {
+  local w=$1 meta
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 0
+  fm_backend_tmux_socket_of_meta "$meta"
+}
+
 window_harness() {
   local w=$1 meta
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -590,7 +602,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   backend=$(window_backend "$w")
-  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  agent_state=$(FM_TMUX_SOCKET=$(window_tmux_socket "$w") fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   case "$agent_state" in
     dead|missing)
       if [ "$verb" = retry ]; then
@@ -959,9 +971,9 @@ secondmate_idle_ring_safe() {  # <window>
   secondmate_busy_class "$w"
   [ "$SECONDMATE_BUSY_CLASS" = idle ] || return 1
   backend=$(window_backend "$w")
-  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  agent_state=$(FM_TMUX_SOCKET=$(window_tmux_socket "$w") fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   [ "$agent_state" = alive ] || return 1
-  cstate=$(fm_backend_composer_state "$backend" "$w" "$(window_label "$w")" 2>/dev/null) || cstate=unknown
+  cstate=$(FM_TMUX_SOCKET=$(window_tmux_socket "$w") fm_backend_composer_state "$backend" "$w" "$(window_label "$w")" 2>/dev/null || true)
   [ "$cstate" != pending ] || return 1
   return 0
 }
@@ -1828,7 +1840,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
-  agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
+  agent_state=$(FM_TMUX_SOCKET=$(window_tmux_socket "$win") fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
   case "$agent_state" in
     dead) detail='the endpoint is still there with no agent running in it' ;;
     missing) detail='the recorded endpoint is gone' ;;
@@ -3010,8 +3022,21 @@ watcher_waited() {  # <command...>
 }
 
 # watcher_capture: fm_backend_capture through watcher_waited.
+# The capture addresses one window's recorded endpoint, so the recorded socket
+# scope is derived HERE - once, for every caller: fleet records read their
+# dedicated socket, legacy records read the ambient server exactly as before
+# socket isolation. The scope is exported only for the duration of the call:
+# watcher_waited runs the command it is given in this shell's environment, and
+# the event wait that shares it takes no target and must keep its own.
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  local socket rc prev=${FM_TMUX_SOCKET-} had=${FM_TMUX_SOCKET+set}
+  socket=$(window_tmux_socket "$2")
+  FM_TMUX_SOCKET=$socket
+  export FM_TMUX_SOCKET
   watcher_waited fm_backend_capture "$@"
+  rc=$?
+  if [ -n "$had" ]; then FM_TMUX_SOCKET=$prev; export FM_TMUX_SOCKET; else unset FM_TMUX_SOCKET; fi
+  return "$rc"
 }
 
 # The event wait's scratch directory, given to it as TMPDIR. A stop kills the

@@ -103,6 +103,9 @@ exclusion_reason() {
     fm-backend-tmux-smoke.test.sh)
       printf '%s\n' 'real tmux on a private socket; keep exclusive of default-server contention class'
       ;;
+    fm-tmux-socket-isolation.test.sh)
+      printf '%s\n' 'real tmux on private sockets plus a live process in a scratch worktree; keep exclusive of the default-server contention class'
+      ;;
     fm-backend.test.sh)
       printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
       ;;
@@ -204,6 +207,7 @@ list_exclusions_for_report() {
   done <<'EOF'
 fm-test-isolation-proof.test.sh
 fm-backend-tmux-smoke.test.sh
+fm-tmux-socket-isolation.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh

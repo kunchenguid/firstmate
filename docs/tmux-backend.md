@@ -16,7 +16,17 @@ No provisioning is required before the first task.
 
 ## Watching the crew
 
-For the best visible experience, launch the primary harness inside a tmux session:
+Worker endpoints live on a dedicated tmux socket, not on the session the captain is looking at.
+Every new spawn creates its window in a detached `firstmate` session on the fleet socket (default name `firstmate`, configurable with `config/fleet-tmux-socket`; [`configuration.md`](configuration.md#tmux-fleet-socket-configfleet-tmux-socket) owns the selection contract), and records that socket in the task's `socket=` field.
+The captain's own interactive session - the one a visible primary harness runs in - is never adopted for worker windows, so interactive tmux churn cannot touch them.
+
+To look at the fleet server directly:
+
+```sh
+tmux -L firstmate attach -t firstmate
+```
+
+Legacy task records without `socket=` still live in the ambient server (the captain's own session, or the detached `firstmate` session when the primary runs outside tmux):
 
 ```sh
 tmux new -s firstmate

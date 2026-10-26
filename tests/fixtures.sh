@@ -109,6 +109,16 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-isolated spawns address the dedicated fleet socket: every invocation
+# may carry a leading `-L <socket>` (bin/fm-tmux-lib.sh's fm_tmux). Strip it;
+# these fixtures model endpoint behavior, never socket routing (which
+# tests/fm-tmux-socket-isolation.test.sh owns).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 # Simulate the OpenCode 2 worker's busy-state plugin reporting its turn start,
 # using the exact apply command fm-spawn generated into the worktree plugin.
 fake_opencode_plugin() {
@@ -292,6 +302,14 @@ fm_test_fake_tmux_send() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-scoped sends (fleet records) carry a leading `-L <socket>`; strip it.
+# Socket routing itself is owned by tests/fm-tmux-socket-isolation.test.sh.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "${1:-}" in
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1

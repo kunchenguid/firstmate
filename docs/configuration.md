@@ -478,6 +478,18 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, 
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
+### tmux fleet socket (config/fleet-tmux-socket)
+
+Every tmux worker endpoint spawns on a dedicated tmux socket, physically separate from the captain's interactive tmux server, so a dying interactive server cannot take workers with it and a dying fleet server leaves the interactive one alone.
+The socket name resolves from `FM_FLEET_TMUX_SOCKET`, then the first line of local, gitignored `config/fleet-tmux-socket`, then the default `firstmate`; a malformed name refuses the spawn.
+
+`fm-spawn.sh` records the name in each new tmux task's `socket=` meta field, and every task-scoped read, send, watch, control, and teardown dispatch addresses the recorded socket.
+A task record WITHOUT `socket=` is a legacy record on the ambient server and keeps its pre-isolation behavior verbatim, including the control plane's refusal to reclaim a missing endpoint.
+A recorded socket whose server is provably dead - the window definitively absent, no server process, no live process in the recorded worktree - licenses `fm-control.sh relaunch` to re-create the endpoint on the recorded socket and rebind the record; the proof is owned by `fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`.
+
+Non-tmux backends are unaffected: they never read `socket=` and ignore the scope entirely.
+The socket name is per user, so a primary and its local secondmates sharing the default land on one fleet server; window names remain task-scoped, and a per-home override is the config line.
+
 ### Liveness classification
 
 The session-start secondmate liveness sweep and the watcher's secondmate liveness tick use the recovery-grade `fm_backend_agent_state` classifier where verified.

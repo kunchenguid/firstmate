@@ -302,6 +302,13 @@ make_fake_tmux() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+# A socket-scoped probe carries a leading `-L <socket>` (fm_tmux); strip it.
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "\${1:-}" in
   display-message)
     target=""
@@ -339,6 +346,13 @@ killed=${spawned}.killed
 mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
+# A socket-scoped probe carries a leading `-L <socket>` (fm_tmux); strip it.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "${1:-}" in
   display-message)
     target=

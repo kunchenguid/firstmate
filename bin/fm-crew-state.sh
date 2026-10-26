@@ -329,10 +329,14 @@ fi
 # endpoint-existence predicate.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+# The recorded socket scope for every backend probe of this task's endpoint
+# (empty for a legacy record - the ambient-server read these probes always
+# made before socket isolation - and for non-tmux backends).
+TASK_SOCKET=$(fm_backend_tmux_socket_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) fm_backend_target_exists tmux "$1" ;;
+    tmux) FM_TMUX_SOCKET=$TASK_SOCKET fm_backend_target_exists tmux "$1" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
@@ -353,7 +357,7 @@ pane_readable() {  # <target>
 # to misread.
 crew_busy_verdict() {  # <target>
   local tail40
-  tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40=''
+  tail40=$(FM_TMUX_SOCKET=$TASK_SOCKET fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40=''
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
@@ -1342,7 +1346,8 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # report unverified, and tern's classifier is not promoted to recovery grade)
   # keep their historical capture-failure-means-gone reading.
   case "$TASK_BACKEND" in
-    tmux|herdr|rex|t3code) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    tmux|herdr) AGENT_STATE=$(FM_TMUX_SOCKET=$TASK_SOCKET fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    rex|t3code) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;
   esac
   case "$TASK_BACKEND:$AGENT_STATE" in
