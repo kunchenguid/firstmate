@@ -128,25 +128,44 @@ test_fm_tmux_fleet_socket_resolution() {
   dir="$TMP_ROOT/a2"; mkdir -p "$dir/cfg"
   # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-tmux-lib.sh"
-    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = firstmate ] || exit 11
+    unset FM_FLEET_TMUX_SOCKET || true
+    d1=$(FM_HOME="$TMP_ROOT/home-a" fm_tmux_fleet_socket "$dir/cfg") || exit 11
+    d2=$(FM_HOME="$TMP_ROOT/home-a" fm_tmux_fleet_socket "$dir/cfg") || exit 12
+    [ "$d1" = "$d2" ] || exit 13
+    case "$d1" in firstmate-*) : ;; *) exit 14 ;; esac
+    d3=$(FM_HOME="$TMP_ROOT/home-b" fm_tmux_fleet_socket "$dir/cfg") || exit 15
+    [ "$d1" != "$d3" ] || exit 16
     printf 'captains-fleet\n' > "$dir/cfg/fleet-tmux-socket"
-    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = captains-fleet ] || exit 12
+    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = captains-fleet ] || exit 17
     FM_FLEET_TMUX_SOCKET=env-fleet
     export FM_FLEET_TMUX_SOCKET
-    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = env-fleet ] || exit 13
-    exit 0 ) || fail "fm_tmux_fleet_socket must resolve env > config > firstmate default"
-  pass "fm_tmux_fleet_socket: env beats config beats the firstmate default"
+    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = env-fleet ] || exit 18
+    exit 0 ) || fail "fm_tmux_fleet_socket must resolve env > config > a stable PER-HOME derived default (review M3)"
+  pass "fm_tmux_fleet_socket: env beats config; the default is derived per home"
 
   # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-tmux-lib.sh"
-    printf 'bad name!\n' > "$dir/cfg/fleet-tmux-socket"
     unset FM_FLEET_TMUX_SOCKET || true
-    if fm_tmux_fleet_socket "$dir/cfg" 2>/dev/null; then exit 11; fi
-    FM_FLEET_TMUX_SOCKET='x'
+    # 'default' names the operator's own server and must be refused (M3).
+    FM_FLEET_TMUX_SOCKET=default
     export FM_FLEET_TMUX_SOCKET
-    if fm_tmux_fleet_socket "$dir/cfg" 2>/dev/null; then exit 12; fi
-    exit 0 ) || fail "fm_tmux_fleet_socket must refuse malformed names, not pass them to tmux"
-  pass "fm_tmux_fleet_socket: malformed config or env name refuses loudly"
+    if fm_tmux_fleet_socket "$dir/cfg" 2>/dev/null; then exit 11; fi
+    # One-character names are valid atoms (m2).
+    FM_FLEET_TMUX_SOCKET=x
+    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = x ] || exit 12
+    unset FM_FLEET_TMUX_SOCKET
+    # Only the FIRST line of the config is the name; whitespace is malformed.
+    printf 'line-one\nsecond-line\n' > "$dir/cfg/fleet-tmux-socket"
+    [ "$(fm_tmux_fleet_socket "$dir/cfg")" = line-one ] || exit 13
+    printf 'bad name!\n' > "$dir/cfg/fleet-tmux-socket"
+    if fm_tmux_fleet_socket "$dir/cfg" 2>/dev/null; then exit 14; fi
+    # An unreadable config refuses rather than silently defaulting (m2).
+    printf 'ok-name\n' > "$dir/cfg/fleet-tmux-socket"
+    chmod 000 "$dir/cfg/fleet-tmux-socket"
+    if fm_tmux_fleet_socket "$dir/cfg" 2>/dev/null; then exit 15; fi
+    chmod 600 "$dir/cfg/fleet-tmux-socket"
+    exit 0 ) || fail "fm_tmux_fleet_socket must refuse default/whitespace/unreadable and accept one-char names"
+  pass "fm_tmux_fleet_socket: refuses default, whitespace, unreadable; first-line; one-char ok"
 }
 
 test_socket_meta_round_trip_and_validation() {
@@ -184,6 +203,10 @@ EOF
   sed "s/^socket=fleet-rt/socket=$long_name/" "$meta" > "$dir/long.meta"
   if fm_backend_validate_task_endpoint "$dir/long.meta" t1 2>/dev/null; then
     fail "socket= longer than 64 chars must refuse validation"
+  fi
+  sed 's/^socket=fleet-rt/socket=default/' "$meta" > "$dir/default.meta"
+  if fm_backend_validate_task_endpoint "$dir/default.meta" t1 2>/dev/null; then
+    fail "socket=default must refuse validation (it names the operator's own server)"
   fi
   { cat "$meta"; echo 'socket=second-line'; } > "$dir/dup.meta"
   if fm_backend_validate_task_endpoint "$dir/dup.meta" t1 2>/dev/null; then
@@ -288,13 +311,22 @@ test_real_tmux_death_proof_primitives() {
     fm_tmux_server_evidence "$sock" || exit 1
   ) || fail "a live server must produce positive evidence"
   tmux -L "$sock" kill-server 2>/dev/null || true
-  sleep 1
-  if (
-    . "$ROOT/bin/fm-tmux-lib.sh"
-    fm_tmux_server_evidence "$sock"
-  ); then
-    fail "a killed server must produce no evidence once its process is gone"
-  fi
+  # The kernel/lsof release the socket binding asynchronously; poll (bounded)
+  # for the evidence to settle instead of racing a single fixed sleep.
+  evidence_settled=
+  for _i in $(seq 1 50); do
+    if (
+      . "$ROOT/bin/fm-tmux-lib.sh"
+      fm_tmux_server_evidence "$sock"
+    ); then
+      sleep 0.2
+    else
+      evidence_settled=1
+      break
+    fi
+  done
+  [ -n "$evidence_settled" ] \
+    || fail "a killed server must produce no evidence once its process is gone"
 
   ( cd "$wt" && exec sleep 30 ) &
   local sleeper=$!
@@ -330,6 +362,9 @@ test_verdict_real_socket_gone_and_refusal_cases() {
   [ "$HAVE_PROOF_TOOLS" = 1 ] || { pass "absence verdict on real sockets (skipped: no lsof/pgrep)"; return 0; }
   local sock="fmvdct-$$" wt="$TMP_ROOT/vdct-wt" meta="$TMP_ROOT/vdct.meta" verdict
   mkdir -p "$wt"
+  # m4 (review): a fail() mid-test must not leak the private server.
+  cleanup_vdct() { tmux -L "$sock" kill-server 2>/dev/null || true; }
+  trap 'cleanup_vdct; suite_cleanup' EXIT
   cat > "$meta" <<EOF
 window=firstmate:fm-vdct
 endpoint_task_id=vdct
@@ -438,6 +473,8 @@ SH
     unproven*$'\t'*could\ not\ be\ read*) : ;;
     *) fail "an unreadable socket must refuse as unproven, got '$verdict'" ;;
   esac
+  cleanup_vdct
+  trap 'suite_cleanup' EXIT
   pass "real tmux: the three-conjunct verdict answers alive/unproven/gone per case, and legacy refuses unchanged"
 }
 
@@ -652,6 +689,8 @@ test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint() {
   fi
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "the replacement agent must be running after the reclaim"
+  assert_grep "absence=gone socket=$sock" "$dir/home/state/d1.control-relaunch" \
+    "the relaunch journal must record the proof outcome and the recorded socket"
   pass "fm-control relaunch: a proven-dead fleet socket rebinds onto the recorded socket"
 }
 
@@ -701,6 +740,166 @@ test_relaunch_refuses_when_the_worktree_survived_the_server() {
   pass "fm-control relaunch: a worktree survivor refuses the reclaim"
 }
 
+# B1 (review): an lsof that is MISSING, FAILS, or TIMES OUT must read as
+# `unproven`, never as "no live process" - a failed取证 returning `gone`
+# would relaunch a duplicate agent into a live worktree. Each shape runs the
+# composed verdict against a dead recorded socket with a REAL live process
+# sitting in the recorded worktree; every shape must refuse.
+test_proof_fails_closed_when_evidence_tools_fail() {
+  local dir wt meta sock="fmfake-evid-$$" verdict
+  dir="$TMP_ROOT/b1"; wt="$TMP_ROOT/b1-wt"
+  rm -rf "$dir" "$wt"; mkdir -p "$dir/home/state" "$dir/fake" "$wt"
+  make_socket_stub "$dir"
+  meta="$dir/home/state/b1.meta"
+  cat > "$meta" <<EOF
+window=fmses:fm-b1
+endpoint_task_id=b1
+worktree=$wt
+project=$TMP_ROOT
+socket=$sock
+EOF
+  # The recorded server is dead (no alive marker) and a REAL process holds
+  # the worktree: the only thing between this and a false `gone` is the
+  # fail-closed取证 rule.
+  ( cd "$wt" && exec sleep 60 ) &
+  local sleeper=$!
+  sleep 1
+
+  run_b1_verdict() {  # <lsof-dir> [proof-timeout]
+    local lsof_dir=$1 timeout=${2:-}
+    (
+      PATH="$lsof_dir:$dir/fakebin:$PATH"
+      FM_FAKE_DIR="$dir/fake"
+      export PATH FM_FAKE_DIR
+      [ -z "$timeout" ] || { FM_TMUX_PROOF_TIMEOUT=$timeout; export FM_TMUX_PROOF_TIMEOUT; }
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-b1" "$meta"
+    )
+  }
+  kill_sleeper() { kill "$sleeper" 2>/dev/null || true; }
+
+  # Shape 1: lsof present but failing (exit 1 - the permission/kern-memory
+  # failure form). Both the socket scan and the worktree scan hit the shim.
+  local faildir="$dir/fail-lsof"; mkdir -p "$faildir"
+  cat > "$faildir/lsof" <<'SH'
+#!/usr/bin/env bash
+echo "lsof: can't open kernel memory" >&2
+exit 1
+SH
+  chmod +x "$faildir/lsof"
+  verdict=$(run_b1_verdict "$faildir")
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill_sleeper; fail "a failing lsof must refuse as unproven, got '$verdict'" ;;
+  esac
+  pass "proof fail-closed: an exit-1 lsof (live process in the worktree) refuses"
+
+  # Shape 2: lsof hanging past the proof timeout.
+  local slowdir="$dir/slow-lsof"; mkdir -p "$slowdir"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$slowdir/lsof"
+  chmod +x "$slowdir/lsof"
+  verdict=$(run_b1_verdict "$slowdir" 2)
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill_sleeper; fail "a timing-out lsof must refuse as unproven, got '$verdict'" ;;
+  esac
+  pass "proof fail-closed: a timing-out lsof refuses within the bound"
+
+  # Shape 3: lsof absent from PATH - a minimal tool dir (pgrep still present,
+  # it is a legitimate independent source) plus the fakebin tmux.
+  local nodir="$dir/no-lsof"; mkdir -p "$nodir"
+  local tool real
+  for tool in bash awk cat grep sed head pgrep ps paste env dirname basename sh; do
+    real=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$real" ] && ln -sf "$real" "$nodir/$tool"
+  done
+  verdict=$(
+    PATH="$nodir:$dir/fakebin" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-b1" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) kill_sleeper; fail "a missing lsof must refuse as unproven, got '$verdict'" ;;
+  esac
+  pass "proof fail-closed: a missing lsof refuses"
+
+  kill_sleeper
+  wait "$sleeper" 2>/dev/null || true
+}
+
+# M1 (review): tmux nests sockets under ${TMUX_TMPDIR}/tmux-<uid>/<name>, and
+# the lsof half of the evidence must find the holder through macOS's /private
+# spelling for ANY absolute path (the usual TMPDIR lives under /var, which the
+# kernel reports as /private/var). A pgrep shim that always fails leaves lsof
+# as the only usable source, so a wrong path cannot hide behind pgrep.
+test_real_tmux_socket_path_under_tmux_tmpdir() {
+  [ "$HAVE_TMUX" = 1 ] || { pass "socket path under TMUX_TMPDIR (skipped: no real tmux)"; return 0; }
+  [ "$HAVE_PROOF_TOOLS" = 1 ] || { pass "socket path under TMUX_TMPDIR (skipped: no lsof/pgrep)"; return 0; }
+  local tdir="${TMPDIR%/}/fm-m1-$$" sock="fmm1-$$" computed rc
+  rm -rf "$tdir"; mkdir -p "$tdir"
+  TMUX_TMPDIR="$tdir" tmux -L "$sock" new-session -d -s firstmate -x 120 -y 30 \
+    || fail "real tmux: TMUX_TMPDIR session failed"
+
+  computed=$(
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    TMUX_TMPDIR="$tdir"; export TMUX_TMPDIR
+    fm_tmux_socket_path "$sock"
+  )
+  [ "$computed" = "$tdir/tmux-$(id -u)/$sock" ] \
+    || fail "socket path must be \$TMUX_TMPDIR/tmux-<uid>/<name>, got '$computed' (want $tdir/tmux-$(id -u)/$sock)"
+  [ -S "$computed" ] || [ -S "/private$computed" ] \
+    || fail "the real server is not at the computed path"
+  # A trailing-slash TMUX_TMPDIR (the macOS TMPDIR spelling) must compute
+  # the SAME path tmux actually creates.
+  computed=$(
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    TMUX_TMPDIR="$tdir/"; export TMUX_TMPDIR
+    fm_tmux_socket_path "$sock"
+  )
+  [ "$computed" = "$tdir/tmux-$(id -u)/$sock" ] \
+    || fail "a trailing-slash TMUX_TMPDIR must normalize to the same path, got '$computed'"
+  pass "socket path: tmux-<uid> nesting under TMUX_TMPDIR matches the real server"
+
+  # lsof-only evidence (pgrep shim always fails) finds the live holder
+  # through the /private spelling.
+  local pgdir="$TMP_ROOT/m1-pgshim"; mkdir -p "$pgdir"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$pgdir/pgrep"
+  chmod +x "$pgdir/pgrep"
+  (
+    PATH="$pgdir:$PATH"
+    TMUX_TMPDIR="$tdir"; export TMUX_TMPDIR PATH
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_server_evidence "$sock"
+  )
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "lsof-only evidence must find the live server under TMUX_TMPDIR (rc=$rc)"
+
+  # And once the server is dead, the same lsof-only setup answers rc 1
+  # (clean scan, no evidence) - never rc 2, never a false anything.
+  TMUX_TMPDIR="$tdir" tmux -L "$sock" kill-server 2>/dev/null || true
+  sleep 1
+  if (
+    PATH="$pgdir:$PATH"
+    TMUX_TMPDIR="$tdir"; export TMUX_TMPDIR PATH
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_server_evidence "$sock"
+  ); then
+    fail "a killed server must not produce evidence"
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "a dead server under TMUX_TMPDIR must read rc=1 (clean, none), got $rc"
+  fi
+  rm -rf "$tdir"
+  pass "server evidence: lsof-only detection works end to end under TMUX_TMPDIR"
+}
+
 # --- E. real-script screen read and doorbell through the recorded socket -----
 
 test_real_socket_peek_and_doorbell_end_to_end() {
@@ -745,6 +944,16 @@ EOF
     *) tmux -L "$sock" kill-server 2>/dev/null; fail "fm-peek did not return the pane marker through the recorded socket" ;;
   esac
   pass "fm-peek.sh: the recorded socket scope reaches the fleet window"
+
+  # m1 (review): the same read by EXPLICIT session:window address must find
+  # the meta through the window-keyed lookup and stay on the recorded socket.
+  out=$(FM_HOME="$home" "$PEEK" "firstmate:fm-$id" 20 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || { tmux -L "$sock" kill-server 2>/dev/null; fail "fm-peek by explicit target failed: $out"; }
+  case "$out" in
+    *e2e-marker-ready*) : ;;
+    *) tmux -L "$sock" kill-server 2>/dev/null; fail "fm-peek by explicit target lost the recorded socket scope" ;;
+  esac
+  pass "fm-peek.sh: an explicit session:window target keeps the recorded socket scope"
 
   # The doorbell: fm-send --key Enter lands on the fleet window, not the
   # ambient server - the pane's last line (a fresh prompt) changes.
@@ -822,6 +1031,8 @@ test_socket_meta_round_trip_and_validation
 test_real_tmux_scoped_addressing_isolates_servers
 test_real_tmux_death_proof_primitives
 test_verdict_real_socket_gone_and_refusal_cases
+test_proof_fails_closed_when_evidence_tools_fail
+test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint
 test_relaunch_refuses_a_dead_socket_legacy_record_unchanged

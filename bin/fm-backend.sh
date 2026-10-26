@@ -582,6 +582,10 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
           echo "REFUSED: task $id has a malformed tmux socket identity; preserving task state." >&2
           return 1
           ;;
+        default)
+          echo "REFUSED: task $id records the reserved 'default' tmux socket (the operator's own server); preserving task state." >&2
+          return 1
+          ;;
       esac
       [ "${#socket}" -le 64 ] || {
         echo "REFUSED: task $id's tmux socket identity is too long; preserving task state." >&2

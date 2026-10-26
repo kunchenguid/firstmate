@@ -95,19 +95,45 @@ fm_tmux() {
   fi
 }
 
+# fm_tmux_home_fleet_socket: the DEFAULT fleet socket name for THIS home.
+# Derived from the home identity (review M3): two homes (a primary and its
+# local secondmates, or any two FM_HOMEs) must never share one fleet server
+# by default - task ids are unique only within a home, so a shared default
+# would let a stale or foreign meta with a colliding id read, steer, or kill
+# another home's live window. The shared `firstmate` name stays available as
+# an EXPLICIT, documented config/env choice.
+fm_tmux_home_fleet_socket() {
+  local home=${FM_HOME:-${HOME:-}}
+  printf 'firstmate-%s\n' "$(printf '%s' "$home" | cksum | awk '{print substr($1,1,8)}')"
+}
+
 # fm_tmux_fleet_socket: print the socket name NEW worker endpoints spawn into:
-# FM_FLEET_TMUX_SOCKET (tests, the real-socket smoke), else the first line of
-# config/fleet-tmux-socket under <config-dir> when given, else `firstmate`.
-# A name must be a plain atom - it becomes a socket filename - so a malformed
-# config or env value refuses loudly here instead of failing inside tmux.
+# FM_FLEET_TMUX_SOCKET (tests, the real-socket smoke), else the FIRST LINE of
+# config/fleet-tmux-socket under <config-dir> when a readable regular file
+# exists there, else this home's derived default (fm_tmux_home_fleet_socket).
+# `default` is refused (review M3): it names the operator's own tmux server
+# and would silently defeat the entire isolation guarantee. A name must be a
+# plain atom - it becomes a socket filename - so a malformed, unreadable, or
+# non-regular config refuses loudly here instead of failing inside tmux.
 fm_tmux_fleet_socket() {  # [config-dir]
-  local name dir=${1:-}
+  local name line dir=${1:-}
   name=${FM_FLEET_TMUX_SOCKET:-}
-  if [ -z "$name" ] && [ -n "$dir" ] && [ -f "$dir/fleet-tmux-socket" ]; then
-    name=$(tr -d '[:space:]' <"$dir/fleet-tmux-socket" 2>/dev/null || true)
+  if [ -z "$name" ] && [ -n "$dir" ] && [ -e "$dir/fleet-tmux-socket" ]; then
+    [ -f "$dir/fleet-tmux-socket" ] && [ -r "$dir/fleet-tmux-socket" ] \
+      || { echo "error: config/fleet-tmux-socket exists but is not a readable regular file; refusing to guess a fleet socket" >&2; return 1; }
+    IFS= read -r line < "$dir/fleet-tmux-socket" || true
+    name=$line
   fi
-  [ -n "$name" ] || name=firstmate
+  [ -n "$name" ] || name=$(fm_tmux_home_fleet_socket)
   case "$name" in
+    default)
+      echo "error: 'default' names the operator's own tmux server and would defeat socket isolation; pick a dedicated fleet socket name" >&2
+      return 1
+      ;;
+  esac
+  case "$name" in
+    [A-Za-z0-9_-])
+      : ;;  # one character is valid ([A-Za-z0-9_-]{1,64})
     ?[A-Za-z0-9_-]*[A-Za-z0-9_-])
       [ "${#name}" -le 64 ] || { echo "error: tmux fleet socket name is ${#name} chars (max 64)" >&2; return 1; } ;;
     *) echo "error: malformed tmux fleet socket name '$name' (want [A-Za-z0-9_-]{1,64})" >&2; return 1 ;;
@@ -116,78 +142,168 @@ fm_tmux_fleet_socket() {  # [config-dir]
 }
 
 # fm_tmux_socket_path: the filesystem path of named socket <name>, derived
-# with the same rule the spawning server used (TMUX_TMPDIR wins, else the
-# per-user default). Note macOS resolves /tmp to /private/tmp: callers
-# comparing lsof output must normalize both sides (fm_tmux_server_evidence
-# does).
+# with the same rule the spawning server used: tmux ALWAYS nests its sockets
+# in a tmux-<uid> directory - ${TMUX_TMPDIR}/tmux-<uid>/<name> when
+# TMUX_TMPDIR is set, /tmp/tmux-<uid>/<name> otherwise (verified 2026-10-17
+# against a real server: TMUX_TMPDIR=<dir> puts the socket at
+# <dir>/tmux-<uid>/<name>, not <dir>/<name>). Note macOS resolves /tmp (and
+# TMPDIR-style paths) to a /private prefix: callers comparing lsof output
+# must test both spellings (fm_tmux_server_evidence builds the /private
+# candidate for ANY absolute path).
 fm_tmux_socket_path() {  # <name>
-  printf '%s/%s\n' "${TMUX_TMPDIR:-/tmp/tmux-$(id -u)}" "$1"
+  # ${var%/}: macOS TMPDIR carries a trailing slash, and real tmux normalizes
+  # the doubled separator away when it creates the socket - the computed path
+  # must match what lsof reports, slash for slash.
+  local dir=${TMUX_TMPDIR%/}
+  printf '%s/tmux-%s/%s\n' "${dir:-/tmp}" "$(id -u)" "$1"
 }
 
-# fm_tmux_server_evidence: POSITIVE evidence that a tmux server for <name> is
-# running, one evidence line per source on stdout; rc 0 when any exists, 1
-# when none does (which is itself only half the death proof - the caller also
-# needs the worktree check). Sources, each independent because no single one
-# is reliable everywhere:
-#   lsof -U   a process holding the socket (the bracket-free path is matched
-#             with and without macOS's /private prefix). Verified 2026-10-17:
-#             a plain `lsof <socket-path>` matches NOTHING on macOS even for a
-#             live server - the -U table is the only holder read.
-#   pgrep     a `tmux -L <name>` argv (macOS keeps the client's original argv
-#             for the server process) or a rewritten `tmux: server (... <name>)`
-#             proctitle (Linux). The [r] bracket keeps the pattern from
-#             matching this shell's own command line.
+# fm_tmux_bounded: run <cmd...> under a wait bound (FM_TMUX_PROOF_TIMEOUT,
+# default 15s). A proof primitive must never hang the control plane: on
+# expiry the child is killed and rc 2 is returned, which every proof caller
+# reads as `unproven` - a取证超时 is "no usable evidence", never "no
+# evidence found". The child's own status rides a sentinel file: bash reaps
+# fast background jobs before `wait $pid` can read them, so `wait` alone
+# cannot carry the rc.
+fm_tmux_bounded() {
+  local timeout=${FM_TMUX_PROOF_TIMEOUT:-15} rc pid rcfile
+  case "$timeout" in ''|*[!0-9]*) timeout=15 ;; esac
+  rcfile=$(mktemp "${TMPDIR:-/tmp}/fm-tmux-bounded.XXXXXX") || return 2
+  (
+    "$@"
+    printf '%s' "$?" > "$rcfile"
+  ) &
+  pid=$!
+  rc=2
+  while :; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rc=$(cat "$rcfile" 2>/dev/null || printf 2)
+      break
+    fi
+    sleep 0.2
+    timeout=$((timeout - 1))
+    if [ "$timeout" -lt 0 ]; then
+      kill "$pid" 2>/dev/null || true
+      rc=2
+      break
+    fi
+  done
+  rm -f "$rcfile"
+  case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+  return "$rc"
+}
+
+# fm_tmux_server_evidence: evidence about a tmux server for <name>.
+# Three outcomes, because "no evidence found" and "no usable evidence
+# source" are different facts and only the first is proof of absence:
+#   rc 0 - POSITIVE evidence printed (one line per source): the server is
+#          running. The pid-liveness/zombie and exact-match rules below
+#          keep a stale or coincidental line from counting.
+#   rc 1 - NO evidence, and at least one source completed a clean scan: the
+#          server is provably without a live process (the caller still owes
+#          the worktree check before `gone`).
+#   rc 2 - every source was unusable (lsof missing/failed/timed out AND
+#          pgrep missing/failed): the socket's liveness is UNPROVEN; callers
+#          must refuse, never treat as dead.
+# Sources, each independent because no single one is reliable everywhere:
+#   lsof -U   a process holding the socket. The socket path is matched
+#             EXACTLY (last whitespace field equal to either spelling -
+#             substring matching would let `firstmate` match `firstmate2`).
+#             Verified 2026-10-17: a plain `lsof <socket-path>` matches
+#             NOTHING on macOS even for a live server - the -U table is the
+#             only holder read; and it keeps listing a JUST-EXITED server's
+#             binding for a second or two, so a holder line counts only
+#             after a pid-liveness check (kill -0, zombies excluded).
+#   pgrep     a `tmux -L <name>` argv boundary-matched (macOS keeps the
+#             client's original argv for the server process) or a rewritten
+#             `tmux: server (... <path-or-name>)` proctitle end-anchored
+#             (Linux). The [r] bracket keeps the pattern from matching this
+#             shell's own command line.
 # The socket FILE's existence is deliberately NOT evidence either way:
-# verified 2026-10-17 that a clean `kill-server` can leave the file behind for
-# a while, and jetsam leaves it forever - so a lingering file must not block
-# reclaim, and a missing file must not prove death by itself.
+# verified 2026-10-17 that a clean `kill-server` can leave the file behind,
+# and jetsam leaves it forever.
 fm_tmux_server_evidence() {  # <name>
-  local name=$1 path private_path found=0 holder_pid holder_stat
+  local name=$1 path private_path found=0 clean=0
+  local holder_pid holder_stat out rc
   path=$(fm_tmux_socket_path "$name")
-  case "$path" in /tmp/*) private_path=/private$path ;; *) private_path=$path ;; esac
+  case "$path" in
+    /private/*) private_path=$path ;;
+    /*) private_path=/private$path ;;
+    *) private_path=$path ;;
+  esac
   if command -v lsof >/dev/null 2>&1; then
-    # The holder line names a pid in column 2. Verified 2026-10-17: macOS
-    # lsof -U keeps listing a JUST-EXITED server's socket binding for a
-    # second or two, so a holder line alone is not alive evidence - the pid
-    # must still exist and not be a zombie (kill -0 succeeds on zombies).
-    holder_pid=$(lsof -U 2>/dev/null \
-      | awk -v p="$path" -v pp="$private_path" '$1 != "" && (index($0, p) > 0 || index($0, pp) > 0) { print $2; exit }')
-    case "$holder_pid" in
-      ''|*[!0-9]*) : ;;
-      *)
-        if kill -0 "$holder_pid" 2>/dev/null; then
-          holder_stat=$(ps -o stat= -p "$holder_pid" 2>/dev/null || true)
-          case "$holder_stat" in
-            Z*|'') : ;;
-            *) printf 'lsof-pid:%s\n' "$holder_pid"; found=1 ;;
-          esac
-        fi
-        ;;
-    esac
+    rc=0
+    out=$(export LC_ALL=C; fm_tmux_bounded lsof -U 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      clean=1
+      holder_pid=$(printf '%s\n' "$out" \
+        | awk -v p="$path" -v pp="$private_path" '
+            $NF == p || $NF == pp { print $2; exit }')
+      case "$holder_pid" in
+        ''|*[!0-9]*) : ;;
+        *)
+          if kill -0 "$holder_pid" 2>/dev/null; then
+            holder_stat=$(ps -o stat= -p "$holder_pid" 2>/dev/null || true)
+            case "$holder_stat" in
+              Z*|'') : ;;
+              *) printf 'lsof-pid:%s\n' "$holder_pid"; found=1 ;;
+            esac
+          fi
+          ;;
+      esac
+    elif [ "$rc" -ne 2 ]; then
+      # lsof ran and failed: this source is unusable, but a clean pgrep can
+      # still prove absence on its own - the rc-2 (all sources unusable)
+      # verdict is composed below.
+      :
+    fi
   fi
   if command -v pgrep >/dev/null 2>&1; then
-    pgrep -fl "tmux -L $name" 2>/dev/null | head -1 | grep -q . \
-      && { printf 'pgrep:%s\n' "$(pgrep -fl "tmux -L $name" 2>/dev/null | head -1)"; found=1; } || true
-    pgrep -fl "tmux: serve[r].*$name" 2>/dev/null | head -1 | grep -q . \
-      && { printf 'pgrep:%s\n' "$(pgrep -fl "tmux: serve[r].*$name" 2>/dev/null | head -1)"; found=1; } || true
+    # pgrep's vocabulary differs from lsof's: rc 1 is the CLEAN "no
+    # processes matched" answer (it is the empty-scan proof), rc 0 means a
+    # match was found, and only other statuses are source failures.
+    rc=0
+    out=$(fm_tmux_bounded pgrep -fl "tmux -L ${name}([[:space:]]|$)" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) clean=1; printf 'pgrep:%s\n' "$(printf '%s' "$out" | head -1)"; found=1 ;;
+      1) clean=1 ;;
+    esac
+    rc=0
+    out=$(fm_tmux_bounded pgrep -fl "tmux: serve[r].*(${path}|${name})$" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) clean=1; printf 'pgrep:%s\n' "$(printf '%s' "$out" | head -1)"; found=1 ;;
+      1) clean=1 ;;
+    esac
   fi
-  [ "$found" -eq 1 ]
+  if [ "$found" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$clean" -eq 1 ]; then
+    return 1
+  fi
+  return 2
 }
 
 # fm_tmux_worktree_live_pids: pids whose current working directory is <dir>
 # or a subdirectory of it, one pid per line; empty output with rc 0 proves
-# nothing is running out of that checkout. rc 2 means the check is
-# unprovable (lsof unavailable), which every caller must read as `unproven`,
-# never as `gone`. A <dir> that no longer exists cannot hold a cwd, so it
-# returns 0 with no output. This is the reclaim proof's orphan guard: a tmux
-# server death usually takes its pane processes with it, but a reparented
-# survivor (or an editor the captain opened in the checkout) keeps its cwd,
-# and relaunching a second agent into that worktree would duplicate it.
+# nothing is running out of that checkout. rc 2 means the check is UNPROVABLE
+# - lsof missing, failed, or timed out (B1, review 2026-10-17: a failed lsof
+# must NEVER read as "no live process", or the composed verdict returns
+# `gone` against a live agent and the relaunch duplicates it) - which every
+# caller must read as `unproven`, never as `gone`. A <dir> that no longer
+# exists cannot hold a cwd, so it returns 0 with no output. This is the
+# reclaim proof's orphan guard: a tmux server death usually takes its pane
+# processes with it, but a reparented survivor (launchd under jetsam) keeps
+# its cwd, and relaunching a second agent into that worktree would duplicate
+# it.
 fm_tmux_worktree_live_pids() {  # <dir>
-  local dir=$1
+  local dir=$1 out rc
   [ -d "$dir" ] || return 0
   command -v lsof >/dev/null 2>&1 || return 2
-  LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null | awk -v dir="$dir" '
+  rc=0
+  out=$(export LC_ALL=C; fm_tmux_bounded lsof -a -d cwd -F pn 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  printf '%s\n' "$out" | awk -v dir="$dir" '
     /^p/ { pid = substr($0, 2); next }
     /^n/ {
       cwd = substr($0, 2)

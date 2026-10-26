@@ -3448,7 +3448,10 @@ cleanup_firstmate_home_children() {
           fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+        # The child's endpoint lives on the CHILD home's recorded socket
+        # (review B2): an unscoped kill addresses the ambient server and
+        # either fails closed or closes a same-named wrong window.
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home FM_TMUX_SOCKET=$(meta_value "$child_meta" socket) fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi

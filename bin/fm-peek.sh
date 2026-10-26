@@ -43,9 +43,16 @@ T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
-# The recorded socket scope for a task meta's endpoint (empty for a legacy
-# record or an ad hoc target - the ambient-server read this script always did).
+# The recorded socket scope for the resolved target. A task-id selector
+# resolves through meta; an explicit "session:window" target does not (the
+# selector form rejects targets containing ':'), so fall back to the
+# window-keyed meta lookup before concluding there is no meta (review m1) -
+# otherwise peeking a recorded fleet window by its address reads the ambient
+# server.
 PEEK_META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+if [ -z "$PEEK_META" ]; then
+  PEEK_META=$(fm_backend_meta_for_window "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+fi
 PEEK_SOCKET=
 if [ -n "$PEEK_META" ]; then
   PEEK_SOCKET=$(fm_backend_tmux_socket_of_meta "$PEEK_META")

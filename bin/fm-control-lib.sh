@@ -475,7 +475,7 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 # drift into two answers for the same endpoint.
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   local backend=${1-} target=${2-} meta=${3-}
-  local socket session worktree windows inventory_status evidence pids
+  local socket session worktree windows inventory_status evidence_rc pids pids_rc
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
@@ -510,16 +510,25 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
           return 0
           ;;
       esac
-      evidence=$(fm_tmux_server_evidence "$socket")
-      if [ -n "$evidence" ]; then
-        printf 'unproven\tthe recorded tmux socket still has a live server (window absent, server present), so the endpoint'"'"'s processes may still be running on it'
+      evidence_rc=0
+      fm_tmux_server_evidence "$socket" >/dev/null || evidence_rc=$?
+      case "$evidence_rc" in
+        0)
+          printf 'unproven\tthe recorded tmux socket still has a live server (window absent, server present), so the endpoint'"'"'s processes may still be running on it'
+          return 0
+          ;;
+        2)
+          printf 'unproven\tthe recorded tmux socket'"'"'s liveness could not be established (every probe source failed or timed out), so the server cannot be proven dead'
+          return 0
+          ;;
+      esac
+      worktree=$(fm_meta_get "$meta" worktree)
+      pids_rc=0
+      pids=$(fm_tmux_worktree_live_pids "$worktree") || pids_rc=$?
+      if [ "$pids_rc" -ne 0 ]; then
+        printf 'unproven\tthe recorded tmux server is provably dead, but the worktree could not be checked for a surviving agent process (lsof missing, failed, or timed out)'
         return 0
       fi
-      worktree=$(fm_meta_get "$meta" worktree)
-      pids=$(fm_tmux_worktree_live_pids "$worktree") || {
-        printf 'unproven\tthe recorded tmux server is provably dead, but lsof is unavailable, so the worktree cannot be checked for a surviving agent process'
-        return 0
-      }
       if [ -n "$pids" ]; then
         printf 'unproven\tthe recorded tmux server is provably dead, but the worktree still has live processes (%s), so an agent may have survived it' "$(printf '%s' "$pids" | paste -sd, - 2>/dev/null || printf '%s' "$pids")"
         return 0

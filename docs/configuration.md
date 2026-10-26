@@ -481,14 +481,15 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, 
 ### tmux fleet socket (config/fleet-tmux-socket)
 
 Every tmux worker endpoint spawns on a dedicated tmux socket, physically separate from the captain's interactive tmux server, so a dying interactive server cannot take workers with it and a dying fleet server leaves the interactive one alone.
-The socket name resolves from `FM_FLEET_TMUX_SOCKET`, then the first line of local, gitignored `config/fleet-tmux-socket`, then the default `firstmate`; a malformed name refuses the spawn.
+The socket name resolves from `FM_FLEET_TMUX_SOCKET`, then the first line of local, gitignored `config/fleet-tmux-socket`, then a default DERIVED FROM THE HOME IDENTITY (`firstmate-<hash>`, per [`bin/fm-tmux-lib.sh`](../bin/fm-tmux-lib.sh) `fm_tmux_home_fleet_socket`): two homes never share one fleet server by default, because task ids are unique only within a home and a shared default would let a stale or foreign meta with a colliding id address another home's live window.
+The shared name `firstmate` remains available as an explicit, deliberate config or env choice for homes that want one fleet server; `default` is refused everywhere (fleet config, `FM_FLEET_TMUX_SOCKET`, and `socket=` validation) because it names the operator's own server and would silently defeat the isolation.
+A malformed name, or a config that exists but is not a readable regular file, refuses the spawn rather than guessing.
 
 `fm-spawn.sh` records the name in each new tmux task's `socket=` meta field, and every task-scoped read, send, watch, control, and teardown dispatch addresses the recorded socket.
 A task record WITHOUT `socket=` is a legacy record on the ambient server and keeps its pre-isolation behavior verbatim, including the control plane's refusal to reclaim a missing endpoint.
-A recorded socket whose server is provably dead - the window definitively absent, no server process, no live process in the recorded worktree - licenses `fm-control.sh relaunch` to re-create the endpoint on the recorded socket and rebind the record; the proof is owned by `fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`.
+A recorded socket whose server is provably dead - the window definitively absent on the recorded socket, no live process for that socket's server, no live process in the recorded worktree, with every probe failure reading as unproven rather than absence - licenses `fm-control.sh relaunch` to re-create the endpoint on the recorded socket and rebind the record; the proof is owned by `fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`.
 
 Non-tmux backends are unaffected: they never read `socket=` and ignore the scope entirely.
-The socket name is per user, so a primary and its local secondmates sharing the default land on one fleet server; window names remain task-scoped, and a per-home override is the config line.
 
 ### Liveness classification
 

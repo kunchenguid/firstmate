@@ -274,7 +274,10 @@ SH
 run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
   fm_test_spawn_brief "$home" "$id" brief
-  FM_TMUX_REC="$rec" \
+  # Pin the fleet socket name so the full-log assertion below can name it:
+  # the default is derived per home (review M3), which the sequence
+  # assertions do not care about but the socket-scope assertion does.
+  FM_TMUX_REC="$rec" FM_FLEET_TMUX_SOCKET=firstmate \
     fm_test_run_spawn "$home" "$pane" "$fakebin" \
     "$id" "$proj" codex --mode no-mistakes --yolo off
 }

@@ -17,13 +17,13 @@ No provisioning is required before the first task.
 ## Watching the crew
 
 Worker endpoints live on a dedicated tmux socket, not on the session the captain is looking at.
-Every new spawn creates its window in a detached `firstmate` session on the fleet socket (default name `firstmate`, configurable with `config/fleet-tmux-socket`; [`configuration.md`](configuration.md#tmux-fleet-socket-configfleet-tmux-socket) owns the selection contract), and records that socket in the task's `socket=` field.
+Every new spawn creates its window in a detached `firstmate` session on the fleet socket (default name derived from the home identity, `firstmate-<hash>`; `config/fleet-tmux-socket` overrides, and an explicit `firstmate` opts one home or several into a shared server - [`configuration.md`](configuration.md#tmux-fleet-socket-configfleet-tmux-socket) owns the selection contract), and records that socket in the task's `socket=` field.
 The captain's own interactive session - the one a visible primary harness runs in - is never adopted for worker windows, so interactive tmux churn cannot touch them.
 
-To look at the fleet server directly:
+To look at the fleet server directly (use the name a task's `socket=` records, or `bin/fm-tmux-lib.sh`'s `fm_tmux_fleet_socket` to resolve the current default):
 
 ```sh
-tmux -L firstmate attach -t firstmate
+tmux -L firstmate-<hash> attach -t firstmate
 ```
 
 Legacy task records without `socket=` still live in the ambient server (the captain's own session, or the detached `firstmate` session when the primary runs outside tmux):

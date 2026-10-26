@@ -790,18 +790,24 @@ task_window_harness() {  # <window> <state>
 # A T3 thread is gone only when the adapter reads it missing (archived or 404);
 # its verdict is native, so a failed transcript read is uncertainty, not removal.
 # Other backends treat a failed capture as gone.
+# The whole read is scoped to the task's RECORDED socket (review B2): an
+# unscoped capture addresses the ambient server, fails against a fleet
+# window, and silently drops the away-mode stale marker for every
+# socket-isolated worker.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40='' verdict
+  local win=$1 state=$2 backend harness label task tail40='' verdict socket
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
+  socket=
+  [ -z "$task" ] || socket=$(fm_backend_tmux_socket_of_meta "$state/$task.meta")
   if [ "$backend" = t3code ]; then
     [ "$(fm_backend_agent_state "$backend" "$win" 2>/dev/null)" != missing ] || return 2
   else
-    tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+    tail40=$(FM_TMUX_SOCKET=$socket fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   fi
-  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  verdict=$(FM_TMUX_SOCKET=$socket fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   case "$verdict" in
     busy\ *) return 0 ;;
     unknown\ t3code-native) return 3 ;;

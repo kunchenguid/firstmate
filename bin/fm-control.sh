@@ -1233,7 +1233,17 @@ do_relaunch() {
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  # A reclaim's post-mortem evidence: when the exit leg proved the endpoint
+  # gone, the journal records the verdict and the recorded socket alongside
+  # the outcome, so the durable transaction names what licensed the rebind
+  # without re-deriving the three-conjunct proof.
+  absence_line=
+  [ "$exit_result" != endpoint-gone ] || absence_line="absence=gone socket=${CONTROL_SOCKET:-none}"
+  if [ -n "$absence_line" ]; then
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "$absence_line"
+  else
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
@@ -1273,7 +1283,11 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ -n "$absence_line" ]; then
+    journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "$absence_line"
+  else
+    journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  fi
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
