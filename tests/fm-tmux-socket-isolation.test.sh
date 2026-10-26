@@ -657,6 +657,18 @@ run_socket_control() {  # <case-dir> <args...>
     "$CONTROL" "$@" 2>&1
 }
 
+# The same fixture env for commands other than the control plane (spawns).
+run_socket_cmd() {  # <case-dir> <cmd...>
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TMUX \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$@" 2>&1
+}
+
 socket_meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
@@ -1215,6 +1227,77 @@ SH
   pass "per-worktree coverage: an empty worktree is covered by its directory handle"
 }
 
+# The gate's half-migration finding: secondmate spawns (and the respawn
+# duplicate-launch corridor) must address the dedicated socket like every
+# other spawn path. A real --secondmate spawn lands its window on the
+# RECORDED fleet socket and records socket= in the secondmate's meta.
+test_secondmate_spawn_uses_the_dedicated_socket() {
+  local dir out rc sock="fmfake-smspawn-$$"
+  dir=$(new_socket_case secondmate-spawn sm9)
+  mkdir -p "$dir/home/config" "$dir/sm-home/data" "$dir/sm-home/state" "$dir/sm-home/config" "$dir/sm-home/projects" "$dir/sm-home/bin"
+  git init -q -b main "$dir/sm-home"
+  git -C "$dir/sm-home" -c user.name='T' -c user.email='t@example.invalid' commit -q --allow-empty -m init
+  printf 'sm9\n' > "$dir/sm-home/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$dir/sm-home/data/charter.md"
+  : > "$dir/sm-home/AGENTS.md"
+  seed_socket_backlog "$dir" sm9
+
+  out=$(run_socket_cmd "$dir" env FM_FLEET_TMUX_SOCKET="$sock" \
+    "$ROOT/bin/fm-spawn.sh" sm9 "$dir/sm-home" claude --secondmate 2>&1); rc=$?
+
+  expect_code 0 "$rc" "a secondmate spawn on the dedicated socket must succeed"$'\n'"$out"
+  assert_grep "socket=$sock" "$dir/home/state/sm9.meta" \
+    "the secondmate record must carry the dedicated socket"
+  assert_grep "$sock fm-sm9" "$dir/fake/created-windows" \
+    "the secondmate window must be created on the dedicated socket"
+  [ -f "$dir/fake/server-$sock-alive" ] \
+    || fail "the dedicated socket's server must exist after the secondmate spawn"
+  pass "fm-spawn --secondmate: the window and the record live on the dedicated socket"
+}
+
+# And the duplicate-launch corridor reads the recorded endpoint through the
+# recorded socket: a live fleet window must refuse the respawn, not read as
+# absent from the ambient server and allow a duplicate agent.
+test_secondmate_duplicate_corridor_scopes_the_recorded_socket() {
+  local dir out rc sock="fmfake-smdup-$$"
+  dir=$(new_socket_case secondmate-dup sm10)
+  mkdir -p "$dir/home/config" "$dir/sm-home/data" "$dir/sm-home/state" "$dir/sm-home/config" "$dir/sm-home/projects" "$dir/sm-home/bin"
+  git init -q -b main "$dir/sm-home"
+  git -C "$dir/sm-home" -c user.name='T' -c user.email='t@example.invalid' commit -q --allow-empty -m init
+  printf 'sm10\n' > "$dir/sm-home/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$dir/sm-home/data/charter.md"
+  : > "$dir/sm-home/AGENTS.md"
+  # Pre-existing record ON THE DEDICATED SOCKET with a live agent window.
+  cat > "$dir/home/state/sm10.meta" <<EOF
+window=fmses:fm-sm10
+endpoint_task_id=sm10
+worktree=$dir/sm-home
+home=$dir/sm-home
+harness=claude
+kind=secondmate
+socket=$sock
+EOF
+  : > "$dir/fake/server-$sock-alive"
+  printf 'fm-sm10\n' > "$dir/fake/windows-$sock"
+  printf 'claude\n' > "$dir/fake/command"
+
+  out=$(run_socket_cmd "$dir" env FM_FLEET_TMUX_SOCKET="$sock" \
+    "$ROOT/bin/fm-spawn.sh" sm10 "$dir/sm-home" --secondmate 2>&1); rc=$?
+
+  expect_code 1 "$rc" "a live secondmate endpoint must refuse the duplicate launch"$'\n'"$out"
+  # The guard is the scoped duplicate-window check inside create_task (the
+  # herdr-only corridor is a separate path): with the recorded socket scope
+  # it SEES the live fleet window and refuses before any launch. Without
+  # the scope it would read the window as absent and create a duplicate.
+  case "$out" in
+    *'already exists'*|*'refusing duplicate launch'*) : ;;
+    *) fail "the duplicate launch must be refused naming the live window, got: $out" ;;
+  esac
+  [ ! -e "$dir/fake/created-windows" ] \
+    || fail "a refused duplicate launch must not create any window"
+  pass "fm-spawn --secondmate: the scoped duplicate check sees the live fleet window and refuses"
+}
+
 # --- E. real-script screen read and doorbell through the recorded socket -----
 
 test_real_socket_peek_and_doorbell_end_to_end() {
@@ -1359,4 +1442,6 @@ test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint
 test_relaunch_refuses_a_dead_socket_legacy_record_unchanged
 test_relaunch_refuses_when_the_worktree_survived_the_server
+test_secondmate_spawn_uses_the_dedicated_socket
+test_secondmate_duplicate_corridor_scopes_the_recorded_socket
 test_teardown_closes_the_window_on_the_recorded_socket

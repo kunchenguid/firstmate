@@ -4376,7 +4376,7 @@ herdr_projection_meta_field_exact() { # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() { # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
+  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane old_socket
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
@@ -4388,6 +4388,11 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
     return 1
   }
   HERDR_RECOVERY_BACKEND=$old_backend
+  # The duplicate-launch corridor reads the recorded endpoint itself: a tmux
+  # record must be read through its RECORDED socket (review: half-migration),
+  # or a live fleet window reads as absent on the ambient server and a
+  # duplicate agent is launched into the same worktree.
+  old_socket=$(fm_backend_tmux_socket_of_meta "$meta")
   if [ "$old_backend" = herdr ]; then
     fm_backend_herdr_parse_target "$old_target" || {
       echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
@@ -4434,7 +4439,7 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
       ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(FM_TMUX_SOCKET=$old_socket fm_backend_agent_alive "$old_backend" "$old_target")
   case "$old_state" in
   dead) return 0 ;;
   alive | unknown)
