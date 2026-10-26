@@ -2977,6 +2977,42 @@ test_auto_cleanup_legacy_without_incarnation_skips() {
   pass "legacy lanes without incarnation identity keep the plain merge notice and are never auto-torn down"
 }
 
+test_restore_winner_disposition_absent_record_unattributed() {
+  local dir state url notice before after
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case restore-absent-unattributed)
+  state="$dir/home/state"
+  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 1 \
+    || fail "restore-absent: could not write the plain merge marker"
+  rm -f "$state/.wake-queue" "$state/task-a.meta" "$state/task-a.status"
+  fm_merge_outcome_restore_winner_disposition "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+    || fail "restore-absent: an absent record without disposition was reported as $FM_MERGE_OUTCOME_CLEANUP"
+  case "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" in
+    *absent*) ;;
+    *) fail "restore-absent: absent record was not reported: $FM_MERGE_OUTCOME_CLEANUP_DETAIL" ;;
+  esac
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'automatically cleaned up'*) fail "restore-absent: unattributed absent record claimed automatic cleanup: $notice" ;;
+  esac
+  [ "$notice" = "check: merge landed: task-a $url" ] \
+    || fail "restore-absent: unattributed notice was not plain: $notice"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "merged-task-a-$url" "check: merge landed: task-a $url; lane automatically cleaned up" \
+    || fail "restore-absent: could not seed the explicit success wake row"
+  rm -f "$state/task-a.meta"
+  fm_merge_outcome_restore_winner_disposition "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = cleaned ] \
+    || fail "restore-absent: explicit winning-watcher success was not preserved: $FM_MERGE_OUTCOME_CLEANUP"
+  notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
+  case "$notice" in
+    *'lane automatically cleaned up'*) ;;
+    *) fail "restore-absent: explicit success lost its wording: $notice" ;;
+  esac
+  pass "a duplicate merge without disposition leaves cleanup unattributed instead of claiming automatic cleanup"
+}
+
 test_cleanup_marker_update_does_not_clobber_newer_report() {
   local dir state url_a url_b pid_a pid_b i rc before after
   url_a=https://github.com/o/r/pull/1
@@ -4290,6 +4326,7 @@ test_watcher_surfaces_guarded_auto_teardown_refusal
 test_merged_notice_auto_teardown_is_done_only_and_guarded
 test_auto_cleanup_legacy_without_incarnation_skips
 test_cleanup_marker_update_does_not_clobber_newer_report
+test_restore_winner_disposition_absent_record_unattributed
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
 test_auto_cleanup_preserves_relaunched_incarnation
 test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report

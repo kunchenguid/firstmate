@@ -207,8 +207,7 @@ fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
     esac
   fi
   if [ ! -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
-    FM_MERGE_OUTCOME_CLEANUP=cleaned
-    FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+    FM_MERGE_OUTCOME_CLEANUP_DETAIL='task record absent'
   fi
   return 0
 }
