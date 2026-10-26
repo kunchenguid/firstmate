@@ -1532,16 +1532,72 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then
-    exec 8<&-
-    return 1
-  fi
   exec 8<&-
   [ "$version" = fm-pr-poll-merge-notified-v1 ] \
     && [ "$provider" = "$expected_provider" ] \
     && [ "$host" = "$expected_host" ] \
     && [ "$path" = "$expected_path" ] \
     && [ "$number" = "$expected_number" ]
+}
+
+fm_pr_poll_merge_cleanup_read() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local marker=$state/$id.pr-poll-merge-notified state_device version provider host path number cleanup detail
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-merge-notified"
+  fm_pr_private_file_valid "$marker" 600 "$state_device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r cleanup <&8 || { exec 8<&-; return 1; }
+  IFS= read -r detail <&8 || detail=
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-merge-notified-v1 ] || return 1
+  [ "$provider" = "$expected_provider" ] || return 1
+  [ "$host" = "$expected_host" ] || return 1
+  [ "$path" = "$expected_path" ] || return 1
+  [ "$number" = "$expected_number" ] || return 1
+  case "$cleanup" in
+    cleanup=refused) FM_PR_POLL_MERGE_CLEANUP=refused ;;
+    cleanup=failed) FM_PR_POLL_MERGE_CLEANUP=failed ;;
+    *) return 1 ;;
+  esac
+  FM_PR_POLL_MERGE_CLEANUP_DETAIL=$detail
+  : "${FM_PR_POLL_MERGE_CLEANUP:-}" "${FM_PR_POLL_MERGE_CLEANUP_DETAIL:-}"
+}
+
+fm_pr_poll_merge_record_cleanup() {  # <state> <id> <provider> <host> <path> <number> <cleanup> <detail>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 cleanup=$7 detail=$8
+  local marker tmp state_device clean_detail
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  case "$cleanup" in refused|failed) ;; *) return 1 ;; esac
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-merge-notified"
+  fm_pr_poll_merge_marker_matches "$marker" "$state_device" "$provider" "$host" "$path" "$number" || return 1
+  clean_detail=$(printf '%s' "$detail" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200)
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" "cleanup=$cleanup" "$clean_detail" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" "$provider" "$host" "$path" "$number" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" "$provider" "$host" "$path" "$number"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>

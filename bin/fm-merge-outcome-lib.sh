@@ -145,11 +145,15 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
 }
 
 fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
-  local state=$1 id=$2 url=$3 key payload detail
+  local state=$1 id=$2 url=$3 key payload detail provider host path number
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_CLEANUP=skipped
   FM_MERGE_OUTCOME_CLEANUP_DETAIL=
   fm_pr_url_parse "$url" 2>/dev/null || return 0
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
   key="merged-$id-$FM_PR_URL"
   STATE=$state
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
@@ -183,6 +187,17 @@ fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
       return 0
       ;;
   esac
+  FM_PR_POLL_MERGE_CLEANUP=
+  FM_PR_POLL_MERGE_CLEANUP_DETAIL=
+  if fm_pr_poll_merge_cleanup_read "$state" "$id" "$provider" "$host" "$path" "$number" 2>/dev/null; then
+    case "$FM_PR_POLL_MERGE_CLEANUP" in
+      refused|failed)
+        FM_MERGE_OUTCOME_CLEANUP=$FM_PR_POLL_MERGE_CLEANUP
+        FM_MERGE_OUTCOME_CLEANUP_DETAIL=$FM_PR_POLL_MERGE_CLEANUP_DETAIL
+        return 0
+        ;;
+    esac
+  fi
   if [ ! -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
     FM_MERGE_OUTCOME_CLEANUP=cleaned
     FM_MERGE_OUTCOME_CLEANUP_DETAIL=
@@ -208,6 +223,11 @@ fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
   fm_wake_append check "merged-$id-$FM_PR_URL" \
     "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")" || status=1
+  case "$FM_MERGE_OUTCOME_CLEANUP" in
+    refused|failed)
+      fm_pr_poll_merge_record_cleanup "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_MERGE_OUTCOME_CLEANUP" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" || status=1
+      ;;
+  esac
   return "$status"
 }
 
