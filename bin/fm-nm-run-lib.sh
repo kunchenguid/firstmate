@@ -459,6 +459,17 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# The delivered-PR exemption to the head rule: an ACTIVE run whose own `pr`
+# is exactly the task's recorded pr= (bin/fm-pr-check.sh writes it only after
+# the delivery gate accepted that PR) is the run that manages this task's
+# delivered PR, even after a ci-monitoring rebase moved its head off the task
+# worktree's history. Like the custody exemption, it never binds a terminal run.
+fm_nm_run_manages_task_pr() {  # <toon-output> <recorded-pr-url>
+  [ -n "${2:-}" ] || return 1
+  fm_nm_run_is_active "$1" || return 1
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$1" pr)")" = "$2" ]
+}
+
 # The gate evidence in an `axi status` TOON, as ONE set of patterns. Both
 # readers must agree exactly: fm_nm_run_is_parked below decides whether a run
 # keeps the strict head rule, and fm-crew-state.sh's nm_gate_step_row /
