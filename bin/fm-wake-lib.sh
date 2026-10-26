@@ -1928,8 +1928,9 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
 # reserves a slot under a label until `treehouse return --if-lease-holder`
 # releases it, and Firstmate uses exactly that for secondmate homes
-# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
-# their slot through the interactive pane-driven `treehouse get`, whose state
+# (bin/fm-home-seed.sh). Herdr crewmate spawns take that path too; the other
+# crewmate spawns acquire their slot through the interactive pane-driven
+# `treehouse get`, whose state
 # entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
 # status` reports in-use from the processes actually running under the path).
 # That answers "is anything running here", never "which task owns this", and it
@@ -1939,7 +1940,7 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # its own claim on top: one file naming the task that took the slot, written by
 # bin/fm-spawn.sh under the same project lock that allocates the slot and
 # released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
-# crewmate spawns onto the durable lease is separate follow-up work.
+# the remaining crewmate spawns onto the durable lease is separate follow-up work.
 #
 # The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
 # checkout rather than a file inside it - so claiming a slot can never dirty the
