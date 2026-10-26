@@ -683,11 +683,12 @@ fm_lock_reclaim_stale_plain_path() {
   [ -d "$lockdir" ] && return 1
   [ -e "$lockdir" ] || return 1
   fm_lock_mid_acquire_is_fresh "$lockdir" "" && return 1
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire_steal_mutex "$steal"; then
+    FM_LOCK_OWNER_DIR=
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
-  if [ -L "$lockdir" ] || [ -d "$lockdir" ] || [ ! -e "$lockdir" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
+  if ! fm_lock_points_to_owner "$steal" "$steal_owner" || [ -L "$lockdir" ] || [ -d "$lockdir" ] || [ ! -e "$lockdir" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
     fm_lock_release "$steal"
     FM_LOCK_OWNER_DIR=
     return 1
