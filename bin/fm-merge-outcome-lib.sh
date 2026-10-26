@@ -144,13 +144,62 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
   esac
 }
 
+fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
+  local state=$1 id=$2 url=$3 key payload detail
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_MERGE_OUTCOME_CLEANUP=skipped
+  FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+  fm_pr_url_parse "$url" 2>/dev/null || return 0
+  key="merged-$id-$FM_PR_URL"
+  STATE=$state
+  . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
+  payload=
+  if [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+    if fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+      payload=$(awk -F '\t' -v key="$key" 'NF >= 5 && $3 == "check" && $4 == key { payload = $5 } END { print payload }' "$FM_WAKE_QUEUE" 2>/dev/null || true)
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    fi
+  fi
+  case "$payload" in
+    *"; lane automatically cleaned up"*)
+      FM_MERGE_OUTCOME_CLEANUP=cleaned
+      detail=${payload#*"; lane automatically cleaned up"}
+      case "$detail" in
+        "; "*) FM_MERGE_OUTCOME_CLEANUP_DETAIL=${detail#"; "} ;;
+        ";"*) FM_MERGE_OUTCOME_CLEANUP_DETAIL=${detail#";"} ;;
+        "") FM_MERGE_OUTCOME_CLEANUP_DETAIL= ;;
+        *) FM_MERGE_OUTCOME_CLEANUP_DETAIL=${detail#" "} ;;
+      esac
+      return 0
+      ;;
+    *"; automatic cleanup refused: "*)
+      FM_MERGE_OUTCOME_CLEANUP=refused
+      FM_MERGE_OUTCOME_CLEANUP_DETAIL=${payload#*"; automatic cleanup refused: "}
+      return 0
+      ;;
+    *"; automatic cleanup did not complete: "*)
+      FM_MERGE_OUTCOME_CLEANUP=failed
+      FM_MERGE_OUTCOME_CLEANUP_DETAIL=${payload#*"; automatic cleanup did not complete: "}
+      return 0
+      ;;
+  esac
+  if [ ! -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
+    FM_MERGE_OUTCOME_CLEANUP=cleaned
+    FM_MERGE_OUTCOME_CLEANUP_DETAIL=
+  fi
+  return 0
+}
+
 # The one boundary for a post-merge cleanup: run the guarded teardown, then
 # publish its outcome under the durable key the merge notice used, so the
 # payload presented for that key carries the cleanup result.
 fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
   local home=$1 state=$2 id=$3 url=$4 status=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" != true ] || return 0
+  if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
+    fm_merge_outcome_restore_winner_disposition "$state" "$id" "$url" || true
+    return 0
+  fi
   fm_merge_outcome_auto_teardown "$home" "$state" "$id" "$url"
   [ "$FM_MERGE_OUTCOME_CLEANUP" != skipped ] || return 0
   fm_pr_url_parse "$url" || return 2
