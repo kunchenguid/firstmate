@@ -3266,6 +3266,15 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     printf 'unknown'
     return 0
   fi
+  # Vibe is not in Herdr's native agent catalog. Bind its capability to the
+  # exact recorded endpoint, never to a lookalike screen in another pane.
+  local meta=''
+  if command -v fm_backend_meta_for_window >/dev/null 2>&1; then
+    meta=$(fm_backend_meta_for_window "$target" "${STATE:-${FM_STATE_OVERRIDE:-$FM_HOME/state}}" 2>/dev/null || true)
+    if [ -n "$meta" ] && [ "$(fm_meta_get "$meta" harness)" = vibe ]; then
+      caps=$caps$'\nvibe=1'
+    fi
+  fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then

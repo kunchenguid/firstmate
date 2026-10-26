@@ -35,9 +35,21 @@ rule=$(printf '─%.0s' $(seq 1 80))
 screen() {
   printf '%s\n' "$rule accept edits · auto-approve ─" "> $1" '' '' "$rule" '/project [PID 123] 15k/800k tokens (2%)'
 }
-caps=$'styled=1\ncursor=0\nidentity=0'
-[ "$(fm_composer_classify_screen "$caps" "$(screen '')")" = empty ] || fail 'Vibe ruled empty composer lost'
-[ "$(fm_composer_classify_screen "$caps" "$(screen 'unsent draft')")" = pending ] || fail 'Vibe draft not preserved'
+caps=$'styled=1\ncursor=0\nidentity=1\nvibe=ask'
+[ "$(fm_composer_classify_screen "$caps" "$(screen '')")" = need-identity ] || fail 'Vibe shape did not require identity'
+[ "$(fm_composer_classify_screen "$caps" "$(screen '')" '' $'vibe\tidle')" = empty ] || fail 'Vibe ruled empty composer lost'
+[ "$(fm_composer_classify_screen "$caps" "$(screen 'unsent draft')" '' $'vibe\tidle')" = pending ] || fail 'Vibe draft not preserved'
+[ "$(fm_composer_classify_screen $'vibe=1' "$(screen '')")" = empty ] || fail 'proven Vibe capability lost'
+# A lookalike transcript must use the ordinary classifier, not the Vibe hook.
+ordinary=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=0' "$(screen '')")
+[ "$ordinary" != empty ] || fail 'unproven Vibe lookalike authorized injection'
+for identity in $'claude\tidle' $'pi\tidle' probe-absent; do
+  [ "$(fm_composer_classify_screen "$caps" "$(screen '')" '' "$identity")" = "$ordinary" ] || fail 'non-Vibe identity did not fall through'
+done
+for label in 'task' 'ask me anything' 'auto-approve extra'; do
+  lookalike=$(printf '%s\n' "$rule $label ─" '> ' '' '' "$rule" '/project [PID 123] 15k/800k tokens (2%)')
+  [ "$(fm_vibe_screen_state "$lookalike")" = unknown ] || fail "loose approval label accepted: $label"
+done
 [ "$(fm_vibe_composer_state "$rule" )" = unknown ] || fail 'partial redraw read as empty'
 [ "$(fm_vibe_screen_state "$(printf '⠋ Generating… (2s Esc/Ctrl+C to interrupt)\n'; screen '')")" = busy ] || fail 'delivery busy shape lost'
 [ "$(fm_vibe_screen_state "$(screen '')")" = idle ] || fail 'idle shape lost'
@@ -104,6 +116,16 @@ printf 'backend=herdr\nwindow=lab:w1:p1\nharness=pi\n' > "$STATE/vibe.meta"
 [ "$(fm_backend_herdr_pane_agent_state lab w2:p1)" = no-agent ] || fail 'unrecorded pane agent_not_found changed'
 [ ! -s "$probe_calls" ] || fail 'unrecorded fallback read process-info'
 pass 'recorded Vibe liveness, empty handoff, uncertain reads and unchanged shared Herdr semantics'
+(
+  fm_backend_herdr_visible_capture_ansi() { screen ''; }
+  fm_backend_herdr_composer_identity() { printf 'claude\tidle'; }
+  printf 'backend=herdr\nwindow=lab:w1:p1\nharness=vibe\n' > "$STATE/vibe.meta"
+  [ "$(fm_backend_herdr_composer_state lab:w1:p1)" = empty ] || fail 'recorded Vibe composer capability lost'
+  printf 'backend=herdr\nwindow=lab:w1:p1\nharness=claude\n' > "$STATE/vibe.meta"
+  [ "$(fm_backend_herdr_composer_state lab:w1:p1)" = "$ordinary" ] || fail 'recorded non-Vibe lookalike authorized injection'
+  [ "$(fm_backend_herdr_composer_state lab:w2:p1)" = "$ordinary" ] || fail 'unrecorded Vibe lookalike authorized injection'
+)
+pass 'Herdr composer capability bound to exact recorded Vibe endpoint'
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
 # The model-free fixture needs only the vendor version surface.

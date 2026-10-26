@@ -86,7 +86,7 @@ fm_tmux_composer_cursor_row() {  # <target>
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
 # logic (see the capability model in bin/fm-composer-lib.sh).
 fm_tmux_composer_caps() {
-  printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
+  printf 'styled=1\ncursor=1\nidentity=1\nvibe=ask\nrows=0\n'
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
@@ -110,7 +110,7 @@ fm_tmux_composer_caps() {
 # bare `❯` row between the same two rules, and its placeholder needs the
 # identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
+# polytoken, commandcode, or vibe; exits 1 when the pane is not a live shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
@@ -123,6 +123,7 @@ fm_tmux_composer_identity() {  # <target>
           pi|pi-signed|pi-launcher|Pi) owner=pi ;;
           polytoken) owner=polytoken ;;
           command-code) owner=commandcode ;;
+          vibe-rs) owner=vibe ;;
         esac
         [ -n "$owner" ] && break
       done <<EOF
