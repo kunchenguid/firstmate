@@ -2,8 +2,10 @@
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# gotmp/ and, for ship and scout workers, general scratch (TMPDIR, TMP, TEMP) nested
+# at tmp/, exports both into the crewmate pane, and records tasktmp= in the task's
+# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup, and only
+# that root: it never removes the worktree or a path beside the root.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
 # built so the real script resolves into it, with stub helper scripts.
@@ -154,6 +156,56 @@ test_teardown_removes_tasktmp_dir() {
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
 }
 
+test_teardown_removes_nested_scratch_only() {
+  # Ordinary mktemp scratch under TMPDIR lives in tmp/ beside gotmp/. Teardown
+  # removes it with the root, and removes nothing outside the recorded root: not
+  # a sibling that merely shares the root's name prefix, and not the worktree.
+  local id=td-scratch-z5
+  local task_tmp="$TMP_ROOT/fm-$id"
+  local sibling="$TMP_ROOT/fm-$id-sibling"
+  mkdir -p "$task_tmp/gotmp" "$task_tmp/tmp/tmp.AbCdEf/nested" "$task_tmp/tmp/agfp-live-XyZ" "$sibling"
+  printf 'x\n' > "$task_tmp/tmp/tmp.AbCdEf/nested/file"
+  printf 'x\n' > "$task_tmp/tmp/agfp-live-XyZ/file"
+  printf 'keep\n' > "$sibling/file"
+  local fake
+  fake=$(make_fake_root "$id" "$task_tmp")
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || fail "teardown exited non-zero with scratch under tmp/"
+  [ ! -e "$task_tmp" ] \
+    || fail "teardown left the task root, including its tmp/ scratch, behind"
+  [ -f "$sibling/file" ] \
+    || fail "teardown removed a path beside the recorded task root"
+  pass "fm-teardown removes the tmp/ scratch with the root and nothing outside it"
+}
+
+test_teardown_keeps_scratch_while_work_is_unlanded() {
+  # A refusal to tear down unlanded work must happen before any temp removal, so
+  # the scratch of a task that still has uncommitted changes survives the refusal.
+  local id=td-dirty-z6
+  local task_tmp="$TMP_ROOT/fm-$id"
+  local wt="$TMP_ROOT/dirty-wt-$id"
+  mkdir -p "$task_tmp/tmp/tmp.KeepMe" "$wt"
+  printf 'x\n' > "$task_tmp/tmp/tmp.KeepMe/file"
+  git -C "$wt" init -q -b main
+  git -C "$wt" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+  printf 'unlanded\n' > "$wt/unlanded.txt"
+  local fake
+  fake=$(make_fake_root "$id" "$task_tmp")
+  sed -i.bak "s#^worktree=.*#worktree=$wt#" "$fake/state/$id.meta" && rm -f "$fake/state/$id.meta.bak"
+  local out
+  if out=$(FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1); then
+    fail "teardown accepted a worktree with uncommitted changes"
+  fi
+  case "$out" in
+    *"has uncommitted changes"*) ;;
+    *) fail "teardown refused for a reason other than the unlanded work: $out" ;;
+  esac
+  [ -f "$wt/unlanded.txt" ] || fail "teardown touched the unlanded file"
+  [ -f "$task_tmp/tmp/tmp.KeepMe/file" ] \
+    || fail "a refused teardown removed the task scratch before the unlanded-work refusal"
+  pass "a teardown refused for unlanded work leaves the per-task scratch in place"
+}
+
 test_teardown_skips_gracefully_without_tasktmp() {
   # Backward compat: a meta from a pre-fix task has no tasktmp= line. Teardown must
   # not error and must not remove anything.
@@ -248,5 +300,7 @@ test_teardown_skips_gracefully_when_dir_missing() {
 }
 
 test_teardown_removes_tasktmp_dir
+test_teardown_removes_nested_scratch_only
+test_teardown_keeps_scratch_while_work_is_unlanded
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
