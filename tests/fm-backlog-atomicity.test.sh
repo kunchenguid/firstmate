@@ -2084,6 +2084,37 @@ test_recovery_replays_a_verified_merge_as_a_merge() {
   pass "session start replays a verified merge as a merge"
 }
 
+test_recovery_replays_a_failed_close_without_duplicating_its_note() {
+  local case_dir id out url=https://github.com/example/repo/pull/11 note body
+  id=atomic-heal-failed-close-b14
+  case_dir=$(make_home heal-failed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the link the failed close names"
+  note="Delivered, merge not confirmed because it was still open when this finished: $url. The link is a historical record whose merge was not verified in this run"
+  # The shape a failed close leaves: the note is already the row's body, the title
+  # has lost the link, and the pending-close record still owes the close.
+  tasks-axi update "$id" --title "fixture task" --file "$(backlog_of "$case_dir")" >/dev/null
+  tasks-axi update "$id" --body "$note" --file "$(backlog_of "$case_dir")" >/dev/null
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-failed\narg=--note\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$(printf '%s' "$note" | sed 's/ /%20/g')" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a failed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "the replayed failed close claimed a merge"
+  body=$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o "$url" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the replayed failed close duplicated or dropped its note: $body"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed failed close left its record behind"
+  pass "session start finishes a failed close without duplicating its note"
+}
+
 test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
   local case_dir id out url=https://github.com/example/repo/pull/7
   id=atomic-heal-unconfirmed-b9
@@ -3265,6 +3296,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_verified_merge_as_a_merge
+test_recovery_replays_a_failed_close_without_duplicating_its_note
 test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note

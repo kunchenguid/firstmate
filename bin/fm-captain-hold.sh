@@ -426,19 +426,10 @@ show_field() {  # <show-output> <field>
 # libraries default it off and reject the whole value as "must be object or
 # array", so ask for it explicitly rather than inheriting the local default.
 decode_shown_value() {  # <shown-field>
-  local value=$1
-  case "$value" in
-    \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
-        local $/;
-        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value;
-      '
-      ;;
-    *) printf '%s' "$value" ;;
-  esac
+  # One `tasks-axi show` scalar decoder for the whole fleet:
+  # bin/fm-backlog-transition-lib.sh owns it, and this reads through it so the
+  # JSON-scalar handling cannot drift between the two callers.
+  fm_backlog_shown_value "$1"
 }
 
 # Decode show-encoded scalar fields and normalize the empty marker.
@@ -1254,7 +1245,10 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr)
-      if fm_backlog_merge_fact_read "$STATE" "$id"; then
+      # The durable fact is trusted only for the link this record names, so a fact
+      # left behind by an earlier cycle cannot close a later delivery as merged.
+      if fm_backlog_merge_fact_read "$STATE" "$id" \
+         && [ "$FM_BACKLOG_MERGE_FACT_URL" = "${args[1]-}" ]; then
         RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
         return 0
       fi
@@ -1322,7 +1316,12 @@ close_answered() {  # <task-id> <release-0-or-1>
   # is what tells this answer that a run read the merge; a retention that landed
   # keeps the row's structured link and leaves that record behind for exactly
   # this moment.
-  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ] && fm_backlog_merge_fact_read "$STATE" "$id"; then
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ] \
+     && fm_backlog_merge_fact_read "$STATE" "$id" \
+     && fm_backlog_row_carries_pr_link "$DATA" "$id" "$FM_BACKLOG_MERGE_FACT_URL"; then
+    # The fact counts only while the row still shows that exact link: a fact from
+    # an earlier cycle, or one whose link the row no longer carries, is not
+    # evidence for this delivery.
     RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
   fi
   if [ "${RETAINED_CLOSE_ARGS[0]-}" = --pr ]; then

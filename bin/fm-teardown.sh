@@ -1713,12 +1713,10 @@ EOF
 # "merged".
 FM_TEARDOWN_PR_MERGE=
 FM_TEARDOWN_PR_MERGE_DETAIL=
-FM_TEARDOWN_PR_MERGE_AT=
 pr_merge_fact() {  # <recorded-pr-url>
   local url=$1 view state remainder merged_at resolved_url
   FM_TEARDOWN_PR_MERGE=unreadable
   FM_TEARDOWN_PR_MERGE_DETAIL="its pull request state could not be read"
-  FM_TEARDOWN_PR_MERGE_AT=
   [ -n "$url" ] || { FM_TEARDOWN_PR_MERGE_DETAIL="no pull request was recorded"; return 0; }
   fm_pr_url_parse "$url" || return 0
   case "$FM_PR_PROVIDER" in
@@ -1758,7 +1756,6 @@ pr_merge_fact() {  # <recorded-pr-url>
       [ -n "$merged_at" ] || return 0
       FM_TEARDOWN_PR_MERGE=merged
       FM_TEARDOWN_PR_MERGE_DETAIL=
-      FM_TEARDOWN_PR_MERGE_AT=$merged_at
       ;;
     OPEN|open)
       FM_TEARDOWN_PR_MERGE=unmerged
@@ -1920,7 +1917,7 @@ backlog_pr_completion_args() {  # <pr-url>
     # durable record carries it for a captain answer, which arrives after that
     # pending-close record has been retired with the transition it recorded.
     FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    if ! fm_backlog_merge_fact_write "$STATE" "$ID" "$1" "$FM_TEARDOWN_PR_MERGE_AT" "$FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT"; then
+    if ! fm_backlog_merge_fact_write "$STATE" "$ID" "$1" "$FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT"; then
       echo "warning: could not record the merge $ID's pull request reports ($FM_BACKLOG_TRANSITION_ERROR); a captain answer to a retained row will record a completion instead of a merge" >&2
     fi
   else

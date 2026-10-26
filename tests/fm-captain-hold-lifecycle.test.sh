@@ -3723,6 +3723,39 @@ EOF
   pass "answer survives a failed close without losing the link it recorded"
 }
 
+test_answer_ignores_a_merge_fact_for_another_link() {
+  local home id pr other show
+  home=$(make_home answer-fact-other-link)
+  id=sample-answer-fact-other-link
+  pr=https://github.com/sample/sample/pull/49
+  other=https://github.com/sample/sample/pull/50
+  tasks_in "$home" add "$id" "Ship the rebound fact pull request" --kind ship --repo sample >/dev/null \
+    || fail "could not create the rebound fact fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the pull-request link the row carries"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the rebound fact fixture"
+  # A durable fact about a different pull request cannot vouch for this row's
+  # delivery, so the answer must close as a completion instead of a merge.
+  printf 'url=%s\nverified_at=2026-07-14T00:00:00Z\n' "$other" > "$home/state/$id.pr-merge"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer a row whose fact names another link"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered rebound row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the rebound row"
+  assert_not_contains "$show" "pr:$pr" \
+    "a merge fact about another link closed this row as a merge"
+  assert_contains "$show" "$pr" "the answer dropped the row's own pull-request link"
+  assert_contains "$show" "the merge was not verified in this run" \
+    "the answer did not say why this delivery's merge is unconfirmed"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "a merge fact about another link recorded a merge here"
+  assert_absent "$home/state/$id.pr-merge" \
+    "the answered row kept the merge-verification record after it closed"
+  pass "answer ignores a merge fact that names another link"
+}
+
 test_answer_records_the_note_a_retained_record_carried() {
   local home id pr show
   home=$(make_home answer-retained-note)
@@ -5458,6 +5491,7 @@ test_answer_clears_an_earlier_pr_link_it_did_not_verify
 test_answer_keeps_a_merge_the_retention_verified
 test_answer_keeps_a_merge_after_the_retention_landed
 test_answer_survives_a_failed_close_without_losing_the_link
+test_answer_ignores_a_merge_fact_for_another_link
 test_answer_records_the_note_a_retained_record_carried
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
