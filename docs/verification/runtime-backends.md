@@ -151,6 +151,7 @@ Empirical facts this record pins:
 - A plain `lsof <socket-path>` matches NOTHING even for a live server; `lsof -U` is the only holder read, it reports the `/private`-prefixed path on macOS, and it keeps listing a just-exited server's binding for a second or two - so a holder line only counts as alive evidence after a pid-liveness check (`kill -0`, excluding zombies).
 - A clean `kill-server` can leave the socket file behind, and destroying a session's last window takes the whole server down (tmux `exit-empty` default) - so the socket file proves nothing either way and "window destroyed, server alive" needs a companion session to exist as a state.
 - The reclaim verdict is three-conjunct and fail-closed: definitive window absence on the recorded socket, no live server evidence for that socket, and no live process in the recorded worktree; `gone` requires all three, and any positive contrary evidence refuses naming what it saw.
+- Follow-up verification (2026-10-19): proof scratch never enters the worktree even when `TMPDIR` points inside it, `FM_TMUX_PROOF_TIMEOUT` is counted in real seconds, and the worktree coverage proof matches `/private` spellings; a healthy macOS `lsof +D` exits 1 with complete output, so the proof accepts that shape rather than leaving every reclaim unproven.
 
 ### Agent liveness name sources
 

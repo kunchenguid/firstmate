@@ -169,8 +169,8 @@ fm_tmux_socket_path() {  # <name>
 #   stall the caller. Reap latency is bounded by the configured timeout
 #   (FM_TMUX_PROOF_TIMEOUT, default 15 s) plus loop granularity: with the
 #   regression's 2 s bound the probe and its child are gone in ~2-3.5 s
-#   end to end; with the default 15 s bound the same shape reaps within
-#   roughly the same margin after 15 s.
+#   end to end. The configured value is counted in real seconds (five
+#   0.2 s ticks), so the default bound expires at ~15 s, not ~3 s.
 # - The probe writes to a FILE, not the inherited pipe: a timed-out
 #   grandchild then holds only that file (partial output is discarded), so
 #   the caller's command substitution can return while the reaper finishes.
@@ -179,7 +179,7 @@ fm_tmux_socket_path() {  # <name>
 # `unproven` at every proof caller - a取证超时 is "no usable evidence",
 # never "no evidence found".
 fm_tmux_bounded() {
-  local timeout=${FM_TMUX_PROOF_TIMEOUT:-15} rc pid rcfile outfile child
+  local timeout=${FM_TMUX_PROOF_TIMEOUT:-15} rc pid rcfile outfile child ticks
   case "$timeout" in ''|*[!0-9]*) timeout=15 ;; esac
   rcfile=$(mktemp "${TMPDIR:-/tmp}/fm-tmux-bounded.XXXXXX") || return 2
   outfile=$rcfile.out
@@ -189,14 +189,13 @@ fm_tmux_bounded() {
   ) &
   pid=$!
   rc=2
+  ticks=$((timeout * 5))
   while :; do
     if ! kill -0 "$pid" 2>/dev/null; then
       rc=$(cat "$rcfile" 2>/dev/null || printf 2)
       break
     fi
-    sleep 0.2
-    timeout=$((timeout - 1))
-    if [ "$timeout" -lt 0 ]; then
+    if [ "$ticks" -le 0 ]; then
       # Two-level teardown: the probe's children first (while their parent
       # still exists to name them), then the probe, then reap.
       for child in $(pgrep -P "$pid" 2>/dev/null); do
@@ -208,6 +207,8 @@ fm_tmux_bounded() {
       rc=2
       break
     fi
+    sleep 0.2
+    ticks=$((ticks - 1))
   done
   cat "$outfile" 2>/dev/null || true
   rm -f "$rcfile" "$outfile"
@@ -331,11 +332,19 @@ fm_tmux_server_evidence() {  # <name>
 # worktree: a fixed-name canary there could truncate a same-named project
 # file or follow an attacker-planted symlink (both reproduced by review);
 # a private lab with a random name closes the collision, symlink, and
-# forgery attack surfaces by construction. ABSENCE AUTHORITY stays with
-# lsof alone and stays fail-closed: a TIMEOUT (rc 2) on either worktree
-# scan is unusable even when calibrated, because a truncated walk can miss
-# survivors; any other failure of EITHER scan is already caught by the lab.
-# pgrep can only ADD pids here, never prove absence. Every caller must
+# forgery attack surfaces by construction. The lab lives under a scratch
+# base OUTSIDE the worktree: a caller TMPDIR inside <dir> falls back to
+# /tmp, and no safe base means UNPROVABLE, so an adversarial TMPDIR cannot
+# move proof scratch into the project. ABSENCE AUTHORITY stays with lsof
+# alone and stays fail-closed: a TIMEOUT (rc 2) on either worktree scan,
+# or any nonzero cwd-scan status, is unusable even when calibrated. A +D
+# walk that prints the coverage target and exits 1 is ACCEPTED because
+# macOS lsof reports that shape for a healthy walk (measured 2026-10-19);
+# requiring 0 there would make every reclaim unproven. A partial +D tool
+# that prints the coverage path and exits nonzero is therefore inside the
+# declared trust boundary below - it is not distinguishable from the
+# healthy shape without authenticating the tool. pgrep can only ADD pids
+# here, never prove absence. Every caller must
 # read rc 2 as `unproven`, never as `gone`. A <dir> that no longer exists
 # cannot hold anything, so it returns 0 with no output. This is the
 # reclaim proof's orphan guard: a tmux server death usually takes its pane
@@ -344,8 +353,11 @@ fm_tmux_server_evidence() {  # <name>
 #
 # TRUST MODEL (round 5 review; this is the declared boundary):
 #   - We trust the local toolchain's lsof SEMANTICS. The proof requires:
-#     (a) any scan error, timeout, or suspicious result reads as UNPROVABLE
-#         (fail-closed), never as absence;
+#     (a) any timeout or suspicious result reads as UNPROVABLE (fail-closed),
+#         never as absence; the cwd scan additionally requires rc 0, while
+#         the +D scan accepts its measured healthy macOS rc-1-with-output
+#         shape (see above), so a partial +D tool that exits nonzero after
+#         printing the coverage path is inside this boundary;
 #     (b) PER-WORKTREE COVERAGE PROOF: an fd we hold ourselves, opened
 #         O_NOFOLLOW read-only on an EXISTING regular file inside the
 #         worktree (the directory itself, opened as a directory handle, when
@@ -354,24 +366,57 @@ fm_tmux_server_evidence() {  # <name>
 #         proves the scan actually covered THIS worktree rather than merely
 #         working elsewhere (the lab below);
 #     (c) the trusted lsof is invoked by its resolved absolute path.
+#   - The worktree path is matched in its given, /private, and physically
+#     resolved spellings, so a checkout opened through a symlinked path
+#     (/tmp on macOS, a linked project root) is not mistaken for uncovered.
 #   - Further forgery built on top of those three requirements (for example
 #     an lsof that honors this exact coverage protocol and then lies about
 #     one path) is OUT OF SCOPE for this proof.
 fm_tmux_worktree_live_pids() {  # <dir>
-  local dir=$1 out rc pids='' lab canary escaped tmpbase lsof_bin
-  local holder='' coverage='' coverage_alt='' _i=0
+  local dir=$1 out rc pids='' lab canary escaped lsof_bin
+  local holder='' coverage='' coverage_alt='' coverage_phys='' _i=0
+  local dir_phys dir_alt base_phys scratch
   [ -d "$dir" ] || return 0
   lsof_bin=$(command -v lsof 2>/dev/null || true)
   [ -n "$lsof_bin" ] || return 2
   command -v perl >/dev/null 2>&1 || return 2
+  # lsof reports the kernel's spelling: /tmp and logical /var paths appear
+  # under /private on macOS, and a symlinked checkout appears at its target.
+  # Match the given, /private, and physically resolved spellings so a valid
+  # worktree is never mistaken for an uncovered one.
+  dir_phys=$(cd "$dir" 2>/dev/null && pwd -P) || dir_phys=$dir
+  dir_alt=$dir
+  case "$dir" in
+    /private/*) : ;;
+    /*) dir_alt=/private$dir ;;
+  esac
+  # Proof scratch (the calibration lab and fm_tmux_bounded's tiny sentinel
+  # files) must never land in the project. A TMPDIR that resolves to or
+  # under the worktree falls back to /tmp; if no candidate is outside the
+  # worktree, absence is unprovable rather than written into the project.
+  scratch=${TMPDIR%/}
+  [ -n "$scratch" ] || scratch=/tmp
+  base_phys=$(cd "$scratch" 2>/dev/null && pwd -P) || base_phys=
+  case "$base_phys" in
+    ''|"$dir_phys"|"$dir_phys"/*)
+      scratch=/tmp
+      base_phys=$(cd /tmp 2>/dev/null && pwd -P) || base_phys=
+      case "$base_phys" in
+        ''|"$dir_phys"|"$dir_phys"/*) return 2 ;;
+      esac
+      ;;
+  esac
+  local TMPDIR="$scratch"
   if [ -n "$lsof_bin" ]; then
     # Private calibration lab: prove THIS lsof walks trees before any
     # worktree result is believed. Random dir + random file name, our own
-    # fd, nothing project-visible. ${TMPDIR%/}: macOS TMPDIR carries a
-    # trailing slash and lsof normalizes the doubled separator away, so
-    # the lab path must be built without it or the canary grep misses.
-    tmpbase=${TMPDIR%/}
-    lab=$(mktemp -d "${tmpbase:-/tmp}/fm-lsof-lab.XXXXXX" 2>/dev/null) || lab=
+    # fd, nothing project-visible. Build the lab on the safe scratch base
+    # and use its physical spelling (macOS /tmp -> /private/tmp) so the
+    # lsof-output greps match slash for slash.
+    lab=$(mktemp -d "$scratch/fm-lsof-lab.XXXXXX" 2>/dev/null) || lab=
+    if [ -n "$lab" ]; then
+      lab=$(cd "$lab" 2>/dev/null && pwd -P) || lab=
+    fi
     if [ -n "$lab" ]; then
       chmod 700 "$lab" 2>/dev/null || true
       canary="$lab/c.$$.$(date +%s).$RANDOM"
@@ -382,11 +427,15 @@ fm_tmux_worktree_live_pids() {  # <dir>
       out=$( ( cd "$lab" && fm_tmux_bounded env LC_ALL=C "$lsof_bin" -a -d cwd -F pn 2>/dev/null ) ) || true
       printf '%s\n' "$out" | grep -qF "$lab" || cal=1
       # Criterion-2 honesty: a +D walk of the lab must report the canary WE
-      # hold open, whatever the rc.
+      # hold open, whatever the rc. Group redirections keep a failed open or
+      # close from silencing the rest of the shell's stderr.
       rc=0
-      exec 9<"$canary" 2>/dev/null || true
+      if ! { exec 9<"$canary"; } 2>/dev/null; then
+        rm -rf "$lab" 2>/dev/null || true
+        return 2
+      fi
       out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" +D "$lab" 2>/dev/null) || rc=$?
-      exec 9<&- 2>/dev/null || true
+      { exec 9<&-; } 2>/dev/null || true
       if [ "$rc" -eq 2 ] || [ "$cal" -ne 0 ]; then
         cal=1
       elif printf '%s\n' "$out" | grep -qF "$canary"; then
@@ -410,6 +459,10 @@ fm_tmux_worktree_live_pids() {  # <dir>
       /*) coverage_alt=/private$coverage ;;
       *) coverage_alt=$coverage ;;
     esac
+    coverage_phys=$coverage
+    case "$coverage" in
+      "$dir"/*) coverage_phys="$dir_phys/${coverage#"$dir"/}" ;;
+    esac
     if [ -n "$coverage" ]; then
       perl -e 'use Fcntl; chdir($ARGV[1]) or exit 9; sysopen(my $fh, $ARGV[0], O_RDONLY|O_NOFOLLOW) or exit 9; sleep 30' \
         "$coverage" "$dir" >/dev/null 2>&1 &
@@ -419,6 +472,7 @@ fm_tmux_worktree_live_pids() {  # <dir>
         "$dir" >/dev/null 2>&1 &
       holder=$!
       coverage=$dir
+      coverage_phys=$dir_phys
       case "$coverage" in
         /private/*) coverage_alt=$coverage ;;
         /*) coverage_alt=/private$coverage ;;
@@ -434,26 +488,28 @@ fm_tmux_worktree_live_pids() {  # <dir>
     sleep 0.3
     rc=0
     out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" -a -d cwd -F pn 2>/dev/null) || rc=$?
-    if [ "$rc" -eq 2 ]; then
+    if [ "$rc" -ne 0 ]; then
       kill "$holder" 2>/dev/null || true
       wait "$holder" 2>/dev/null || true
       return 2
     fi
     # Coverage assertion 1: the cwd scan reports the holder's cwd (the
     # worktree). -F pn emits "p<pid>" then "n<cwd>".
-    if ! printf '%s\n' "$out" | awk -v h="$holder" -v d="$dir" -v da="$coverage_alt" '
+    if ! printf '%s\n' "$out" | awk -v h="$holder" -v d="$dir" -v dalt="$dir_alt" -v dphys="$dir_phys" '
         /^p/ { pid = substr($0, 2); next }
-        /^n/ { cwd = substr($0, 2); if (pid == h && (cwd == d || cwd == da)) { found = 1 } }
+        /^n/ { cwd = substr($0, 2); if (pid == h && (cwd == d || cwd == dalt || cwd == dphys)) { found = 1 } }
         END { exit !found }'; then
       kill "$holder" 2>/dev/null || true
       wait "$holder" 2>/dev/null || true
       return 2
     fi
-    pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" -v da="$coverage_alt" -v h="$holder" '
+    pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" -v dalt="$dir_alt" -v dphys="$dir_phys" -v h="$holder" '
       /^p/ { pid = substr($0, 2); next }
       /^n/ {
         cwd = substr($0, 2)
-        if (cwd == dir || cwd == da || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) {
+        if (cwd == dir || cwd == dalt || cwd == dphys ||
+            (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/") ||
+            (index(cwd, dphys) == 1 && substr(cwd, length(dphys) + 1, 1) == "/")) {
           if (pid != h) print pid
         }
       }
@@ -462,11 +518,16 @@ fm_tmux_worktree_live_pids() {  # <dir>
     out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" +D "$dir" 2>/dev/null) || rc=$?
     kill "$holder" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
+    # rc 1 is the measured HEALTHY macOS shape: a +D walk prints every open
+    # file and still exits 1 (verified 2026-10-19 on tmux 3.8 / macOS 25.6).
+    # Requiring rc 0 here would make every reclaim unproven; rc 2 is a
+    # timeout and stays unusable. The coverage assertion below is the
+    # absence authority.
     if [ "$rc" -eq 2 ]; then
       return 2
     fi
     # Coverage assertion 2: the +D walk reports our coverage target.
-    if ! printf '%s\n' "$out" | grep -qF -e "$coverage" -e "$coverage_alt"; then
+    if ! printf '%s\n' "$out" | grep -qF -e "$coverage" -e "$coverage_phys" -e "$coverage_alt"; then
       return 2
     fi
     # Header line filtered; only numeric pid fields are attributions; the

@@ -814,12 +814,15 @@ SH
   local slowdir="$dir/slow-lsof"; mkdir -p "$slowdir"
   printf '#!/usr/bin/env bash\nsleep 31337\n' > "$slowdir/lsof"
   chmod +x "$slowdir/lsof"
+  local started=$SECONDS
   verdict=$(run_b1_verdict "$slowdir" 2)
+  [ $((SECONDS - started)) -ge 1 ] \
+    || { kill_sleeper; fail "a 2 s proof bound must not expire in ~0.6 s (review follow-up: the timeout is counted in real seconds)"; }
   case "$verdict" in
     unproven*$'\t'*) : ;;
     *) kill_sleeper; fail "a timing-out lsof must refuse as unproven, got '$verdict'" ;;
   esac
-  pass "proof fail-closed: a timing-out lsof refuses within the bound"
+  pass "proof fail-closed: a timing-out lsof refuses within the configured seconds"
   reaped=
   for _i in $(seq 1 20); do
     if pgrep -f 'sleep 31337' >/dev/null 2>&1; then
@@ -1101,18 +1104,14 @@ SH
 # follow an attacker-planted symlink; the calibration-lab design closes both
 # by construction, and these cases pin that against regression.
 test_proof_never_writes_into_the_worktree() {
-  local wt before after victim
+  local wt wt2 before after victim
   wt="$TMP_ROOT/nowrite-wt"
-  rm -rf "$wt"; mkdir -p "$wt"
+  wt2="$TMP_ROOT/nowrite-wt-symlink"
+  rm -rf "$wt" "$wt2"; mkdir -p "$wt" "$wt2"
   # Case 1: a project file already carries the OLD design's fixed canary
   # name; the proof must leave it byte-identical (and must not create or
   # delete anything under the worktree).
   printf 'precious uncommitted data\n' > "$wt/.fm-proof-canary"
-  # Case 2: a symlink at that old name points OUTSIDE the worktree at a
-  # victim file; the proof must never follow or replace it.
-  victim="$TMP_ROOT/nowrite-victim"
-  printf 'victim data\n' > "$victim"
-  ln -s "$victim" "$wt/.fm-proof-canary-symlink" 2>/dev/null || true
   before=$( ( cd "$wt" && find . -mindepth 1 -maxdepth 1 | sort ) )
 
   (
@@ -1125,11 +1124,28 @@ test_proof_never_writes_into_the_worktree() {
     || fail "the proof must not add or remove worktree files (before: $before; after: $after)"
   [ "$(cat "$wt/.fm-proof-canary")" = 'precious uncommitted data' ] \
     || fail "a same-named project file must survive the proof untouched"
+  # Case 2: the EXACT old fixed name is a symlink pointing OUTSIDE the
+  # worktree at a victim file; the proof must never follow or replace it.
+  # A separate worktree is required because case 1's regular file owns the
+  # name there.
+  victim="$TMP_ROOT/nowrite-victim"
+  printf 'victim data\n' > "$victim"
+  ln -s "$victim" "$wt2/.fm-proof-canary" 2>/dev/null || fail "fixture: could not create the symlink"
+  before=$( ( cd "$wt2" && find . -mindepth 1 -maxdepth 1 | sort ) )
+
+  (
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_worktree_live_pids "$wt2"
+  ) >/dev/null 2>&1
+
+  after=$( ( cd "$wt2" && find . -mindepth 1 -maxdepth 1 | sort ) )
+  [ "$before" = "$after" ] \
+    || fail "the proof must not add or remove symlink-worktree files (before: $before; after: $after)"
   [ "$(cat "$victim")" = 'victim data' ] \
     || fail "a symlinked name must never be followed to a target outside the worktree"
-  [ -L "$wt/.fm-proof-canary-symlink" ] \
+  [ -L "$wt2/.fm-proof-canary" ] \
     || fail "the pre-existing symlink must not be replaced"
-  pass "proof writes nothing into the worktree (collision and symlink attacks closed)"
+  pass "proof writes nothing into the worktree (exact-name collision and symlink attacks closed)"
 
   # And the proof still detects a real cwd survivor in the same worktree.
   ( cd "$wt" && exec sleep 30 ) &
@@ -1147,6 +1163,72 @@ test_proof_never_writes_into_the_worktree() {
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
   pass "proof still attributes survivors with zero project writes"
+}
+
+# Follow-up (review §12.2): a caller TMPDIR inside the worktree must not
+# move the calibration lab or the bounded-probe sentinels into the project.
+# The proof falls back to /tmp (or refuses when no base is outside), and it
+# must still attribute a real survivor from that safe scratch base.
+test_proof_scratch_stays_outside_the_worktree() {
+  local wt shim log real_mktemp pids rc sleeper
+  wt="$TMP_ROOT/scratch-wt"; rm -rf "$wt"; mkdir -p "$wt/scratch"
+  printf 'existing project file\n' > "$wt/existing.txt"
+  shim="$TMP_ROOT/scratch-shim"; log="$TMP_ROOT/scratch-mktemp.log"
+  rm -rf "$shim" "$log"; mkdir -p "$shim"
+  real_mktemp=$(command -v mktemp)
+  cat > "$shim/mktemp" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$shim/mktemp"
+  # A cwd survivor proves the safe-scratch path still does its real job.
+  ( cd "$wt" && exec sleep 30 ) &
+  sleeper=$!
+  sleep 1
+  pids=$(
+    PATH="$shim:$PATH" TMPDIR="$wt/scratch" bash -c '
+      . "$1/bin/fm-tmux-lib.sh"
+      fm_tmux_worktree_live_pids "$2"
+    ' _ "$ROOT" "$wt"
+  ); rc=$?
+  case "$pids" in
+    *"$sleeper"*) : ;;
+    *) kill "$sleeper" 2>/dev/null; fail "the safe-scratch path must still attribute a cwd survivor, got '$pids' (rc=$rc)" ;;
+  esac
+  [ -s "$log" ] \
+    || { kill "$sleeper" 2>/dev/null; fail "fixture: the mktemp shim observed no proof scratch calls"; }
+  if grep -qF "$wt" "$log"; then
+    kill "$sleeper" 2>/dev/null
+    fail "proof scratch must never be created under the worktree:"$'\n'"$(cat "$log")"
+  fi
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "proof scratch stays outside a worktree whose TMPDIR points inside it"
+}
+
+# Follow-up (review §12.2): lsof reports /tmp and logical /var paths under
+# /private on macOS; the per-worktree coverage proof must match that
+# spelling or every reclaim under such a path would read unproven.
+test_worktree_coverage_matches_private_spelling() {
+  local wt pids rc sleeper
+  wt=$(mktemp -d /tmp/fm-proof-private.XXXXXX) || fail "fixture: mktemp under /tmp failed"
+  printf 'existing project file\n' > "$wt/existing.txt"
+  ( cd "$wt" && exec sleep 30 ) &
+  sleeper=$!
+  sleep 1
+  pids=$(
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    fm_tmux_worktree_live_pids "$wt"
+  ); rc=$?
+  case "$pids" in
+    *"$sleeper"*) : ;;
+    *) kill "$sleeper" 2>/dev/null; rm -rf "$wt"; fail "a worktree under /tmp must be covered through lsof's /private spelling, got '$pids' (rc=$rc)" ;;
+  esac
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  rm -rf "$wt"
+  pass "worktree liveness: a worktree under /tmp matches lsof's /private spelling"
 }
 
 # Round 5 (review): lab calibration alone cannot prove the scan covers the
@@ -1473,6 +1555,8 @@ test_proof_fails_closed_when_evidence_tools_fail
 test_worktree_liveness_covers_open_files_and_argv
 test_open_file_scan_failure_fails_closed
 test_proof_never_writes_into_the_worktree
+test_proof_scratch_stays_outside_the_worktree
+test_worktree_coverage_matches_private_spelling
 test_worktree_scan_coverage_is_proven_per_worktree
 test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
