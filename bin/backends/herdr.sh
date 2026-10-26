@@ -2299,7 +2299,21 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    if [ "$code" = agent_not_found ]; then
+      # Vibe 3's Rust TUI is not recognized by Herdr's agent catalog yet.
+      # Its exact foreground executable, not a rendered title, proves liveness.
+      local vibe_info
+      vibe_info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || vibe_info=
+      if ! printf '%s' "$vibe_info" | jq -e --arg pane "$pane_id" '.result.process_info | .pane_id == $pane and (.foreground_processes | type == "array" and length > 0)' >/dev/null 2>&1; then
+        printf 'unknown'
+      elif printf '%s' "$vibe_info" | jq -e '.result.process_info | any(.foreground_processes[]; .name == "vibe-rs")' >/dev/null 2>&1; then
+        printf 'live'
+      else
+        printf 'no-agent'
+      fi
+    else
+      printf 'unknown'
+    fi
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)

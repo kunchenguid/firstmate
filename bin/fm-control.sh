@@ -1054,6 +1054,18 @@ resolve_relaunch_profile() {
     "$account_model" "$TARGET_HARNESS" "" "$account_mate" >/dev/null || return 1
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
+  # Reject unsupported Vibe replacements before stopping the old agent.
+  if [ "$TARGET_HARNESS" = vibe ]; then
+    case "$BACKEND" in tmux|herdr) ;; *) die 'vibe is verified on tmux and herdr only' ;; esac
+    case "$TARGET_EFFORT" in ''|default) ;; *) die 'vibe effort pinning is unsupported' ;; esac
+    local vibe_bin
+    vibe_bin=$(command -v vibe) || die 'vibe executable not found on PATH'
+    [ "$("$vibe_bin" --version 2>/dev/null)" = 'vibe 3.0.2' ] || die 'vibe requires live adapter verification for this version; verified version is 3.0.2'
+    case "$TARGET_MODEL" in
+      ''|default) ;;
+      *) python3 "$SCRIPT_DIR/fm-vibe-config.py" "$vibe_bin" "$TARGET_MODEL" >/dev/null || return 1 ;;
+    esac
+  fi
   # Likewise polytoken's launch profile and wiring refusals
   # (bin/fm-polytoken-lib.sh owns them). The launch owner retires the prior
   # incarnation's own generated hook layer, so only one it did not generate

@@ -1047,6 +1047,18 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     esac
   fi
   case "$harness" in
+    vibe)
+      local vibe_wt vibe_gen
+      vibe_wt=$(fm_meta_get "$state/$id.meta" worktree 2>/dev/null) || vibe_wt=
+      vibe_gen=$(fm_meta_get "$state/$id.meta" spawn_gen 2>/dev/null) || vibe_gen=
+      if [ -n "$vibe_wt" ] && fm_busy_token_valid "$vibe_gen"; then
+        native=$(python3 "${BASH_SOURCE[0]%/*}/fm-vibe-state.py" "$state/$id.vibe-sessions/$vibe_gen/unified" "$vibe_wt" 2>/dev/null) || native=unknown
+      else
+        native=unknown
+      fi
+      printf '%s vibe-session' "${native:-unknown}"
+      return 0
+      ;;
     kimi*)
       if ! fm_busy_kimi_verified; then
         printf 'unknown kimi-unverified'

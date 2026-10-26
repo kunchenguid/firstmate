@@ -2427,7 +2427,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | vibe)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2805,6 +2805,9 @@ launch_template() {
   # axis rides `__MODELFLAG__` after mapping to the nearest compatible
   # level in the installed model's selectable set.
   polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Vibe 3 uses its Rust TUI with invocation-only trust and tool approval.
+  # Model selection rides the environment; reasoning effort is unsupported.
+  vibe) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI __MODELFLAG____VIBEBIN__ --trust --auto-approve -- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Command Code receives the typed launch envelope after -- as its initial
   # message. --yolo bypasses permission prompts, --trust skips the folder-trust
   # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
@@ -2949,7 +2952,7 @@ esac
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
 # cortex has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = vibe ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2986,7 +2989,31 @@ if [ "$KIND" != secondmate ]; then
   EXCLUDE_TOOLS=$(fm_exclude_tools_check "$HARNESS" "$RAW_LAUNCH" "$CONFIG") || exit 1
 fi
 
+if [ "$HARNESS" = vibe ]; then
+  if [ "$BACKEND" != herdr ] && [ "$BACKEND" != tmux ]; then
+    echo "error: vibe is verified on the herdr and tmux backends only; select backend herdr or tmux" >&2
+    exit 1
+  fi
+  if [ -n "$EFFORT" ] && [ "$EFFORT" != default ]; then
+    echo "error: vibe effort pinning is unsupported; omit --effort to use Vibe's configured reasoning level" >&2
+    exit 1
+  fi
+fi
+
 case "$HARNESS" in
+vibe)
+  VIBE_BIN=$(command -v vibe) || {
+    echo "error: vibe executable not found on PATH" >&2
+    exit 1
+  }
+  case "$("$VIBE_BIN" --version 2>/dev/null)" in
+    'vibe 3.0.2') ;;
+    *) echo "error: vibe requires live adapter verification for this version; verified version is 3.0.2" >&2; exit 1 ;;
+  esac
+  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+    VIBE_MODEL_NAME=$(python3 "$SCRIPT_DIR/fm-vibe-config.py" "$VIBE_BIN" "$MODEL") || exit 1
+  fi
+  ;;
 devin)
   DEVIN_BIN=$(command -v devin) || {
     echo "error: devin executable not found on PATH" >&2
@@ -3355,6 +3382,9 @@ model_flag_for_harness() {
   # fallback to the bare model axis.
   polytoken)
     printf -- '--model %s ' "$(shell_quote "${POLYTOKEN_MODEL_REF:-$model}")"
+    ;;
+  vibe)
+    printf 'VIBE_ACTIVE_MODEL=%s VIBE_ALLOWED_MODELS=%s ' "$(shell_quote "$model")" "$(shell_quote "$(jq -cn --arg model "$VIBE_MODEL_NAME" '[$model]')")"
     ;;
   esac
 }
@@ -6869,6 +6899,10 @@ commandcode)
     COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmGen=$BUSY_GEN") "
   fi
   LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
+  ;;
+vibe)
+  LAUNCH=${LAUNCH//__VIBEBIN__/"$(shell_quote "$VIBE_BIN")"}
+  LAUNCH="VIBE_SESSION_LOGGING__SAVE_DIR=$(shell_quote "$STATE_REAL/$ID.vibe-sessions/${SPAWN_GEN}") $LAUNCH"
   ;;
 cortex)
   LAUNCH=${LAUNCH//__CORTEXBIN__/"$(shell_quote "$CORTEX_BIN")"}

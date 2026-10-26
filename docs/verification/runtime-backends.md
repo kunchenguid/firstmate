@@ -6,6 +6,12 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Mistral Vibe worker lifecycle
+
+Verified on 2026-10-26 with Vibe 3.0.2 on macOS arm64, using tmux and a guarded non-default Herdr lab.
+[Vibe verification](vibe.md) owns the credentialed refresh command, exact output, model proof, journal-state evidence, and unsupported boundaries.
+This verifies crewmate/scout work only, not a primary or secondmate.
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.

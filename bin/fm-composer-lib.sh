@@ -398,7 +398,7 @@ fm_composer_strip_ghost() {
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
 # bare `>` composer verdict is `unknown`, so the busy footer is the only
 # turn-started acknowledgement that path can read.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Esc/Ctrl\+C to interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -472,6 +472,7 @@ fm_busy_lines_match() {  # [harness]
     case "$harness" in
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
+      vibe) regex='Esc/Ctrl\+C to interrupt|Generating…|Thinking…' ;;
       cortex) regex=$FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT ;;
       commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
@@ -2109,6 +2110,9 @@ fm_composer_dialog_sink_release() {
   fi
 }
 
+# shellcheck source=bin/fm-vibe-lib.sh
+. "${BASH_SOURCE[0]%/*}/fm-vibe-lib.sh"
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
@@ -2141,6 +2145,14 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  if printf '%s\n' "$plain" | grep -qE '\[PID [0-9]+\].*tokens'; then
+    local vibe_verdict
+    vibe_verdict=$(fm_vibe_composer_state "$plain")
+    if [ "$vibe_verdict" != unknown ]; then
+      printf '%s' "$vibe_verdict"
+      return 0
+    fi
+  fi
   _fm_composer_scan_screen "$plain" "$cy" '' "$cortex_proven"
   # The lazy Cortex identity pass: only a caller that asked for it
   # (cortex=ask), has not yet supplied an identity, and sees a titled rounded
