@@ -96,6 +96,16 @@ EOF
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Socket-isolated spawns address the dedicated fleet socket: every invocation
+# may carry a leading `-L <socket>` (bin/fm-tmux-lib.sh's fm_tmux). Strip it;
+# this fixture models endpoint behavior, never socket routing (which
+# tests/fm-tmux-socket-isolation.test.sh owns).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
 case "${1:-}" in
