@@ -205,21 +205,8 @@ fm_nm_run_status_class() {  # <status_word>
 # 0 when the status identity with $3 is newer than the overview-selected run
 # with $2; 2 means same-head identity ordering is unverified.
 fm_nm_run_is_newer_than_selected() {  # <branch> <selected-id> <reported-id> <candidate-ids> <selected-head> <reported-head> <runs-list>
-  local branch=$1 selected_id=$2 reported_id=$3 candidate_ids=$4 selected_head=$5 reported_head=$6 runs=$7 first_match candidate_match
+  local branch=$1 selected_id=$2 reported_id=$3 candidate_ids=$4 selected_head=$5 reported_head=$6 runs=$7 first_match
   if [ "${selected_head:0:7}" = "${reported_head:0:7}" ]; then
-    candidate_match=$(printf '%s\n' "$candidate_ids" | awk -v selected="$selected_id" -v reported="$reported_id" -F ', ' '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i == selected) selected_seen = 1
-          if ($i == reported) reported_seen = 1
-        }
-      }
-      END { print (selected_seen && reported_seen) ? "yes" : "no" }')
-    if [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] \
-      && [ "$candidate_match" = yes ]; then
-      [[ "$reported_id" > "$selected_id" ]] && return 0
-      return 1
-    fi
     first_match=$(printf '%s\n' "$candidate_ids" | awk -v selected="$selected_id" -v reported="$reported_id" -F ', ' '
       {
         for (i = 1; i <= NF; i++) {
@@ -227,6 +214,12 @@ fm_nm_run_is_newer_than_selected() {  # <branch> <selected-id> <reported-id> <ca
           if ($i == reported) { print "reported"; exit }
         }
       }')
+    [ "$first_match" ] || return 2
+    if [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+      [ "${selected_id:0:10}" = "${reported_id:0:10}" ] && return 2
+      [[ "${reported_id:0:10}" > "${selected_id:0:10}" ]] && return 0
+      return 1
+    fi
     [ "$first_match" = selected ] && return 1
     return 2
   fi

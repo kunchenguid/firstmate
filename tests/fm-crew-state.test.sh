@@ -5765,6 +5765,41 @@ branch_sync:
   pass 'same-head active run beats a stale failed overview row'
 }
 
+test_same_head_run_with_unverifiable_timestamp_reports_unknown() {
+  reset_fakes
+  local d head out old_id new_id old_var new_var
+  old_id=01M00000000000000000000001
+  new_id=01M00000000000000000000000
+  old_var=FM_FAKE_AXI_STATUS_RUN_$old_id
+  new_var=FM_FAKE_AXI_STATUS_RUN_$new_id
+  d=$(new_case stale-same-head-unverifiable-overview-row)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"$old_id\",fm/reused-branch,failed,$head,\"\"
+  \"$new_id\",fm/reused-branch,running,$head,\"\""
+  FM_FAKE_RUN_HEAD=$head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed "s/01RUN/$new_id/")
+branch_sync:
+  state: pipeline_owned"
+  printf -v "$old_var" '%s' "$(FM_FAKE_RUN_HEAD=$head run_failed fm/reused-branch | sed "s/01RUN/$old_id/")"
+  printf -v "$new_var" '%s' "$FM_FAKE_AXI_STATUS"
+  export "${old_var?}" "${new_var?}"
+  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${head:0:7} 2026-09-28 12:00
+  failed fm/reused-branch ${head:0:7} 2026-09-28 12:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'state: unknown' 'same-head ordering within one ULID millisecond is unverified'
+  assert_contains "$out" "$old_id" 'unverified same-head ordering names the selected run'
+  assert_contains "$out" "$new_id" 'unverified same-head ordering names the reported run'
+  assert_not_contains "$out" 'state: failed' 'unverified same-head ordering never attributes stale failure'
+  unset "$old_var" "$new_var"
+  pass 'same-head run with an unverified ULID timestamp reports unknown'
+}
+
 # Overview order B (recorded newer-first): a bare AXI status can lag the
 # creation-ordered overview and name an older live run. That historical
 # identity must not hide the overview's newer completed result, including when
@@ -6173,6 +6208,7 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_current_active_run_beats_stale_overview_row
 test_current_active_run_beats_stale_failed_overview_row
 test_current_active_run_beats_same_head_stale_failed_overview_row
+test_same_head_run_with_unverifiable_timestamp_reports_unknown
 test_older_live_status_does_not_hide_newer_completed_run
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
