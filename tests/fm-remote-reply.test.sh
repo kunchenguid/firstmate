@@ -53,6 +53,7 @@ if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
+[ "${FM_REMOTE_REPLY_EMPTY_OK:-}" != 1 ] || exit 0
 host=$1
 entry=$2
 shift 2
@@ -964,6 +965,17 @@ caught_up=$(FM_STATE_OVERRIDE="$PARENT/state" bash -c '
 [ "$caught_up" -ge "$watermark_before" ] && [ "$caught_up" -le "$watermark_after" ] \
   || fail "the caught-up watermark ($caught_up) is outside the quiet window"
 pass "a quiet reply window publishes the caught-up watermark the reply guard reads"
+
+# A read that exits 0 yet prints nothing carries no delta. Capturing it would
+# publish an empty result that wakes firstmate forever, so it must read as an
+# empty window (75) and capture nothing.
+set +e
+empty_out=$(FM_REMOTE_REPLY_EMPTY_OK=1 remote_env "$ADAPTER" source ios 2>/dev/null)
+empty_rc=$?
+set -e
+[ "$empty_rc" -eq 75 ] || fail "an exit-0 empty remote read was not treated as an empty window: $empty_rc"
+[ -z "$empty_out" ] || fail "an exit-0 empty remote read produced output: $empty_out"
+pass "an exit-0 empty remote read is an empty window, not a captured result"
 
 # The observed already-handled replay class: a lost cursor (an update or
 # convergence retire) makes the next armed source recapture the WHOLE remote

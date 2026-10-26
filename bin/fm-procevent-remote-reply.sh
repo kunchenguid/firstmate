@@ -310,8 +310,19 @@ cmd_source() {
   validate_id "$id"
   read_cursor "$id"
   started=$(fm_pending_reply_now)
+  # A read that exits 0 yet prints nothing carries no delta: capturing it would
+  # publish an empty, unclassifiable result that wakes firstmate forever, so it
+  # is treated as an empty window and relistened.
+  local out
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-rr-source.XXXXXX") || return 1
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null > "$out" || rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$out" ]; then
+    rc=$WINDOW_CLOSED_EMPTY
+  else
+    cat "$out"
+  fi
+  rm -f "$out"
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
   elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
