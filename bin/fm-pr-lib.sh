@@ -1521,7 +1521,9 @@ fm_pr_poll_retirement_recover_all() {
 # The marker is the durable record that this merge's outcome was already
 # published, so it outlives the task record: a cleanup that removed it would
 # let a late duplicate report publish a second, plainer notice over the
-# cleanup's own notice.
+# cleanup's own notice. A refused or failed guarded cleanup appends a
+# `cleanup=<refused|failed>` line plus its detail line; identity matching
+# accepts exactly those trailing lines and rejects any other extension.
 fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
   local version provider host path number cleanup_tail detail_tail
