@@ -217,7 +217,7 @@ fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
 # publish its outcome under the durable key the merge notice used, so the
 # payload presented for that key carries the cleanup result.
 fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
-  local home=$1 state=$2 id=$3 url=$4 status=0
+  local home=$1 state=$2 id=$3 url=$4 status=0 lock
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
     fm_merge_outcome_restore_winner_disposition "$state" "$id" "$url" || true
@@ -231,7 +231,13 @@ fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
   case "$FM_MERGE_OUTCOME_CLEANUP" in
     refused|failed)
-      fm_pr_poll_merge_record_cleanup "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_MERGE_OUTCOME_CLEANUP" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" || status=1
+      lock="$state/$id.pr-poll-merge-notified.lock"
+      if fm_lock_acquire_wait "$lock"; then
+        fm_pr_poll_merge_record_cleanup "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_MERGE_OUTCOME_CLEANUP" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" || status=1
+        fm_lock_release "$lock" || status=1
+      else
+        status=1
+      fi
       ;;
   esac
   fm_wake_append check "merged-$id-$FM_PR_URL" \

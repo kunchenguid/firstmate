@@ -2977,6 +2977,74 @@ test_auto_cleanup_legacy_without_incarnation_skips() {
   pass "legacy lanes without incarnation identity keep the plain merge notice and are never auto-torn down"
 }
 
+test_cleanup_marker_update_does_not_clobber_newer_report() {
+  local dir state url_a url_b pid_a pid_b i rc before after
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case cleanup-marker-no-clobber)
+  state="$dir/home/state"
+  fm_merge_outcome_report "$dir/home" "$state" task-a "$url_a" poll external \
+    || fail "cleanup-marker-no-clobber: report A failed"
+  [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = false ] \
+    || fail "cleanup-marker-no-clobber: report A was absorbed"
+  fm_merge_outcome_auto_teardown() {
+    FM_MERGE_OUTCOME_CLEANUP=refused
+    FM_MERGE_OUTCOME_CLEANUP_DETAIL="teardown refused for test"
+    return 0
+  }
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.pr-poll-merge-notified"*)
+    : > "$FM_TEST_MV_READY"
+    while [ ! -e "$FM_TEST_MV_RELEASE" ]; do sleep 0.01; done
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  rm -f "$dir/mv-ready" "$dir/mv-release"
+  FM_TEST_MV_READY="$dir/mv-ready" FM_TEST_MV_RELEASE="$dir/mv-release" FM_TEST_REAL_MV="$REAL_MV" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" STATE="$state" \
+    fm_merge_outcome_cleanup_and_publish "$dir/home" "$state" task-a "$url_a" >"$dir/cleanup-a.out" 2>"$dir/cleanup-a.err" &
+  pid_a=$!
+  for i in $(seq 1 100); do
+    [ -e "$dir/mv-ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$dir/mv-ready" ] || { kill "$pid_a" 2>/dev/null || true; wait "$pid_a" 2>/dev/null || true; fail "cleanup-marker-no-clobber: cleanup A did not reach its marker update"; }
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" STATE="$state" \
+    fm_merge_outcome_report "$dir/home" "$state" task-a "$url_b" poll external >"$dir/report-b.out" 2>"$dir/report-b.err" &
+  pid_b=$!
+  sleep 1
+  if ! process_is_live_non_zombie "$pid_b"; then
+    : > "$dir/mv-release"
+    wait "$pid_a" 2>/dev/null || true
+    wait "$pid_b" 2>/dev/null || true
+    fail "cleanup-marker-no-clobber: report B was not serialized behind cleanup A"
+  fi
+  : > "$dir/mv-release"
+  wait "$pid_a" || fail "cleanup-marker-no-clobber: cleanup A failed: $(cat "$dir/cleanup-a.err")"
+  wait "$pid_b" || fail "cleanup-marker-no-clobber: report B failed: $(cat "$dir/report-b.err")"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 2 \
+    || fail "cleanup-marker-no-clobber: marker does not name the newer report B"
+  ! fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
+    || fail "cleanup-marker-no-clobber: marker still names the superseded report A"
+  before=$(grep -c -F "merged-task-a-$url_b" "$state/.wake-queue" 2>/dev/null || true)
+  FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  fm_merge_outcome_report "$dir/home" "$state" task-a "$url_b" poll external \
+    || fail "cleanup-marker-no-clobber: duplicate report B failed"
+  [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ] \
+    || fail "cleanup-marker-no-clobber: duplicate report B was not deduplicated"
+  after=$(grep -c -F "merged-task-a-$url_b" "$state/.wake-queue" 2>/dev/null || true)
+  [ "$after" = "$before" ] \
+    || fail "cleanup-marker-no-clobber: duplicate report B published a second notice"
+  unset -f fm_merge_outcome_auto_teardown
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
+  pass "a refused cleanup cannot clobber a newer merge report identity"
+}
+
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
   local dir state url rc last head
   url=https://github.com/o/r/pull/1
@@ -4221,6 +4289,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_watcher_surfaces_guarded_auto_teardown_refusal
 test_merged_notice_auto_teardown_is_done_only_and_guarded
 test_auto_cleanup_legacy_without_incarnation_skips
+test_cleanup_marker_update_does_not_clobber_newer_report
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
 test_auto_cleanup_preserves_relaunched_incarnation
 test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report
