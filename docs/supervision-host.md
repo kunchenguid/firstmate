@@ -109,8 +109,8 @@ The host asks the Pi branch's offer rule (`branchOfferForWake`, through `bin/fm-
 So a close reaches main off Pi exactly when it would on Pi: a check trigger, a decision-owned signal or stale trigger, and a scan that is unsafe or holds nothing for the branch stay main's.
 On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
-The host confirms no handling handoff and republishes the watcher's recovery marker as downtime, even when an earlier engine turn left it reading handling, because the re-arm owner delivers a close to main only while that marker reads downtime.
-If that publish fails, the host prints a `watcher: FAILED` line instead of the close and exits nonzero, so the arm owner reports a failure rather than a hand-back it could not deliver.
+The host confirms no handling handoff.
+[Failure direction](#failure-direction) owns downtime restoration and publication-failure delivery.
 The default successor is one-shot, so a lost main continuation can still leave supervision down after that successor's next close.
 The opt-in [acknowledged hand-back](#acknowledged-hand-back) keeps replacing those closed cycles until main acknowledges.
 The session's next park without `--restart` requests a take-over to restore a single host-owned arm; the [host header](../bin/fm-supervision-host.sh) owns successor persistence and cleanup, and the [arm header](../bin/fm-watch-arm.sh) owns take-over eligibility and fallback.
@@ -260,9 +260,16 @@ All other primaries and the host-off Stop path retain their existing behavior.
 ## Failure direction
 
 With acknowledged hand-back disabled, every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
-Before handing it back, the host stops its successor cycle, and whenever a successor generation was recorded (confirmed or not), it explicitly republishes downtime for that generation.
-That publication is required even when the successor already exited, because no watcher cleanup remains to make the close deliverable to the arm owner.
-If that publication fails, the hand-back adds a `supervision-host: watcher downtime could not be restored` line and the host exits nonzero.
+Engine failures, attended pass-throughs, captain outcomes, and park boundaries republish downtime before emitting a wake to main or leaving a successor cycle running.
+`hand_back` owns that publication except on the initial main-only pass-through, where `leave_successor_for_main` retains its own publication path.
+When leaving a successor cycle running, `hand_back` uses the [handling-successor hand-back contract](watcher-continuity.md#durable-queue-and-turn-end-backstop).
+Otherwise it uses [ordinary watcher publication](watcher-continuity.md#recovery-episode-acknowledgement), as does the initial main-only pass-through.
+Failure and boundary paths stop their successor before that publication.
+The re-arm owner delivers a close to main only while the watcher's recovery marker reads downtime.
+An engine drain can move the episode to handling after a successor close published downtime, so the host must restore downtime even when that close has already arrived.
+Publication is also required after the successor exits, when no watcher cleanup remains to make the close deliverable to the arm owner.
+If `hand_back` cannot publish downtime, it stops any successor, adds a `supervision-host: watcher downtime could not be restored` line, and exits nonzero.
+On the initial main-only path, a failed publication instead produces a `watcher: FAILED` line without the close and exits nonzero, so the arm owner reports a failure rather than a hand-back it could not deliver.
 On Claude, a Stop hook whose rewake is refused while the recovery marker is still `pending:handling` and no watcher is live commits the auto-arm failure notice once per failure episode (`failed-suppressed` after that) and still exits 2, so the hand-back reaches main; every other refused rewake stays silent as before.
 So the owner's next arm starts from the same state as without the host, and the wake stays durable in the queue.
 
