@@ -799,6 +799,14 @@ test_resolve_selector_three_forms() {
   fakebin="$TMP_ROOT/resolve-fakebin"; mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# The bare-name search goes through fm_tmux, so a fleet-scoped call carries a
+# leading `-L <socket>`; strip it to reach the subcommand.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "${1:-}" in
   list-windows) printf 'firstmate:adhoc\nother:otherwin\n' ;;
 esac
@@ -866,6 +874,14 @@ make_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $F
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+# Fleet-scoped sends carry a leading `-L <socket>` (fm_tmux); the log above
+# keeps the full argv, and the dispatch below needs the subcommand.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
