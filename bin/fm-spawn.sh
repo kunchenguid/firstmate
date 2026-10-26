@@ -61,7 +61,13 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--held-ok]
+#   --held-ok, with --relaunch only, accepts a backlog item that is In flight
+#   but captain-held or blocked: the relaunch replaces the worker of work that
+#   is already dispatched and moves the row nowhere, so the hold is not a reason
+#   to refuse. bin/fm-control.sh passes it for a --fresh-slot relaunch, whose
+#   subjects are exactly the parked, held lanes that lose their slot. A queued
+#   or closed item keeps the ordinary dispatchability refusal.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -944,6 +950,7 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RELAUNCH_HELD_OK=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -1016,6 +1023,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --held-ok) RELAUNCH_HELD_OK=1 ;;
   --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
@@ -1161,6 +1169,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
 else
+  [ "$RELAUNCH_HELD_OK" -eq 0 ] || {
+    echo "error: --held-ok applies to --relaunch only; a fresh dispatch of a held or blocked item is refused" >&2
+    exit 1
+  }
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
@@ -4421,6 +4433,15 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# --relaunch --held-ok (header): an in-flight row, held or blocked, is accepted
+# because the relaunch replaces the worker of work already dispatched and moves
+# the row nowhere; queued and closed rows keep the ordinary dispatchability rule.
+spawn_relaunch_held_ok_row() {  # <row-state>
+  [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_HELD_OK" -eq 1 ] || return 1
+  case "$1" in in_flight\ *) return 0 ;; esac
+  return 1
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -4445,6 +4466,8 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
+  elif spawn_relaunch_held_ok_row "$BACKLOG_ROW_STATE"; then
+    :
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
@@ -4998,6 +5021,23 @@ spawn_send_text_line() { # <target> <text>
   tern) fm_backend_tern_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+# Before a fresh acquisition, print every record bin/fm-slot-audit.sh reads as
+# slot-unprotected as a warning: the `treehouse get` this spawn is about to send
+# is exactly the acquisition that can take such a slot. FM_SLOT_AUDIT_BIN lets
+# tests stub the audit; an audit that cannot run warns about nothing.
+spawn_warn_unprotected_slots() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "slot-audit: "*" verdict="*slot-unprotected*)
+        echo "warning: $line - the treehouse get this spawn is about to run may take that slot; re-protect or rebind its task (bin/fm-control.sh <id> relaunch --note <text>, with --fresh-slot once the slot has been reassigned)" >&2
+        ;;
+    esac
+  done <<EOF
+$("${FM_SLOT_AUDIT_BIN:-$SCRIPT_DIR/fm-slot-audit.sh}" --all 2>/dev/null || true)
+EOF
+}
+
 spawn_current_path() { # <target>
   case "$BACKEND" in
   tmux) fm_backend_tmux_current_path "$1" ;;
@@ -5541,6 +5581,10 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" != t3code ]; then
+    # The `treehouse get` sent next is exactly the acquisition that takes a slot
+    # a parked task no longer protects, so name every such record first
+    # (bin/fm-slot-audit.sh owns the verdicts). Read-only and best effort.
+    spawn_warn_unprotected_slots
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -6718,7 +6762,11 @@ fi
 # point below so every earlier launch-delivery failure remains unwindable.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  if spawn_relaunch_held_ok_row "$BACKLOG_ROW_STATE"; then
+    fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE" --held-ok
+  else
+    fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  fi
 }
 
 # The deferred-signal exit path's preservation report. A claim about preserved
@@ -6742,7 +6790,8 @@ spawn_report_preserved_state() {
     fi
     return 1
   fi
-  if [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ]; then
+  if [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ] \
+     || spawn_relaunch_held_ok_row "$FM_BACKLOG_ROW_STATE"; then
     SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
     return 0
   fi

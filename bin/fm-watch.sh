@@ -3133,6 +3133,61 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Heartbeat slot audit. Runs bin/fm-slot-audit.sh --all (FM_SLOT_AUDIT_BIN lets
+# tests stub it) and queues one `check: slot-audit <task> <verdict>` wake per
+# task whose verdict is not ok and differs from the verdict last surfaced for
+# it, recorded in .slot-audit-surfaced-<task>. A task that reads ok again, or
+# whose record is gone, loses its marker so a recurrence re-fires; a task with a
+# slot-audit row still queued (for example bin/fm-teardown.sh's stale-record
+# wake) is not duplicated. 0 when at least one wake was queued, with
+# SLOT_AUDIT_WAKE_REASON set to the first one's reason; an audit that fails to
+# run changes nothing.
+SLOT_AUDIT_WAKE_REASON=
+slot_audit_heartbeat() {
+  local out rc=0 line task verdict marker current queued surfaced=0 seen=' '
+  SLOT_AUDIT_WAKE_REASON=
+  out=$("${FM_SLOT_AUDIT_BIN:-$SCRIPT_DIR/fm-slot-audit.sh}" --all 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    triage_log "slot audit did not run (rc=$rc); surfaced markers left as they are"
+    return 1
+  fi
+  queued=$(fm_wake_queued_keys check 2>/dev/null || true)
+  while IFS= read -r line; do
+    case "$line" in "slot-audit: "*) ;; *) continue ;; esac
+    task=${line#slot-audit: }
+    task=${task%% *}
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    verdict=${line##* verdict=}
+    verdict=${verdict%% *}
+    seen="$seen$task "
+    marker="$STATE/.slot-audit-surfaced-$task"
+    if [ "$verdict" = ok ]; then
+      rm -f "$marker"
+      continue
+    fi
+    current=$(cat "$marker" 2>/dev/null || true)
+    [ "$current" != "$verdict" ] || continue
+    if printf '%s\n' "$queued" | grep -qx "slot-audit:$task"; then
+      continue
+    fi
+    if ! fm_wake_append check "slot-audit:$task" "check: slot-audit $task $verdict - $line"; then
+      triage_log "could not queue the slot-audit wake for $task"
+      continue
+    fi
+    printf '%s\n' "$verdict" > "$marker" || true
+    [ -n "$SLOT_AUDIT_WAKE_REASON" ] || SLOT_AUDIT_WAKE_REASON="check: slot-audit $task $verdict"
+    surfaced=1
+  done <<EOF
+$out
+EOF
+  for marker in "$STATE"/.slot-audit-surfaced-*; do
+    [ -e "$marker" ] || continue
+    task=${marker##*/.slot-audit-surfaced-}
+    case "$seen" in *" $task "*) ;; *) rm -f "$marker" ;; esac
+  done
+  [ "$surfaced" = 1 ]
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -4168,6 +4223,14 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Slot audit (bin/fm-slot-audit.sh owns the verdicts): a record whose slot
+    # evidence disagrees with it wakes firstmate once per task until its verdict
+    # changes. Runs in both postures, before the heartbeat triage below, because
+    # a lost slot is actionable in its own right.
+    if slot_audit_heartbeat; then
+      touch "$STATE/.last-heartbeat"
+      wake "$SLOT_AUDIT_WAKE_REASON"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

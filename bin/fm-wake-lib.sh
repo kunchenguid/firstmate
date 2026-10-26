@@ -1777,6 +1777,50 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Stale-slot marker: durable evidence that a record's pool slot was proven
+# another task's. A teardown whose own claim proves another record stale
+# (bin/fm-teardown.sh, slot ownership) writes slot_stale=<epoch>,
+# slot_stale_by=<task>, and slot_stale_slot=<slot> into that record under its
+# metadata lock before the slot is returned, because the return drops the claim
+# that was the proof. bin/fm-control.sh's relaunch --fresh-slot accepts it,
+# bin/fm-slot-audit.sh reads it as slot-lost, and a rebind drops it; the
+# record's own teardown removes it with the record.
+fm_slot_stale_marker_write() {  # <meta> <by-task> <slot>
+  local meta=$1 by=$2 slot=$3 lock tmp line rc=0
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$meta" ] || [ -L "$meta" ] || ! tmp=$(mktemp "${meta%/*}/.${meta##*/}.stale.XXXXXX"); then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        slot_stale=*|slot_stale_by=*|slot_stale_slot=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$meta" &&
+    printf 'slot_stale=%s\nslot_stale_by=%s\nslot_stale_slot=%s\n' "$(date +%s)" "$by" "$slot"
+  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$meta" || rc=1
+  rm -f "$tmp"
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+# Succeeds when <meta> carries a stale-slot marker naming <slot>.
+fm_slot_stale_marker_names() {  # <meta> <slot>
+  local meta=$1 slot=$2 line stamp='' marked=''
+  [ -f "$meta" ] && [ -n "$slot" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      slot_stale=*) stamp=${line#slot_stale=} ;;
+      slot_stale_slot=*) marked=${line#slot_stale_slot=} ;;
+    esac
+  done < "$meta" 2>/dev/null || return 1
+  [ -n "$stamp" ] && [ -n "$marked" ] || return 1
+  [ "$marked" = "$slot" ] || [ "$marked" -ef "$slot" ]
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

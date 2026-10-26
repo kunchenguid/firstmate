@@ -563,8 +563,8 @@ fm_backlog_row_artifact_supported() {
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local data authorized_data=$1 id=$2 previous_arg=''
+  local arg deliverable=''
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -593,63 +593,76 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     previous_arg=$arg
   done
   if [ -n "$deliverable" ]; then
-    out=$(fm_backlog_row_show "$data" "$id" --full)
-    command_status=$?
-    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
-    if [ "$command_status" -ne 0 ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-      return "$command_status"
-    fi
-    # The leading quote selects a JSON-encoded bare string, which is exactly the
-    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
-    # decoder below requests it rather than inheriting the local default. It then
-    # writes bytes, because printing the decoded characters to a stream with no
-    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
-    # silently corrupts the body this rewrites.
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/
-          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value unless $value eq "-";
-      ') || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
-    line="Deliverable of the finished work: $deliverable"
-    case $'\n'"$body"$'\n' in
-      *$'\n'"$line"$'\n'*) ;;
-      *)
-        new_body=$line
-        [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-        tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        }
-        if ! printf '%s\n' "$new_body" > "$tmp"; then
-          rm -f -- "$tmp"
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        fi
-        if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-          rm -f -- "$tmp"
-          return 1
-        fi
-        rm -f -- "$tmp"
-        ;;
-    esac
+    fm_backlog_body_append_line "$authorized_data" "$id" \
+      "Deliverable of the finished work: $deliverable" || return $?
   fi
   if [ "${#row_args[@]}" -gt 0 ]; then
     fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
   fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
+}
+
+# Append one line to the end of a task body, separated from the existing body
+# by a blank line; a body that already carries exactly that line is left alone.
+# The retained-hold deliverable and bin/fm-teardown.sh's records-only note both
+# land through this one path. Fails with FM_BACKLOG_TRANSITION_ERROR set when
+# the row cannot be read, decoded, staged, or updated.
+fm_backlog_body_append_line() {  # <data-dir> <id> <line>
+  local data authorized_data=$1 id=$2 line=$3 out command_status body new_body tmp
+  if ! data=$(fm_backlog_data_absolute "$1"); then
+    FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
+    return 1
+  fi
+  FM_BACKLOG_TRANSITION_ERROR=
+  out=$(fm_backlog_row_show "$data" "$id" --full)
+  command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
+  if [ "$command_status" -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
+      || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
+    return "$command_status"
+  fi
+  # The leading quote selects a JSON-encoded bare string, which is exactly the
+  # value an older JSON::PP rejects unless allow_nonref is asked for, so the
+  # decoder below requests it rather than inheriting the local default. It then
+  # writes bytes, because printing the decoded characters to a stream with no
+  # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
+  # silently corrupts the body this rewrites.
+  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      exit 0 if $shown eq "" || $shown eq "-";
+      my $value = $shown =~ /\A"/
+        ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+      binmode STDOUT, ":raw";
+      utf8::encode($value) if utf8::is_utf8($value);
+      print $value unless $value eq "-";
+    ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+    return 1
+  }
+  case $'\n'"$body"$'\n' in
+    *$'\n'"$line"$'\n'*) return 0 ;;
+  esac
+  new_body=$line
+  [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-body-line.XXXXXX") || {
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the body line for $id"
+    return 1
+  }
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the body line for $id"
+    return 1
+  fi
+  if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
 }
 
 fm_backlog_canonical_existing() {
@@ -807,8 +820,11 @@ fm_backlog_row_dispatchable() {
   esac
 }
 
+# The optional fifth argument --held-ok accepts an In-flight row whatever its
+# hold or block flags say, moving it nowhere: bin/fm-spawn.sh passes it for a
+# --relaunch --held-ok, which replaces the worker of already-dispatched work.
 fm_backlog_dispatch_transition() {
-  local meta=$1 data=$2 id=$3 state=$4 row row_status
+  local meta=$1 data=$2 id=$3 state=$4 held_ok=${5:-} row row_status
   fm_backlog_record_present "$meta" "task record" "$state" || return 1
   fm_backlog_row_probe "$data" "$id"
   row_status=$?
@@ -821,6 +837,9 @@ fm_backlog_dispatch_transition() {
     return "$row_status"
   fi
   row=$FM_BACKLOG_ROW_STATE
+  if [ "$held_ok" = --held-ok ]; then
+    case "$row" in in_flight\ *) return 0 ;; esac
+  fi
   if ! fm_backlog_row_dispatchable "$row"; then
     FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not dispatchable in state $row"
     return 1

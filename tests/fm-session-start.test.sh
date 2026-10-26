@@ -3159,4 +3159,43 @@ test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
+# --- slot audit: the digest carries every non-ok verdict -----------------------
+#
+# The fleet-state section runs bin/fm-slot-audit.sh --all (stubbed through
+# FM_SLOT_AUDIT_BIN) and prints only the records whose verdict is not ok, or
+# `(none)`, so a lost or unprotected slot is a startup recovery input.
+test_slot_audit_section_lists_only_non_ok_verdicts() {
+  local rec root home fakebin out
+  rec=$(new_world slot-audit)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  cat > "$fakebin/fm-slot-audit-fake.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'slot-audit: parked slot=/pool/3/proj claim=other:claimant worker=outside:/proj pool=in-use verdict=slot-lost\n'
+printf 'slot-audit: healthy slot=/pool/4/proj claim=mine worker=in-slot pool=in-use verdict=ok\n'
+printf 'slot-audit: drifted slot=/pool/6/proj claim=absent worker=outside:/proj pool=available verdict=slot-unprotected,worker-outside-slot\n'
+SH
+  chmod +x "$fakebin/fm-slot-audit-fake.sh"
+
+  out=$(FM_SLOT_AUDIT_BIN="$fakebin/fm-slot-audit-fake.sh" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Slot audit (records whose pool slot disagrees with them)" "the digest should carry the slot audit subsection"
+  assert_contains "$out" "slot-audit: parked slot=/pool/3/proj claim=other:claimant worker=outside:/proj pool=in-use verdict=slot-lost" \
+    "a slot-lost record should be listed verbatim"
+  assert_contains "$out" "verdict=slot-unprotected,worker-outside-slot" "a combined hazard should be listed"
+  assert_not_contains "$out" "slot-audit: healthy" "an ok record should be left out"
+
+  cat > "$fakebin/fm-slot-audit-fake.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'slot-audit: healthy slot=/pool/4/proj claim=mine worker=in-slot pool=in-use verdict=ok\n'
+SH
+  out=$(FM_SLOT_AUDIT_BIN="$fakebin/fm-slot-audit-fake.sh" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=${out#*Slot audit (records whose pool slot disagrees with them)}
+  out=${out%%Orphan status logs*}
+  assert_contains "$out" "(none)" "an all-ok audit should print (none) under the subsection"
+  pass "session start: the slot audit subsection lists every non-ok verdict and (none) otherwise"
+}
+test_slot_audit_section_lists_only_non_ok_verdicts
+
 echo "# fm-session-start.test.sh: all assertions passed"

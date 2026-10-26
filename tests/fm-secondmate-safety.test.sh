@@ -2113,6 +2113,67 @@ EOF
   pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
+# The same two child records, but the slot's claim names live-child: the claim
+# proves stale-child's record stale, so the forced teardown proceeds instead of
+# refusing, and since it removes stale-child with the rest of the home, it
+# queues no wake telling anyone to relaunch it.
+test_secondmate_force_teardown_flags_stale_child_record_on_claimed_slot() {
+  local home subhome childproj childwt fakebin log err rc
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  home="$TMP_ROOT/force-claimed-slot-home"
+  subhome="$TMP_ROOT/force-claimed-slot-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-claimed-slot-pool/1/alpha"
+  err="$TMP_ROOT/force-claimed-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" claimed-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-claimed-slot-pool/treehouse-state.json"
+  printf 'task=live-child\nhome=%s\n' "$subhome" > "$TMP_ROOT/force-claimed-slot-pool/1/.fm-slot-owner"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  for child in stale-child live-child; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=firstmate:fm-$child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-claimed-slot-fake")
+  log="$TMP_ROOT/force-claimed-slot-fake/tmux.log"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-claimed-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ ! -e "$home/state/domain.meta" ] \
+    || fail "forced secondmate teardown refused a claimed child slot beside a stale record (rc=$rc): $(cat "$err")"
+  assert_not_contains "$(cat "$err")" "REFUSED" "the stale child record should be flagged, not refused"
+  assert_not_contains "$(cat "$err")" "could not mark" "the stale child record should be marked before its home is removed"
+  [ ! -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown left the stale child record"
+  ! grep -Fq 'slot-audit:stale-child' "$home/state/.wake-queue" 2>/dev/null \
+    || fail "a slot-audit wake was queued for a child record this teardown removed: $(cat "$home/state/.wake-queue")"
+  assert_not_contains "$(cat "$err")" "stale-child needs a fresh slot" "no fresh-slot advice for a removed child record"
+  pass "forced secondmate teardown proceeds past a sibling's stale record on a claimed child slot without flagging a record it removes"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -3174,6 +3235,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
+test_secondmate_force_teardown_flags_stale_child_record_on_claimed_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

@@ -964,6 +964,18 @@ for meta in "$STATE"/*.meta; do
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
+# Every live record whose pool slot disagrees with it (bin/fm-slot-audit.sh owns
+# the verdicts and the line format); ok verdicts are left out. Read-only, so it
+# runs in the read-only session too. FM_SLOT_AUDIT_BIN lets tests stub it.
+subsection "Slot audit (records whose pool slot disagrees with them)"
+SLOT_AUDIT_OUT=$(fm_run_timed "$ENDPOINT_TIMEOUT" "${FM_SLOT_AUDIT_BIN:-$SCRIPT_DIR/fm-slot-audit.sh}" --all 2>/dev/null \
+  | grep -Ev ' verdict=ok$' || true)
+if [ -n "$SLOT_AUDIT_OUT" ]; then
+  printf '%s\n' "$SLOT_AUDIT_OUT"
+else
+  printf '(none)\n'
+fi
+
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
 for status in "$STATE"/*.status; do
