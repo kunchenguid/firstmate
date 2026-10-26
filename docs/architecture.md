@@ -258,6 +258,11 @@ Ordinary child teardown uses its own home's configuration; retiring a whole home
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns publication, retirement, path safety, and retention mechanics.
 [`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh) and [`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) cover archival and isolation across local, nested, and remote retirement.
 
+### Read-only record exports
+
+The [record export reference](configuration.md#record-export-configrecord-export-root) owns the operator contract, allowlist, publication mechanics, and teardown boundary.
+The export root remains cold output; no operational reader consumes it.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
