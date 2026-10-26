@@ -19,9 +19,8 @@
 # that executable. Unset (or any other value), the pane's executable is unknown
 # because the identity probe reports `pi` for both, so the adapter checks every
 # Pi executable on PATH and requires at least one to exist and all found to be
-# pinned. FM_COMPOSER_PI_ADAPTER_VERSION overrides the lookup (test fixtures pin
-# it explicitly). Outside the pin set, or when no version can
-# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
+# pinned. Outside the pin set, or when no version can be read, the adapter
+# refuses the banner-as-empty verdict so an unpinned Pi
 # rendering cannot become a shared empty proof and the classifier keeps its
 # ordinary unknown answer. The live guard proves the pinned shape on a pinned
 # install, and on an unpinned install proves that refusal and names the release
@@ -50,8 +49,6 @@ FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'
 # From pi 0.87.1 on, pi draws the fixed bug-report hint directly below EVERY
 # error banner. It is vendor boilerplate attached to the banner, not a
 # transcript row proving a new turn, so the scan skips at most one occurrence.
-# FM_COMPOSER_PI_TERMINAL_ERROR_RE and FM_COMPOSER_PI_ERROR_HINT_RE override
-# for an unverified rendering.
 # Fixed banner Pi draws once a turn ended on Codex's usage limit.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
 # Fixed bug-report hint row pi 0.87.1 draws under every error banner.
@@ -84,10 +81,6 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
 # prints no version keeps the banner unproven.
 fm_composer_pi_adapter_installed_pinned() {
   local exe found=0 v candidates='pi pi-signed'
-  if [ -n "${FM_COMPOSER_PI_ADAPTER_VERSION:-}" ]; then
-    fm_composer_pi_adapter_version_pinned "$FM_COMPOSER_PI_ADAPTER_VERSION"
-    return
-  fi
   case "${FM_COMPOSER_PI_EXECUTABLE:-}" in
     pi|pi-signed) candidates=$FM_COMPOSER_PI_EXECUTABLE ;;
   esac
@@ -126,11 +119,11 @@ fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
     trimmed=$(_fm_composer_row_content "$raw" 0)
     if [ -n "$trimmed" ]; then
       if fm_composer_idle_matches "$trimmed" \
-        "${FM_COMPOSER_PI_TERMINAL_ERROR_RE:-$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT}" sensitive; then
+        "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT" sensitive; then
         return 0
       fi
       if [ "$hint_seen" = 0 ] && fm_composer_idle_matches "$trimmed" \
-        "${FM_COMPOSER_PI_ERROR_HINT_RE:-$FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT}" sensitive; then
+        "$FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT" sensitive; then
         hint_seen=1
         row=$((row - 1))
         continue

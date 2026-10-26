@@ -78,7 +78,6 @@ VERSION=$(pi --version 2>/dev/null | head -1)
 # the banner screen empty; an unpinned one must keep the adapter's refusal (a
 # stale status stays unknown) and is named so its pin can be refreshed, rather
 # than turning every newer Pi release into a red build.
-unset FM_COMPOSER_PI_ADAPTER_VERSION
 if fm_composer_pi_adapter_version_pinned "$VERSION"; then
   PINNED=1
 else
