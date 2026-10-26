@@ -88,8 +88,10 @@
 #              recorded on refuses before the old agent stops. Such a task
 #              stays on the account it was launched on: its session state
 #              lives under that root, so a pin changed since the spawn moves
-#              new tasks, never this one. A secondmate replacement starts from
-#              its own home's records, so its pin is still re-read.
+#              new tasks, not this one. Only a pinned spawn records an
+#              account; a task launched unpinned records none, so a pin added
+#              later reaches it on relaunch. A secondmate replacement starts
+#              from its own home's records, so its pin is still re-read.
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.

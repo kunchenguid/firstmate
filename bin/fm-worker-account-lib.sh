@@ -22,12 +22,14 @@
 # one absolute path to an existing readable, searchable directory. Firstmate
 # never copies credentials or changes a global login.
 #
-# An ordinary task stays on the account it was launched on. The spawn records
-# that account, and fm_worker_account_relaunch_guard refuses a relaunch whose
-# current pin selects a different account directory, because the replacement
-# would start without the outgoing worker's session state, which stays under
-# the recorded root. A secondmate replacement starts from its own home's
-# records instead, so it keeps re-reading the pin.
+# An ordinary task that recorded an account at launch stays on it. A pinned
+# spawn records that account, and fm_worker_account_relaunch_guard refuses a
+# relaunch whose current pin selects a different account directory, because
+# the replacement would start without the outgoing worker's session state,
+# which stays under the recorded root. A task launched unpinned records no
+# account, so a pin added later reaches it on its next relaunch. A secondmate
+# replacement starts from its own home's records instead, so it keeps
+# re-reading the pin.
 #
 # A Pi root can hold several provider identities, so config/pi-account names
 # the root on line 1 and the providers that home may spend on line 2,
