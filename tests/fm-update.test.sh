@@ -48,8 +48,23 @@ new_world() {
   cat > "$w/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+sock=
+if [ "${1:-}" = "-L" ]; then
+  sock=${2:-}
+  shift 2
+fi
+windows="$FM_FAKE_DIR/windows"
+[ -z "$sock" ] || windows="$FM_FAKE_DIR/windows-$sock"
 case "${1:-}" in
-  list-windows) cat "$FM_FAKE_DIR/windows" ;;
+  list-windows)
+    # A recorded socket with no server file is a real absent server, which the
+    # adapter must read as missing rather than as a readable empty inventory.
+    if [ -n "$sock" ] && [ ! -f "$windows" ]; then
+      printf 'no server running on /tmp/tmux-%s/%s\n' "$(id -u)" "$sock" >&2
+      exit 1
+    fi
+    cat "$windows"
+    ;;
   display-message)
     target=
     for arg in "$@"; do
@@ -97,7 +112,7 @@ SH
 # which is what makes a restart provable. Pass a backend to model one that cannot
 # prove an agent stopped.
 add_sm() {
-  local w=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local w=$1 id=$2 harness=${3:-claude} backend=${4:-} socket=${5:-}
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
     printf 'window=main:fm-%s\n' "$id"
@@ -107,9 +122,14 @@ add_sm() {
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
     [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
+    [ -z "$socket" ] || printf 'socket=%s\n' "$socket"
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
-  printf 'fm-%s\n' "$id" >> "$w/fake/windows"
+  if [ -z "$socket" ]; then
+    printf 'fm-%s\n' "$id" >> "$w/fake/windows"
+  else
+    printf 'fm-%s\n' "$id" >> "$w/fake/windows-$socket"
+  fi
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
@@ -243,6 +263,43 @@ test_dead_secondmate_gets_no_action() {
   assert_contains "$out" "restart-secondmates: none" "a stopped mate must not be sent to restart"
   assert_contains "$out" "nudge-secondmates: none" "a stopped mate must not receive a queued nudge"
   pass "T3d an already-stopped secondmate is left to startup recovery"
+}
+
+# --- T3f: a live mate on its recorded socket is still seen -------------------
+# The liveness read feeds the action split. Without the record's socket scope it
+# resolves against the ambient server, where a dedicated-socket mate reads
+# missing and silently drops out of both the restart and the nudge sets.
+test_socket_scoped_mate_liveness_reads_its_socket() {
+  local w out sock unscoped scoped
+  w=$(new_world t3f)
+  sock="fmupd-sock-$$"
+  add_sm "$w" smsock claude "" "$sock"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate smsock: updated " "the socket mate's home still advances"
+  assert_contains "$out" "restart-secondmates: fm-smsock" \
+    "a live mate on its recorded socket must still be in the restart set"
+  assert_contains "$out" "nudge-secondmates: none" \
+    "a restarted socket mate must not also be nudged"
+
+  # Counterfactual, straight from the adapter: the same window is missing to an
+  # ambient read, so only the recorded scope can have classified it alive.
+  unscoped=$(
+    . "$ROOT/bin/fm-backend.sh"
+    PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" fm_backend_agent_state tmux main:fm-smsock
+  )
+  scoped=$(
+    . "$ROOT/bin/fm-backend.sh"
+    PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" FM_TMUX_SOCKET="$sock" \
+      fm_backend_agent_state tmux main:fm-smsock
+  )
+  [ "$unscoped" = missing ] \
+    || fail "the fixture must read missing without the recorded scope, got '$unscoped'"
+  [ "$scoped" = alive ] \
+    || fail "the recorded scope must read the live mate, got '$scoped'"
+  pass "T3f a live secondmate on its recorded socket is restarted, and a scope-less read is missing"
 }
 
 # --- T3e: a legacy remote advance still restarts ---------------------------
@@ -561,6 +618,7 @@ test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge
 test_dead_secondmate_gets_no_action
+test_socket_scoped_mate_liveness_reads_its_socket
 test_legacy_remote_advance_restarts
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped

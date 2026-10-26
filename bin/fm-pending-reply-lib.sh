@@ -824,8 +824,15 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # global OR of every vendor signature), so one harness's output cannot make
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
-fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
-  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
+# <socket> is the recorded dedicated tmux socket of a LOCAL mate: every read
+# below addresses that server, or the ambient read reports the live pane as
+# unknown and the delivery confirmation never sees its busy-to-idle turn.
+# Empty (a legacy record, or the remote herdr path) keeps ambient addressing.
+fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness] [socket]
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} socket=${5-} native tail40
+  local FM_TMUX_SOCKET
+  # shellcheck disable=SC2034 # Read dynamically by fm_tmux() in the reads below.
+  FM_TMUX_SOCKET=$socket
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
@@ -1672,7 +1679,8 @@ fm_pending_reply_tick() {  # <state-dir>
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness" \
+              "$(fm_backend_tmux_socket_of_meta "$meta")")
           fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")

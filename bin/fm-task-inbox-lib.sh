@@ -376,6 +376,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # must address that same server, or a fleet worker reads as `missing` from the
 # ambient server and the doorbell never lands. Empty (a legacy record) keeps
 # ambient addressing verbatim, exactly where pre-isolation spawns put the pane.
+# That local assignment is deliberate: it also shadows a nonempty
+# FM_TMUX_SOCKET exported by an ancestor fleet pane, which is the one boundary
+# where this differs from a pre-fix ring that inherited the ancestor value.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [socket]
   local backend=$1 target=$2 rec=$3 label=${4:-} socket=${5:-} line cstate verdict
   local FM_TMUX_SOCKET

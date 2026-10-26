@@ -1356,6 +1356,37 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   pass "pending replies scope Kimi capture fallback by recorded harness"
 )
 
+# The local observation reads a mate's pane through its RECORDED socket. A
+# scope-less read resolves against the ambient server, reports unknown, and the
+# busy-to-idle delivery confirmation never lands.
+test_local_observation_uses_the_recorded_socket() (
+  local home state corr rec sm_home sock="fleet-observe-$$"
+  home=$(setup_parent observation-socket)
+  state="$home/state"
+  sm_home="$home/sm"
+  mkdir -p "$sm_home/state"
+  # This fixture clock is intentionally scoped to the isolated subshell.
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=10200
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "socket observation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
+  printf 'socket=%s\n' "$sock" >> "$state/hibit.meta"
+  # shellcheck disable=SC2329 # Both are called indirectly by the tick.
+  fm_backend_busy_state() { printf 'unknown'; }
+  # shellcheck disable=SC2329 # Called indirectly through the tick's observation.
+  fm_backend_capture() {
+    [ "${FM_TMUX_SOCKET:-}" = "$sock" ] || return 1
+    printf 'Working...'
+  }
+
+  fm_pending_reply_tick "$state"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
+    || fail "the local observation must capture through the recorded socket; a scope-less read is unknown"
+  pass "a local mate's pending-reply observation reads its recorded socket"
+)
+
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
     local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
@@ -2158,6 +2189,8 @@ test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
+test_local_observation_uses_the_recorded_socket \
+  || fail "local pending-reply observation must read the recorded socket"
 test_tick_skips_terminal_and_reuses_target_observation
 test_tick_leaves_settled_records_alone
 test_correlations_reuse_only_for_matching_open_task

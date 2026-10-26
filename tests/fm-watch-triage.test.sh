@@ -7651,6 +7651,39 @@ test_closed_exit_picker_drops_saved_dialog_name() {
   pass "a closed picker drops the saved dialog name, and the stale stays ordinary"
 }
 
+# The watcher's busy classification feeds the steering-inbox gate and the stale
+# backbone. Its Grok/Rovo/AGY capture fallback must read the worker's RECORDED
+# socket: a scope-less capture against the ambient server fails, the fallback
+# reports capture-failed, and a busy fleet worker reads as not provably working.
+# The stub below answers only under the recorded scope, so the case fails if
+# window_is_busy stops carrying it.
+test_busy_fallback_reads_the_recorded_socket() (
+  local state="$TMP_ROOT/socket-busy/state" sock="fleet-busy-$$"
+  mkdir -p "$state"
+  unset FM_TMUX_SOCKET
+  printf 'window=fake\nharness=grok\nsocket=%s\n' "$sock" > "$state/groker.meta"
+  FM_HOME="$TMP_ROOT/socket-busy"
+  FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  # shellcheck disable=SC2329 # Called indirectly through the sourced classifier.
+  fm_backend_capture() {
+    [ "${FM_TMUX_SOCKET:-}" = "$sock" ] || return 1
+    printf 'Ctrl+c:cancel'
+  }
+  window_is_busy fake '' \
+    || fail "the grok capture fallback must read the recorded socket, not the ambient server"
+  # A legacy record (no socket=) keeps ambient addressing verbatim.
+  printf 'window=fake\nharness=grok\n' > "$state/groker.meta"
+  if window_is_busy fake ''; then
+    fail "a legacy record must keep ambient addressing and miss the fleet pane"
+  fi
+  pass "the busy fallback reads a fleet worker's recorded socket and keeps legacy records ambient"
+)
+
+test_busy_fallback_reads_the_recorded_socket \
+  || fail "watcher busy fallback must read the recorded socket"
 test_exit_picker_stale_names_the_dialog
 test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale

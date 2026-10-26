@@ -466,14 +466,19 @@ hash_pane() {
 # into the contract's harness-scoped rendered-text checks: the Grok/Rovo/AGY
 # busy fallbacks and the launch-prompt backstop that keeps a launch pinned at
 # its fm-spawn seed from reading as provably working.
+# The classification runs under window_tmux_socket "$w", so a fallback capture
+# reads the same server as every other watcher dispatch; a scope-less read
+# against the ambient server reports capture-failed for a fleet worker. An
+# empty scope (a legacy record) keeps ambient addressing verbatim.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
+  local w=$1 tail40=$2 task meta verdict socket
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
+  socket=$(window_tmux_socket "$w")
   if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+    verdict=$(FM_TMUX_SOCKET=$socket fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
   else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+    verdict=$(FM_TMUX_SOCKET=$socket fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
   case "$verdict" in

@@ -125,7 +125,11 @@ secondmate_agent_may_be_alive() {  # <id>
     state=$("$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state=unreadable
   elif fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
-    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
+    # The liveness read carries the record's socket scope: a scope-less read
+    # resolves against the ambient server, where a dedicated-socket mate reads
+    # missing and silently drops out of both the restart and the nudge sets.
+    state=$(FM_TMUX_SOCKET=$(fm_backend_tmux_socket_of_meta "$meta") \
+      fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
       "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || state=unreadable
   fi
   case "$state" in
