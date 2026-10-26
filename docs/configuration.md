@@ -1145,6 +1145,14 @@ An absent or blank file changes nothing, while a present path that is not a read
 The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
 
+## Home merge gate (config/merge-gate)
+
+An executable `config/merge-gate` in a home is run before every landing - `bin/fm-pr-merge.sh` for a pull request and `bin/fm-merge-local.sh` for local-only work - with `<task-id> <worktree|-> <candidate-head> <pr-url|->`.
+A nonzero exit refuses that merge and prints the gate's own reason; an absent file changes nothing, and a present but non-executable one refuses the merge until it is fixed.
+`bin/fm-merge-gate-lib.sh` owns the hook, so the gate runs whether or not any add-on is installed; the merge-card add-on defines the same two hooks for homes that install it.
+`config/post-merge` is the matching after-the-fact hook and never changes a merge's outcome.
+The gate's content is home-local policy; `bin/fm-tool-wiring.sh` places done-done's gate only in a home that has none.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
@@ -1506,8 +1514,11 @@ Every home requires:
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
+- done-done (`done-done-axi`, pinned by `bin/fm-bootstrap.sh`'s `DONE_DONE_AXI_PIN`).
+- sign-off-axi (pinned by that script's `SIGN_OFF_AXI_PIN`).
 
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
+The two pinned companion tools install at the exact published npm version the same constant names, never from git, and that version is their floor too.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
@@ -1539,6 +1550,13 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+
+**Companion-tool wiring**
+
+An install is not wiring: `bin/fm-tool-wiring.sh` runs on every locked session start and writes what the pinned packages carry, once per home.
+It links the skill each package ships, appends done-done's `integrations/firstmate/brief-include.md` to `config/brief-include.md` as one managed block that a rerun replaces rather than appends, and places done-done's `integrations/firstmate/merge-gate` as `config/merge-gate` with the executable bit set.
+A second run writes nothing, an absent package is a silent no-op, and an existing `config/merge-gate` is never replaced, so a home that chains another gate keeps its chain.
+Sign-off arming stays per home and is never done for the user; the first wiring of an unarmed home prints one line naming `bin/fm-procevent-signoff.sh arm`, and an already wired home stays silent.
 
 **Missing-tool diagnostics**
 

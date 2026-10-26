@@ -783,6 +783,40 @@ test_merge_failure_propagates_after_recording() {
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
+# A home's config/merge-gate must be honoured by core itself. The fixture home has
+# no projects/firstmate-addons, so only core can run the gate: an unproven merge
+# is refused before the forge sees it, with the gate's own reason on stderr.
+test_merge_gate_refuses_without_the_merge_card_add_on() {
+  local case_dir rc
+  case_dir=$(make_case merge-gate-refusal)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/home/config/merge-gate" <<'GATE'
+#!/usr/bin/env bash
+printf 'done-done: no receipt for %s\n' "$3"
+exit 3
+GATE
+  chmod +x "$case_dir/home/config/merge-gate"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/21 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  assert_absent "$case_dir/home/projects/firstmate-addons" \
+    "merge-gate-refusal: the fixture holds the add-on, so this case proves nothing"
+  expect_code 1 "$rc" "merge-gate-refusal: an unproven merge must be refused"
+  assert_grep 'done-done: no receipt' "$case_dir/stderr" \
+    "merge-gate-refusal: the gate's own reason was not shown"
+  assert_grep 'merge refused by config/merge-gate (exit 3)' "$case_dir/stderr" \
+    "merge-gate-refusal: the refusal did not name the gate"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "merge-gate-refusal: the forge merged after the gate refused"
+  pass "a home merge gate refuses an unproven merge with no add-on installed"
+}
+
 test_github_merged_outcome_is_verified() {
   local case_dir rc
   case_dir=$(make_case github-verified-merged)
@@ -2929,6 +2963,7 @@ test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
+test_merge_gate_refuses_without_the_merge_card_add_on
 test_github_open_unqueued_outcome_refuses
 test_github_mergeable_unknown_retries_then_succeeds
 test_github_mergeable_unknown_exhausts_bound_and_reports_pending

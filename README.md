@@ -205,27 +205,19 @@ Juggernaut's skills live in two separate places with different audiences:
 ## Proof and decision tools
 
 Three companion tools fit Juggernaut without changing it, and each also works with no Juggernaut at all.
-Every hook below is optional and does nothing until you add it.
+Each hook below does nothing until its tool is installed; your first session installs done-done and sign-off for you.
 
 **[done-done](https://github.com/umeranjum17/done-done-axi) - proof that "done" is real.**
-Install it and its Juggernaut files with these commands:
-
-```sh
-npx skills add umeranjum17/done-done-axi --skill done-done -g -a claude-code -y
-npm install -g --allow-git=all github:umeranjum17/done-done-axi
-cat "$(npm root -g)/done-done-axi/integrations/firstmate/brief-include.md" >> "$FM_HOME/config/brief-include.md"
-cp "$(npm root -g)/done-done-axi/integrations/firstmate/merge-gate" "$FM_HOME/config/merge-gate"
-```
-
-Run the `cat >>` line once: each run appends the brief include again, duplicating it in every brief.
+Your first session installs it for you: the pinned published npm package, its skill, and its two Juggernaut files, all written once.
+You only approve the install when the session asks.
 
 - `config/brief-include.md` is appended to every ship and recon brief, so every operator proves its change with done-done ([details](docs/configuration.md#home-brief-include-configbrief-includemd)).
-- `config/merge-gate` is enforced by the merge-card add-on when it is installed; without the add-on, core does not check it. The gate runs `done-done check` against the mission's PR, or its `data/<task-id>/checks.md` when there is no PR, with the default-branch rules, then `receipt --verify <head>`. A nonzero exit refuses the merge and shows its output. Run `git fetch origin` first, since the gate reads local origin refs.
+- `config/merge-gate` refuses a merge that done-done has not proven, whether or not any add-on is installed ([details](docs/configuration.md#home-merge-gate-configmerge-gate)). The gate runs `done-done check` against the mission's PR, or its `data/<task-id>/checks.md` when there is no PR, with the default-branch rules, then `receipt --verify <head>`. A nonzero exit refuses the merge and shows its output. Run `git fetch origin` first, since the gate reads local origin refs.
 
 **[sign-off](https://github.com/umeranjum17/sign-off) - answer decisions with one click.**
-Install its skill with `npx skills add umeranjum17/sign-off --skill sign-off-axi`.
+Your first session installs the pinned `sign-off-axi` package and its skill, and tells you in one line that the home still needs arming.
 Run `bin/fm-procevent-signoff.sh arm` once in a home: from then on every mission held in a home where sign-off is armed raises a card on the sign-off board; arm each secondmate home the same way, and your click comes back to Juggernaut as the answer to that hold ([details](docs/configuration.md#process-to-event-sources-stateprocevent)).
-The adapter needs `sign-off-axi` on your PATH; open the board with `sign-off-axi open`, and turn the link off with `bin/fm-procevent-signoff.sh retire`.
+Open the board with `sign-off-axi open`, and turn the link off with `bin/fm-procevent-signoff.sh retire`.
 
 **[learn-from-mistakes](https://github.com/umeranjum17/learn-from-mistakes) - stop repeated mistakes.**
 Install its skill with `npx skills add umeranjum17/learn-from-mistakes --skill learn-from-mistakes -g`.

@@ -118,6 +118,10 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   return "$status"
 }
 
-# Optional merge-card add-on: defines fm_merge_post_hook.
+# Merge hooks owned by core (the same file bin/fm-dod-lib.sh sources), so
+# config/post-merge runs whether or not the merge-card add-on is installed.
+# shellcheck source=bin/fm-merge-gate-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-merge-gate-lib.sh"
+# Optional merge-card add-on: defines the same two hooks for homes that install it.
 # shellcheck source=/dev/null
 [ ! -r "${FM_ADDONS_DIR:-${FM_HOME:-$_FM_MERGE_OUTCOME_LIB_DIR/..}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh" ] || . "${FM_ADDONS_DIR:-${FM_HOME:-$_FM_MERGE_OUTCOME_LIB_DIR/..}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh"

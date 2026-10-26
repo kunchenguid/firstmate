@@ -130,7 +130,11 @@
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-timeout-lib.sh"
 
-# Optional merge-card add-on: defines fm_dod_merge_gate and fm_merge_post_hook.
+# Merge hooks owned by core: config/merge-gate and config/post-merge are honoured
+# whether or not the merge-card add-on is installed.
+# shellcheck source=bin/fm-merge-gate-lib.sh
+. "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-merge-gate-lib.sh"
+# Optional merge-card add-on: defines the same two hooks for homes that install it.
 # shellcheck source=/dev/null
 [ ! -r "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh" ] || . "${FM_ADDONS_DIR:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects/firstmate-addons}/merge-card/bin/fm-merge-hooks-lib.sh"
 # Optional receipts add-on: defines fm_dod_receipt_accept and the fm_receipts_* helpers.
