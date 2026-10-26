@@ -373,6 +373,44 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_reclaims_reused_pid_but_not_a_live_owner() {
+  local dir state lockdir recorded owner_pid rc newpid
+  dir=$(make_case lock-reused-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  owner_pid=$$
+  printf '%s\n' "$owner_pid" > "$lockdir/pid"
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$owner_pid") \
+    || fail "could not compute the live owner's start token"
+  printf '%s\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a live owner was evicted"
+  printf '%sX\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 7; cat "$2/pid"' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a recycled-pid lock was not reclaimed (rc=$rc)"
+  [ "$newpid" != "$owner_pid" ] || fail "reclaimed lock still names the recycled owner"
+  pass "a live owner remains protected while a mismatched start token is reclaimed"
+}
+
+test_mac_ps_start_token_normalizes_whitespace() {
+  local dir token_again token
+  dir=$(make_case lock-mac-start-token)
+  token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$$"' _ "$LIB") \
+    || fail "portable start-token fallback failed"
+  token_again=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$$"' _ "$LIB") \
+    || fail "second portable start-token fallback failed"
+  [ "$token" = "$token_again" ] || fail "portable start token changed between reads"
+  case "$token" in
+    ps-lstart=*) ;;
+    *) fail "portable start token did not identify its format: <$token>" ;;
+  esac
+  case "$token" in *[[:space:]]) fail "portable start token retained trailing whitespace: <$token>" ;; esac
+  pass "macOS-style ps start tokens normalize leading and trailing whitespace"
+}
+
 # Start a process that claims each given link lock, then SIGKILL it so every
 # claim is left behind with a dead owner - an acquirer TERMed mid-steal.
 leave_dead_link_locks() {  # <state> <lock>...
@@ -1668,6 +1706,8 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_reclaims_reused_pid_but_not_a_live_owner
+test_mac_ps_start_token_normalizes_whitespace
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
