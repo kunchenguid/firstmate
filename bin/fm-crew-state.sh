@@ -40,8 +40,11 @@
 # instead of claiming a failure that did not happen - and it never carries a
 # bare verdict. A reader that cannot see has to say so about itself rather than
 # answer for the crew with a confident-sounding `unknown`.
-# The run-step reader mints it today; the other sources still report `unknown`
-# and are unchanged by that rule.
+# The run-step reader mints it today, including when the primary
+# `no-mistakes axi status` call fails or times out without answering: that is
+# a read this reader could not make, not a crew without a run, so it does not
+# fall through to the pane or status log. The other sources still report
+# `unknown` and are unchanged by that rule.
 # Consumers that act on a CREW claim match `working`, `paused`, `parked`,
 # `done`, or `failed` positively (fm-classify-lib.sh's crew_absorb_class,
 # fm-inactive-reconcile.sh), so `unreadable` is handled exactly as `unknown`
@@ -1019,9 +1022,12 @@ SELECTED_RUN_ID=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
+  primary_ok=1
+  RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status) || primary_ok=0
   if [ "$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^error: //p')")" = "repo not initialized (run 'no-mistakes init' first)" ]; then
     RUN_OUT=""
+  elif [ "$primary_ok" != 1 ] && [ -z "$RUN_OUT" ]; then
+    emit unreadable run-step "could not read the run: \`no-mistakes axi status\` did not answer"
   fi
   if [ -n "$RUN_OUT" ]; then
     # The overview includes run ids and creation order, which the plain runs

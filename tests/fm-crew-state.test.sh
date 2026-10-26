@@ -3362,8 +3362,10 @@ SH
   start=$SECONDS
   out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
-  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
-  assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
+  assert_contains "$out" "state: unreadable" "timed-out no-mistakes reports the run unreadable"
+  assert_contains "$out" "source: run-step" "timed-out no-mistakes is a run-step read failure"
+  assert_contains "$out" "\`no-mistakes axi status\` did not answer" "the unreadable verdict names the call that did not answer"
+  assert_not_contains "$out" "source: pane" "a timed-out run read never falls back to the busy pane"
   [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
