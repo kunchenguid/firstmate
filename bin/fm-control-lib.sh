@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -93,6 +93,7 @@ fm_control_harness_family() {  # <recorded-harness>
     devin) printf 'devin' ;;
     commandcode) printf 'commandcode' ;;
     polytoken) printf 'polytoken' ;;
+    cortex) printf 'cortex' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -107,7 +108,7 @@ fm_control_harness_family() {  # <recorded-harness>
 }
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
-# commandcode, and polytoken are crewmate/scout adapters only: none has a primary
+# commandcode, polytoken, and cortex are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
@@ -116,7 +117,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|commandcode|polytoken|cortex) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -147,10 +148,12 @@ fm_control_interrupt_transport() {  # <harness>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). cortex cancels on a single Escape, printing the Interrupted row
+# with an idle composer and firing its Stop hook; an Escape pressed on an idle
+# composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -163,7 +166,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -182,7 +185,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex) ;;
     *) return 1 ;;
   esac
 }
@@ -197,7 +200,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -220,7 +223,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex) ;;
     *) return 1 ;;
   esac
 }
@@ -241,7 +244,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex) ;;
     *) return 1 ;;
   esac
 }
@@ -256,16 +259,28 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex) printf 'none' ;;
     *) return 1 ;;
   esac
 }
 
-# The command that exits the agent from its own composer.
-fm_control_exit_command() {  # <harness>
+# The command or key that exits the agent from its own composer. OpenCode is
+# version-sensitive: 2.x exits on raw keys, where bin/fm-control.sh sends Ctrl-U
+# to clear the composer, then Ctrl-C, and one more Ctrl-C if the agent is still
+# alive (verified on 2.0.11, 2.0.21, and 2.0.22), while 1.x exits on the typed
+# /exit command. The detected major is recorded at spawn (bin/fm-spawn.sh) and
+# passed as $2; when it is absent or 1 the version-agnostic /exit is used, which
+# exits both lines.
+fm_control_exit_command() {  # <harness> [opencode-major]
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken) printf '/quit' ;;
+    opencode)
+      case "${2-}" in
+        ''|1) printf '/exit' ;;
+        *) printf 'C-c' ;;
+      esac
+      ;;
+    claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -310,35 +325,85 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key). T3 has no composer
+# to clear, so Ctrl+U has nothing to do there; Escape and Ctrl+C are both a
+# turn interrupt (bin/backends/t3code.sh's fm_backend_t3code_send_key).
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux|paseo)
+    tmux|herdr|zellij|cmux|paseo|rex|tern)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac
       ;;
+    t3code)
+      case "$key" in Escape|Enter|C-c) return 0 ;; esac
+      ;;
   esac
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
+# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
+# `unverified`, and tern's `tern process` classifier answers for display but is
+# not promoted to this list, so no reading of theirs can prove an agent stopped.
+# The control plane refuses a stop-proving verb there instead of reporting an
+# unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|rex|t3code) return 0 ;;
   esac
   return 1
+}
+
+# Whether <backend> can stop an agent for `exit`. T3 Code cannot: it has no
+# composer for the harness exit command, and its Orchestrator V2 `/mcp` tools
+# offer no session stop, only a turn interrupt that leaves the thread idle and
+# alive, so no stop could be proven and `exit` refuses before anything is
+# sent (docs/t3code-backend.md "Active limits").
+fm_control_backend_exit_supported() {  # <backend>
+  case "${1-}" in
+    t3code) return 1 ;;
+  esac
+  return 0
+}
+
+# Whether <backend> can launch a REPLACEMENT agent into an existing task's
+# endpoint. A T3 thread keeps its conversation: a new turn continues the same
+# agent with its transcript, and a provider or model change through
+# t3_thread_configure is a context handoff on the same thread (T3 main; older
+# nightlies refused a driver change outright), never the fresh agent a
+# relaunch promises. So t3code has no replacement to launch and a relaunch
+# is refused before anything is stopped (docs/t3code-backend.md "Active
+# limits"). zellij, orca, cmux, and paseo never reach this table: they fail
+# fm_control_backend_state_verified first.
+fm_control_backend_relaunch_supported() {  # <backend>
+  case "${1-}" in
+    tmux|herdr|rex) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether a raw fm_backend_agent_state reading on <backend> goes through
+# fm_control_endpoint_absence_verdict before a recovery verb (exit, relaunch)
+# acts or refuses. `missing` always does. A Rex `unreadable` does too: Rex's
+# passive reads never start a server, so a stopped server - which ends every
+# session on it - reads as unreachable rather than not-found, and only the
+# recheck (which may start the personal server) can turn that into a proof.
+# Passive readers keep the raw state.
+fm_control_absence_recheck_applies() {  # <backend> <raw-state>
+  case "${2-}" in
+    missing) return 0 ;;
+    unreadable) [ "${1-}" = rex ] ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
 # that an endpoint reading `missing` is actually GONE rather than merely
-# unreachable from this seat. Call it only for a `missing` raw state.
+# unreachable from this seat. Call it only for a raw state that
+# fm_control_absence_recheck_applies accepts.
 #
 # Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
 # unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
@@ -366,6 +431,17 @@ fm_control_backend_state_verified() {  # <backend>
 #     passes `--session <session>`, so the recheck starts and reads the session
 #     the RECORD names, through that session's own socket. The answer is about
 #     the task's endpoint and nothing else.
+#   rex CAN prove it. Rex never reuses an id, a session never survives its
+#     server, and a missing target is a structured not-found (exit 3) distinct
+#     from an unreachable server (exit 4). So a not-found from the server the
+#     task was CREATED on proves the block gone. The record names that server
+#     (rex_server, from the task's [meta]); the recheck refuses unless the
+#     server this process reaches - starting a stopped personal server, which
+#     then answers with authority - is that one.
+#   t3code has a native absence verdict: `missing` means archived or not found
+#     on the verified server, while an unreachable server reads `unreadable`.
+#     The proof re-reads the thread, but exit and relaunch refuse before it:
+#     V2 has no session stop and a thread cannot host a replacement.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -376,8 +452,8 @@ fm_control_backend_state_verified() {  # <backend>
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
-fm_control_endpoint_absence_verdict() {  # <backend> <target>
-  local backend=${1-} target=${2-}
+fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
+  local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
@@ -393,6 +469,25 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
+      esac
+      ;;
+    rex)
+      case "$(fm_backend_rex_endpoint_absence_recheck "$target" "$(fm_meta_get "$meta" rex_server)")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe Rex server the task was created on could not be reached from here, or its block could not be classified' ;;
+      esac
+      ;;
+    t3code)
+      # A T3 `missing` is the server's own answer (an archived thread or an
+      # HTTP 404), never a reachability guess: an unreachable server reads
+      # `unreadable` instead. Re-read the thread so the verdict is current.
+      case "$(fm_backend_t3code_agent_state "$target")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe T3 server could not be reached to re-read thread %s' "$target" ;;
       esac
       ;;
     *)
@@ -452,6 +547,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    # cortex's lifecycle hooks live in a firstmate-owned plugin directory the
+    # launch reaches through --plugin-dir. Only its two files are retired here
+    # (this table's consumer removes files); teardown removes the directory.
+    cortex)
+      printf '%s\n' "$state/$id.cortex-plugin/hooks/hooks.json"
+      printf '%s\n' "$state/$id.cortex-plugin/.cortex-plugin/plugin.json"
+      ;;
     # commandcode leaves none: its tracked mod (bin/fm-commandcode-mod.ts) takes
     # the generation from its own launch command, so the retired process
     # takes its wiring with it.

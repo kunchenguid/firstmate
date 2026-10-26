@@ -590,6 +590,49 @@ EOF
     "unfilled ship spawn did not name the intent subsection to fill"
   assert_absent "$home/state/$id.meta" "unfilled ship spawn wrote task metadata"
 
+  id=delivery-herdr-lifecycle-unguarded
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Run `herdr session stop` to reproduce the lifecycle operation.
+
+## Firstmate spec
+Use the existing task setup.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "Herdr isolation contract" \
+    "the Herdr lifecycle guard changed the default-off spawn path"
+  : > "$home/config/herdr-lifecycle-spawn-guard"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Herdr lifecycle brief without the isolation contract should be refused"
+  assert_contains "$out" "Herdr isolation contract" \
+    "Herdr lifecycle refusal did not name the missing isolation contract"
+  assert_contains "$out" "\`herdr session stop\`" \
+    "Herdr lifecycle refusal did not name the matched command"
+  assert_contains "$out" "fm-brief.sh --herdr-lab" \
+    "Herdr lifecycle refusal did not name the brief regeneration remedy"
+  assert_absent "$home/state/$id.meta" \
+    "Herdr lifecycle refusal wrote task metadata"
+  printf '\n# Herdr isolation - HARD SAFETY CONTRACT\n' >> "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "Herdr isolation contract" \
+    "a brief carrying the Herdr isolation contract was refused"
+
+  id=delivery-herdr-lab-scaffold
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR --herdr-lab >/dev/null 2>&1 \
+    || fail "herdr-lab ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Reproduce the session restart in an isolated lab." \
+    "Drive every lifecycle step through the lab helper."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "Herdr isolation contract" \
+    "a brief scaffolded with --herdr-lab was refused by the Herdr lifecycle guard"
+
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"

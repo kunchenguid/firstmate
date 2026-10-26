@@ -138,6 +138,7 @@ SH
   chmod +x "$fake_root/bin/fm-guard.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+printf 'host=%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
@@ -304,7 +305,7 @@ write_poll_meta() {
 run_check_entry() {
   local dir=$1
   shift
-  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
@@ -315,7 +316,7 @@ run_check_entry() {
 run_merge_entry() {
   local dir=$1
   shift
-  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
@@ -890,6 +891,162 @@ SH
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
+}
+
+# A GitHub Enterprise pull request URL is accepted only for a host this home
+# names in config/github-hosts, and the parsed host is carried to every forge
+# call on the check, poll, and merge paths. github.com needs no configuration
+# and keeps the exact behavior it had before the list existed.
+test_github_enterprise_config_resolution() {
+  local code_root url
+  code_root="$TMP_ROOT/github-enterprise-code-root"
+  url=https://leadsonline.ghe.com/Org/repo/pull/7
+  mkdir -p "$code_root/bin" "$code_root/config" "$code_root/home/config" "$code_root/override"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$code_root/bin/"
+  printf 'leadsonline.ghe.com\n' > "$code_root/config/github-hosts"
+  printf 'home.ghe.com\n' > "$code_root/home/config/github-hosts"
+  printf 'override.ghe.com\n' > "$code_root/override/github-hosts"
+
+  (
+    unset FM_HOME FM_CONFIG_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$code_root/bin/fm-pr-lib.sh" || exit 1
+    cd "$TMP_ROOT" || exit 1
+    fm_pr_url_parse "$url" || fail "parser ignored the code-root config with both home variables unset"
+    [ "$FM_PR_PROVIDER|$FM_PR_HOST|$FM_PR_PATH|$FM_PR_OWNER|$FM_PR_REPO|$FM_PR_NUMBER" \
+      = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
+      || fail "default-home parsing returned the wrong Enterprise identity"
+
+    FM_HOME=
+    fm_pr_url_parse "$url" || fail "an empty FM_HOME hid the code-root config"
+
+    # Consumed by the separately analyzed parser library.
+    # shellcheck disable=SC2034
+    FM_HOME="$code_root/home"
+    fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_HOME did not override the code-root config"
+    ! fm_pr_url_parse "$url" || fail "FM_HOME still accepted a host only named in the code-root config"
+
+    FM_CONFIG_OVERRIDE="$code_root/override"
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE did not override FM_HOME"
+    ! fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE still accepted a host only named in FM_HOME"
+    unset FM_HOME
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE required FM_HOME"
+
+    unset FM_CONFIG_OVERRIDE
+    fm_pr_url_parse "$url" || fail "parser lost the code-root config after clearing overrides"
+  ) || fail "GitHub Enterprise config resolution failed"
+  pass "GitHub Enterprise config resolves override, home, then the library code root"
+}
+
+test_github_enterprise_hosts() {
+  local dir cfg url out sidecar rc
+  url=https://leadsonline.ghe.com/Org/repo/pull/7
+
+  cfg="$TMP_ROOT/github-enterprise-config"
+  mkdir -p "$cfg"
+  printf '# GitHub Enterprise hosts this home uses\nleadsonline.ghe.com\n' > "$cfg/github-hosts"
+
+  # The allowed host keeps GitHub's own owner and repository rules and becomes
+  # the recorded host, exactly as a self-hosted GitLab or Forgejo host does.
+  out=$(
+    FM_CONFIG_OVERRIDE=$cfg
+    export FM_CONFIG_OVERRIDE
+    fm_pr_url_parse "$url" || exit 1
+    printf '%s|%s|%s|%s|%s|%s\n' "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" \
+      "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER"
+  ) || fail "parser refused a GitHub Enterprise URL this home names"
+  [ "$out" = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
+    || fail "parser returned the wrong identity for a GitHub Enterprise URL: $out"
+
+  out=$(
+    FM_CONFIG_OVERRIDE=$cfg
+    export FM_CONFIG_OVERRIDE
+    fm_pr_url_parse https://github.com/o/r/pull/1 || exit 1
+    printf '%s|%s\n' "$FM_PR_PROVIDER" "$FM_PR_HOST"
+  ) || fail "parser refused github.com once a host list existed"
+  [ "$out" = 'github|github.com' ] || fail "github.com identity changed: $out"
+
+  # A look-alike of an allowed host, a different Enterprise host, and a
+  # look-alike of github.com all stay refused while the list exists.
+  for out in \
+    https://leadsonline.ghe.com.evil/Org/repo/pull/7 \
+    https://evil-leadsonline.ghe.com/Org/repo/pull/7 \
+    https://other.ghe.com/Org/repo/pull/7 \
+    https://github.com.evil/o/r/pull/1
+  do
+    FM_CONFIG_OVERRIDE=$cfg fm_pr_url_parse "$out" \
+      && fail "parser accepted a GitHub host the home does not name: $out"
+  done
+  FM_CONFIG_OVERRIDE="$TMP_ROOT/absent-config" fm_pr_url_parse "$url" \
+    && fail "parser accepted a GitHub Enterprise host with no configured host list"
+
+  # Registration records the Enterprise identity and carries its host to every
+  # gh read it makes.
+  dir=$(make_case github-enterprise)
+  write_task_meta "$dir"
+  printf 'leadsonline.ghe.com\n' > "$dir/home/config/github-hosts"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "check entrypoint refused a configured GitHub Enterprise URL: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" \
+    || fail "canonical GitHub Enterprise pr metadata was not recorded"
+  sidecar=$(cat "$dir/home/state/task-a.pr-poll")
+  [ "$sidecar" = $'github\nhttps://leadsonline.ghe.com/Org/repo/pull/7\nleadsonline.ghe.com\nOrg/repo\n7' ] \
+    || fail "published sidecar did not record the GitHub Enterprise host"
+  grep -qxF 'host=leadsonline.ghe.com' "$dir/gh.log" \
+    || fail "no registration read addressed the GitHub Enterprise host"
+  ! grep -qxF 'host=' "$dir/gh.log" \
+    || fail "a registration read addressed github.com for a GitHub Enterprise pull request"
+  FM_CONFIG_OVERRIDE="$dir/home/config" \
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "the recorded GitHub Enterprise poll identity did not re-validate"
+
+  # The static poll reports the merge of that recorded identity.
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "static poll did not report a merged GitHub Enterprise pull request"
+
+  # Merging addresses the host too, and keeps addressing only owner and
+  # repository in the command itself.
+  : > "$dir/gh.log"
+  run_merge_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "merge entrypoint refused a configured GitHub Enterprise URL: $(cat "$dir/stderr")"
+  grep -qxF 'pr merge 7 --repo Org/repo --match-head-commit 0123456789abcdef0123456789abcdef01234567 --squash' \
+    "$dir/gh.log" || fail "merge wrapper did not derive owner and repository for a GitHub Enterprise pull request"
+  grep -qxF 'host=leadsonline.ghe.com' "$dir/gh.log" \
+    || fail "no merge read addressed the GitHub Enterprise host"
+  ! grep -qxF 'host=' "$dir/gh.log" \
+    || fail "a merge read addressed github.com for a GitHub Enterprise pull request"
+
+  # A host the home does not name is refused before anything is recorded,
+  # armed, or asked of the forge.
+  dir=$(make_case github-enterprise-unlisted)
+  write_task_meta "$dir"
+  set +e
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "check entrypoint accepted an unlisted GitHub Enterprise host"
+  [ "$(cat "$dir/stderr")" = 'error: invalid PR check request' ] \
+    || fail "unlisted GitHub host diagnostic was not the fixed refusal"
+  assert_no_grep 'pr=' "$dir/home/state/task-a.meta" "an unlisted GitHub host recorded pr metadata"
+  [ ! -s "$dir/gh.log" ] || fail "an unlisted GitHub host still reached the forge"
+
+  # github.com keeps its previous shape: the same URL records and merges with no
+  # host exported, so every call addresses github.com exactly as before.
+  dir=$(make_case github-dotcom-unchanged)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/37 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "github.com registration broke once the host list existed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/my-org/repo/pull/37' "$dir/home/state/task-a.meta" \
+    || fail "github.com pr metadata changed"
+  [ -s "$dir/gh.log" ] || fail "github.com registration made no forge read"
+  ! grep -qE '^host=.+' "$dir/gh.log" \
+    || fail "github.com registration exported a host it never needed"
+  pass "GitHub Enterprise hosts are accepted only when the home names them and their host reaches every forge call"
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
@@ -3603,6 +3760,8 @@ SH
 }
 
 test_parser_matrix
+test_github_enterprise_config_resolution
+test_github_enterprise_hosts
 test_gitlab_merge_watch
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes

@@ -1240,7 +1240,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -1249,9 +1249,27 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "a PR with no CI checks -> working"
+  assert_not_contains "$out" "checks green" "a PR with no CI checks is not checks green"
+  assert_contains "$out" "no CI checks" "the detail names the real condition"
+  pass "a PR with no CI checks reported is not read as checks green"
+}
+
+# The crew's own "done: ... checks green" report must not be promoted by the
+# status-log override when the ci log says no check ever reported.
+test_ci_no_checks_status_log_override_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-status-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinocheckssl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinocheckssl.meta" "window=fm:fm-feat-cinocheckssl" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocheckssl.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocheckssl)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cinocheckssl)
+  assert_contains "$out" "state: working" "crew-reported green with no CI checks -> working"
+  assert_not_contains "$out" "source: status-log" "no-checks must not reach the status-log override"
+  pass "status-log override refuses a PR with no CI checks"
 }
 
 # The monitor logs a checks state only when it changes, and a base-branch
@@ -1305,6 +1323,55 @@ test_ci_monitoring_green_before_log_tail_stays_green() {
   assert_contains "$out" "https://github.com/o/r/pull/2" "the full-log reading names the run's PR"
   assert_not_contains "$out" "state: working" "a truncated ci log must not hide a green PR"
   pass "a green marker before the ci log tail still surfaces done"
+}
+
+NO_CI_SENTENCE="repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed"
+
+test_ci_monitoring_no_ci_declared_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-noci)
+  make_repo_on_branch "$d/wt" fm/feat-cinoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinoci.meta" "window=fm:fm-feat-cinoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinoci)"
+  FM_FAKE_CI_LOGS="$NO_CI_SENTENCE"
+  local out; out=$(run_crew_state "$d" feat-cinoci)
+  assert_contains "$out" "state: working" "a no_ci repository -> working"
+  assert_contains "$out" "repository declares no CI" "the detail names the no_ci condition"
+  assert_not_contains "$out" "validating (running)" "a parked no_ci run is not validating"
+  assert_not_contains "$out" "checks green" "a no_ci repository is not checks green"
+  pass "a no_ci ci-monitor marker reads as unverified, not validating"
+}
+
+test_ci_no_ci_status_log_override_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-noci-status-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinocisl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinocisl.meta" "window=fm:fm-feat-cinocisl" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocisl.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocisl)"
+  FM_FAKE_CI_LOGS="$NO_CI_SENTENCE"
+  local out; out=$(run_crew_state "$d" feat-cinocisl)
+  assert_contains "$out" "state: working" "crew-reported green on a no_ci repository -> working"
+  assert_not_contains "$out" "source: status-log" "no_ci must not reach the status-log override"
+  pass "status-log override refuses a no_ci repository"
+}
+
+test_ci_no_ci_then_red_marker_is_not_ready() {
+  reset_fakes
+  local d; d=$(new_case ci-noci-red)
+  make_repo_on_branch "$d/wt" fm/feat-cinocired
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinocired.meta" "window=fm:fm-feat-cinocired" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinocired.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinocired)"
+  FM_FAKE_CI_LOGS=$(printf '%s\nCI checks failed: build\n' "$NO_CI_SENTENCE")
+  local out; out=$(run_crew_state "$d" feat-cinocired)
+  assert_contains "$out" "state: working" "a red marker after the no_ci sentence -> working"
+  assert_not_contains "$out" "state: done" "a red marker after the no_ci sentence is not done"
+  assert_not_contains "$out" "repository declares no CI" "the last marker wins over the no_ci sentence"
+  pass "a red marker after the no_ci sentence reads not ready"
 }
 
 test_ci_monitoring_no_checks_yet_stays_working() {
@@ -5796,9 +5863,13 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_stays_working
+test_ci_no_checks_status_log_override_stays_working
 test_ci_monitoring_green_then_rearm_stays_green
 test_ci_monitoring_green_before_log_tail_stays_green
+test_ci_monitoring_no_ci_declared_stays_working
+test_ci_no_ci_status_log_override_stays_working
+test_ci_no_ci_then_red_marker_is_not_ready
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working

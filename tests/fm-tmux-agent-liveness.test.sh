@@ -365,6 +365,50 @@ fm_tmux_pane_is_cursor "$SESSION:cursor-idle" \
   || fail "an idle Cursor composer must read empty; without it every away-mode escalation defers forever"
 pass "cursor composer: an idle Cursor pane reads empty even though the cursor row is blind"
 
+# cursor-agent 2026.10.19 draws the glyph and the placeholder as one dim run,
+# with half-block rules around the row and no reverse-video cell. The older
+# screen above keeps the glyph outside the dim run, so it cannot see this.
+cursor_screen_dimrun() {  # <composer-text> <idle|typed>
+  local text=$1 mode=$2 e
+  e=$(printf '\033')
+  printf '\n %s[38;2;42;44;57m▄▄▄▄▄▄▄▄%s[39m\n' "$e" "$e"
+  if [ "$mode" = idle ]; then
+    printf ' %s[48;2;42;44;57m %s[2m→ %s%s[0m%s[48;2;42;44;57m        %s[49m\n' \
+      "$e" "$e" "$text" "$e" "$e" "$e"
+  else
+    printf ' %s[48;2;42;44;57m %s[2m→ %s[0m%s[38;2;224;222;244m%s%s[0m\n' \
+      "$e" "$e" "$e" "$e" "$text" "$e"
+  fi
+  printf ' %s[38;2;42;44;57m▀▀▀▀▀▀▀▀%s[39m\n  Cursor Grok 4.5                    Run Everything\n\n' \
+    "$e" "$e"
+}
+open_dimrun_pane() {  # <window> <binary> <composer-text> <idle|typed>
+  local window=$1 binary=$2 text=$3 mode=$4
+  new_window "$window" bash -c "$(declare -f cursor_screen_dimrun); cursor_screen_dimrun '$text' '$mode'; exec '$binary' 900"
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+      *"$text"*) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "pane $window never rendered its composer"
+}
+open_dimrun_pane cursor-dim-idle "$LAB/bin/cursor-agent" 'Add a follow-up' idle
+fm_tmux_pane_is_cursor "$SESSION:cursor-dim-idle" \
+  || fail "the fully dim pane's foreground process must still be Cursor"
+[ "$(cursor_anchored_verdict "$SESSION:cursor-dim-idle")" = unknown ] \
+  || fail "the fully dim pane's cursor-anchored source must stay blind"
+[ "$(fm_tmux_composer_state "$SESSION:cursor-dim-idle")" = empty ] \
+  || fail "a fully dim idle Cursor placeholder must read empty"
+pass "cursor composer: a fully dim placeholder reads empty"
+
+open_dimrun_pane cursor-dim-typed "$LAB/bin/cursor-agent" 'Add a follow-up' typed
+[ "$(fm_tmux_composer_state "$SESSION:cursor-dim-typed")" = pending ] \
+  || fail "typed text that matches the placeholder must stay pending"
+pass "cursor composer: bright text matching the placeholder stays pending"
+
 open_composer_pane cursor-typed "$LAB/bin/cursor-agent" 'half typed captain text' 0
 [ "$(cursor_anchored_verdict "$SESSION:cursor-typed")" = unknown ] \
   || fail "the cursor-anchored source must be blind here too"
