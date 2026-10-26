@@ -599,3 +599,92 @@ fm_session_lock_inspect() {  # <state>
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_LIVE_HARNESS=false
 }
+
+# --- naming a live lock holder -----------------------------------------------
+# The read-only classification above says WHETHER a live session holds the
+# lock. These two helpers say WHO it is, in the terms an operator can act on:
+# the pid, the process start time, and the process age, all read live from the
+# process itself, not remembered from when the lock was taken. A pid can be
+# recycled, so the current process's start time and age are useful context, but
+# this helper does not compare them with an identity captured at lock time.
+#
+# Nothing here is stored in state/.lock: each summary is a live observation,
+# which cannot establish whether a process reusing the pid acquired the lock.
+
+# Read the live process $1's start time and age. Sets:
+#   FM_SESSION_LOCK_HOLDER_STARTED  the process start time, or empty
+#   FM_SESSION_LOCK_HOLDER_AGE      the process age, or empty
+# Returns 1 when the process cannot be inspected at all, so the caller can say
+# "started unknown; age unknown" instead of guessing.
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_STARTED=
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_AGE=
+fm_session_lock_process_liveness() {  # <pid>
+  local pid=$1 out started age
+  local -a fields
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # One read of both fields, so the start time and the age describe the same
+  # observation of the same process. lstart is five whitespace-separated
+  # fields and etime is the last one. LC_ALL=C pins the date format, and
+  # COLUMNS is pinned wide so the ambient terminal width can never truncate
+  # a field (the same reason fm_pid_identity pins both).
+  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o etime= 2>/dev/null) || return 1
+  out=${out%%$'\n'*}
+  [ -n "$out" ] || return 1
+  read -r -a fields <<< "$out"
+  [ "${#fields[@]}" -ge 6 ] || return 1
+  started="${fields[0]} ${fields[1]} ${fields[2]} ${fields[3]} ${fields[4]}"
+  age=${fields[5]}
+  case "$age" in ''|*[!0-9:-]*) return 1 ;; esac
+  case "$age" in *[0-9]*) ;; *) return 1 ;; esac
+  case "$started" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=$started
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=$age
+  return 0
+}
+
+# True when this session may record a fleet mutation against the home whose
+# state dir is $1: it owns the lock, or no live session holds it.
+#
+# A live session that holds the lock and is not this one is a foreign holder:
+# the session is read-only, and a read-only session must not record a
+# mandate it cannot carry out. The holder is named in the refusal, with its
+# start time and age, so the operator can act on it. Stopping the holder is
+# never automatic.
+#
+# A lock this session cannot classify - unreadable, malformed, or owned by a
+# process it cannot inspect - is not proof of a foreign holder, so it does not
+# refuse. The refusal is for a PROVEN live holder, never a guess.
+fm_session_lock_may_record() {  # <state-dir>
+  local state=$1 summary
+  if fm_session_lock_owned_by_self "$state"; then
+    return 0
+  fi
+  fm_session_lock_inspect "$state"
+  [ "$FM_LOCK_INSPECT_STATE" = held ] || return 0
+  summary=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID") \
+    || summary="pid $FM_LOCK_INSPECT_PID, started unknown; age unknown"
+  printf 'another live firstmate session holds the lock (%s); this session does not own the fleet lock, so it must not record a mandate it cannot carry out. Stopping the holder is a decision for the operator, never for this script.\n' "$summary" >&2
+  return 1
+}
+
+# Print one line naming the live process $1: its pid, its start time, and its
+# age. The start time and age are "started unknown; age unknown" when the
+# process cannot be inspected, never a guess.
+fm_session_lock_holder_summary() {  # <pid>
+  local pid=$1
+  fm_session_pid_valid "$pid" || return 1
+  if fm_session_lock_process_liveness "$pid"; then
+    printf 'pid %s, started %s, age %s\n' "$pid" "$FM_SESSION_LOCK_HOLDER_STARTED" "$FM_SESSION_LOCK_HOLDER_AGE"
+  else
+    printf 'pid %s, started unknown; age unknown\n' "$pid"
+  fi
+}

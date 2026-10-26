@@ -3,6 +3,12 @@
 # captain's away words recorded verbatim, the read-back rendering, the entry
 # announcement, and the archive at return.
 #
+# The `enter` path checks the fleet lock under this script's own mutation
+# lock, just before it writes the record: a read-only session must not record
+# an away mandate it cannot carry out. The check is inside the write, so it
+# cannot be overtaken by a concurrent writer, and it applies to every writer
+# of this record, not only the launcher's.
+#
 # POSTURE. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While an away record exists
 # the home is afk; the captain's first unmarked message archives it (the return
@@ -155,6 +161,9 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# The session-lock identity owner: the away record needs the fleet lock.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-session-lock-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -556,6 +565,14 @@ fm_afk_contract_cmd_enter() {
     fm_afk_contract_validate "$record" || return 1
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
+  fi
+  # The away posture is a mandate this session has to carry out, so the write
+  # needs the fleet lock: a read-only session must not record one. The check
+  # runs HERE, under the same mutation lock as the write, so it cannot be
+  # overtaken by a concurrent writer between the check and the write, and it
+  # applies to every writer of this record, not only the launcher's.
+  if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
+    fm_session_lock_may_record "${FM_AFK_CONTRACT_STATE}" || return 1
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then

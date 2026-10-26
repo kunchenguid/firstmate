@@ -2921,11 +2921,21 @@ main_drain_and_ack() {  # <home>
 start_session() {  # <home>
   local home=$1
   FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
-    MIRROR_ROOT="$MIRROR_ROOT" "$FAKE_CLAUDE" -c '
+    MIRROR_ROOT="$MIRROR_ROOT" FM_TEST_CONTRACT="$CONTRACT" "$FAKE_CLAUDE" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
       printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
       while [ ! -e "$FM_HOME/session.stop" ] && [ -d "$FM_HOME" ] \
         && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null; do
+        # The session records its own away posture when the test stages a
+        # mandate. A real /afk entry runs inside the session that holds the
+        # fleet lock, and the record writer refuses an away entry made from
+        # outside that session, so the fixture runs the entry HERE.
+        if [ -e "$FM_HOME/enter-away.go" ]; then
+          rm -f "$FM_HOME/enter-away.go"
+          "$FM_TEST_CONTRACT" enter --words "$(cat "$FM_HOME/enter-away.words")" \
+            > "$FM_HOME/enter-away.out" 2>&1
+          printf "%s\n" "$?" > "$FM_HOME/enter-away.rc"
+        fi
         if [ -e "$FM_HOME/park.go" ]; then
           rm -f "$FM_HOME/park.go"
           for seed in "$FM_HOME"/mirror-seed.*; do
@@ -2938,6 +2948,22 @@ start_session() {  # <home>
         sleep 0.1
       done
     ' "$HOST" 2>> "$home/claude.err" &
+}
+
+# enter_away_in_session <home> <words>: record the away posture from inside the
+# home's lock-owning fake session, then wait for the result. An away entry the
+# test process makes directly is refused while that live session holds the
+# fleet lock, exactly as a real foreign session's would be, so a fixture that
+# needs the posture re-recorded must stage it the way the session does.
+enter_away_in_session() {  # <home> <words>
+  local home=$1
+  rm -f "$home/enter-away.rc" "$home/enter-away.out"
+  printf '%s\n' "$2" > "$home/enter-away.words"
+  : > "$home/enter-away.go"
+  wait_until 200 sh -c '[ -s "$1" ]' _ "$home/enter-away.rc" \
+    || fail "fixture: the session never recorded the away posture: $(cat "$home/enter-away.out" 2>/dev/null)"
+  [ "$(cat "$home/enter-away.rc")" = 0 ] \
+    || fail "fixture: the session could not record the away posture: $(cat "$home/enter-away.out" 2>/dev/null)"
 }
 
 park_again() {  # <home>
@@ -3047,8 +3073,7 @@ test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes() {
   main_drain_and_ack "$home"
 
   : > "$home/config/supervision-host-off"
-  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet; merge nothing' >/dev/null 2>&1 \
-    || fail "fixture: could not record the away posture again"
+  enter_away_in_session "$home" 'watch the fleet; merge nothing'
   park_again "$home"
   append_status "$home" 'away after opting out'
   wait_until 250 host_exited "$home" || fail "latch scope: the close after the opt-out did not reach main"

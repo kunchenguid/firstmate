@@ -368,6 +368,133 @@ unit_fresh_vs_refresh() {
 }
 
 # ---------------------------------------------------------------------------
+# UNIT 0b: the away entry needs the fleet lock. A read-only session cannot
+# carry out the away words, so the entry refuses while another live session
+# holds the lock, and it names that holder (pid, process start time, process
+# age, read live from the process). Stopping the holder is never automatic.
+# The quiet path is settled BEFORE the check, so a read-only session may still
+# enter quiet mode: quiet mode spawns nothing.
+# ---------------------------------------------------------------------------
+unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
+  local st st_quiet holder_pid out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock.XXXXXX")
+  mkdir -p "$st/state"
+  # A live session-shaped process outside this session's ancestry: it stands
+  # for the other live session that holds the fleet lock. The executable name
+  # is not what identifies it - the path component in its argv[0] is, exactly
+  # as a real harness session presents itself.
+  # The bash executable is resolved through PATH: /bin/bash is absent on a
+  # NixOS host, and a holder that cannot start would silently turn every
+  # live-owner case into a no-op.
+  holder_bash=$(command -v bash) || holder_bash=bash
+  "$holder_bash" -c "exec -a /fm-fleet-lock-other-session/claude '$holder_bash' -c 'sleep 30; true'" &
+  holder_pid=$!
+  sleep 0.3
+  printf '%s\n' "$holder_pid" > "$st/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null \
+    && printf '%s' "$out" | grep -F 'started ' >/dev/null \
+    && printf '%s' "$out" | grep -F 'age ' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'started unknown' >/dev/null; then
+    pass "enter: refuses while another live session holds the fleet lock, names that holder's pid, start time, and age, and writes no record"
+  else
+    fail "enter: a live lock holder did not refuse the away entry by name (rc=$rc): $out"
+  fi
+  # The quiet path is settled before the check: quiet mode spawns nothing, so
+  # a read-only session may still enter quiet mode. A separate home, so this
+  # case never depends on what the away case wrote.
+  st_quiet=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-quiet.XXXXXX")
+  mkdir -p "$st_quiet/state"
+  printf '%s\n' "$holder_pid" > "$st_quiet/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_quiet" FM_STATE_OVERRIDE="$st_quiet/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'quiet down' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$st_quiet/state/.afk-contract" ] \
+    && [ "$(FM_HOME="$st_quiet" FM_STATE_OVERRIDE="$st_quiet/state" "$CONTRACT" mode)" = quiet ]; then
+    pass "enter: quiet mode still enters for a read-only session while another live session holds the fleet lock"
+  else
+    fail "enter: the live lock holder blocked the quiet entry too (rc=$rc): $out"
+  fi
+  rm -rf "$st_quiet"
+  # A standing away record owns its own mode, so a quiet-mode caller on a home
+  # that already holds an away record still writes an away mandate. That write
+  # is the one the fleet-lock check has to stop.
+  st_away=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-away.XXXXXX")
+  mkdir -p "$st_away/state"
+  # The standing away record is written first, while no other session holds
+  # the lock: the record writer refuses an away mandate for a read-only
+  # session, so a fixture cannot stage one under a live holder.
+  FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" enter >/dev/null 2>&1
+  printf '%s\n' "$holder_pid" > "$st_away/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" FM_AFK_MODE=quiet "$LAUNCH" enter --words 'replace the mandate' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null \
+    && [ "$(FM_HOME="$st_away" FM_STATE_OVERRIDE="$st_away/state" "$CONTRACT" words)" != 'replace the mandate' ]; then
+    pass "enter: a quiet-mode caller on a home holding an away record still writes an away mandate, so the live lock holder refuses that write too"
+  else
+    fail "enter: the quiet-mode exception let an away mandate through a live lock holder (rc=$rc): $out"
+  fi
+  rm -rf "$st_away"
+
+  # The record writer owns the check, so a direct write of the away record is
+  # refused for a read-only session too, not only the launcher's entry.
+  st_direct=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-direct.XXXXXX")
+  mkdir -p "$st_direct/state"
+  printf '%s\n' "$holder_pid" > "$st_direct/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st_direct" FM_STATE_OVERRIDE="$st_direct/state" "$CONTRACT" enter --words 'bypass the launcher' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st_direct/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null; then
+    pass "enter: the record writer itself refuses an away mandate while another live session holds the fleet lock"
+  else
+    fail "enter: a direct record write bypassed the live lock holder (rc=$rc): $out"
+  fi
+  rm -rf "$st_direct"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  # A lock whose recorded pid is gone is not a live holder: it never blocks an
+  # entry, because the ordinary stale-owner path reclaims it.
+  rm -f "$st/state/.afk-contract"
+  printf '999999\n' > "$st/state/.lock"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ]; then
+    pass "enter: a stale lock with no live holder does not block the away entry"
+  else
+    fail "enter: a stale lock blocked the away entry (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_away_guard_refuses_when_holder_summary_fails() {
+  local out rc
+  out=$(bash -c '
+    . "$1/bin/fm-session-lock-lib.sh"
+    fm_session_lock_owned_by_self() { return 1; }
+    fm_session_lock_inspect() {
+      FM_LOCK_INSPECT_STATE=held
+      FM_LOCK_INSPECT_PID=win:123
+    }
+    fm_session_lock_holder_summary() { return 1; }
+    fm_session_lock_may_record "$1/state"
+  ' _ "$ROOT" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && printf '%s' "$out" | grep -F 'another live firstmate session holds the lock (pid win:123, started unknown; age unknown)' >/dev/null; then
+    pass "away write: a held lock is refused even when holder details cannot be produced"
+  else
+    fail "away write: a failed holder summary allowed recording or lost the holder pid (rc=$rc): $out"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # UNIT 2a: away/quiet mode plumbing (kunchenguid/firstmate#2356). fm_afk_mode
 # is the single owner of reading the mode; these pin its write side
 # (fm_afk_launch_flag_write / fm_afk_flag_write) against the exact double-
@@ -1788,6 +1915,8 @@ e2e_rex() {
 
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
+unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock
+unit_away_guard_refuses_when_holder_summary_fails
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
