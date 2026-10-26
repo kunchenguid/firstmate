@@ -30,6 +30,7 @@ config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignore
 config/project-capacity  optional per-machine count of workers each named project admits at once, read from the root home by every local home; LOCAL, gitignored; see docs/configuration.md "Project capacity"
 config/secondmate-harness  primary-local secondmate runtime pins; see docs/configuration.md "Choose the secondmate harness" for schema, precedence, and inheritance
 config/lane-capacity  optional lane cap and limits for this home, read by bin/fm-capacity.sh and the opt-in that makes its watcher publish state/lane-capacity.json; LOCAL, gitignored, not inherited by secondmate homes; see docs/configuration.md "Lane capacity"
+config/lane-placement.json  optional advisory lane placement policy for the placing home, read by bin/fm-place.sh; LOCAL, gitignored, not inherited; see docs/configuration.md "Lane placement"
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = the configured tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; docs/configuration.md "Runtime backend" owns supported values, selection, and limits; inherited by secondmate homes under the primary-authoritative contract in secondmate-provisioning
 config/t3code-token  LOCAL, gitignored T3 Code mcp-client credential; docs/t3code-backend.md "Sign-in" owns minting, expiry, and secondmate linking
@@ -156,6 +157,7 @@ state/               runtime records and signals; gitignored
   .secondmate-relaunch-<id> .secondmate-relaunch-bound-<id>   durable relaunch history and parked-bound state; never touch (bin/fm-secondmate-liveness-lib.sh owns the ledger contract)
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   lane-capacity.json  this home's published lane facts, refreshed only while config/lane-capacity exists; written only by bin/fm-capacity.sh --publish, whose header owns the document
+  lane-placement.jsonl lane-placement.jsonl.1  bin/fm-place.sh's private decision log and its one rotated copy; written only by that script, whose header owns the format
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
