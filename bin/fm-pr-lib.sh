@@ -1524,7 +1524,7 @@ fm_pr_poll_retirement_recover_all() {
 # cleanup's own notice.
 fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
-  local version provider host path number
+  local version provider host path number cleanup_tail detail_tail
   fm_pr_private_file_valid "$marker" 600 "$device" || return 1
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
@@ -1532,6 +1532,24 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  if ! IFS= read -r cleanup_tail <&8; then
+    exec 8<&-
+    [ "$version" = fm-pr-poll-merge-notified-v1 ] \
+      && [ "$provider" = "$expected_provider" ] \
+      && [ "$host" = "$expected_host" ] \
+      && [ "$path" = "$expected_path" ] \
+      && [ "$number" = "$expected_number" ]
+    return
+  fi
+  case "$cleanup_tail" in
+    cleanup=refused|cleanup=failed) ;;
+    *) exec 8<&-; return 1 ;;
+  esac
+  IFS= read -r detail_tail <&8 || detail_tail=
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
   exec 8<&-
   [ "$version" = fm-pr-poll-merge-notified-v1 ] \
     && [ "$provider" = "$expected_provider" ] \
