@@ -1275,6 +1275,40 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
     fail "a Stop that lost ownership claimed it was still proven"
   fi
   pass "session-lock e2e: a failed refresh that loses ownership neither arms nor rewakes"
+
+  # Phase 10: the real writer's trust probe fails on its second call under the
+  # claim lock. The refresh must fail without touching the sidecar, and the
+  # still-owned Stop must arm.
+  mv "$dir/bin/fm-lock-real.sh" "$dir/bin/fm-lock.sh"
+  mv "$dir/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib-real.sh"
+  cat > "$dir/bin/fm-session-lock-lib.sh" <<'SH'
+. "${BASH_SOURCE[0]%/*}/fm-session-lock-lib-real.sh"
+eval "fm_test_real_trusted_session_id() $(declare -f fm_session_lock_trusted_session_id | tail -n +2)"
+fm_session_lock_trusted_session_id() {
+  local calls
+  if [ "${CLAIM_LOCK_HELD:-0}" = 1 ]; then
+    calls=$(( $(cat "$FM_HOME/state/trust-calls" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$calls" > "$FM_HOME/state/trust-calls"
+    [ "$calls" -ne 2 ] || return 1
+  fi
+  fm_test_real_trusted_session_id "$@"
+}
+SH
+  printf '%s\n' "$spare" > "$dir/state/.lock"
+  touch -t 202001010000 "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/sidecar-stale"
+  fire_phase "$dir" 10 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  mv "$dir/bin/fm-session-lock-lib-real.sh" "$dir/bin/fm-session-lock-lib.sh"
+  expect_phase_owned "$dir" 10 12 "$spare" "trust probe failure inside a publisher refresh" S2
+  [ "$(cat "$dir/state/trust-calls" 2>/dev/null || echo 0)" -ge 2 ] \
+    || fail "the refresh never reached a second trust probe under the claim lock"
+  grep -q 'publisher refresh failed (exit 1); continuing supervision with proven ownership' "$dir/state/phase-10/hook.out" \
+    || fail "the refresh with a failed trust probe did not fail: $(cat "$dir/state/phase-10/hook.out")"
+  cmp -s "$dir/state/.lock-session" "$dir/sidecar-stale" || fail "a failed trust probe inside the refresh changed or removed the sidecar"
+  if [ "$dir/state/.lock-session" -nt "$dir/sidecar-stale" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-stale" ]; then
+    fail "a failed trust probe inside the refresh changed the sidecar mtime"
+  fi
+  pass "session-lock e2e: a trust probe failing inside a publisher refresh leaves the sidecar unchanged and the Stop still arms"
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"

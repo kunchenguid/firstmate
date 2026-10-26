@@ -179,9 +179,10 @@ remember_lock_session() {
 # trusted id backs. Called only while the claim lock is held. A sidecar already
 # naming this id and publisher is left untouched. An ancestry-confirmed owner
 # upgrades an id-only sidecar at SessionStart or an owned Stop before detaching.
-publish_lock_session() {
-  local trusted recorded publisher identity='' recorded_publisher recorded_identity tmp
-  if trusted=$(fm_session_lock_trusted_session_id); then
+# An id already verified under the claim lock is published as given.
+publish_lock_session() {  # [<verified-id>]
+  local trusted=${1:-} recorded publisher identity='' recorded_publisher recorded_identity tmp
+  if [ -n "$trusted" ] || trusted=$(fm_session_lock_trusted_session_id); then
     publisher=$me
     fm_session_lock_pid_identity "$STATE" "$me" identity || publisher=
     recorded=
@@ -215,8 +216,8 @@ publish_lock_session() {
   return 0
 }
 
-publish_lock_session_or_die() {
-  publish_lock_session && return 0
+publish_lock_session_or_die() {  # [<verified-id>]
+  publish_lock_session "$@" && return 0
   echo "error: cannot record the session identity beside the lock; operate read-only until resolved" >&2
   exit 1
 }
@@ -275,7 +276,9 @@ refuse_live_owner() {  # <recorded-pid>
 }
 
 # Stop may refresh the publisher, but only SessionStart may change the id or
-# anchor. Recheck the id under the claim lock as well as in the caller.
+# anchor. Recheck the id and the CLAUDE_PID anchor under the claim lock as well
+# as in the caller, and publish exactly those; anything unproven exits 1 with
+# the sidecar untouched.
 if [ "${1:-}" = refresh-publisher ]; then
   fm_lock_acquire_wait "$CLAIM_LOCK"
   CLAIM_LOCK_HELD=1
@@ -283,7 +286,10 @@ if [ "${1:-}" = refresh-publisher ]; then
   trusted=$(fm_session_lock_trusted_session_id) || exit 1
   fm_session_lock_read_record "$STATE" || exit 1
   [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ] || exit 1
-  publish_lock_session_or_die
+  anchor=$(fm_session_lock_anchor_pid) || exit 1
+  case "$anchor" in "$CLAUDE_PID"|"$FM_WIN_PID_PREFIX$CLAUDE_PID") ;; *) exit 1 ;; esac
+  [ "$me" = "$anchor" ] || exit 1
+  publish_lock_session_or_die "$trusted"
   commit_lock_session
   exit 0
 fi

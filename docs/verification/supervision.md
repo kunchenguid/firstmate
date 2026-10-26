@@ -345,6 +345,7 @@ Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a sess
 `tests/fm-session-lock-ancestry.test.sh` drives ancestry and publisher evidence apart, preserves the detached frontend re-anchor and same-process re-key, and checks lease and rewake movement.
 Its Stop-only phase upgrades a legacy publisher before bridge recycling, and the post-recycle Stop is admitted before SessionStart re-anchors the lock.
 A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh leaves a still-owned Stop free to arm, with its warning reaching the session only when that Stop rewakes.
+A trust probe that fails on its second call under the real writer's claim lock makes the refresh fail with the sidecar bytes and mtime unchanged, and the owned Stop still arms.
 Alternating shared-ancestor Stops preserve the recorded id, lock anchor and mtime; a failed publisher write restores the sidecar mtime.
 It also covers Windows pid tags, publication failures, missing, malformed or identity-less publisher evidence, refusal of an exited or unverified publisher over a live lock, and refusal of a reused publisher pid number in a new same-id chain.
 `tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
@@ -395,15 +396,16 @@ bash tests/fm-turnend-foreign-owner-arm-fix.test.sh
 
 Observed output, bounded to the affected guarantees:
 The refresh-failure line below came from a Stop that rewoke; it does not establish warning delivery on exit-0 Stops.
-The reused-pid line came from a later run on the same date with the same tool versions.
-That run executed the repro from a copy outside the validation checkout, because the watcher refuses to arm from a disposable checkout.
-Its ancestry-suite run accepted a user-session subreaper in place of pid 1 for the pty-host reparent check.
+The reused-pid and refresh trust-probe lines came from later runs on the same date with the same tool versions.
+Those runs executed the repro from a copy outside the validation checkout, because the watcher refuses to arm from a disposable checkout.
+Their ancestry-suite runs accepted a user-session subreaper in place of pid 1 for the pty-host reparent check.
 
 ```text
 ok - session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime
 ok - session-lock e2e: post-recycle Stop owns through the publisher before SessionStart
 ok - session-lock e2e: current-sidecar Stop calls no writer and preserves bytes and mtime
 ok - session-lock e2e: a failed publisher refresh reports its status and still rewakes
+ok - session-lock e2e: a trust probe failing inside a publisher refresh leaves the sidecar unchanged and the Stop still arms
 ok - session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change
 ok - session-lock: alternating shared-ancestor Stops preserve the recorded id, anchor and mtime
 ok - session-lock: a failed lock write restores the previous sidecar and mtime
