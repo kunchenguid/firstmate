@@ -21,9 +21,14 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
-# Pin the Pi banner adapter to a verified release for portable fixtures.
-# The live guard supplies the installed `pi --version` instead.
-FM_COMPOSER_PI_ADAPTER_VERSION=${FM_COMPOSER_PI_ADAPTER_VERSION:-0.85.1}
+# Use fixture Pi executables for modeled screens; the adapter always reads their
+# actual --version output, just as production callers do.
+FM_PI_TEST_BIN=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-test.XXXXXX")
+printf '#!/bin/sh\nprintf "0.85.1\\n"\n' > "$FM_PI_TEST_BIN/pi"
+printf '#!/bin/sh\nprintf "0.85.1\\n"\n' > "$FM_PI_TEST_BIN/pi-signed"
+chmod +x "$FM_PI_TEST_BIN/pi" "$FM_PI_TEST_BIN/pi-signed"
+PATH="$FM_PI_TEST_BIN:$PATH"
+export PATH
 
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
@@ -845,16 +850,19 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   screen=$' hello there\n\n '"$banner"$'
 \n────────────────────────\n\n────────────────────────\n/path\n0.0%'
   id=$(printf 'pi\tworking')
-  FM_COMPOSER_PI_ADAPTER_VERSION=0.0.0
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  printf '#!/bin/sh\nprintf "0.0.0\\n"\n' > "$FM_PI_TEST_BIN/pi"
+  chmod +x "$FM_PI_TEST_BIN/pi"
+  out=$(FM_COMPOSER_PI_EXECUTABLE=pi fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
   [ "$out" = unknown ] \
     || fail "unpinned adapter version must not settle a stale status via the banner, got '$out'"
-  FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  printf '#!/bin/sh\nprintf "0.85.1\\n"\n' > "$FM_PI_TEST_BIN/pi"
+  chmod +x "$FM_PI_TEST_BIN/pi"
+  unset _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+  out=$(FM_COMPOSER_PI_EXECUTABLE=pi fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
   [ "$out" = empty ] \
     || fail "pinned adapter version must still settle the banner, got '$out'"
-  # Production callers never set the override: the adapter reads the installed
-  # `pi --version` itself, so a pinned install settles the banner and an
+  # The adapter reads the installed `pi --version` itself, so a pinned install
+  # settles the banner and an
   # unpinned or absent pi keeps refusing.
   # Hermetic PATH: a private dir holding only the fake Pi executables plus the
   # host tools the classifier needs, so no host pi or pi-signed is ever found.
@@ -884,7 +892,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
       chmod +x "$fakebin/pi-signed"
     fi
     out=$(
-      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      unset FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
       # shellcheck disable=SC2030 # each case runs in its own subshell on purpose
       [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
       PATH="$fakebin"
@@ -895,7 +903,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     # Each executable runs once per process across two classifications.
     rm -f "$fakebin/count"
     (
-      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      unset FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
       # shellcheck disable=SC2031 # each case runs in its own subshell on purpose
       [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
       PATH="$fakebin"
