@@ -23,7 +23,13 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "BOOTSTRAP_INFO: herdr husk fm-<id> (<session>:<pane>) closed",
+#                 "BOOTSTRAP_INFO: herdr husk fm-<id> (<session>:<pane>) kept: <condition>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          On backend=herdr, the husk sweep (bin/fm-herdr-husk-lib.sh owns the
+#          closable-husk definition) closes orphan task panes that no local
+#          home records and prints one line per close and per kept candidate;
+#          live task tabs print nothing.
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -107,10 +113,10 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          herdr_husk_sweep, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -118,7 +124,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -835,6 +841,36 @@ secondmate_liveness_one() {  # <meta> <id>
       ;;
   esac
   fm_secondmate_liveness_unlock "$id"
+  return 0
+}
+
+# Herdr husk sweep: close orphan task panes a server restart or an aborted
+# spawn left behind. bin/fm-herdr-husk-lib.sh owns the closable-husk
+# definition and every mutation; this wrapper only selects the backend and
+# session and reports. A closed husk and a kept candidate are each one
+# BOOTSTRAP_INFO line, always: the close is a mutation the captain should see,
+# and a kept candidate names the condition that protected it. Live task tabs
+# are not candidates and print nothing. Runs in the local phase, because it
+# never leaves the machine, and is skipped by FM_BOOTSTRAP_DETECT_ONLY like
+# every other mutating sweep.
+herdr_husk_sweep() {
+  [ "$BACKEND" = herdr ] || return 0
+  command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+  [ -d "$STATE" ] || return 0
+  local session line verdict label target reason
+  # shellcheck source=bin/fm-herdr-husk-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-herdr-husk-lib.sh"
+  session=$(fm_backend_herdr_session)
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS=$'\t' read -r verdict label target reason <<EOF
+$line
+EOF
+    case "$verdict" in
+      closed) echo "BOOTSTRAP_INFO: herdr husk $label ($target) closed" ;;
+      kept) echo "BOOTSTRAP_INFO: herdr husk $label ($target) kept: $reason" ;;
+    esac
+  done < <(fm_herdr_husk_sweep "$session" "$STATE")
   return 0
 }
 
@@ -1704,6 +1740,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # The husk sweep talks only to the local Herdr server.
+  local_phase && herdr_husk_sweep
   # Adopt existing durable contribution links without making a network call.
   # Detection-only startup must never publish a check registration.
   if local_phase && command -v jq >/dev/null 2>&1 \

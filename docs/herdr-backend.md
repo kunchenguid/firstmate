@@ -663,6 +663,10 @@ Ordinary local text steers instead use the durable steering inbox and send only 
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 
+A fresh pane's shell can still be initializing when its tab exists, and text typed then is kept as typeahead that runs late or is lost.
+Spawn therefore types `treehouse get` only after the pane is proven a lone idle shell, takes the echoed command as its receipt through `pane wait-output`, resends it at most once and only when no echo was seen while the same top-level shell is still the idle foreground, and reads treehouse's own error text during its worktree poll so an exhausted pool fails in seconds with that message instead of a 60 second silence.
+`bin/fm-spawn.sh`'s header ("Treehouse get on Herdr") owns the budgets and the resend conditions; `tests/fm-spawn-herdr-readiness-live-e2e.test.sh` pins the typeahead behaviour on the installed release.
+
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter, so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
 
@@ -798,6 +802,33 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+
+A spawn refused before its launch is delivered closes the fresh pane it opened, through the same exact-pane focus-preserving close every other retirement uses, when that pane provably holds only the spawn's own shell chain.
+That chain is a lone idle shell, or that shell plus the `treehouse get` subshell the spawn started in its recorded worktree.
+In the second case the spawn first drops its slot claim and hands the slot back with `treehouse return --force`, and the pane must settle back into its lone idle shell before it is closed.
+A slot the base freshen did not prove clean, because it holds uncommitted work or its status could not be read, is never force-returned: its lease and the pane stay, and the refusal names the manual `treehouse return --force` step, as on T3 Code.
+A pane holding anything else, an agent above all, or whose tab is the captain's attended active tab, is kept and named in the refusal.
+A polytoken spawn keeps its unconditional close through the ordinary task kill.
+
+#### Session-start husk sweep
+
+A husk no task will ever reclaim is closed at locked session start by the sweep in `bin/fm-herdr-husk-lib.sh`, run from bootstrap on the Herdr backend.
+A tab is a candidate only when its label parses as a task label `fm-<id>` and no local Firstmate home holds a record for that task.
+A tab with a live record is a live task, is never a candidate, and prints nothing.
+A candidate is closed only when every condition holds:
+
+- No presentation journal for the task, in any local home, binds a different pane that is still present.
+- The tab holds exactly one pane, that pane positively reads no-agent, and the process proof shows one lone idle shell with no child process.
+- The pane's foreground directory is not inside a treehouse pool slot that a live task record or a slot claim names, because that parked shell is the slot's only protection against reassignment.
+- The close can preserve focus, which excludes the captain's attended active tab.
+- The task's spawn lock and the named-session presentation lock are both free, and the proof still holds under them.
+
+The close is the exact-pane focus-preserving close; a refused or unconfirmed close keeps the pane.
+Only after the pane is confirmed gone does the sweep retire the task's orphan journals: a version 2 journal bound to exactly that pane, or a version 1 journal whose token no workspace label still carries.
+The sweep never closes a tab or a workspace, never signals a process, never closes a pane in any other agent state, and never touches a label that does not parse as a task label.
+Each close and each kept candidate is one `BOOTSTRAP_INFO` line naming the tab, the pane, and the condition that protected a kept one; `bin/fm-herdr-husk-lib.sh`'s header owns the exact mechanics.
+A stopped server, an unreadable listing, or an unprovable set of local homes makes the sweep a silent no-op rather than a guess.
+This complements the narrower [startup cleanup of restored projections](#startup-cleanup-of-restored-projections), which retires a projected child through its own journal.
 
 ### Stale agent registrations
 
@@ -981,6 +1012,10 @@ tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-spawn-herdr-readiness.test.sh
+tests/fm-spawn-herdr-readiness-live-e2e.test.sh
+tests/fm-herdr-husk-sweep.test.sh
+tests/fm-herdr-husk-sweep-live-e2e.test.sh
 tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
