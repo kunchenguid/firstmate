@@ -1695,7 +1695,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-herdr-session-cleanup-e2e.test.sh
 ```
 
-Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
+The recorded run observed one exact home-local, journal-correlated, one-tab and one-pane childless idle shell closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op. The current cleanup contract, including the bound empty-tab recovery shape, is owned by [Herdr backend documentation](../herdr-backend.md#startup-cleanup-of-restored-projections).
 
 ### Workspace-removal focus safety
 
