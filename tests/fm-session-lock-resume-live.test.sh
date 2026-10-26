@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Real Claude same-conversation collision, isolated from user configuration.
+# Real Claude same-conversation collision (live-harness-optin family),
+# isolated from user configuration.
 # Uses two unauthenticated Haiku sessions and bash mode to persist a conversation;
 # no credentials are copied and no model response is needed. Opt-in because it
 # submits a bash-mode prompt to Claude. The portable counterpart is the foreign-owner repro.
@@ -33,7 +34,7 @@ def wait(check, label):
         if result:
             return result
         time.sleep(0.1)
-    raise RuntimeError(f"{version}: {label}")
+    raise RuntimeError(label)
 
 def event(pid, source):
     p = home / "state" / f"{pid}-{source}.json"

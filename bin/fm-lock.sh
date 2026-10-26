@@ -21,9 +21,8 @@
 # and left byte-identical when both values match. Publisher-only updates keep
 # its mtime because fm-afk-return.sh uses that time as a session-id boundary.
 # A same-session confirmation keeps a live line 1 in this session's harness
-# ancestry,
-# because bin/fm-startup-network.sh compares that pid across its deferred
-# sweeps; a dead recorded pid is reclaimed and rewritten to this session's
+# ancestry, because bin/fm-startup-network.sh compares that pid across its
+# deferred sweeps; a dead recorded pid is reclaimed and rewritten to this session's
 # anchor. A live line 1 outside the ancestry, owned only through the trusted
 # id and publisher, is rewritten to the anchor under the claim lock and then the
 # lease-command lock, and task leases recorded against the old pid move to the
@@ -40,6 +39,10 @@
 # re-anchors.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
+#        fm-lock.sh refresh-publisher
+#                             refresh only the publisher of an owned, same-id
+#                             sidecar under the claim lock; never re-key the id
+#                             or re-anchor the lock; exit 1 if not confirmed.
 #        fm-lock.sh status    print holder and liveness; always exits 0.
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
@@ -253,17 +256,29 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded trusted
+  local recorded
+  echo "error: $(fm_session_lock_refusal_advice "$STATE")" >&2
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
-    if trusted=$(fm_session_lock_trusted_session_id) && [ "$trusted" = "$recorded" ]; then
-      echo "error: matching conversation id does not prove ownership while lock owner pid $1 is alive; a missing, foreign, or exited recorded publisher cannot take it; restarting the main session clears this condition" >&2
-    fi
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
     echo "error: another live firstmate session holds the lock (pid $1); operate read-only until resolved" >&2
   fi
   exit 1
 }
+
+# Stop may refresh the publisher, but only SessionStart may change the id or
+# anchor. Recheck the id under the claim lock as well as in the caller.
+if [ "${1:-}" = refresh-publisher ]; then
+  fm_lock_acquire_wait "$CLAIM_LOCK"
+  CLAIM_LOCK_HELD=1
+  fm_session_lock_owned_by_self "$STATE" || exit 1
+  trusted=$(fm_session_lock_trusted_session_id) || exit 1
+  fm_session_lock_read_record "$STATE" || exit 1
+  [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ] || exit 1
+  publish_lock_session_or_die
+  commit_lock_session
+  exit 0
+fi
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)

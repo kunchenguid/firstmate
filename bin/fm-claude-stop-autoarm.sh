@@ -201,22 +201,27 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # Use the shared liveness predicate to recognize only that stale-owner case; it
 # resolves a tagged identity too, so a dead Windows session is still recoverable
 # rather than being read as a malformed lock nobody may ever clear.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home does not reclaim another session's stale lock.
-# Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# Stale-lock reclamation waits for the AFK and need gates. An owned publisher
+# refresh runs before those exits so an attached session upgrades before its
+# helper chain detaches. Missing or malformed locks remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$LOCK_PID" || exit 0
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
-elif fm_session_lock_trusted_session_id >/dev/null \
+elif TRUSTED_SESSION_ID=$(fm_session_lock_trusted_session_id) \
+  && fm_session_lock_read_record "$STATE" \
+  && [ "$FM_SESSION_LOCK_RECORDED_ID" = "$TRUSTED_SESSION_ID" ] \
   && ! fm_session_lock_publisher_current "$STATE"; then
   # Refresh while ancestry still proves ownership, including legacy sidecars.
   # The writer rechecks ownership under its claim lock before changing anything.
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
+  if "$SCRIPT_DIR/fm-lock.sh" refresh-publisher >/dev/null 2>&1; then
+    fm_session_lock_owned_by_self "$STATE" || exit 0
+  else
+    REFRESH_RC=$?
+    printf 'warning: session-lock publisher refresh failed (exit %s); continuing supervision with proven ownership\n' "$REFRESH_RC" >&2
+  fi
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------

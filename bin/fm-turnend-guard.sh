@@ -282,14 +282,14 @@ block_stop() {
 }
 
 # Another verified live session owns the home lock under the shared
-# ancestry-or-trusted-id verdict. This session is read-only and cannot arm or
+# ownership verdict. This session is read-only and cannot arm or
 # repair supervision without
 # stealing ownership, so blocking its Stop would create an impossible loop.
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.
 if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision."}\n' \
-    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely. %s"}\n' \
+    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID" "$(fm_session_lock_refusal_advice "$STATE")"
   exit 0
 fi
 

@@ -445,7 +445,7 @@ fm_session_lock_read_record() {  # <state>
   {
     IFS= read -r FM_SESSION_LOCK_RECORDED_ID || [ -n "$FM_SESSION_LOCK_RECORDED_ID" ] || return 1
     IFS= read -r FM_SESSION_LOCK_RECORDED_PUBLISHER || true
-  } < "$1/.lock-session" 2>/dev/null || return 1
+  } 2>/dev/null < "$1/.lock-session" || return 1
   case "$FM_SESSION_LOCK_RECORDED_ID" in ''|*$'\r'*) return 1 ;; esac
   fm_session_pid_valid "$FM_SESSION_LOCK_RECORDED_PUBLISHER" || FM_SESSION_LOCK_RECORDED_PUBLISHER=
 }
@@ -471,6 +471,7 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
   trusted=$(fm_session_lock_trusted_session_id "$pids") || return 1
   fm_session_lock_read_record "$state" || return 1
   [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ] || return 1
+  [ -n "$FM_SESSION_LOCK_RECORDED_PUBLISHER" ] || return 1
   fm_harness_pid_listed "$FM_SESSION_LOCK_RECORDED_PUBLISHER" "$pids"
 }
 
@@ -483,6 +484,37 @@ fm_session_lock_publisher_current() {  # <state>
   fm_session_lock_read_record "$1" || return 1
   [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ] \
     && [ "$FM_SESSION_LOCK_RECORDED_PUBLISHER" = "$anchor" ]
+}
+
+# Only a definite exit selects restart advice. Unknown liveness, including
+# permission errors, keeps the second-process advice; it never grants ownership.
+fm_session_lock_publisher_exited() {  # <publisher-pid>
+  local winpid rc=0 error
+  if winpid=$(fm_win_untag_pid "$1"); then
+    fm_win_command "$winpid" >/dev/null || rc=$?
+    [ "$rc" -eq 1 ]
+    return
+  fi
+  error=$(LC_ALL=C kill -0 "$1" 2>&1) && return 1
+  case "$error" in *'No such process'*) return 0 ;; *) return 1 ;; esac
+}
+
+# Called only after a live foreign owner has been established. This selects
+# diagnostic text, not an ownership verdict.
+fm_session_lock_refusal_advice() {  # <state>
+  local trusted
+  if trusted=$(fm_session_lock_trusted_session_id) \
+    && fm_session_lock_read_record "$1" \
+    && [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ]; then
+    if [ -z "$FM_SESSION_LOCK_RECORDED_PUBLISHER" ] \
+      || fm_session_lock_publisher_exited "$FM_SESSION_LOCK_RECORDED_PUBLISHER"; then
+      printf '%s' "This session's lock is from a legacy record or a replaced model loop; restarting the main session restores supervision."
+    else
+      printf '%s' "This session is a second process resuming the owner's conversation; exit this session while the owner keeps supervision."
+    fi
+  else
+    printf '%s' 'The owning session must restore supervision.'
+  fi
 }
 
 # Print the pid bin/fm-lock.sh records on lock line 1 for this session. For a
@@ -516,7 +548,8 @@ fm_session_lock_anchor_pid() {
 # bin/fm-lock.sh's ordinary stale-owner path, which refreshes line 1, rather than
 # silently owned with a dead anchor. A missing lock, a malformed lock, a lock
 # held by a harness outside this ancestry under another (or no) session id, or
-# an ancestry that cannot be resolved all fail closed.
+# the same id with no publisher in the ancestry, or an ancestry that cannot be
+# resolved all fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)

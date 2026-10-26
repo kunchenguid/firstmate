@@ -324,7 +324,8 @@ An already-detached session whose sidecar contains only the conversation id cann
 It sees the foreign-owner diagnostic, its Stop is read-only, and its auto-arm stays inert.
 Restarting the main session clears this condition by acquiring the lock with a current publisher record.
 The same restart is required if the recorded model-loop publisher exits while the lock's frontend remains alive and the replacement cannot prove ancestry to that frontend.
-A same-id refusal from `bin/fm-lock.sh` names missing, foreign, or exited publisher evidence and the restart remedy; `bin/fm-session-lock-lib.sh` owns the admission rule.
+Both acquisition and the Stop guard distinguish the restart case from a second live process resuming the owner's conversation, which is told to exit while the owner keeps supervision.
+Unknown publisher liveness selects the second-process advice and never grants ownership; `bin/fm-session-lock-lib.sh` owns the admission rule.
 
 #### Auto-arm generation claim
 

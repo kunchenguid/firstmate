@@ -343,7 +343,9 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: a pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 `bin/fm-session-lock-lib.sh` owns the trusted Claude identity and publisher test; `bin/fm-lock.sh` owns its sidecar format, ancestry-confirmed legacy upgrade, and re-anchor transaction.
 `tests/fm-session-lock-ancestry.test.sh` drives ancestry and publisher evidence apart, preserves the detached frontend re-anchor and same-process re-key, and checks lease and rewake movement.
-Its Stop-only phase upgrades a legacy publisher before bridge recycling, its current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer, and its failed publisher write restores the sidecar mtime.
+Its Stop-only phase upgrades a legacy publisher before bridge recycling, and the post-recycle Stop is admitted before SessionStart re-anchors the lock.
+A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh reports its status and still rewakes.
+Alternating shared-ancestor Stops preserve the recorded id, lock anchor and mtime; a failed publisher write restores the sidecar mtime.
 It also covers Windows pid tags, publication failures, missing or malformed publisher evidence, and refusal of an exited or unverified publisher over a live lock.
 `tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
 These portable tests use synthetic harness processes; the real Claude resume test and its limits are recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
@@ -393,9 +395,16 @@ bash tests/fm-turnend-foreign-owner-arm-fix.test.sh
 Observed output, bounded to the affected guarantees:
 
 ```text
+ok - session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime
+ok - session-lock e2e: post-recycle Stop owns through the publisher before SessionStart
+ok - session-lock e2e: current-sidecar Stop calls no writer and preserves bytes and mtime
+ok - session-lock e2e: a failed publisher refresh reports its status and still rewakes
 ok - session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change
+ok - session-lock: alternating shared-ancestor Stops preserve the recorded id, anchor and mtime
+ok - session-lock: a failed lock write restores the previous sidecar and mtime
 ok - session-lock: a re-anchor keeps both supervision actors' task leases live
 FIXED a second live model loop remains foreign after resuming the owner's conversation
+FIXED an exited publisher cannot transfer a live frontend's lock, leases, or rewake
 COMPLETE
 ```
 

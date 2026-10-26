@@ -8,7 +8,8 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Claude conversation resume ownership
 
-Verified on 2026-10-26 with Claude Code 2.1.310 on Linux.
+Verified on 2026-10-26 with Claude Code 2.1.310 on Linux before the live guard's setup, partial-record handling and error reporting were restructured.
+The restructured script has not been rerun with live Claude; the output below records the earlier run.
 The opt-in test uses a private tmux socket, a fresh unauthenticated Claude config, two real Haiku sessions, and bash mode to persist the first conversation without a model response.
 Run after a Claude upgrade:
 

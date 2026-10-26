@@ -257,6 +257,8 @@ try:
     accepted_log = (OUT / "same-accepted.txt").read_text(errors="replace")
     print("same-session acquisition", "rc=" + (same / "state/accepted-rc").read_text().strip(), "pid=" + accepted_pid, "output=" + repr(accepted_log), flush=True)
     require((same / "state/accepted-rc").read_text().strip() == "1", "a second live model loop acquired the same conversation's lock")
+    require("second process resuming" in accepted_log and "exit this session" in accepted_log,
+            "the live-publisher acquisition gave the wrong remedy")
     require(same_owner.poll() is None, "the original owner exited, so the refusal proves nothing over a live line 1")
     require(accepted_pid != same_lock_owner, "the same-session acquisition ran as the original owner")
     require(session_lock_text(same_lock) == same_lock_owner, "the resumed second process moved the live owner's lock")
@@ -271,6 +273,8 @@ try:
     same_stop = guard(same_env, "same-session stop", prefix="export CLAUDE_PID=$$; ")
     require(same_stop.returncode == 0, "a resumed foreign Stop must end safely")
     require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in same_stop.stdout, "a resumed process lost the foreign-owner diagnostic")
+    require("second process resuming" in same_stop.stdout and "exit this session" in same_stop.stdout,
+            "the live-publisher Stop gave the wrong remedy")
     other_stop = guard(same_env | {"CLAUDE_CODE_SESSION_ID": "synthetic-other"}, "other-session stop", prefix="export CLAUDE_PID=$$; ")
     require(other_stop.returncode == 0, "a different-session Stop must still end safely")
     require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in other_stop.stdout, "a different-session Stop lost the foreign-owner diagnostic")
@@ -289,10 +293,12 @@ try:
     saved = {path: path.read_bytes() for path in (same_lock, sidecar, lease, epoch)}
     dead_publisher = run(same_env, 'export CLAUDE_PID=$$; "$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; exit "$rc"')
     require(dead_publisher.returncode == 1, "an exited publisher let an outsider re-anchor the live frontend")
-    require("exited recorded publisher" in dead_publisher.stderr and "restarting the main session" in dead_publisher.stderr,
+    require("legacy record or a replaced model loop" in dead_publisher.stderr and "restarting the main session" in dead_publisher.stderr,
             "the dead-publisher refusal omitted the restart diagnostic")
     dead_stop = guard(same_env, "dead-publisher stop", prefix="export CLAUDE_PID=$$; ")
     require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in dead_stop.stdout, "the dead publisher hid the live foreign owner")
+    require("legacy record or a replaced model loop" in dead_stop.stdout and "restarting the main session" in dead_stop.stdout,
+            "the dead-publisher Stop omitted the restart remedy")
     dead_auto = run(same_env, 'export CLAUDE_PID=$$; echo "{}" | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"')
     require(dead_auto.returncode == 0, "dead-publisher foreign auto-arm did not stand down")
     require(same_owner.poll() is None, "the frontend exited during the dead-publisher check")

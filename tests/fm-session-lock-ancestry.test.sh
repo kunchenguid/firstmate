@@ -376,6 +376,12 @@ test_same_session_id_owns_a_recycled_background_chain() {
   fi
   FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
     || fail "a failed publisher lookup hid the foreign live frontend"
+  got=$(FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 \
+    lib_eval "$fakebin" "fm_session_lock_refusal_advice '$state'")
+  case "$got" in *'second process resuming'*'exit this session'*) ;; *) fail "unknown publisher liveness did not keep the second-process advice" ;; esac
+  if lib_eval "$fakebin" 'kill() { echo "Operation not permitted" >&2; return 1; }; fm_session_lock_publisher_exited 730'; then
+    fail "a permission error was reported as publisher exit"
+  fi
   printf 'S1\n710\n' > "$state/.lock-session"
   # 2. A different id: the existing refusal, naming the live owner.
   if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
@@ -977,8 +983,8 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 # exactly as in production, and the tree is orphaned before use. The daemon is
 # then ended while the front-end stays alive - the recycling that breaks the run
 # above the pty-host - and the spare fires the real Stop auto-arm, the real
-# turn-end guard on each Stop. Only startup, compact, and clear phases run
-# the lock script, matching the production SessionStart path.
+# turn-end guard on each Stop before any acquisition probe or SessionStart.
+# Foreign phases also probe acquisition; compact and clear then re-key the lock.
 
 BG_FIXTURE_PIDS=()
 reap_background_fixture() {
@@ -1044,10 +1050,6 @@ while [ ! -e "$FM_HOME/state/stop-spare" ]; do
     unset CLAUDE_CODE_SESSION_ID CLAUDE_PID
     # shellcheck disable=SC1090
     . "$req"
-    if [ "$n" -eq 5 ] || [ "$n" -eq 6 ]; then
-      "$FM_HOME/bin/fm-lock.sh" > "$out/lock.out" 2>&1
-      printf '%s\n' "$?" > "$out/lock.rc"
-    fi
     ( . "$FM_HOME/bin/fm-session-lock-lib.sh" && fm_harness_ancestry_pids ) > "$out/ancestry" 2>/dev/null
     printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
       | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$out/hook.out" 2>&1
@@ -1055,6 +1057,10 @@ while [ ! -e "$FM_HOME/state/stop-spare" ]; do
     printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
       | "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$out/guard.out" 2>&1
     printf '%s\n' "$?" > "$out/guard.rc"
+    if [ "$n" -ge 2 ] && [ "$n" -le 6 ]; then
+      "$FM_HOME/bin/fm-lock.sh" > "$out/lock.out" 2>&1
+      printf '%s\n' "$?" > "$out/lock.rc"
+    fi
     cp "$FM_HOME/state/.lock" "$out/lock-after"
     [ ! -e "$FM_HOME/state/.lock-session" ] || cp "$FM_HOME/state/.lock-session" "$out/session-after"
     : > "$out/done"
@@ -1137,6 +1143,9 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" guard.rc)" "$label: a non-owner Stop did not end safely"
   grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $owner" "$dir/state/phase-$n/guard.out" \
     || fail "$label: the guard did not report the live owner $owner: $(cat "$dir/state/phase-$n/guard.out")"
+  expect_code 1 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh accepted a lock this session does not own"
+  grep -q "another live firstmate session holds the lock (pid $owner, session S1)" "$dir/state/phase-$n/lock.out" \
+    || fail "$label: acquisition did not identify the live owner"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
 
@@ -1175,6 +1184,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
     fail "the legacy publisher upgrade changed the session-id boundary"
   fi
   cp "$dir/state/.lock-session" "$dir/sidecar-initial"
+  pass "session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime"
 
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
   # the front-end that holds the lock stays alive.
@@ -1201,11 +1211,12 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   fire_phase "$dir" 4 ''
   expect_phase_foreign "$dir" 4 2 "$frontend" "recycled chain, no id"
 
-  # Phase 5: compact runs SessionStart under the same id over the broken chain.
-  # The confirmation re-anchors line 1 from the live non-ancestor front-end onto the
+  # Phase 5: Stop must own through the publisher before compact SessionStart.
+  # The later confirmation re-anchors line 1 from the live frontend onto the
   # spare - the model-loop process - not onto the outermost pty-host.
   fire_phase "$dir" 5 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   expect_phase_owned "$dir" 5 4 "$spare" "recycled chain, same session"
+  pass "session-lock e2e: post-recycle Stop owns through the publisher before SessionStart"
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end exited, so the re-anchor was not over a live owner"
 
@@ -1228,9 +1239,49 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   if [ "$dir/state/.lock-session" -nt "$dir/sidecar-current" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-current" ]; then
     fail "a current sidecar Stop changed its mtime"
   fi
+  pass "session-lock e2e: current-sidecar Stop calls no writer and preserves bytes and mtime"
+
+  # Phase 8: a failing writer cannot suppress an already-owned Stop.
+  printf 'S2\n%s\n' "$frontend" > "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/sidecar-stale"
+  fire_phase "$dir" 8 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 8 10 "$spare" "failed publisher refresh" S2
+  [ -e "$dir/state/unexpected-lock-call" ] || fail "the stale publisher never reached the failing writer"
+  grep -q 'publisher refresh failed (exit 1); continuing supervision with proven ownership' "$dir/state/phase-8/hook.out" \
+    || fail "the failed refresh did not report its exit status"
+  cmp -s "$dir/state/.lock-session" "$dir/sidecar-stale" || fail "the failing writer changed the stale sidecar"
+  pass "session-lock e2e: a failed publisher refresh reports its status and still rewakes"
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"
+}
+
+# An ancestry-owned Stop may refresh the publisher, never another session's id.
+test_stops_under_shared_ancestor_do_not_rekey_the_sidecar() {
+  local dir fakebin id pid
+  dir="$TMP_ROOT/shared-ancestor-stops"
+  make_background_session_home "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  write_background_session_ps "$fakebin"
+  printf '700\n' > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  touch -t 202001010000 "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/sidecar-time"
+  : > "$dir/state/.afk"
+  for id in S1 S2 S1 S2; do
+    pid=710
+    [ "$id" != S2 ] || pid=730
+    env PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_DAEMON_PRESENT=1 \
+      CLAUDE_CODE_SESSION_ID="$id" CLAUDE_PID="$pid" \
+      bash "$dir/bin/fm-claude-stop-autoarm.sh" </dev/null > "$dir/stop-$id.out" 2>&1
+    [ "$(sidecar_id "$dir/state/.lock-session")" = S1 ] || fail "an alternating Stop re-keyed the recorded id"
+    [ "$(sed -n '2p' "$dir/state/.lock-session")" = 710 ] || fail "the same-id Stop did not upgrade its publisher, or the other id replaced it"
+    [ "$(cat "$dir/state/.lock")" = 700 ] || fail "a Stop re-anchored the shared line-1 owner"
+    if [ "$dir/state/.lock-session" -nt "$dir/sidecar-time" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-time" ]; then
+      fail "an alternating Stop moved the session-id time boundary"
+    fi
+  done
+  pass "session-lock: alternating shared-ancestor Stops preserve the recorded id, anchor and mtime"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
@@ -1663,6 +1714,7 @@ test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
+test_stops_under_shared_ancestor_do_not_rekey_the_sidecar
 test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
 test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar
