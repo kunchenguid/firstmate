@@ -7,6 +7,8 @@ It provides task tabs and their terminal blocks while Treehouse continues to pro
 ## Setup
 
 Pick Rex when you already run Firstmate inside Rex and want each task as its own tab next to your session.
+The Rex server must run on the same machine as Firstmate because spawn and liveness checks compare Rex-reported process and filesystem data with local machine state.
+A remote or otherwise unverified endpoint is refused before spawn creates a tab or leases a worktree; use a remote second mate to run workers on another host.
 Rex is in beta, and its sessions live in a personal server that does not keep them across a server stop.
 
 Prerequisites:
