@@ -782,7 +782,7 @@ do_exit() {
   fi
   : > "$FM_COMPOSER_DIALOG_SINK" \
     || die "task $ID's dialog check could not be recorded"
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+  composer_state=$(FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
   # The classify that filled the sink ran in a subshell, so read the file
   # rather than a function that subshell sourced.
@@ -842,7 +842,7 @@ do_exit() {
     # verdict needs no composer read, and a cleared composer can be read
     # before the picker renders. Read the screen once more here.
     : > "$FM_COMPOSER_DIALOG_SINK" || true
-    fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
+    FM_TMUX_SOCKET=$CONTROL_SOCKET fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
     if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
       refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
     fi

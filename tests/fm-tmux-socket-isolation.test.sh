@@ -532,6 +532,19 @@ case "$cmd" in
     printf '@9\n'
     exit 0 ;;
   kill-window)
+    printf '%s\n' "$sock kill-window $*" >> "$D/literal"
+    target=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = -t ] && target=$arg
+      prev=$arg
+    done
+    name=${target##*:}
+    name=${name#=}
+    if [ -f "$D/windows-$sock" ]; then
+      grep -vxF -- "$name" "$D/windows-$sock" > "$D/windows-$sock.tmp" 2>/dev/null || true
+      mv "$D/windows-$sock.tmp" "$D/windows-$sock"
+    fi
     exit 0 ;;
   set-window-option)
     exit 0 ;;
@@ -753,6 +766,50 @@ EOF
   tmux -L "$sock" kill-server 2>/dev/null || true
 }
 
+# A teardown drives the same stub: the window exists on the RECORDED socket,
+# and the close must be scoped there - an unscoped kill-window would resolve
+# "already gone" against the wrong server and silently strand the fleet
+# window (the half-migration this suite exists to prevent).
+run_socket_teardown() {  # <case-dir> <args...>
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TMUX \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_TEARDOWN_GUARD_DONE=1 \
+    "$ROOT/bin/fm-teardown.sh" "$@" 2>&1
+}
+
+test_teardown_closes_the_window_on_the_recorded_socket() {
+  local dir out rc sock="fmfake-tear-$$"
+  dir=$(new_socket_case teardown-socket d4)
+  add_socket_ship_task "$dir" d4 "$sock"
+  mkdir -p "$dir/home/config"
+  # The endpoint exists on the RECORDED socket: server alive, window listed.
+  : > "$dir/fake/server-$sock-alive"
+  printf 'fm-d4\n' > "$dir/fake/windows-$sock"
+  # teardown returns the worktree through treehouse; stub it.
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse"
+
+  out=$(run_socket_teardown "$dir" d4 --force); rc=$?
+
+  expect_code 0 "$rc" "a clean socket-isolated task must tear down"$'\n'"$out"
+  assert_grep "$sock kill-window" "$dir/fake/literal" \
+    "the window close must be addressed to the RECORDED socket"
+  if [ -e "$dir/fake/windows-$sock" ] && grep -qxF 'fm-d4' "$dir/fake/windows-$sock"; then
+    fail "the recorded socket's window must be removed"
+  fi
+  [ ! -e "$dir/home/state/d4.meta" ] \
+    || fail "teardown must remove the durable record"
+  pass "fm-teardown: the window close addresses the recorded socket"
+}
+
 # --- entrypoint ---------------------------------------------------------------
 
 test_fm_tmux_routes_every_invocation_through_one_owner
@@ -765,3 +822,4 @@ test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint
 test_relaunch_refuses_a_dead_socket_legacy_record_unchanged
 test_relaunch_refuses_when_the_worktree_survived_the_server
+test_teardown_closes_the_window_on_the_recorded_socket
