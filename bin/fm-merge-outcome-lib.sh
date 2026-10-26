@@ -221,13 +221,13 @@ fm_merge_outcome_cleanup_and_publish() {  # <home> <state> <task-id> <pr-url>
   STATE=$state
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
-  fm_wake_append check "merged-$id-$FM_PR_URL" \
-    "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")" || status=1
   case "$FM_MERGE_OUTCOME_CLEANUP" in
     refused|failed)
       fm_pr_poll_merge_record_cleanup "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_MERGE_OUTCOME_CLEANUP" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" || status=1
       ;;
   esac
+  fm_wake_append check "merged-$id-$FM_PR_URL" \
+    "$(fm_merge_outcome_cleanup_notice "$FM_MERGE_OUTCOME_NOTICE")" || status=1
   return "$status"
 }
 
