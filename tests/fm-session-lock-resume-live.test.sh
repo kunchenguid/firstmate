@@ -23,6 +23,7 @@ repo = Path(sys.argv[1])
 lab = None
 version = "Claude Code (version unavailable)"
 sessions = []
+claude_pids = set()
 socket = os.environ.get("FM_CLAUDE_LOCK_TEST_SOCKET", f"fm-lock-resume-{os.getpid()}")
 
 def tmux(*args):
@@ -52,7 +53,9 @@ def launch(label):
     command = ["env", "-i", *(f"{k}={v}" for k, v in env.items()),
                "claude", "--model", "haiku", "--setting-sources", "project",
                "--settings", str(settings), "--strict-mcp-config"]
-    tmux("new-session", "-d", "-s", name, "-c", str(home), shlex.join(command))
+    pid = tmux("new-session", "-d", "-P", "-F", "#{pane_pid}",
+               "-s", name, "-c", str(home), "exec " + shlex.join(command))
+    claude_pids.add(int(pid.strip()))
     sessions.append(name)
     def started():
         rows = list((home / "state").glob("*-startup.json"))
@@ -63,6 +66,7 @@ def launch(label):
         except (FileNotFoundError, json.JSONDecodeError):
             return None
     records = wait(started, f"{label} SessionStart did not run")
+    claude_pids.update(int(row["pid"]) for row in records)
     return name, next(row for row in records if row["pid"] not in known)
 
 known = set()
@@ -122,6 +126,17 @@ except Exception as exc:
 finally:
     for session in sessions:
         subprocess.run(["tmux", "-L", socket, "kill-session", "-t", session], capture_output=True)
+    # Closing the last pane stops the private server, but Claude can still be
+    # flushing its config. Wait for exit before removing files it may recreate.
+    def exited(pid):
+        result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True, text=True)
+        if result.returncode not in (0, 1):
+            raise RuntimeError(f"cannot check Claude process {pid}: {result.stderr}")
+        state = result.stdout.strip()
+        return not state or state.startswith("Z")
+    for pid in claude_pids:
+        wait(lambda: exited(pid), f"Claude process {pid} did not exit; lab retained at {lab}")
     if lab is not None:
         shutil.rmtree(lab)
 PY
