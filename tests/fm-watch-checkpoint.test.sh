@@ -104,12 +104,12 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
   expect_code 0 "$status" "first recovery checkpoint exit"
   assert_contains "$(cat "$out")" "check: rearm-resurface" \
     "first checkpoint did not announce the pending recovery"
-  marker=$(cat "$home/state/.watcher-down")
+  marker=$(cat "$home/state/wake/watcher-down")
   case "$marker" in
     announced:downtime:*) ;;
     *) fail "first checkpoint did not leave an announced generation: $marker" ;;
   esac
-  [ -s "$home/state/.wake-queue" ] \
+  [ -s "$home/state/wake/queue" ] \
     || fail "durable wake did not stay unacknowledged after the announcement"
 
   status=0
@@ -121,10 +121,10 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
     "announced recovery checkpoint did not supervise for its bound"
   assert_not_contains "$(cat "$out")" "check: rearm-resurface" \
     "announced recovery was reannounced by the next checkpoint"
-  [ "$(cat "$home/state/.watcher-down")" = "$marker" ] \
+  [ "$(cat "$home/state/wake/watcher-down")" = "$marker" ] \
     || fail "announced recovery checkpoint changed the outstanding generation"
   grep "$(printf '\tcheck\tburied\tcheck: unacknowledged durable wake')" \
-    "$home/state/.wake-queue" >/dev/null \
+    "$home/state/wake/queue" >/dev/null \
     || fail "unacknowledged durable wake was not retained"
   pass "an announced recovery is not reannounced by the next foreground checkpoint"
 }
@@ -134,7 +134,8 @@ test_never_announced_recovery_is_announced_once() {
   home=$(make_home pending-recovery)
   out="$home/out.txt"
   err="$home/err.txt"
-  printf 'pending:downtime:unreported.1.aaa\n' > "$home/state/.watcher-down"
+  mkdir -p "$home/state/wake"
+  printf 'pending:downtime:unreported.1.aaa\n' > "$home/state/wake/watcher-down"
 
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
@@ -143,7 +144,7 @@ test_never_announced_recovery_is_announced_once() {
   expect_code 0 "$status" "pending recovery checkpoint exit"
   [ "$(grep -c '^check: rearm-resurface$' "$out" || true)" -eq 1 ] \
     || fail "never-announced recovery did not surface exactly once: $(cat "$out")"
-  [ "$(cat "$home/state/.watcher-down")" = 'announced:downtime:unreported.1.aaa' ] \
+  [ "$(cat "$home/state/wake/watcher-down")" = 'announced:downtime:unreported.1.aaa' ] \
     || fail "never-announced recovery did not retain its announced generation"
   pass "a never-announced recovery still surfaces once from a foreground checkpoint"
 }
@@ -171,7 +172,7 @@ test_queue_append_during_checkpoint_still_resurfaces() {
   assert_contains "$(cat "$out")" "check: rearm-resurface" \
     "queue append during checkpoint did not resurface"
   grep "$(printf '\tcheck\tconcurrent\tcheck: appended during checkpoint')" \
-    "$home/state/.wake-queue" >/dev/null \
+    "$home/state/wake/queue" >/dev/null \
     || fail "queue append was not retained durably after checkpoint recovery"
   pass "a queue append during a foreground checkpoint still resurfaces"
 }

@@ -223,7 +223,7 @@ In its `--claude` mode it cooperates with the auto-arm.
 
 ## Recovery episode acknowledgement
 
-A recovery episode is one generation of the `state/.watcher-down` marker.
+A recovery episode is one generation of the `state/wake/watcher-down` marker.
 It is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
 The away return brief treats a still-open handling episode as a wake in progress, not watcher downtime; an open downtime episode remains a gap.
 
@@ -419,7 +419,7 @@ Once per poll the watcher checks that its home, its state directory, and its own
 The arm applies the same rule to its own ground: when its script, its state directory, or an `FM_HOME` that existed at start disappears, it fails with `watcher: FAILED - arm ground removed: <path> no longer exists` instead of polling on; the `bin/fm-watch-arm.sh` header owns the timing bound.
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked check, a blocked `fm_backend_capture` pane read, or a backend event wait, so both run its EXIT cleanup and stop that read or wait.
 `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
-The EXIT cleanup bounds its wait for `state/.watcher-down.lock` while persisting recovery state with `FM_WATCHER_CLEANUP_LOCK_BOUND` (default 2 seconds).
+The EXIT cleanup bounds its wait for `state/wake/watcher-down.lock` while persisting recovery state with `FM_WATCHER_CLEANUP_LOCK_BOUND` (default 2 seconds).
 Only positive decimal integers are accepted, including leading-zero forms such as `08`; empty, non-numeric, and zero values (including `00`) fall back to 2 seconds.
 A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lock wait: on timeout the recovery transition fails without releasing the singleton, leaving dead-pid stale evidence for the next arm to republish and clear.
 

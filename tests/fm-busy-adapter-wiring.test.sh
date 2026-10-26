@@ -569,7 +569,7 @@ secondmate_stall_watch() { # <primary> <id> <out> [seconds]
   window=$(grep '^window=' "$state/$id.meta" | cut -d= -f2-)
   # A previous quiet checkpoint leaves a downtime marker. The next watcher
   # would exit on that recovery wake before this observation finishes.
-  rm -f "$state/.watcher-down"
+  rm -f "$state/wake/watcher-down"
   fakebin="$primary/watch-fake-$id"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<SH
@@ -624,12 +624,13 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
   out=$(fm_busy_classify tmux "firstmate:fm-$id" claude "$id" "$state" 'working on the charter')
   [ "$out" = "busy fm-spawn" ] || fail "a non-empty tail without a record used to stay unknown; got '$out'"
 
+  mkdir -p "$sm/state/wake"
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
-    > "$sm/state/.wake-queue"
+    > "$sm/state/wake/queue"
   secondmate_stall_watch "$primary" "$id" "$case_dir/watch-busy.out"
   grep -F 'secondmate wake-loop stalled' "$case_dir/watch-busy.out" >/dev/null \
     && fail "a secondmate inside an armed turn was escalated as a stalled wake loop: $(cat "$case_dir/watch-busy.out")"
-  [ ! -s "$state/.wake-queue" ] \
+  [ ! -s "$state/wake/queue" ] \
     || fail "a secondmate inside an armed turn published a durable stall notification"
 
   rm -f "$state/$id.turn-ended"
@@ -714,8 +715,9 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
     grep -F "gen=$gen " "$state/$id.busy-state" >/dev/null \
       || fail "a blocked Stop must write the spawn's gen ($order): $(cat "$state/$id.busy-state")"
   done
+  mkdir -p "$sm/state/wake"
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
-    > "$sm/state/.wake-queue"
+    > "$sm/state/wake/queue"
   secondmate_stall_watch "$primary" "$id" "$case_dir/watch-blocked.out"
   grep -F 'secondmate wake-loop stalled' "$case_dir/watch-blocked.out" >/dev/null \
     && fail "a secondmate inside a guard-forced continuation was escalated as stalled: $(cat "$case_dir/watch-blocked.out")"

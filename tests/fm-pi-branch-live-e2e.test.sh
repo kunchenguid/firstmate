@@ -49,7 +49,7 @@ repo="$TMP_ROOT/repo"
 home="$TMP_ROOT/home"
 agentdir="$TMP_ROOT/agent-dir"
 mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
-  "$home/state" "$home/config" "$agentdir"
+  "$home/state/wake" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
@@ -112,7 +112,7 @@ const home = resolve(process.env.FM_HOME);
 const approvedProject = `${home}/projects/live-probe`;
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-probe.meta`, `project=${approvedProject}\nwindow=fm-live-probe\n`);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
 // Main gets a separate local model runtime; the branch's agent dir remains
 // empty. Observe real vendor input, consumption, settlement and provider
 // requests rather than synthesizing successful sendUserMessage callbacks.
@@ -253,7 +253,7 @@ await session.dispose();
 session = await createMain("new");
 await waitFor(() => armCount() >= 3, "replacement watcher arm");
 await waitFor(() => liveArmPids().length === 1, "replacement to retire the previous fixture arm");
-writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
 writeFileSync(process.env.FM_LIVE_WATCH_TRIGGER, "signal: live pin probe\n");
 await waitFor(() => mainUserMessages.length === 2, "pinned watcher-owned main delivery");
 if (offers.length !== 2 || !offers[1].accepted) {
@@ -292,7 +292,7 @@ if (!session.sessionManager.buildSessionContext().messages.some((message) => mes
 if (existsSync(`${home}/state/.branch-eligible-rows`) || existsSync(`${home}/state/branch-outcomes.jsonl`)) {
   throw new Error("unusable branch fabricated an outcome or retained claimed notification ownership");
 }
-if (!readFileSync(`${home}/state/.wake-queue`, "utf8").includes("signal: live pin probe") || errors.length) {
+if (!readFileSync(`${home}/state/wake/queue`, "utf8").includes("signal: live pin probe") || errors.length) {
   throw new Error(`real fallback lost its durable row or raised extension errors: ${JSON.stringify(errors)}`);
 }
 await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -314,7 +314,7 @@ pass "real Pi SDK $PI_VERSION rejects an unusable pin and delivers both fallback
 # assistant message and resolves session.prompt() through its production loop.
 errorhome="$TMP_ROOT/error-home"
 erroragentdir="$TMP_ROOT/error-agent-dir"
-mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir"
+mkdir -p "$errorhome/state/wake" "$errorhome/config" "$erroragentdir"
 cat > "$erroragentdir/models.json" <<'JSON'
 {
   "providers": {
@@ -343,7 +343,7 @@ const home = resolve(process.env.FM_HOME);
 const approvedProject = `${home}/projects/live-error-probe`;
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
 let providerRequests = 0;
 globalThis.fetch = async (input) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -449,7 +449,7 @@ if (existsSync(`${home}/state/.branch-eligible-rows`)) {
 if (existsSync(`${home}/state/branch-outcomes.jsonl`)) {
   throw new Error("real-SDK provider error fabricated a durable branch outcome");
 }
-const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+const queue = readFileSync(`${home}/state/wake/queue`, "utf8");
 if (!queue.includes("\tsignal\tlive-error-probe.status\t")) {
   throw new Error(`real-SDK provider-error fallback lost the durable wake row: ${queue}`);
 }
@@ -1200,7 +1200,7 @@ const loader = new sdk.DefaultResourceLoader({
       if (isUser && version.startsWith("1.2.") && event.messageType !== "user") throw new Error("SDK1.2 user discriminator missing");
       if (!isUser && (event.messageType !== "custom" || event.message.content !== customText)) throw new Error("unexpected no-prompt trigger");
       if (textOf(manager.buildSessionContext().messages).includes(currentPrompt)) throw new Error("current prompt was already persisted before startup wait");
-      writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tstaging-probe.status\tsignal: startup context probe\n");
+      writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tstaging-probe.status\tsignal: startup context probe\n");
       const offer = {
         message: "signal: startup context probe", projects: [project], heartbeat: false, eligible: true,
         accepted: false, settlement: Promise.resolve(),

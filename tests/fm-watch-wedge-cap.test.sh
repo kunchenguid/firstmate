@@ -250,7 +250,7 @@ hold_capped_polls() {  # <dir> <max> <stale-secs> <timer-age-secs> <cycles> [ext
 queued_wakes_carrying() {  # <state> <window> <needle>
   awk -F '\t' -v w="$2" -v needle="$3" \
     'NF >= 5 && $3 == "stale" && $4 == w && index($5, needle) { n++ } END { print n + 0 }' \
-    "$1/.wake-queue" 2>/dev/null || printf '0\n'
+    "$1/wake/queue" 2>/dev/null || printf '0\n'
 }
 
 # 1. Disabled by default: FM_WEDGE_MAX_ESCALATIONS=0 leaves the cap inert,
@@ -795,7 +795,7 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   # Drive one more poll: the sentinel short-circuits the wedge path. Within
   # FM_ROLLBACK_SENTINEL_TTL_SECS no new wake may be published at all.
   local queue_before
-  queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  queue_before=$(cat "$state/wake/queue" 2>/dev/null || true)
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -810,8 +810,8 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   # The cap-fire round already queued its terminal wake (it appended before the
   # marker write it then failed on), so compare against the snapshot rather than
   # against an empty queue: no NEW stale row may appear while the sentinel holds.
-  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] \
-    || fail "sentinel short-circuit queued another wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(cat "$state/wake/queue" 2>/dev/null || true)" = "$queue_before" ] \
+    || fail "sentinel short-circuit queued another wake: $(cat "$state/wake/queue" 2>/dev/null)"
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "expected the sentinel short-circuit triage line; got triage: $(cat "$state/.watch-triage.log" 2>/dev/null) and watch.out: $(cat "$out")"
   [ -e "$sentinel" ] || fail "the sentinel was removed by the short-circuit poll; it must hold until TTL expiry or an operator rm"
@@ -836,8 +836,8 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "a rollback-failed sentinel with an unusable TTL did not hold the wedge path: $(cat "$state/.watch-triage.log" 2>/dev/null) and watch.out: $(cat "$out")"
   [ -e "$sentinel" ] || fail "a rollback-failed sentinel with an unusable TTL was dropped instead of holding for the documented default"
-  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] \
-    || fail "a rollback-failed sentinel with an unusable TTL queued another wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(cat "$state/wake/queue" 2>/dev/null || true)" = "$queue_before" ] \
+    || fail "a rollback-failed sentinel with an unusable TTL queued another wake: $(cat "$state/wake/queue" 2>/dev/null)"
 
   # The sentinel silences ESCALATIONS, not detection: the agent exits while its
   # pane keeps rendering the identical frame, so the session inventory no longer
@@ -902,7 +902,7 @@ test_wedge_cap_unwritable_escalation_count_fails_safe() {
   [ "$round_status" -eq 1 ] \
     || fail "a failed escalation-count write under a configured cap expected exit 1, got $round_status: $(cat "$out")"
   [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
-    || fail "a wedge escalation whose count could not be recorded was published anyway: $(cat "$state/.wake-queue" 2>/dev/null)"
+    || fail "a wedge escalation whose count could not be recorded was published anyway: $(cat "$state/wake/queue" 2>/dev/null)"
   [ -e "$sentinel" ] \
     || fail "an escalation count this state dir refuses left the wedge path unsilenced: $(cat "$state/.watch-triage.log" 2>/dev/null)"
 
@@ -912,7 +912,7 @@ test_wedge_cap_unwritable_escalation_count_fails_safe() {
   poll_capped_wedge_round "$dir" "$max" "" absorb \
     || fail "the poll after an unwritable escalation count never settled: $(cat "$out")"
   [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
-    || fail "the next poll republished a wedge escalation from a counter this state dir refuses: $(cat "$state/.wake-queue" 2>/dev/null)"
+    || fail "the next poll republished a wedge escalation from a counter this state dir refuses: $(cat "$state/wake/queue" 2>/dev/null)"
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "the silenced poll did not report the sentinel to the operator: $(cat "$state/.watch-triage.log" 2>/dev/null)"
 
@@ -983,7 +983,7 @@ test_wedge_cap_sentinel_probe_keeps_its_cadence() {
   [ "$at" -le 1 ] \
     || fail "a window silenced at the escalation threshold read its endpoint $at times across five polls; the probe must keep its once-per-STALE_ESCALATE_SECS cadence there too"
   [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
-    || fail "the sentinel published a wedge wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+    || fail "the sentinel published a wedge wake: $(cat "$state/wake/queue" 2>/dev/null)"
   [ -e "$sentinel" ] || fail "a poll at the threshold consumed the sentinel; it must hold until TTL expiry or an operator rm"
   unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_REAL FM_FAKE_TMUX_INVENTORY_LOG
   pass "a window silenced by the rollback-failure sentinel keeps the probe on its escalation cadence, not once per poll"
@@ -1077,7 +1077,7 @@ SHIM
   # new escalation, no new terminal row - exactly as it does on the write
   # routes above, while the saturated counter the state dir refused to reset
   # stays where it is.
-  queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  queue_before=$(cat "$state/wake/queue" 2>/dev/null || true)
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1093,8 +1093,8 @@ SHIM
   reap "$pid"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "the sentinel short-circuit published a wedge wake after a failed reset: $(cat "$out")"
-  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] \
-    || fail "the poll after a failed reset queued another wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(cat "$state/wake/queue" 2>/dev/null || true)" = "$queue_before" ] \
+    || fail "the poll after a failed reset queued another wake: $(cat "$state/wake/queue" 2>/dev/null)"
   grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null \
     || fail "the silenced poll did not report the sentinel: $(cat "$state/.watch-triage.log" 2>/dev/null)"
   [ -e "$sentinel" ] || fail "the sentinel was consumed by the poll after the failed reset; it must hold until TTL expiry or an operator rm"
@@ -1219,7 +1219,7 @@ test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure() {
     [ -d "$marker_window/blocker" ] || fail "cap cycle $cycle consumed the planted marker-write blocker"
     cycle=$((cycle + 1))
   done
-  terminal_rows=$(awk -F '\t' '$3 == "stale" && $5 ~ /PERMANENTLY-WEDGED/ { n++ } END { print n + 0 }' "$state/.wake-queue")
+  terminal_rows=$(awk -F '\t' '$3 == "stale" && $5 ~ /PERMANENTLY-WEDGED/ { n++ } END { print n + 0 }' "$state/wake/queue")
   [ "$terminal_rows" -eq 1 ] \
     || fail "two cap cycles under a persistent marker-write failure queued $terminal_rows PERMANENTLY-WEDGED rows; exactly one terminal wake per window is the bound"
   grep -F "suppressing the duplicate terminal wake" "$state/.watch-triage.log" >/dev/null \
@@ -1520,7 +1520,7 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
 
   # The episode marker cannot be created - a dangling symlink is absent to
   # every existence test and unwritable on every write - while appending to the
-  # existing .wake-queue keeps working. The cap-marker path is a directory, so
+  # existing wake queue keeps working. The cap-marker path is a directory, so
   # the cap rolls back and re-fires on the next poll, which is what makes a
   # second terminal append possible at all.
   marker_episode="$state/.wedge-terminal-queued-$key"

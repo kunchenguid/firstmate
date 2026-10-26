@@ -255,8 +255,8 @@ poll() {
   timeout=${FM_CHECK_TIMEOUT:-30}
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
   deadline=$(( $(date +%s) + (timeout > 10 ? timeout - 5 : 5) ))
-  FM_WAKE_QUEUE="$STATE/.wake-queue"
-  FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
+  FM_WAKE_QUEUE="$STATE/wake/queue"
+  FM_WAKE_QUEUE_LOCK="$STATE/wake/queue.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_try_acquire "$STATE/.pr-health.lock" || exit 0

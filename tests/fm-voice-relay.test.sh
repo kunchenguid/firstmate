@@ -3708,9 +3708,9 @@ assert_grep 'Refactor the login module' "$note_file" \
 
 # Exactly one wake, so a spoken request is presented once at firstmate's next
 # check rather than queued twice or lost.
-assert_present "$HOME_FIXTURE/state/.wake-queue" \
+assert_present "$HOME_FIXTURE/state/wake/queue" \
   "handover should wake firstmate"
-wakes=$(grep -c 'inbox:' "$HOME_FIXTURE/state/.wake-queue")
+wakes=$(grep -c 'inbox:' "$HOME_FIXTURE/state/wake/queue")
 [ "$wakes" = 1 ] || fail "handover should append exactly one wake, found $wakes"
 
 # The reading half must see what the queueing half just wrote, or the agent says

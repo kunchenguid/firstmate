@@ -205,7 +205,7 @@ host_live() {
 watcher_pid() { cat "$1/fm/state/.watch.lock/pid" 2>/dev/null; }
 watcher_live() { local pid; pid=$(watcher_pid "$1") && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }
 ledger() { head -n 1 "$1/fm/state/.claude-autoarm-epoch" 2>/dev/null; }
-marker() { cat "$1/fm/state/.watcher-down" 2>/dev/null; }
+marker() { cat "$1/fm/state/wake/watcher-down" 2>/dev/null; }
 captain_prompts() { jq -r 'select(.tag == "captain") | .seq' "$1/fm/state/.host-mirror.jsonl" 2>/dev/null | wc -l | tr -d ' '; }
 # The stand-in listener's claim is active and its runner alive.
 listener_pid() {
@@ -221,7 +221,7 @@ diagnose() {  # <lab>
   printf -- '--- host log\n%s\n--- cycle exits\n%s\n--- queue\n%s\n--- ledger: %s\n--- marker: %s\n--- screen\n%s\n' \
     "$(tail -n 8 "$1/fm/state/.supervision-host.log" 2>/dev/null)" \
     "$(tail -n 4 "$1/fm/state/.watch-cycle-exits.log" 2>/dev/null | cut -f1-8)" \
-    "$(cat "$1/fm/state/.wake-queue" 2>/dev/null)" "$(ledger "$1")" "$(marker "$1")" \
+    "$(cat "$1/fm/state/wake/queue" 2>/dev/null)" "$(ledger "$1")" "$(marker "$1")" \
     "$(tmux -L "$SOCKET-$(basename "$1")" capture-pane -p -t primary 2>/dev/null | tail -n 25)"
 }
 
@@ -328,7 +328,7 @@ decide_at_handoff() { # <lab> <status-file> <line>
       }
       sleep 0.002;
     }
-    exit 1' "$1/fm/state/.watcher-down" "$2" "$3" 600
+    exit 1' "$1/fm/state/wake/watcher-down" "$2" "$3" 600
 }
 
 # Steps 2-5 on the host under test: every hand-off reaches the idle primary.
@@ -445,7 +445,7 @@ run_control() {
   if [ -n "$(rewakes_since "$lab" "$e1")" ] || acked_since "$lab" "$e1"; then
     fail "control: the idle primary WAS woken on $CONTROL_REF, so this scenario cannot catch the dropped hand-back"$'\n'"$(diagnose "$lab")"
   fi
-  evidence "control: after ${CONTROL_QUIET_SECONDS}s no rewake and no primary command; ledger: $(ledger "$lab"); marker: $(marker "$lab"); queued rows: $(wc -l < "$lab/fm/state/.wake-queue" | tr -d ' ')"
+  evidence "control: after ${CONTROL_QUIET_SECONDS}s no rewake and no primary command; ledger: $(ledger "$lab"); marker: $(marker "$lab"); queued rows: $(wc -l < "$lab/fm/state/wake/queue" | tr -d ' ')"
   stop_lab "$lab"
   pass "attended live control ($CLAUDE_VERSION): on $CONTROL_REF the idle primary is not woken, so the scenario catches the bug"
 }

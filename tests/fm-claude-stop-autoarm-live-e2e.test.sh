@@ -70,7 +70,7 @@ exit 0
 SH
 chmod +x "$PROJECT/bin/tool-logger.sh"
 
-mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/data"
+mkdir -p "$HOME_DIR/state/wake" "$HOME_DIR/config" "$HOME_DIR/data"
 printf 'project=fixture\nwindow=fixture\nbackend=tmux\n' > "$HOME_DIR/state/task.meta"
 # A numeric pid above the supported OS pid range is a demonstrably dead prior
 # harness owner under fm_harness_pid_alive, matching the reproduced incident.
@@ -88,7 +88,7 @@ if [ "$N" -ge 3 ]; then
   printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
   exit 0
 fi
-printf 'pending:downtime:fixture-generation-%s\n' "$N" > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation-%s\n' "$N" > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
@@ -167,7 +167,7 @@ fi
 # epoch, or rewake.
 FAKE_CLAUDE="$LAB/claude"
 ln -s /bin/bash "$FAKE_CLAUDE"
-mkdir -p "$LIVE_OWNER_HOME/state" "$LIVE_OWNER_HOME/config"
+mkdir -p "$LIVE_OWNER_HOME/state/wake" "$LIVE_OWNER_HOME/config"
 printf 'project=fixture\n' > "$LIVE_OWNER_HOME/state/task.meta"
 "$FAKE_CLAUDE" -c 'sleep 3; :' &
 LIVE_OWNER_PID=$!

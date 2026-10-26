@@ -175,7 +175,7 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 0 "$rc" "poll must succeed when python3 lists mail"
   assert_contains "$out" "woke for 42" "first poll wakes the new uid"
-  local wakeq="$HOME_DIR/state/.wake-queue"
+  local wakeq="$HOME_DIR/state/wake/queue"
   assert_contains "$(cat "$wakeq" 2>/dev/null)" "mail from alice@example.com" "wake queue names the sender"
   assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "42" "cursor records the surfaced uid"
 
@@ -261,7 +261,7 @@ SH
   assert_not_contains "$out" "woke for 99" "healing poll must not re-wake the queued mail"
   assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "99" "healing poll restores the cursor record"
   local wakeq
-  wakeq=$(grep -c "check: mail 99" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 99" "$HOME_DIR/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "queued wake is still appended exactly once"
   pass "fm-mail: poll heals a wake whose cursor record was interrupted"
 }
@@ -296,7 +296,7 @@ SH
   woke_count=$(printf '%s' "$combined" | grep -c "woke for 88" || true)
   expect_code 1 "$woke_count" "overlapping polls surface uid 88 exactly once"
   local wakeq
-  wakeq=$(grep -c "check: mail 88" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 88" "$HOME_DIR/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "overlapping polls append exactly one wake for uid 88"
   pass "fm-mail: the poll lock serializes overlapping polls so mail wakes exactly once"
 }
@@ -328,8 +328,8 @@ SH
   # survives.
   printf 'uidvalidity=70007\n' > "$HOME_DIR/state/.mail-seen"
   printf '%s\t%s\n' '70007' '55' > "$HOME_DIR/state/.mail-woken"
-  grep -v "check: mail 55" "$HOME_DIR/state/.wake-queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
-  mv "$TMP_ROOT/wakeq.acked" "$HOME_DIR/state/.wake-queue"
+  grep -v "check: mail 55" "$HOME_DIR/state/wake/queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
+  mv "$TMP_ROOT/wakeq.acked" "$HOME_DIR/state/wake/queue"
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
@@ -338,7 +338,7 @@ SH
   assert_not_contains "$out" "woke for 55" "recovery must not re-wake the acked mail"
   assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "55" "journal heal restores the cursor record"
   local wakeq
-  wakeq=$(grep -c "check: mail 55" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 55" "$HOME_DIR/state/wake/queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "recovery must not append a second wake for uid 55"
   pass "fm-mail: journal recovers a wake the drain already acknowledged"
 }
@@ -351,7 +351,7 @@ test_poll_duplicate_wakes_on_interrupted_poll() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   interrupted_home="$TMP_ROOT/interrupted-home"
   homedir_bin="$interrupted_home/bin"
-  mkdir -p "$homedir_bin" "$interrupted_home/state"
+  mkdir -p "$homedir_bin" "$interrupted_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   cat > "$fakebin/python3" <<'SH'
@@ -376,7 +376,7 @@ SH
   # queued wake row, but drop both journal and cursor records.
   printf 'uidvalidity=80008\n' > "$interrupted_home/state/.mail-seen"
   : > "$interrupted_home/state/.mail-woken"
-  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "the wake row survived the simulated interruption"
 
   rc=0
@@ -387,7 +387,7 @@ SH
   assert_not_contains "$out" "woke for 33" "healing poll must not duplicate the queued mail"
   assert_contains "$(cat "$interrupted_home/state/.mail-seen" 2>/dev/null)" "33" \
     "healing poll records the uid from the queued wake key"
-  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "the queued wake row stays appended exactly once"
   pass "fm-mail: a poll interrupted before evidence writes does not duplicate on recovery"
 }
@@ -401,7 +401,7 @@ test_poll_acknowledged_wake_evading_recovery() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   acked_home="$TMP_ROOT/acked-home"
   homedir_bin="$acked_home/bin"
-  mkdir -p "$homedir_bin" "$acked_home/state"
+  mkdir -p "$homedir_bin" "$acked_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   cat > "$fakebin/python3" <<'SH'
@@ -420,8 +420,8 @@ SH
   # Simulate: journal survived, cursor did not, and the drain consumed the wake.
   printf 'uidvalidity=90009\n' > "$acked_home/state/.mail-seen"
   printf '%s\t%s\n' '90009' '44' > "$acked_home/state/.mail-woken"
-  grep -v "check: mail 44" "$acked_home/state/.wake-queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
-  mv "$TMP_ROOT/wakeq.acked" "$acked_home/state/.wake-queue"
+  grep -v "check: mail 44" "$acked_home/state/wake/queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
+  mv "$TMP_ROOT/wakeq.acked" "$acked_home/state/wake/queue"
 
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -433,7 +433,7 @@ SH
     "journal heal records the acknowledged uid in the cursor"
   assert_equals "" "$(cat "$acked_home/state/.mail-woken" 2>/dev/null)" \
     "journal is cleared once every uid is durably recorded"
-  wakeq=$(grep -c "check: mail 44" "$acked_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 44" "$acked_home/state/wake/queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "recovery must not append a second wake for uid 44"
   pass "fm-mail: an acknowledged wake whose cursor record was lost is recovered from the journal"
 }
@@ -457,7 +457,7 @@ SH
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
 
   # Seed a legacy wake key (no generation) directly in the wake queue.
-  printf '0\t9001\tcheck\tmail:42\tcheck: mail 42 - legacy\n' >> "$HOME_DIR/state/.wake-queue"
+  printf '0\t9001\tcheck\tmail:42\tcheck: mail 42 - legacy\n' >> "$HOME_DIR/state/wake/queue"
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -517,7 +517,7 @@ SH
   # queue is a different, writable file), but the journal and cursor cannot be
   # recorded. The rollback must remove the queued wake so nothing ackable
   # survives without a durable record.
-  mkdir -p "$roll_home/state"
+  mkdir -p "$roll_home/state/wake"
   printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
   : > "$roll_home/state/.mail-woken"
   chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
@@ -530,7 +530,7 @@ SH
   expect_code 1 "$rc" "poll must fail when no durable record can be written"
   assert_contains "$out" "rolled back" "poll reports the wake was rolled back"
   local wakeq
-  wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 66" "$roll_home/state/wake/queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "rolled-back wake must not stay queued without a durable record"
 
   # Restore write access: the next poll must surface the mail fresh, exactly
@@ -542,7 +542,7 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 0 "$rc" "retry poll must succeed"
   assert_contains "$out" "woke for 66" "retry poll surfaces the mail exactly once"
-  wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 66" "$roll_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "retry poll appends exactly one wake for uid 66"
   pass "fm-mail: a wake with no durable record is rolled back, not left ackable"
 }
@@ -551,7 +551,7 @@ test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake() {
   local fakebin roll_home
   fakebin=$(fm_fakebin "$TMP_ROOT")
   roll_home="$TMP_ROOT/rollback-failure-home"
-  mkdir -p "$roll_home/bin" "$roll_home/state"
+  mkdir -p "$roll_home/bin" "$roll_home/state/wake"
   [ -e "$roll_home/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$roll_home/bin/fm-wake-lib.sh"
 
   cat > "$fakebin/python3" <<'SH'
@@ -568,11 +568,11 @@ SH
   # closed with an honest report and leave the row for the next poll to heal.
   printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
   : > "$roll_home/state/.mail-woken"
-  : > "$roll_home/state/.wake-queue"
+  : > "$roll_home/state/wake/queue"
   chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
-  chmod 0200 "$roll_home/state/.wake-queue"
+  chmod 0200 "$roll_home/state/wake/queue"
   [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
-  [ -w "$roll_home/state/.wake-queue" ] || { echo "fixture unexpected: queue not appendable"; return 1; }
+  [ -w "$roll_home/state/wake/queue" ] || { echo "fixture unexpected: queue not appendable"; return 1; }
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -586,7 +586,7 @@ SH
   # Restore access: the still-queued wake must be healed without re-waking, so
   # the mail surfaces exactly once from the retained row and never duplicates.
   chmod 0600 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
-  chmod 0644 "$roll_home/state/.wake-queue"
+  chmod 0644 "$roll_home/state/wake/queue"
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
@@ -596,7 +596,7 @@ SH
   assert_not_contains "$out" "woke for 88" "retry poll must not surface the mail a second time"
   assert_contains "$(cat "$roll_home/state/.mail-seen")" "88" "retry poll records the retained wake's uid in the cursor"
   local wakeq
-  wakeq=$(grep -c "check: mail 88" "$roll_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 88" "$roll_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "the retained wake row stays queued for the drain exactly once"
   pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
 }
@@ -849,15 +849,15 @@ SH
   printf 'uidvalidity=90009\n77\n' > "$HOME_DIR/state/.mail-seen"
   rm -f "$HOME_DIR/state/.mail-retry"
   printf '77\n' > "$HOME_DIR/state/.mail-retry"
-  : > "$HOME_DIR/state/.wake-queue.seq"
-  chmod 0000 "$HOME_DIR/state/.wake-queue.seq"
+  : > "$HOME_DIR/state/wake/queue.seq"
+  chmod 0000 "$HOME_DIR/state/wake/queue.seq"
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "poll must fail when the recovered wake cannot be appended"
   assert_contains "$(cat "$HOME_DIR/state/.mail-retry" 2>/dev/null)" "77" "the retry record is restored so the recovered metadata can be re-fetched"
-  chmod 0600 "$HOME_DIR/state/.wake-queue.seq"
+  chmod 0600 "$HOME_DIR/state/wake/queue.seq"
   pass "fm-mail: a recovered wake that cannot append restores the retry instead of stranding the metadata"
 }
 
@@ -872,7 +872,7 @@ test_poll_death_between_retry_remove_and_publish_does_not_strand() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   test_home="$TMP_ROOT/retry-survives-failed-publish-home"
   homedir_bin="$test_home/bin"
-  mkdir -p "$homedir_bin" "$test_home/state"
+  mkdir -p "$homedir_bin" "$test_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   cat > "$fakebin/python3" <<'SH'
@@ -888,8 +888,8 @@ SH
 
   # Make the wake queue unwritable so the recovered wake cannot append. The
   # retry record must NOT be cleared in this case.
-  : > "$test_home/state/.wake-queue.seq"
-  chmod 0000 "$test_home/state/.wake-queue.seq"
+  : > "$test_home/state/wake/queue.seq"
+  chmod 0000 "$test_home/state/wake/queue.seq"
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$test_home" PATH="$fakebin:$PATH" \
@@ -897,11 +897,11 @@ SH
   expect_code 1 "$rc" "poll must fail closed when the recovered wake cannot be published"
   assert_contains "$out" "wake append failed for 77" "poll reports the failed wake append"
   assert_grep "77" "$test_home/state/.mail-retry" "retry entry survives a failed publish"
-  assert_not_contains "$(cat "$test_home/state/.wake-queue" 2>/dev/null)" "check: mail 77" \
+  assert_not_contains "$(cat "$test_home/state/wake/queue" 2>/dev/null)" "check: mail 77" \
     "no wake is queued when publish fails"
 
   # Restore writable state: the next poll must recover the metadata.
-  rm -f "$test_home/state/.wake-queue.seq"
+  rm -f "$test_home/state/wake/queue.seq"
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$test_home" PATH="$fakebin:$PATH" \
@@ -910,7 +910,7 @@ SH
   assert_contains "$out" "woke for 77" "follow-up poll re-surfaces the recovered uid"
   assert_contains "$(cat "$test_home/state/.mail-seen" 2>/dev/null)" "77" \
     "follow-up poll records the uid in the cursor"
-  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "exactly one recovery wake is queued"
   pass "fm-mail: a death between retry remove and wake publish cannot strand recovered metadata"
 }
@@ -960,7 +960,7 @@ test_poll_fails_closed_when_retry_clear_fails() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   test_home="$TMP_ROOT/retry-clear-fail-home"
   homedir_bin="$test_home/bin"
-  mkdir -p "$homedir_bin" "$test_home/state"
+  mkdir -p "$homedir_bin" "$test_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -977,8 +977,8 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "poll must fail when the retry record cannot be cleared"
   assert_contains "$out" "could not clear retry for recovered 77 after publish" "failure names the post-publish retry cleanup"
-  assert_grep "check: mail 77" "$test_home/state/.wake-queue" "the recovery wake was already published before the cleanup failed"
-  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  assert_grep "check: mail 77" "$test_home/state/wake/queue" "the recovery wake was already published before the cleanup failed"
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "exactly one recovery wake is queued after the failed clear"
 
   rc=0
@@ -987,7 +987,7 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "a later poll must still fail closed while the retry record cannot be cleared"
   assert_not_contains "$out" "woke for 77" "a later poll must not re-append a recovery wake"
-  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "the queued recovery wake is not duplicated while the retry clear keeps failing"
 
   chmod 0600 "$test_home/state/.mail-retry"
@@ -1000,7 +1000,7 @@ SH
   assert_not_contains "$out" "woke for 77" "clearing the retry record must not re-wake the uid"
   assert_not_contains "$(cat "$test_home/state/.mail-retry" 2>/dev/null || true)" "77" \
     "the retry entry is cleared without a duplicate wake"
-  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "exactly one recovery wake remains after a successful retry clear"
   pass "fm-mail: a failed retry clear fails the poll; the published wake stays and the retry entry remains"
 }
@@ -1013,7 +1013,7 @@ test_poll_fails_closed_when_stale_retry_clear_fails() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   test_home="$TMP_ROOT/stale-retry-clear-fail-home"
   homedir_bin="$test_home/bin"
-  mkdir -p "$homedir_bin" "$test_home/state"
+  mkdir -p "$homedir_bin" "$test_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -1030,7 +1030,7 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "poll must fail when a stale retry cannot be cleared after wake"
   assert_contains "$out" "could not clear retry for recovered 77 after publish" "failure names the post-publish retry cleanup"
-  assert_grep "check: mail 77" "$test_home/state/.wake-queue" "the wake already landed before the cleanup failure"
+  assert_grep "check: mail 77" "$test_home/state/wake/queue" "the wake already landed before the cleanup failure"
   chmod 0600 "$test_home/state/.mail-retry"
   assert_grep "77" "$test_home/state/.mail-retry" "the stale retry entry remains for the next poll to clear"
   pass "fm-mail: a failed stale-retry clear fails the poll instead of silently leaving a duplicate-wake entry"
@@ -1433,7 +1433,7 @@ PYEOF
   # still unfetchable and the rest have recovered. The durable position must
   # advance by the examined prefix (3), never the full window (16), so the
   # recovered uid behind the unfetchable prefix is reached promptly.
-  mkdir -p "$HOME_DIR/state"
+  mkdir -p "$HOME_DIR/state/wake"
   {
     printf 'uidvalidity=90009\n'
     for u in 101 102 103 104 105 106 107 108 109 110 111 112; do
@@ -1503,7 +1503,7 @@ PYEOF
   # Retry set 301..320; cursor records ONLY 320 (the recovered uid). The first
   # scan window (301..316) therefore holds only unseen uids, yet the cursor
   # must advance past it so 320 is reached on a later window.
-  mkdir -p "$HOME_DIR/state"
+  mkdir -p "$HOME_DIR/state/wake"
   printf 'uidvalidity=90009\n320\n' > "$HOME_DIR/state/.mail-seen"
   for u in $(seq 301 320); do printf '%s\n' "$u"; done > "$HOME_DIR/state/.mail-retry"
   : > "$HOME_DIR/state/.mail-retry-pos"
@@ -1569,7 +1569,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_poll_list())
 PYEOF
-  mkdir -p "$HOME_DIR/state"
+  mkdir -p "$HOME_DIR/state/wake"
   {
     printf 'uidvalidity=90009\n'
     for u in $(seq 301 320); do printf '%s\n' "$u"; done
@@ -1637,7 +1637,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_poll_list())
 PYEOF
-  mkdir -p "$HOME_DIR/state"
+  mkdir -p "$HOME_DIR/state/wake"
   printf 'uidvalidity=90009\n320\n' > "$HOME_DIR/state/.mail-seen"
   for u in $(seq 301 320); do printf '%s\n' "$u"; done > "$HOME_DIR/state/.mail-retry"
   : > "$HOME_DIR/state/.mail-retry-pos"
@@ -1883,7 +1883,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_poll_list())
 PYEOF
-  mkdir -p "$HOME_DIR/state"
+  mkdir -p "$HOME_DIR/state/wake"
   {
     printf 'uidvalidity=90009\n'
     for u in 101 102 103 104 105; do
@@ -2120,7 +2120,7 @@ test_poll_retries_transient_fetch_and_surfaces_real_metadata() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   retry_home="$TMP_ROOT/retry-home"
   homedir_bin="$retry_home/bin"
-  mkdir -p "$homedir_bin" "$retry_home/state"
+  mkdir -p "$homedir_bin" "$retry_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
   real_py=$(command -v python3)
   harness="$TMP_ROOT/retry-poll-harness.py"
@@ -2171,7 +2171,7 @@ exec "$real_py" "$harness" "\$@"
 EOF
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$retry_home/state/.mail-seen"
-  : > "$retry_home/state/.wake-queue"
+  : > "$retry_home/state/wake/queue"
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$retry_home" PATH="$fakebin:$PATH" \
@@ -2179,9 +2179,9 @@ EOF
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 0 "$rc" "first poll of a failing fetch must succeed"
   assert_contains "$out" "woke for 41" "failed fetch still wakes once, never missed"
-  assert_contains "$(cat "$retry_home/state/.wake-queue")" "(no header)" \
+  assert_contains "$(cat "$retry_home/state/wake/queue")" "(no header)" \
     "first wake uses the degraded sender placeholder"
-  assert_contains "$(cat "$retry_home/state/.wake-queue")" "unfetchable header" \
+  assert_contains "$(cat "$retry_home/state/wake/queue")" "unfetchable header" \
     "first wake uses the degraded subject placeholder"
   assert_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null)" "41" \
     "the uid is recorded for retry after the degraded wake"
@@ -2198,7 +2198,7 @@ EOF
   assert_contains "$out" "no new mail" "a still-unfetchable retry poll reports no new mail"
   assert_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null)" "41" \
     "the uid stays in the retry set while the fetch keeps failing"
-  wakeq=$(grep -c "check: mail" "$retry_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail" "$retry_home/state/wake/queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "still-failing retry must not append a second wake"
 
   rc=0
@@ -2211,13 +2211,13 @@ EOF
     fail "recovered fetch poll must succeed: expected exit 0, got $rc"
   fi
   assert_contains "$out" "woke for 41" "recovered fetch wakes with the real metadata"
-  assert_contains "$(cat "$retry_home/state/.wake-queue")" "alice@example.com" \
+  assert_contains "$(cat "$retry_home/state/wake/queue")" "alice@example.com" \
     "recovered wake names the real sender"
-  assert_contains "$(cat "$retry_home/state/.wake-queue")" "Hello captain" \
+  assert_contains "$(cat "$retry_home/state/wake/queue")" "Hello captain" \
     "recovered wake names the real subject"
   assert_not_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null || true)" "41" \
     "the uid leaves the retry set after a successful fetch"
-  wakeq=$(grep -c "check: mail" "$retry_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail" "$retry_home/state/wake/queue" 2>/dev/null || true)
   expect_code 2 "$wakeq" "degraded then recovered metadata are two wakes"
   pass "fm-mail: a transient fetch failure recovers real metadata on a later poll"
 }
@@ -2254,7 +2254,7 @@ test_poll_heal_failure_does_not_rewake_unseen_mail() {
   fakebin=$(fm_fakebin "$TMP_ROOT")
   heal_home="$TMP_ROOT/heal-fail-home"
   homedir_bin="$heal_home/bin"
-  mkdir -p "$homedir_bin" "$heal_home/state"
+  mkdir -p "$homedir_bin" "$heal_home/state/wake"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   # Journal names uid 55; the cursor cannot be appended to; IMAP still lists
@@ -2268,7 +2268,7 @@ SH
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$heal_home/state/.mail-seen"
   printf '%s\t%s\n' '90009' '55' > "$heal_home/state/.mail-woken"
-  : > "$heal_home/state/.wake-queue"
+  : > "$heal_home/state/wake/queue"
   chmod 0400 "$heal_home/state/.mail-seen"
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -2278,7 +2278,7 @@ SH
   assert_not_contains "$out" "woke for 55" "heal failure must not re-wake a journaled uid"
   assert_contains "$(cat "$heal_home/state/.mail-woken" 2>/dev/null)" "55" "journal evidence is kept"
   local wakeq
-  wakeq=$(grep -c "check: mail 55" "$heal_home/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail 55" "$heal_home/state/wake/queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "heal failure must not append a second wake"
   chmod 0600 "$heal_home/state/.mail-seen"
   pass "fm-mail: heal failure with unseen mail fails the poll instead of re-waking"
@@ -2451,7 +2451,7 @@ printf '73\t2026-09-05T00:00:00Z\talice@example.com\tC\n'
 SH
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
-  : > "$HOME_DIR/state/.wake-queue"
+  : > "$HOME_DIR/state/wake/queue"
 
   local out rc=0 wakeq
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -2462,7 +2462,7 @@ SH
   assert_contains "$out" "woke for 72" "second message wakes within the cap"
   assert_not_contains "$out" "woke for 73" "third message must not wake in a capped poll"
   assert_contains "$out" "per-poll wake cap" "poll reports the cap"
-  wakeq=$(grep -c "check: mail" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail" "$HOME_DIR/state/wake/queue" 2>/dev/null || true)
   expect_code 2 "$wakeq" "the durable wake queue holds exactly the capped wakes"
 
   # The third message is still unseen: the next poll surfaces it.
@@ -2526,7 +2526,7 @@ exec "$real_py" "$harness" "\$@"
 EOF
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
-  : > "$HOME_DIR/state/.wake-queue"
+  : > "$HOME_DIR/state/wake/queue"
 
   local out rc=0 wakeq
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -2537,10 +2537,10 @@ EOF
   assert_contains "$out" "woke for 61" "newline-bearing subject still wakes once"
   assert_not_contains "$out" "woke for 99" "a newline in Subject must not inject a forged uid"
   assert_not_contains "$out" "woke for fake" "a tab in Subject must not inject a forged uid"
-  wakeq=$(grep -c "check: mail" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  wakeq=$(grep -c "check: mail" "$HOME_DIR/state/wake/queue" 2>/dev/null || true)
   expect_code 2 "$wakeq" "exactly the two real uids wake"
-  assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" "mail:90009/60" "wake key is the real uid 60"
-  assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" "mail:90009/61" "wake key is the real uid 61"
+  assert_contains "$(cat "$HOME_DIR/state/wake/queue")" "mail:90009/60" "wake key is the real uid 60"
+  assert_contains "$(cat "$HOME_DIR/state/wake/queue")" "mail:90009/61" "wake key is the real uid 61"
   pass "fm-mail: poll sanitizes tabs and newlines in header fields"
 }
 
@@ -2572,7 +2572,7 @@ done
 SH
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
-  : > "$HOME_DIR/state/.wake-queue"
+  : > "$HOME_DIR/state/wake/queue"
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \

@@ -47,7 +47,7 @@ install_autoarm_scripts() {
 # and the supervision-host cases below remove the opt-out.
 make_primary_dir() {
   local dir=$1
-  mkdir -p "$dir/state" "$dir/config"
+  mkdir -p "$dir/state/wake" "$dir/config"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -68,7 +68,7 @@ make_secondmate_dir() {
 make_crewmate_worktree_dir() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/autoarm-test-branch
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   : > "$dir/AGENTS.md"
   install_autoarm_scripts "$dir"
   printf '%s\n' "$dir"
@@ -115,7 +115,7 @@ SH
   case "$kind" in
     actionable)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -142,7 +142,7 @@ SH
       ;;
     actionable-many)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 for i in 1 2 3 4 5 6 7 8 9 10; do printf 'stale: fixture-%s actionable\n' "$i"; done
@@ -160,7 +160,7 @@ SH
     slow-actionable)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 2
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: slow fixture\n'
@@ -170,7 +170,7 @@ SH
     blocking-actionable)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 6
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -188,7 +188,7 @@ SH
     meta-vanishes)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 rm -f "$FM_HOME/state/task.meta"
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: fixture\n'
@@ -198,7 +198,7 @@ SH
     afk-appears)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 : > "$FM_HOME/state/.afk"
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -215,7 +215,7 @@ SH
     attached-delivered)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 printf 'signal: task.status done: fixture peer cycle ended\n'
 exit 0
 SH
@@ -227,7 +227,7 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: %s/state/tfmut-116.turn-ended\n' "$FM_HOME"
@@ -1686,12 +1686,12 @@ write_host_fixture() {
     printf 'printf "gen=%%s owner=%%s primary=%%s mode=%%s\\n" "${FM_SUPERVISION_HOST_AUTOARM_GEN:-}" "${FM_SUPERVISION_HOST_OWNER_PID:-}" "${FM_SUPERVISION_HOST_PRIMARY:-}" "${1:-}" > "$FM_HOME/state/host-env"\n'
     case "$kind" in
       boundary)
-        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/wake/watcher-down\"\n"
         printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
         printf "printf 'supervision-host: cycle boundary - fixture\\n'\n"
         ;;
       handed-back)
-        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/wake/watcher-down\"\n"
         printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
         printf "printf 'signal: fixture.status\\n'\n"
         printf "printf 'supervision-host: the away session could not take this wake: fixture; this wake is yours\\n'\n"
@@ -1702,7 +1702,7 @@ write_host_fixture() {
       lost-handback|lost-announced-handback)
         local marker=pending
         [ "$kind" = lost-handback ] || marker=announced
-        printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/.watcher-down\"\\n" "$marker"
+        printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/wake/watcher-down\"\\n" "$marker"
         cat <<'SH'
 printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
@@ -1712,14 +1712,14 @@ SH
         ;;
       benign-refusal)
         cat <<'SH'
-printf 'acked:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'acked:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
 SH
         ;;
       handed-back-many)
         cat <<'SH'
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 for i in 1 2 3 4 5 6 7 8 9 10; do printf 'signal: fixture-%s.status\n' "$i"; done
 printf 'supervision-host: the away session could not take this wake: fixture; relay its outcomes\n'
@@ -1935,7 +1935,7 @@ test_host_crash_is_retried_then_reported() {
   write_host_fixture "$dir" crash
   # A live watcher with a fresh beacon would pass the plain arm's benign-close
   # check; a host that died has no owner for such a cycle, so it must not.
-  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/wake/watcher-down"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "an exhausted host crash must notify"
   [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a crashed host was not retried within the attempt bound"

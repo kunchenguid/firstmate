@@ -1163,7 +1163,7 @@ SH
     [ "$(cat "$state/.stale-since-$key" 2>/dev/null)" != 1 ] || fail "watcher never reset the expired timer"
     # Like the other deferrals, the consult resets the idle timer and leaves
     # the escalation count to the next transcript change.
-    assert_absent "$state/.wake-queue" "a running T3 session must not queue a wake"
+    assert_absent "$state/wake/queue" "a running T3 session must not queue a wake"
     kill "$WATCH_PID" 2>/dev/null || true
   elif [ "$expected" = dead ]; then
     # A stopped or failed session is a dead agent: the shared dead-record probe
@@ -2390,7 +2390,7 @@ test_push_wait_escalates_pending_question_once() {
   assert_grep "$thread (t3code: agent blocked - waiting on human" "$CASE_DIR/wakes" "the wake names the T3 worker and the blocked cause"
   assert_grep "T3 question req-q1 pending - read and answer with bin/fm-t3-answer.sh" "$CASE_DIR/wakes" "the wake names the question and how to answer it"
   assert_grep "1 T3 permission approval(s) pending - only T3 Code itself can approve" "$CASE_DIR/wakes" "the wake separates the approval the question tools cannot answer"
-  assert_grep "$thread" "$state/.wake-queue" "the escalation is durably queued"
+  assert_grep "$thread" "$state/wake/queue" "the escalation is durably queued"
   assert_present "$state/.t3code-escalated-mcp_6d7e8f9a-1b2c-4d3e-8f4a-3456789abcde" "the escalated request set must be recorded"
   [ "$(t3_fake_calls t3_thread_wait | tail -1 | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).runId||"")')" = run-1 ] \
     || fail "the event wait must wait on the exact active run"

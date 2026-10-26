@@ -802,7 +802,7 @@ install_autoarm_scripts() {
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -815,7 +815,7 @@ SH
 # gates both pass and only identity decides the outcome.
 make_primary_home() {  # <dir>
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -949,7 +949,7 @@ trap 'reap_background_fixture; fm_test_cleanup' EXIT
 
 make_background_session_home() {  # <dir>
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -1520,7 +1520,7 @@ autoarm_midturn_healthy() {  # <state-dir>
 test_reanchor_keeps_autoarm_midturn_healthy() {
   local dir front_pid model_pid
   dir="$TMP_ROOT/reanchor-autoarm"
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   "$NAMED_CLAUDE" -c '
     printf "%s\n" "$$" > "$0/state/front-pid"
     while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
@@ -1532,7 +1532,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   printf 'S1\n' > "$dir/state/.lock-session"
   printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1\n' \
     "$front_pid" > "$dir/state/.claude-autoarm-epoch"
-  printf 'acked:handling:g1\n' > "$dir/state/.watcher-down"
+  printf 'acked:handling:g1\n' > "$dir/state/wake/watcher-down"
   touch -t 201901010000 "$dir/state/.last-watcher-beat"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-mtime"
   autoarm_midturn_healthy "$dir/state" || fail "the rewake fixture is not healthy before the re-anchor, so this case proves nothing"

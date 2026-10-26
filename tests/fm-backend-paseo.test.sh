@@ -1028,7 +1028,7 @@ test_branch_dispatch_claims_paseo_stale_wake() {
   command -v node >/dev/null 2>&1 || { echo "skip: node absent (Pi supervision-branch dispatch)"; return 0; }
   local dir out
   dir="$TMP_ROOT/branch-dispatch"
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   # A paseo task records window=<terminal-uuid>:<workspace-uuid>, and the
   # watcher keys a non-Orca stale wake by that window value.
   printf '%s\n' \
@@ -1038,7 +1038,7 @@ test_branch_dispatch_claims_paseo_stale_wake() {
     "paseo_workspace_id=33333333-dddd-4eee-8fff-444444444444" >"$dir/state/paseo-task.meta"
   printf '1\t1\tstale\t%s\tstale: %s (idle 378s)\n' \
     "11111111-aaaa-4bbb-8ccc-222222222222:33333333-dddd-4eee-8fff-444444444444" \
-    "11111111-aaaa-4bbb-8ccc-222222222222:33333333-dddd-4eee-8fff-444444444444" >"$dir/state/.wake-queue"
+    "11111111-aaaa-4bbb-8ccc-222222222222:33333333-dddd-4eee-8fff-444444444444" >"$dir/state/wake/queue"
 
   out=$(FM_STATE_OVERRIDE="$dir/state" node "$ROOT/bin/fm-branch-dispatch.mjs" scope 2>&1)
   assert_contains "$out" "status=safe" "the branch dispatcher did not accept a paseo stale wake: $out"

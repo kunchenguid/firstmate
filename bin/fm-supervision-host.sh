@@ -436,7 +436,7 @@ cleanup() {
   # A signal can land inside the handled-turn settle, which holds the queue and
   # marker locks; the grant release below needs the queue lock, so drop any of
   # them this process still owns first (fm_lock_release ignores foreign owners).
-  fm_lock_release "$STATE/.watcher-down.lock" 2>/dev/null || true
+  fm_lock_release "$FM_WATCHER_DOWN.lock" 2>/dev/null || true
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true
   if [ "$ENGINE_RUNNING" -eq 1 ]; then
     stop_engine_turn
@@ -613,7 +613,7 @@ exit_to_main() {  # <why> [further lines]
   local lines=${2:-} rc=0
   retire_successor
   if [ -n "$SUCCESSOR_GENERATION" ] \
-    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    && ! fm_recovery_marker_publish "$FM_WATCHER_DOWN" downtime >/dev/null 2>&1; then
     log_line "to-main	downtime-unrestored	$1"
     lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
     rc=1
@@ -637,7 +637,7 @@ acknowledged_handback() {  # [extra output lines]; returns only when disabled
   printf '%s\n' "$GEN" > "$tmp" && mv -f "$tmp" "$STATE/.supervision-handoff-pending" || exit 1
   if ! fm_wake_append check "supervision-handoff:$GEN" \
     "check: supervision-handoff - the host handed supervision to main; drain, handle, and acknowledge this hand-back" \
-    || ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null; then
+    || ! fm_recovery_marker_publish "$FM_WATCHER_DOWN" downtime >/dev/null; then
     emit "$@" 'supervision-host: the acknowledged hand-back could not be recorded'
     exit 1
   fi
@@ -780,7 +780,7 @@ leave_successor_for_main() {
     return 1
   fi
   if [ -n "$SUCCESSOR_GENERATION" ] \
-    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    && ! fm_recovery_marker_publish "$FM_WATCHER_DOWN" downtime >/dev/null 2>&1; then
     log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
     return 2
   fi
@@ -1225,7 +1225,7 @@ while :; do
     # back as already announced, so the successor left running does not
     # resurface the episode this very close delivers.
     if [ -n "$SUCCESSOR_GENERATION" ] \
-      && ! fm_recovery_marker_handback "$STATE/.watcher-down" >/dev/null 2>&1; then
+      && ! fm_recovery_marker_handback "$FM_WATCHER_DOWN" >/dev/null 2>&1; then
       log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
       exit 1
     fi
@@ -1265,7 +1265,7 @@ while :; do
   fi
 
   # Handled: park on the successor.
-  if ! fm_recovery_marker_handling_settled "$STATE/.watcher-down"; then
+  if ! fm_recovery_marker_handling_settled "$FM_WATCHER_DOWN"; then
     log_line "handling-settle-failed	turn=$LAST_TURN	successor=$SUCCESSOR_PID"
   fi
   ARM_PID=$SUCCESSOR_PID

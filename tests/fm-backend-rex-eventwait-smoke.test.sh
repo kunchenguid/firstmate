@@ -78,9 +78,9 @@ EOF
 . "$ROOT/bin/fm-push-transition-lib.sh"
 wake() { return 0; }
 handle_push_transition rex "$S" "$REC"
-grep -q "stale	$T	" "$STATE/.wake-queue" || fail "the wake queue must carry a stale record naming $T: $(cat "$STATE/.wake-queue")"
-grep -q 'rex: agent blocked (permission: Allow Bash: rm -rf build)' "$STATE/.wake-queue" \
-  || fail "the stale payload must name rex and carry the kind and message: $(cat "$STATE/.wake-queue")"
+grep -q "stale	$T	" "$STATE/wake/queue" || fail "the wake queue must carry a stale record naming $T: $(cat "$STATE/wake/queue")"
+grep -q 'rex: agent blocked (permission: Allow Bash: rm -rf build)' "$STATE/wake/queue" \
+  || fail "the stale payload must name rex and carry the kind and message: $(cat "$STATE/wake/queue")"
 pass "real rex: the watcher fast path enqueues a stale wake carrying Rex's blocked kind and message"
 
 # --- dedupe, clean deadline ------------------------------------------------------

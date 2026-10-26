@@ -144,7 +144,7 @@ test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -222,7 +222,7 @@ test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
   home="$TMP_ROOT/pi-tool-result-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -286,7 +286,7 @@ test_pi_redundant_tool_call_is_owned_noop() {
   home="$TMP_ROOT/pi-redundant-tool-home"
   log="$TMP_ROOT/pi-redundant-tool.log"
   stop="$TMP_ROOT/pi-redundant-tool.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -348,7 +348,7 @@ test_pi_scheduled_retry_call_is_owned_noop() {
   repo="$TMP_ROOT/pi-scheduled-retry-root"
   home="$TMP_ROOT/pi-scheduled-retry-home"
   log="$TMP_ROOT/pi-scheduled-retry.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -406,7 +406,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   home="$TMP_ROOT/pi-continuous-rearm-home"
   log="$TMP_ROOT/pi-continuous-rearm.log"
   stop="$TMP_ROOT/pi-continuous-rearm.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -501,7 +501,7 @@ test_pi_actionable_output_waits_for_predecessor_close() {
   home="$TMP_ROOT/pi-actionable-before-close-home"
   log="$TMP_ROOT/pi-actionable-before-close.log"
   stop="$TMP_ROOT/pi-actionable-before-close.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -581,7 +581,7 @@ test_pi_branch_offer_owns_actionable_wake() {
   home="$TMP_ROOT/pi-branch-offer-home"
   log="$TMP_ROOT/pi-branch-offer.log"
   stop="$TMP_ROOT/pi-branch-offer.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -656,7 +656,7 @@ async function runScenario(withAcceptor) {
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
+writeFileSync(`${process.env.FM_HOME}/state/wake/queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
 const accepted = await runScenario(true);
 if (accepted.offers.length !== 1) throw new Error(`expected one branch offer, got ${accepted.offers.length}`);
 if (!accepted.offers[0].message.includes("signal: branch-offer synthetic wake")) {
@@ -693,7 +693,7 @@ test_pi_branch_offer_flags_heartbeat() {
   home="$TMP_ROOT/pi-branch-heartbeat-home"
   log="$TMP_ROOT/pi-branch-heartbeat.log"
   stop="$TMP_ROOT/pi-branch-heartbeat.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -747,7 +747,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\theartbeat\theartbeat\theartbeat\n");
+writeFileSync(`${process.env.FM_HOME}/state/wake/queue`, "1\t1\theartbeat\theartbeat\theartbeat\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-branch-heartbeat", {}, undefined, undefined, {});
@@ -778,7 +778,7 @@ test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check() {
   home="$TMP_ROOT/pi-heartbeat-mixed-queue-home"
   log="$TMP_ROOT/pi-heartbeat-mixed-queue.log"
   stop="$TMP_ROOT/pi-heartbeat-mixed-queue.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -830,7 +830,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\theartbeat\theartbeat\theartbeat\n2\t2\tcheck\tx-inbox\tcheck: pending x mention\n",
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -870,7 +870,7 @@ test_pi_main_only_check_classes_stay_on_main() {
   local repo home plugin log stop out status reason label
   repo="$TMP_ROOT/pi-main-only-check-root"
   home="$TMP_ROOT/pi-main-only-check-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -930,7 +930,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 // A task-local row the branch would happily take sits in the same queue, so
 // only the check-kind TRIGGER itself can be what keeps this wake on main.
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\t" + process.env.FM_TEST_REASON + "\n",
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -969,7 +969,7 @@ test_pi_captain_held_signal_stays_on_main() {
   home="$TMP_ROOT/pi-captain-held-whitespace-home"
   log="$TMP_ROOT/pi-captain-held-whitespace.log"
   stop="$TMP_ROOT/pi-captain-held-whitespace.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -1024,7 +1024,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
     "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up\n",
 );
@@ -1058,7 +1058,7 @@ test_pi_unread_pending_reply_forces_later_stale_alias_to_main() {
   home="$TMP_ROOT/pi-mixed-signal-home"
   log="$TMP_ROOT/pi-mixed-signal.log"
   stop="$TMP_ROOT/pi-mixed-signal.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-a\n' "$home" > "$home/state/task-a.meta"
@@ -1114,7 +1114,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
     "2\t2\tstale\tfm-a\tstale: fm-a (routine reminder)\n",
 );
@@ -1157,7 +1157,7 @@ test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main() {
   home="$TMP_ROOT/pi-distinct-mixed-batch-home"
   log="$TMP_ROOT/pi-distinct-mixed-batch.log"
   stop="$TMP_ROOT/pi-distinct-mixed-batch.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-a\n' "$home" > "$home/state/task-a.meta"
@@ -1212,7 +1212,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
     "2\t2\tsignal\ttask-b.status\tsignal: task-b.status\n",
 );
@@ -1251,7 +1251,7 @@ test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision() {
   home="$TMP_ROOT/pi-heartbeat-needs-decision-home"
   log="$TMP_ROOT/pi-heartbeat-needs-decision.log"
   stop="$TMP_ROOT/pi-heartbeat-needs-decision.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1303,7 +1303,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   "1\t1\theartbeat\theartbeat\theartbeat\n2\t2\tsignal\tdecision-task.status\tneeds-decision: decision-task.status\n",
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1336,7 +1336,7 @@ test_pi_heartbeat_restoration_failure_stays_on_main() {
   repo="$TMP_ROOT/pi-heartbeat-restoration-failure-root"
   home="$TMP_ROOT/pi-heartbeat-restoration-failure-home"
   log="$TMP_ROOT/pi-heartbeat-restoration-failure.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1412,7 +1412,7 @@ test_pi_watcher_failure_never_offered_to_branch() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-watcher-failure-root"
   home="$TMP_ROOT/pi-watcher-failure-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1488,7 +1488,7 @@ test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main() {
   local repo home plugin log stop out status label expect reason queue
   repo="$TMP_ROOT/pi-away-root"
   home="$TMP_ROOT/pi-away-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -1548,7 +1548,7 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
-  `${process.env.FM_HOME}/state/.wake-queue`,
+  `${process.env.FM_HOME}/state/wake/queue`,
   process.env.FM_TEST_QUEUE.replace(/\\t/g, "\t").replace(/\\n/g, "\n"),
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1659,7 +1659,7 @@ test_pi_handling_delivery_failure_is_typed_once() {
   home="$TMP_ROOT/pi-handling-fail-home"
   log="$TMP_ROOT/pi-handling-fail.log"
   stop="$TMP_ROOT/pi-handling-fail.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1733,7 +1733,7 @@ test_pi_confirm_failure_retires_arm_with_distinct_watcher_pid() {
   log="$TMP_ROOT/pi-confirm-distinct.log"
   stop="$TMP_ROOT/pi-confirm-distinct.stop"
   retired="$TMP_ROOT/pi-confirm-distinct.retired"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1824,7 +1824,7 @@ test_pi_confirm_failure_spares_a_newer_arm() {
   stop="$TMP_ROOT/pi-confirm-newer.stop"
   go="$TMP_ROOT/pi-confirm-newer.go"
   retired="$TMP_ROOT/pi-confirm-newer.retired"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1932,7 +1932,7 @@ test_pi_superseded_delivery_has_no_rejection_appendix() {
   log="$TMP_ROOT/pi-handling-superseded.log"
   stop="$TMP_ROOT/pi-handling-superseded.stop"
   extension_log="$home/state/.watch-extension.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2014,7 +2014,7 @@ test_pi_superseded_delivery_is_offered_to_branch() {
   home="$TMP_ROOT/pi-superseded-branch-home"
   log="$TMP_ROOT/pi-superseded-branch.log"
   stop="$TMP_ROOT/pi-superseded-branch.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2082,7 +2082,7 @@ async function runScenario(confirmStatus) {
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/superseded-branch.meta`, "project=/projects/approved\nwindow=fm-superseded-branch\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tsuperseded-branch.status\tsignal: superseded synthetic wake\n");
+writeFileSync(`${process.env.FM_HOME}/state/wake/queue`, "1\t1\tsignal\tsuperseded-branch.status\tsignal: superseded synthetic wake\n");
 for (const confirmStatus of [0, 3]) {
   const result = await runScenario(confirmStatus);
   if (!result.rows.some((row) => row.startsWith("confirm ") && row.endsWith(`status=${confirmStatus}`))) {
@@ -2212,7 +2212,7 @@ test_pi_repair_starts_fresh_arm_over_dead_child() {
   log="$TMP_ROOT/pi-stale-child.log"
   stop="$TMP_ROOT/pi-stale-child.stop"
   holder="$TMP_ROOT/pi-stale-child-holder.sh"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$holder" <<'SH'
@@ -2312,7 +2312,7 @@ test_pi_scheduled_retry_starts_fresh_arm_over_dead_child() {
   log="$TMP_ROOT/pi-retry-dead.log"
   stop="$TMP_ROOT/pi-retry-dead.stop"
   release="$TMP_ROOT/pi-retry-dead.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2401,7 +2401,7 @@ test_pi_deferred_close_starts_fresh_arm_over_dead_child() {
   log="$TMP_ROOT/pi-deferred-dead.log"
   stop="$TMP_ROOT/pi-deferred-dead.stop"
   release="$TMP_ROOT/pi-deferred-dead.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2506,7 +2506,7 @@ test_pi_hung_successor_falls_back_to_typed_wake() {
   repo="$TMP_ROOT/pi-hung-successor-root"
   home="$TMP_ROOT/pi-hung-successor-home"
   log="$TMP_ROOT/pi-hung-successor.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2575,7 +2575,7 @@ test_pi_unretired_successor_falls_back_without_retry() {
   home="$TMP_ROOT/pi-unretired-successor-home"
   log="$TMP_ROOT/pi-unretired-successor.log"
   release="$TMP_ROOT/pi-unretired-successor.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2650,7 +2650,7 @@ test_pi_late_unretired_close_resumes_supervision() {
     retired="$TMP_ROOT/pi-late-$kind.retired"
     release="$TMP_ROOT/pi-late-$kind.release"
     stop="$TMP_ROOT/pi-late-$kind.stop"
-    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
     install_pi_watch_extension_fixture "$repo"
     plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2747,7 +2747,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   home="$TMP_ROOT/pi-empty-close-home"
   log="$TMP_ROOT/pi-empty-close.log"
   stop="$TMP_ROOT/pi-empty-close.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2805,7 +2805,7 @@ test_pi_established_empty_close_honors_retry_limit() {
   repo="$TMP_ROOT/pi-established-empty-close-root"
   home="$TMP_ROOT/pi-established-empty-close-home"
   log="$TMP_ROOT/pi-established-empty-close.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2857,7 +2857,7 @@ test_pi_actionable_close_rechecks_session_lock() {
   home="$TMP_ROOT/pi-close-lock-home"
   log="$TMP_ROOT/pi-close-lock.log"
   release="$TMP_ROOT/pi-close-lock.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2915,7 +2915,7 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   repo="$TMP_ROOT/pi-lock-ownership-root"
   home="$TMP_ROOT/pi-lock-ownership-home"
   log="$TMP_ROOT/pi-lock-ownership.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3184,7 +3184,7 @@ test_pi_session_transition_generation_owner() {
   marker_root="$TMP_ROOT/pi-session-transition-markers"
   arm_log="$TMP_ROOT/pi-session-transition-arm.log"
   fail_once="$TMP_ROOT/pi-session-transition-fail-once"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3439,7 +3439,7 @@ test_pi_session_replacement_carries_inflight_actionable_close() {
   marker_root="$TMP_ROOT/pi-session-replacement-handoff-markers"
   trigger="$TMP_ROOT/pi-session-replacement-handoff.trigger"
   stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3545,7 +3545,7 @@ async function waitFor(pred, label, attempts = 500) {
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/replacement-race.meta`, "project=/projects/replacement-race\nwindow=fm-replacement-race\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\treplacement-race.status\tsignal: replacement-race actionable outcome\n");
+writeFileSync(`${process.env.FM_HOME}/state/wake/queue`, "1\t1\tsignal\treplacement-race.status\tsignal: replacement-race actionable outcome\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const previous = makePi(true);
 mod.default(previous.pi);
@@ -3628,7 +3628,7 @@ test_pi_streaming_followup_is_replayed_after_replacement() {
   repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
   home="$TMP_ROOT/pi-streaming-followup-replacement-home"
   trigger="$TMP_ROOT/pi-streaming-followup-replacement.trigger"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3752,7 +3752,7 @@ test_pi_streaming_time_delivery_keeps_the_successor_chain() {
   home="$TMP_ROOT/pi-streaming-chain-home"
   log="$TMP_ROOT/pi-streaming-chain.log"
   trigger="$TMP_ROOT/pi-streaming-chain.trigger"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3877,7 +3877,7 @@ test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
   home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
   log="$TMP_ROOT/pi-successor-dies-mid-delivery.log"
   stop="$TMP_ROOT/pi-successor-dies-mid-delivery.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3940,7 +3940,7 @@ async function waitFor(pred, label) {
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/mid-delivery.meta`, "project=/projects/mid-delivery\nwindow=fm-mid-delivery\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: wake before the successor dies\n");
+writeFileSync(`${process.env.FM_HOME}/state/wake/queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: wake before the successor dies\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("initial-arm", {}, undefined, undefined, {});
@@ -3969,7 +3969,7 @@ test_pi_late_retiring_actionable_reaches_replacement() {
   repo="$TMP_ROOT/pi-late-retiring-actionable-root"
   home="$TMP_ROOT/pi-late-retiring-actionable-home"
   count="$TMP_ROOT/pi-late-retiring-actionable.count"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4077,7 +4077,7 @@ test_pi_replacement_tokens_are_process_unique() {
   repo="$TMP_ROOT/pi-replacement-token-uniqueness-root"
   home="$TMP_ROOT/pi-replacement-token-uniqueness-home"
   count="$TMP_ROOT/pi-replacement-token-uniqueness.count"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4182,7 +4182,7 @@ test_pi_replacement_persistence_failure_keeps_predecessor_until_successor() {
   home="$TMP_ROOT/pi-replacement-persistence-failure-home"
   count="$TMP_ROOT/pi-replacement-persistence-failure.count"
   marker="$TMP_ROOT/pi-replacement-persistence-failure.marker"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4277,7 +4277,7 @@ test_pi_process_exit_cleanup_listener_lifecycle() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exit-listener-root"
   home="$TMP_ROOT/pi-exit-listener-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : > "$repo/bin/fm-watch-arm.sh"
@@ -4375,7 +4375,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   home="$TMP_ROOT/pi-process-exit-home"
   cleanup_log="$TMP_ROOT/pi-process-exit-cleaned"
   pid_file="$TMP_ROOT/pi-process-exit-child.pid"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4468,7 +4468,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   repo="$TMP_ROOT/opencode-effective-state-root"
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -4706,7 +4706,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   repo="$TMP_ROOT/opencode-effective-config-root"
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
@@ -4755,7 +4755,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   repo="$TMP_ROOT/opencode-lock-root"
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -4819,7 +4819,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   home="$TMP_ROOT/opencode-coordinator-home"
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4865,7 +4865,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   home="$TMP_ROOT/opencode-rearm-home"
   log="$TMP_ROOT/opencode-rearm.log"
   stop="$TMP_ROOT/opencode-rearm.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -4962,7 +4962,7 @@ test_opencode_primary_watch_plugin_runs_the_supervision_host() {  # [away|quiet]
   home="$TMP_ROOT/opencode-host-home-$kind"
   log="$TMP_ROOT/opencode-host-$kind.log"
   stop="$TMP_ROOT/opencode-host-$kind.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5054,7 +5054,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   release="$TMP_ROOT/opencode-pre-ready-actionable.release"
   retired="$TMP_ROOT/opencode-pre-ready-actionable.retired"
   stop="$TMP_ROOT/opencode-pre-ready-actionable.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5135,7 +5135,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   repo="$TMP_ROOT/opencode-hung-successor-root"
   home="$TMP_ROOT/opencode-hung-successor-home"
   log="$TMP_ROOT/opencode-hung-successor.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5207,7 +5207,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   home="$TMP_ROOT/opencode-unretired-successor-home"
   log="$TMP_ROOT/opencode-unretired-successor.log"
   release="$TMP_ROOT/opencode-unretired-successor.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5285,7 +5285,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     retired="$TMP_ROOT/opencode-late-$kind.retired"
     release="$TMP_ROOT/opencode-late-$kind.release"
     stop="$TMP_ROOT/opencode-late-$kind.stop"
-    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5381,7 +5381,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   home="$TMP_ROOT/opencode-empty-close-home"
   log="$TMP_ROOT/opencode-empty-close.log"
   stop="$TMP_ROOT/opencode-empty-close.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5441,7 +5441,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   repo="$TMP_ROOT/opencode-established-empty-close-root"
   home="$TMP_ROOT/opencode-established-empty-close-home"
   log="$TMP_ROOT/opencode-established-empty-close.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5496,7 +5496,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   home="$TMP_ROOT/opencode-close-lock-home"
   log="$TMP_ROOT/opencode-close-lock.log"
   release="$TMP_ROOT/opencode-close-lock.release"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5563,7 +5563,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   home="$TMP_ROOT/opencode-coordinate-home"
   log="$TMP_ROOT/opencode-coordinate-arm.log"
   guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
@@ -5637,7 +5637,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   home="$TMP_ROOT/opencode-external-healthy-home"
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
   guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
