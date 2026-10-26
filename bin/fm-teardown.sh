@@ -1777,24 +1777,39 @@ work_is_landed() {
   content_in_default
 }
 
-# Is the recorded PR confirmed CLOSED without merging (rejected)? Only true
-# when gh positively reports a closed, non-merged state; any other outcome -
-# open, merged, no PR recorded, or a gh lookup error - returns non-zero so the
-# caller falls back to its existing recorded-PR allowance rather than
-# refusing on an inconclusive read.
+# Is the recorded PR confirmed closed without merging (rejected)? The provider
+# reader must positively report an open or merged state to allow cleanup; an
+# unreadable or unrecognized record fails closed.
 pr_is_closed_unmerged() {
-  local target state
+  local target provider
   [ -n "$PR_URL" ] || return 1
   target=$PR_URL
-  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_STATE" = closed ] && [ "$FM_PR_RECORD_MERGED" = false ]
-    return
-  fi
-  state=$(cd "$WT" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
-  case "$state" in
-    CLOSED|closed) return 0 ;;
-    *) return 1 ;;
+  fm_pr_url_parse "$target" || return 0
+  provider=$FM_PR_PROVIDER
+  case "$provider" in
+    github)
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 0
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 0
+      ;;
+    gerrit)
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 0
+      ;;
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  case "$provider:$FM_PR_RECORD_STATE:$FM_PR_RECORD_MERGED" in
+    github:CLOSED:false|github:closed:false|gitlab:closed:false|forgejo:closed:false|gerrit:ABANDONED:false|gerrit:abandoned:false)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 

@@ -324,6 +324,24 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_gh_pr_open() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: graphql unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
 # edited the same shared file. A local copy left behind by that rebase holds
 # different content for the shared file, so its per-commit patch ids against the
@@ -970,6 +988,7 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
   seed_backlog_in_flight "$case_dir"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_open "$case_dir"
 
   set +e
   FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
