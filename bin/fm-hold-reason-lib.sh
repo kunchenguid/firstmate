@@ -18,6 +18,8 @@ fm_hold_reason_encode() {
 }
 
 # fm_hold_reason_decode_stream [toon|markdown|json]: decode marked reason fields.
+# JSON output sorts object keys so downstream home-summary byte comparisons
+# do not depend on Perl's randomized hash order.
 fm_hold_reason_decode_stream() {
   perl -MJSON::PP -MMIME::Base64=encode_base64,decode_base64 -MEncode=decode,FB_CROAK -e '
     use strict;
@@ -25,7 +27,7 @@ fm_hold_reason_decode_stream() {
     binmode STDIN, ":encoding(UTF-8)";
     binmode STDOUT, ":encoding(UTF-8)";
     my $format = shift;
-    my $json = JSON::PP->new->allow_nonref;
+    my $json = JSON::PP->new->allow_nonref->canonical;
     sub decode_reason {
       my ($value) = @_;
       return $value unless defined($value) && $value =~ /^fm-hold-v1:(.*)\z/s;
