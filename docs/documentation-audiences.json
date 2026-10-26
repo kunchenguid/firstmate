@@ -409,6 +409,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/readme-brand.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },
