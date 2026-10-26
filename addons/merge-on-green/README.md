@@ -12,7 +12,7 @@ whose evidence-gate PASS is a not-proven PASS — the installed `checks-lint.sh`
 block itself (filing the proof gap stays with the lead). Then it runs, in this order and as separate sequential commands, never piped and never in parallel:
 
 1. `FM_HOME=<home> checks-lint.sh <PR URL> <home>/data/<task>` — the PR's changed-file count is read first:
-   one page (100 files or fewer) runs pinned done-done-axi 0.6.4 with the Firstmate size rules, while a
+   one page (100 files or fewer) runs pinned done-done-axi 0.6.17 with the Firstmate size rules, while a
    bigger PR, or one whose count cannot be read, runs the add-on `fm-checks-lint.sh`, which measures every
    pull-files page; the legacy lint stays the last fallback when done-done is unavailable;
    the evidence gate must print PASS.

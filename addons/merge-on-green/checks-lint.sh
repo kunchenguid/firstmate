@@ -16,7 +16,7 @@ else
   LEGACY=${FM_MAIN_HOME:-$HOME/firstmate}/config/fm-checks-lint.sh
 fi
 DD_HOME=$FM_HOME/data/done-done-lint
-DD=(npx --yes --quiet --package=done-done-axi@0.6.4 done-done)
+DD=(npx --yes --quiet --package=done-done-axi@0.6.17 done-done)
 if [ -n "${FM_DONE_DONE_BIN:-}" ]; then DD=("$FM_DONE_DONE_BIN"); fi
 
 # Pin the released CLI: older installed done-done binaries do not have the config keys.
