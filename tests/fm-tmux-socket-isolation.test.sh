@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
+# (Every case below isolates its fixture environment in a (...) or $(...)
+# subshell on purpose: PATH/socket/TMUX mutations must not leak between cases
+# or into the suite shell. The "might be lost" scoping is the design.)
 # tests/fm-tmux-socket-isolation.test.sh - dedicated tmux socket for worker
 # endpoints, and the provable-death reclaim it unlocks.
 #
