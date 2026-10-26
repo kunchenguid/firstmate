@@ -365,6 +365,10 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 
 ### Restart recovery
 
+A fresh task leases its task copy durably with `treehouse get --lease` and then moves the pane's top-level shell into it.
+Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd` field does not follow the nested shell an interactive `treehouse get` opens, so a restart would otherwise reopen the worker in the primary clone.
+The lease outlives the pane: teardown returns it, and an aborted spawn returns it only when it closed its own endpoint, otherwise it names the `treehouse return --force` command.
+
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
