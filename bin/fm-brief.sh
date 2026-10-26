@@ -394,7 +394,6 @@ if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$PROJECT_DIR_SET" -eq 1
       ;;
   esac
 fi
-
 ID=${POS[0]}
 BRANCH="$BRANCH_PREFIX$ID"
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
