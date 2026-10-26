@@ -1777,34 +1777,34 @@ work_is_landed() {
   content_in_default
 }
 
-# Is the recorded PR confirmed closed without merging (rejected)? The provider
-# reader must positively report an open or merged state to allow cleanup; an
-# unreadable or unrecognized record fails closed.
-pr_is_closed_unmerged() {
+# Is the recorded PR positively open? The provider reader must report an open
+# state to allow cleanup of pushed work that is not landed; every other state,
+# including an unreadable or unrecognized record, fails closed.
+pr_is_open() {
   local target provider
   [ -n "$PR_URL" ] || return 1
   target=$PR_URL
-  fm_pr_url_parse "$target" || return 0
+  fm_pr_url_parse "$target" || return 1
   provider=$FM_PR_PROVIDER
   case "$provider" in
     github)
-      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 0
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1
       ;;
     gitlab)
-      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 0
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
       ;;
     gerrit)
-      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 0
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
       ;;
     forgejo)
-      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 0
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
       ;;
     *)
-      return 0
+      return 1
       ;;
   esac
   case "$provider:$FM_PR_RECORD_STATE:$FM_PR_RECORD_MERGED" in
-    github:CLOSED:false|github:closed:false|gitlab:closed:false|forgejo:closed:false|gerrit:ABANDONED:false|gerrit:abandoned:false)
+    github:OPEN:false|github:open:false|gitlab:opened:false|gitlab:open:false|forgejo:open:false|gerrit:NEW:false|gerrit:DRAFT:false)
       return 0
       ;;
     *)
@@ -2181,7 +2181,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || pr_is_closed_unmerged; }; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || ! pr_is_open; }; then
       echo "REFUSED: worktree $WT has work that is not landed." >&2
       [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2

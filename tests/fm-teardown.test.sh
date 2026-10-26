@@ -1162,6 +1162,31 @@ test_merged_pr_with_later_local_commit_refuses() {
   pass "merged PR does not allow teardown after a later local commit"
 }
 
+test_pushed_followup_after_merged_pr_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case pushed-followup-after-merged-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  wt_commit_file "$case_dir" later.txt pushed-only "pushed follow-up"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pushed-followup-after-merged-pr: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "pushed-followup-after-merged-pr: no REFUSED line in stderr"
+  pass "pushed follow-up work after a merged PR is refused"
+}
+
 test_squash_merged_rebased_branch_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-rebased)
@@ -5941,6 +5966,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
+test_pushed_followup_after_merged_pr_refuses
 test_no_mistakes_pushed_with_open_forgejo_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses
 test_no_mistakes_truly_unpushed_refuses
