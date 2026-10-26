@@ -596,43 +596,99 @@ fm_backlog_note_decode() {  # <encoded-note>
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg label previous_arg='' pr_close=0 note merged=0 i
-  local -a done_args=()
+  local data=$1 id=$2 previous='' arg label pr_close=0 pr_url='' note_text=''
+  local sentence='' body_line='' strip_after=0 drop_note=0
+  local -a close_args=() kept_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && label=$(fm_backlog_pr_note_label "$arg"); then
-      done_args[${#done_args[@]}-1]=--note
-      done_args+=("$label $arg")
-    else
-      [ "$previous_arg" != --pr ] || pr_close=1
-      done_args+=("$arg")
-    fi
-    previous_arg=$arg
-  done
-  # A close that carries no pull-request link did not read a merge from the
-  # forge in this run, and tasks-axi renders any closed row whose title still
-  # carries such a link as "merged". An earlier link therefore cannot survive
-  # this close: it moves into the body note, which keeps the delivery traceable
-  # without claiming a merge nobody read. A close that records a `--pr` link
-  # keeps the title as it is, because that link is the merge this run verified.
-  if [ "$pr_close" = 0 ]; then
-    fm_backlog_pr_link_downgrade "$data" "$id" "this close recorded no merge" || return 1
-    note=$FM_BACKLOG_DOWNGRADE_NOTE
-    if [ -n "$note" ]; then
-      merged=0
-      for ((i = 0; i < ${#done_args[@]}; i++)); do
-        if [ "${done_args[i]}" = --note ] && [ $((i + 1)) -lt "${#done_args[@]}" ]; then
-          merged=1
-          # A note that already keeps the link does not need the sentence twice.
-          fm_backlog_text_names_link "${done_args[i + 1]}" "$FM_BACKLOG_DOWNGRADE_LINKS" \
-            && continue
-          done_args[i + 1]="${done_args[i + 1]}; $note"
+    case "$previous" in
+      --note)
+        note_text=$arg
+        close_args+=(--note "$arg")
+        previous=$arg
+        continue
+        ;;
+      --pr)
+        if label=$(fm_backlog_pr_note_label "$arg"); then
+          # tasks-axi takes only a canonical pull request as a pr link, so a
+          # GitLab merge request or Gerrit change is recorded as a note.
+          note_text="$label $arg"
+          close_args+=(--note "$label $arg")
+        elif [ -n "$pr_url" ]; then
+          # One verified link per close: a second one is prose.
+          note_text="${note_text:+$note_text; }PR $arg"
+          close_args+=(--note "$note_text")
+        else
+          pr_close=1
+          pr_url=$arg
+          close_args+=(--pr "$arg")
         fi
-      done
-      [ "$merged" = 1 ] || done_args+=(--note "$note")
-    fi
+        previous=$arg
+        continue
+        ;;
+    esac
+    case "$arg" in
+      --note|--pr) previous=$arg ;;
+      *) close_args+=("$arg"); previous=$arg ;;
+    esac
+  done
+  if [ "$pr_close" = 1 ]; then
+    # A verified close keeps its own link and may not keep another one no run
+    # verified: tasks-axi writes "merged" for any link it finds, so a still-open
+    # link beside it would claim a merge nobody read. That link keeps its URL in
+    # the body note instead.
+    FM_BACKLOG_PR_LINK_EXCLUDE=$pr_url
+    fm_backlog_pr_link_note "$data" "$id" "the row carried a link no run verified" || {
+      FM_BACKLOG_PR_LINK_EXCLUDE=
+      return 1
+    }
+    FM_BACKLOG_PR_LINK_EXCLUDE=
+    sentence=$FM_BACKLOG_DOWNGRADE_NOTE
+    [ -z "$FM_BACKLOG_DOWNGRADE_LINKS" ] || strip_after=1
+  else
+    fm_backlog_pr_link_note "$data" "$id" "this close recorded no merge" || return 1
+    sentence=$FM_BACKLOG_DOWNGRADE_NOTE
+    [ -z "$FM_BACKLOG_DOWNGRADE_LINKS" ] || strip_after=1
   fi
-  fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
+  # A close that has to take a link off the title writes the prose it records into
+  # the body FIRST, so a close that fails or is killed cannot take the only copy
+  # of a URL with it, and only then closes the row. A close with no link to remove
+  # touches nothing but the row itself and keeps passing its note as an argument,
+  # which is the shape every adapter supports.
+  if [ "$strip_after" = 1 ]; then
+    body_line=$note_text
+    if [ -n "$sentence" ]; then
+      if [ -z "$body_line" ]; then
+        body_line=$sentence
+      elif ! fm_backlog_text_names_link "$body_line" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+        body_line="$body_line; $sentence"
+      fi
+    fi
+    [ -z "$body_line" ] || fm_backlog_body_append_line "$data" "$id" "$body_line" || return 1
+    drop_note=1
+    fm_backlog_pr_title_strip "$data" "$id" || return 1
+  elif [ -n "$note_text" ]; then
+    # A retry finds the note an interrupted attempt already wrote; passing it
+    # again would duplicate the line, so this close owes nothing for it.
+    fm_backlog_row_title_body "$data" "$id" || return 1
+    case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
+      *$'\n'"$note_text"$'\n'*) drop_note=1 ;;
+    esac
+  fi
+  if [ "$drop_note" = 1 ]; then
+    # The note lives in the body, so it is not owed as a close argument.
+    previous=''
+    for arg in "${close_args[@]+"${close_args[@]}"}"; do
+      if [ "$previous" = --note ]; then
+        previous=''
+        continue
+      fi
+      [ "$arg" = --note ] || kept_args+=("$arg")
+      previous=$arg
+    done
+    close_args=("${kept_args[@]+"${kept_args[@]}"}")
+  fi
+  fm_backlog_mutate "$data" "done" "$id" "${close_args[@]+"${close_args[@]}"}"
 }
 
 # Decode one `tasks-axi show` scalar. The field arrives as a JSON-encoded bare
@@ -748,6 +804,7 @@ fm_backlog_row_title_body() {  # <data-dir> <id>
 # before it takes the link off the title. A note an interrupted earlier attempt
 # already wrote is reused, so a retry rebuilds the same record from the body
 # instead of losing the URL with the title it no longer carries.
+FM_BACKLOG_PR_LINK_EXCLUDE=
 fm_backlog_pr_link_note() {  # <data-dir> <id> <reason> [url...]
   local data=$1 id=$2 reason=$3 url collected='' skip seen recorded
   local -a links=() uniq=()
@@ -755,12 +812,12 @@ fm_backlog_pr_link_note() {  # <data-dir> <id> <reason> [url...]
   data=$(fm_backlog_data_absolute "$data") || return 1
   fm_backlog_row_title_body "$data" "$id" || return 1
   for url in "$@"; do
-    [ -z "$url" ] || links+=("$url")
+    [ -z "$url" ] || [ "$url" = "$FM_BACKLOG_PR_LINK_EXCLUDE" ] || links+=("$url")
   done
   if [ -n "$FM_BACKLOG_ROW_TITLE" ]; then
     fm_backlog_title_split_pr_links "$FM_BACKLOG_ROW_TITLE"
     while IFS= read -r url; do
-      [ -z "$url" ] || links+=("$url")
+      [ -z "$url" ] || [ "$url" = "$FM_BACKLOG_PR_LINK_EXCLUDE" ] || links+=("$url")
     done <<EOF
 $FM_BACKLOG_TITLE_PR_LINKS
 EOF
@@ -858,13 +915,15 @@ fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
 # answer arrives later, so the record is the only place the answer can still read
 # "some run verified this merge". It is written only for a merge read in the run
 # that recorded it, removed once the row is closed in the backlog, and never
-# created by a read path.
+# created by a read path. It carries the link and the time the verification
+# happened - not the forge's own merge time, which nothing reads and which,
+# required-present, would demote a verified merge whenever a writer omitted it.
 fm_backlog_merge_fact_path() {  # <state-dir> <id>
   printf '%s/%s.pr-merge\n' "$1" "$2"
 }
 
-fm_backlog_merge_fact_write() {  # <state-dir> <id> <url> <merged-at> <verified-at>
-  local state=$1 id=$2 url=$3 merged_at=$4 verified_at=$5 target tmp
+fm_backlog_merge_fact_write() {  # <state-dir> <id> <url> <verified-at>
+  local state=$1 id=$2 url=$3 verified_at=$4 target tmp
   case "$id" in
     ''|.*|*[!A-Za-z0-9._-]*) FM_BACKLOG_TRANSITION_ERROR="invalid task identity for a merge-verification record"; return 1 ;;
   esac
@@ -872,16 +931,11 @@ fm_backlog_merge_fact_write() {  # <state-dir> <id> <url> <merged-at> <verified-
     || { FM_BACKLOG_TRANSITION_ERROR="the merge-verification record needs a canonical pull request URL"; return 1; }
   fm_backlog_merge_fact_time_valid "$verified_at" \
     || { FM_BACKLOG_TRANSITION_ERROR="invalid verification time for a merge-verification record"; return 1; }
-  if [ -n "$merged_at" ]; then
-    fm_backlog_merge_fact_time_valid "$merged_at" \
-      || { FM_BACKLOG_TRANSITION_ERROR="invalid merge time for a merge-verification record"; return 1; }
-  fi
   fm_backlog_directory_present "$state" "state directory" || return 1
   target=$(fm_backlog_merge_fact_path "$state" "$id")
   fm_backlog_record_parent_authorized "$target" "merge-verification record" "$state" || return 1
   tmp="$state/.$id.pr-merge.${BASHPID:-$$}"
   if ! { printf 'url=%s\n' "$url"
-         printf 'merged_at=%s\n' "$merged_at"
          printf 'verified_at=%s\n' "$verified_at"; } > "$tmp" 2>/dev/null; then
     rm -f -- "$tmp"
     FM_BACKLOG_TRANSITION_ERROR="cannot stage the merge-verification record for $id"
@@ -908,27 +962,52 @@ FM_BACKLOG_MERGE_FACT_URL=
 FM_BACKLOG_MERGE_FACT_MERGED_AT=
 FM_BACKLOG_MERGE_FACT_VERIFIED_AT=
 fm_backlog_merge_fact_read() {  # <state-dir> <id>
-  local state=$1 id=$2 target line url='' merged_at='' verified_at='' url_count=0 merged_count=0 verified_count=0
+  local state=$1 id=$2 target line url='' verified_at='' url_count=0 verified_count=0
   FM_BACKLOG_MERGE_FACT_URL=
-  FM_BACKLOG_MERGE_FACT_MERGED_AT=
   FM_BACKLOG_MERGE_FACT_VERIFIED_AT=
   target=$(fm_backlog_merge_fact_path "$state" "$id") || return 1
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       url=*) url=${line#url=}; url_count=$((url_count + 1)) ;;
-      merged_at=*) merged_at=${line#merged_at=}; merged_count=$((merged_count + 1)) ;;
       verified_at=*) verified_at=${line#verified_at=}; verified_count=$((verified_count + 1)) ;;
       *) return 1 ;;
     esac
   done < "$target"
-  [ "$url_count" -eq 1 ] && [ "$merged_count" -eq 1 ] && [ "$verified_count" -eq 1 ] || return 1
+  [ "$url_count" -eq 1 ] && [ "$verified_count" -eq 1 ] || return 1
   fm_backlog_row_artifact_supported "$id" --pr "$url" || return 1
   fm_backlog_merge_fact_time_valid "$verified_at" || return 1
-  [ -z "$merged_at" ] || fm_backlog_merge_fact_time_valid "$merged_at" || return 1
   FM_BACKLOG_MERGE_FACT_URL=$url
-  FM_BACKLOG_MERGE_FACT_MERGED_AT=$merged_at
   FM_BACKLOG_MERGE_FACT_VERIFIED_AT=$verified_at
+}
+
+# Print this row's canonical pull request links, one per line.
+fm_backlog_row_pr_links() {  # <data-dir> <id>
+  local data=$1 id=$2 url
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  fm_backlog_row_title_body "$data" "$id" || return 1
+  [ -n "$FM_BACKLOG_ROW_TITLE" ] || return 0
+  fm_backlog_title_split_pr_links "$FM_BACKLOG_ROW_TITLE"
+  while IFS= read -r url; do
+    [ -z "$url" ] || printf '%s\n' "$url"
+  done <<EOF
+$FM_BACKLOG_TITLE_PR_LINKS
+EOF
+}
+
+# Does this row's title still carry <url> as one of its pull request links? A
+# durable merge fact is trusted only for the link the row still shows, so a fact
+# left behind by an earlier cycle cannot close a later delivery as merged.
+fm_backlog_row_carries_pr_link() {  # <data-dir> <id> <url>
+  local seen links
+  links=$(fm_backlog_row_pr_links "$1" "$2") || return 1
+  [ -n "$links" ] || return 1
+  while IFS= read -r seen; do
+    [ "$seen" = "$3" ] && return 0
+  done <<EOF
+$links
+EOF
+  return 1
 }
 
 # Retire the record once the row's close has landed in the backlog: the fact is
@@ -971,7 +1050,7 @@ fm_backlog_row_artifact_supported() {
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
+  local data authorized_data=$1 id=$2 previous_arg=''
   local arg deliverable='' line body new_body tmp pr_args=0 note
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -1016,20 +1095,8 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     fi
   fi
   if [ -n "$deliverable" ]; then
-    out=$(fm_backlog_row_show "$data" "$id" --full)
-    command_status=$?
-    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
-    if [ "$command_status" -ne 0 ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-      return "$command_status"
-    fi
-    body=$(fm_backlog_shown_value "$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1)") || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
-    [ "$body" != "-" ] || body=
+    fm_backlog_row_title_body "$data" "$id" || return 1
+    body=$FM_BACKLOG_ROW_BODY
     line="Deliverable of the finished work: $deliverable"
     case $'\n'"$body"$'\n' in
       *$'\n'"$line"$'\n'*) ;;

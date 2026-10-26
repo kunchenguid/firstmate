@@ -859,6 +859,98 @@ test_teardown_close_never_claims_a_merge_it_did_not_read() {
   pass "teardown records a completion, not a merge, when the forge does not report one"
 }
 
+test_teardown_close_keeps_the_link_when_the_close_itself_fails() {
+  local case_dir rc out real_tasks_axi
+  case_dir=$(make_case tasks-axi-close-failed-once)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr https://github.com/example/repo/pull/7 \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  add_gh_pr_merge_fact "$case_dir" OPEN ''
+  # The close fails the way a lock or a backend error does, after the completion
+  # note is already durable and the title has lost the link.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = done ] && [ "\${2:-}" = task-x1 ] && [ ! -e "$case_dir/close-failed-once" ]; then
+  : > "$case_dir/close-failed-once" || exit 93
+  exit 92
+fi
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the injected close failure reported success"
+  # The note was written before the title lost the link, so the URL survives.
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F 'https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "the failed close lost the pull-request URL"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F 'merge was not verified in this run' >/dev/null \
+    || fail "the failed close did not record why the merge is unconfirmed"
+
+  # The close is retried at the next session start from this record, so the record
+  # and the note it names both have to survive the failure.
+  assert_present "$case_dir/state/task-x1.backlog-close" \
+    "a failed close discarded its pending-close record"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "the failed close recorded a merge the forge never reported"
+  pass "a close that fails keeps the link its note already recorded"
+}
+
+test_teardown_verified_close_drops_another_link_no_run_verified() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-close-verified-with-other-link)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/9' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # The row already carries a link for a different, still-open pull request.
+  tasks-axi update task-x1 --pr https://github.com/example/repo/pull/7 \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,mergedAt,url"*)
+        case " $* " in
+          *"/pull/9"*) printf '%s	%s	%s
+' 'MERGED' '2026-07-14T00:00:00Z' 'https://github.com/example/repo/pull/9' ; exit 0 ;;
+          *) printf '%s	%s	%s
+' 'OPEN' '' "${3:-}" ; exit 0 ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a verified merge beside an open link failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/9"' >/dev/null \
+    || fail "the verified close did not keep the merge it read"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | sed -n 's/^  title: //p' | grep -F 'pull/7' >/dev/null \
+    && fail "the verified close kept a second, unverified link on the title"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | sed -n 's/^  links: //p' | grep -F 'pull/7' >/dev/null \
+    && fail "the verified close kept a second, unverified structured link"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F 'Historical record: https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "the verified close dropped the other link instead of noting it"
+  pass "a verified close keeps its merge and notes any other link no run verified"
+}
+
 test_teardown_records_the_merge_the_forge_confirms() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close-merged-pr)
@@ -6250,6 +6342,8 @@ test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_close_never_claims_a_merge_it_did_not_read
 test_teardown_close_without_a_merge_clears_an_earlier_pr_link
+test_teardown_close_keeps_the_link_when_the_close_itself_fails
+test_teardown_verified_close_drops_another_link_no_run_verified
 test_teardown_records_the_merge_the_forge_confirms
 test_teardown_close_states_an_unreadable_pr_without_claiming_a_merge
 test_teardown_retain_never_claims_a_merge_it_did_not_read
