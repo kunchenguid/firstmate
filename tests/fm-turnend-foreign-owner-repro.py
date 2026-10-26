@@ -209,12 +209,8 @@ try:
     require(healthy.returncode == 0, "a replacement owning session must still recover supervision")
     stop(replacement)
 
-    # Positive control: a live harness-shaped process outside the owner's
-    # ancestry that carries the owner's own trusted session id is the same
-    # session, so the lock accepts it and re-anchors line 1 onto that process's
-    # CLAUDE_PID, keeping the recorded id; its Stop is held to the owner's own
-    # guard instead of ending as a foreign session. A different id against the
-    # re-anchored lock keeps the refusal and names the recorded id.
+    # Resuming a live conversation changes the id, not the process. The second
+    # model loop must stay foreign, including its Stop and auto-arm paths.
     same, same_env = make("same-session")
     same_env["CLAUDE_CODE_SESSION_ID"] = "synthetic-same"
     same_owner = start(
@@ -234,12 +230,17 @@ try:
     )
     same_lock_owner = session_lock_text(same_lock)
     require(
-        (same / "state/.lock-session").read_text().strip() == "synthetic-same",
+        (same / "state/.lock-session").read_text().splitlines()[0] == "synthetic-same",
         "the owner did not record its trusted session id beside the lock",
     )
     same_beat = same / "state/.last-watcher-beat"
     same_beat.touch()
     os.utime(same_beat, (old_time, old_time))
+    lease = same / "state/.lease-demo"
+    lease.write_text(f"main\t{same_lock_owner}\t100\n")
+    epoch = same / "state/.claude-autoarm-epoch"
+    epoch.write_text(f"epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid={same_lock_owner} recovery_generation=g1\nidentity-1\n")
+    saved = {path: path.read_bytes() for path in (same_lock, same / "state/.lock-session", lease, epoch)}
     accepted = start(
         same_env,
         'export CLAUDE_PID=$$; printf "%s\\n" "$$" > "$FM_HOME/state/accepted-pid"; '
@@ -255,26 +256,30 @@ try:
     accepted_pid = (same / "state/accepted-pid").read_text().strip()
     accepted_log = (OUT / "same-accepted.txt").read_text(errors="replace")
     print("same-session acquisition", "rc=" + (same / "state/accepted-rc").read_text().strip(), "pid=" + accepted_pid, "output=" + repr(accepted_log), flush=True)
-    require((same / "state/accepted-rc").read_text().strip() == "0", "the same session id was refused as a foreign live owner")
-    require(same_owner.poll() is None, "the original owner exited, so the re-anchor proves nothing over a live line 1")
+    require((same / "state/accepted-rc").read_text().strip() == "1", "a second live model loop acquired the same conversation's lock")
+    require(same_owner.poll() is None, "the original owner exited, so the refusal proves nothing over a live line 1")
     require(accepted_pid != same_lock_owner, "the same-session acquisition ran as the original owner")
-    require(session_lock_text(same_lock) == accepted_pid, "a same-session confirmation outside the owner's ancestry did not re-anchor line 1 onto its own CLAUDE_PID")
-    require((same / "state/.lock-session").read_text().strip() == "synthetic-same", "a same-session confirmation changed the recorded id")
+    require(session_lock_text(same_lock) == same_lock_owner, "the resumed second process moved the live owner's lock")
+    require((same / "state/.lock-session").read_text().splitlines()[0] == "synthetic-same", "a same-session confirmation changed the recorded id")
     refused = run(
         same_env | {"CLAUDE_CODE_SESSION_ID": "synthetic-other"},
         'export CLAUDE_PID=$$; "$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; printf "lock_rc=%s\\n" "$rc"; true',
     )
     print("other-session acquisition", "rc=" + str(refused.returncode), "stdout=" + repr(refused.stdout), "stderr=" + repr(refused.stderr), flush=True)
-    require("lock_rc=1" in refused.stdout, "a different session id acquired the re-anchored lock")
-    require(f"pid {accepted_pid}, session synthetic-same" in refused.stderr, "the refusal did not name the re-anchored pid and the recorded session id")
+    require("lock_rc=1" in refused.stdout, "a different session id acquired the live lock")
+    require(f"pid {same_lock_owner}, session synthetic-same" in refused.stderr, "the refusal did not name the original pid and the recorded session id")
     same_stop = guard(same_env, "same-session stop", prefix="export CLAUDE_PID=$$; ")
-    require(same_stop.returncode == 2, "a same-session Stop must be held to the owner's own guard, not ended as a foreign session")
-    require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" not in same_stop.stdout, "a same-session Stop took the foreign-owner exit")
+    require(same_stop.returncode == 0, "a resumed foreign Stop must end safely")
+    require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in same_stop.stdout, "a resumed process lost the foreign-owner diagnostic")
     other_stop = guard(same_env | {"CLAUDE_CODE_SESSION_ID": "synthetic-other"}, "other-session stop", prefix="export CLAUDE_PID=$$; ")
     require(other_stop.returncode == 0, "a different-session Stop must still end safely")
     require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in other_stop.stdout, "a different-session Stop lost the foreign-owner diagnostic")
-    require(session_lock_text(same_lock) == accepted_pid, "a Stop moved the re-anchored lock line")
-    print("FIXED same-session id re-anchors the lock onto its own process; a different id is still foreign", flush=True)
+    require(session_lock_text(same_lock) == same_lock_owner, "a Stop moved the original lock line")
+    resumed_auto = run(same_env, "export CLAUDE_PID=$$; " + 'echo "{}" | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"')
+    require(resumed_auto.returncode == 0, "resumed foreign auto-arm did not stand down")
+    require(epoch.read_bytes() == saved[epoch], "resumed foreign auto-arm changed the generation")
+    require(all(path.read_bytes() == data for path, data in saved.items()), "the resumed foreign process changed ownership, leases, or rewake")
+    print("FIXED a second live model loop remains foreign after resuming the owner's conversation", flush=True)
     stop(same_owner)
 
     single, single_env = make("single-idle")

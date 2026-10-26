@@ -6,6 +6,28 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Claude conversation resume ownership
+
+Verified on 2026-10-26 with Claude Code 2.1.310 on Linux.
+The opt-in test uses a private tmux socket, a fresh unauthenticated Claude config, two real Haiku sessions, and bash mode to persist the first conversation without a model response.
+Run after a Claude upgrade:
+
+```sh
+FM_CLAUDE_LOCK_RESUME_LIVE=1 bash tests/fm-session-lock-resume-live.test.sh
+```
+
+Observed output:
+
+```text
+ok - 2.1.310 (Claude Code): second live resume refused; owner /clear retained ownership
+```
+
+Claude allowed the second live process to resume the first conversation; the lock refused it while the original model loop remained alive.
+A separate native background probe stopped its private daemon with `claude daemon stop --any --keep-workers`: the pty host became orphaned, and hooks continued under the same model-loop pid.
+That verifies bridge recycling without a publisher change, not replacement of the model loop while its old pid remains alive.
+The portable ancestry suite covers exited-publisher replacement, detached frontend re-anchoring, and tagged Windows publisher records; macOS and Windows vendor behavior were not exercised in this run.
+New-id background continuation is a separate ownership path and is not asserted by this same-id resume test.
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.

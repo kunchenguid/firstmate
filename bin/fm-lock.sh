@@ -13,11 +13,13 @@
 # POSIX. Line 1 keeps its whole-line pid format because every other reader
 # takes the first line as the pid.
 #
-# The trusted id itself is recorded beside the lock in state/.lock-session, a
+# The trusted id and publisher pid are lines 1 and 2 of state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
-# and left byte-identical when it already names that id. A same-session
+# and left byte-identical when both values match. Publisher-only updates keep
+# its mtime because fm-afk-return.sh uses that time as a session-id boundary.
+# A same-session
 # confirmation keeps a live line 1 that is in this session's harness ancestry,
 # because bin/fm-startup-network.sh compares that pid across its deferred
 # sweeps; a dead recorded pid is reclaimed and rewritten to this session's
@@ -169,17 +171,24 @@ remember_lock_session() {
 
 # Record the trusted session id beside the lock, or remove a sidecar that no
 # trusted id backs. Called only while the claim lock is held. A sidecar already
-# naming this id is left untouched, so a same-session confirmation keeps it
-# byte-identical.
+# naming this id and publisher is left untouched. An ancestry-confirmed owner
+# upgrades an id-only sidecar or records its current model loop before detaching.
 publish_lock_session() {
-  local trusted recorded tmp
+  local trusted recorded publisher recorded_publisher tmp
   if trusted=$(fm_session_lock_trusted_session_id); then
-    if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ]; then
+    publisher=$(fm_session_lock_anchor_pid) || return 1
+    if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ] \
+      && recorded_publisher=$(fm_session_lock_recorded_publisher_pid "$STATE") \
+      && [ "$recorded_publisher" = "$publisher" ]; then
       return 0
     fi
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
-    if ! { printf '%s\n' "$trusted" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
+    if ! {
+      printf '%s\n%s\n' "$trusted" "$publisher" > "$tmp" \
+        && { [ "${recorded:-}" != "$trusted" ] || touch -r "$LOCK_SESSION" "$tmp"; } \
+        && mv -f "$tmp" "$LOCK_SESSION"
+    } 2>/dev/null; then
       rm -f "$tmp" 2>/dev/null
       return 1
     fi

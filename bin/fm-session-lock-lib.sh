@@ -8,7 +8,7 @@
 # Stop hook fires inside the lock-owning primary session before it may arm or
 # rewake. Two signals decide ownership, either one sufficient: the recorded pid
 # is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
+# Claude session id and publisher below identify the live lock. Neither
 # signal ever fails open: no id, no sidecar, an untrusted id, or a different
 # recorded id leaves the ancestry verdict exactly as it was.
 # This file is sourced by scripts and has no side effects on source.
@@ -394,8 +394,10 @@ fm_harness_pid_alive() {
 #
 # A --fork-session successor mints a new id, so it stays a foreign live owner
 # until the pre-fork process exits; that is the safe direction and a documented
-# non-goal. Two genuinely different live sessions sharing one id is not a
-# supported state (Claude refuses to resume a running session under its id).
+# non-goal. Claude can resume a conversation in a second live process, so an
+# id match alone is not ownership: the recorded publisher must belong to this
+# run or have exited. A legacy id-only sidecar remains ancestry-only until its
+# owner confirms the lock and records its publisher.
 
 # Print the Claude session id this process may own with, or return 1. $1 is the
 # ancestry list an earlier walk already produced, so a caller that walked once
@@ -444,14 +446,29 @@ fm_session_lock_recorded_session_id() {  # <state>
   printf '%s\n' "$recorded"
 }
 
-# True when the lock in state dir $1 was recorded by this same Claude session:
-# the trusted id equals the id recorded beside the lock. No trusted id, no
-# sidecar, or a different recorded id is false.
+# Print the model-loop pid that published the sidecar, or return 1 for a
+# legacy or malformed record. The namespace tag follows the lock-pid format.
+fm_session_lock_recorded_publisher_pid() {  # <state>
+  local publisher
+  [ -f "$1/.lock-session" ] && [ ! -L "$1/.lock-session" ] || return 1
+  publisher=$(sed -n '2p' "$1/.lock-session" 2>/dev/null) || return 1
+  fm_session_pid_valid "$publisher" || return 1
+  printf '%s\n' "$publisher"
+}
+
+# A matching conversation id cannot displace another live model loop. A bridge
+# recycle preserves the publisher, and a replacement of an exited publisher
+# can still re-anchor a surviving frontend. Missing publisher evidence cannot
+# distinguish a detached owner from a second process resuming its conversation.
 fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
-  local state=$1 trusted recorded
-  trusted=$(fm_session_lock_trusted_session_id "${2:-}") || return 1
+  local state=$1 trusted recorded publisher pids=${2:-}
+  [ -n "$pids" ] || pids=$(fm_harness_ancestry_pids) || return 1
+  trusted=$(fm_session_lock_trusted_session_id "$pids") || return 1
   recorded=$(fm_session_lock_recorded_session_id "$state") || return 1
-  [ "$recorded" = "$trusted" ]
+  [ "$recorded" = "$trusted" ] || return 1
+  publisher=$(fm_session_lock_recorded_publisher_pid "$state") || return 1
+  fm_harness_pid_listed "$publisher" "$pids" && return 0
+  ! fm_harness_pid_alive "$publisher"
 }
 
 # Print the pid bin/fm-lock.sh records on lock line 1 for this session. For a
