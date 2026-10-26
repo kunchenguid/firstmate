@@ -1092,12 +1092,15 @@ test_proof_never_writes_into_the_worktree() {
   local wt before after victim
   wt="$TMP_ROOT/nowrite-wt"
   rm -rf "$wt"; mkdir -p "$wt"
-  # Case 1: a project file already carries the old canary name.
+  # Case 1: a project file already carries the OLD design's fixed canary
+  # name; the proof must leave it byte-identical (and must not create or
+  # delete anything under the worktree).
   printf 'precious uncommitted data\n' > "$wt/.fm-proof-canary"
-  # Case 2: a symlink with that name points OUTSIDE the worktree at a victim.
+  # Case 2: a symlink at that old name points OUTSIDE the worktree at a
+  # victim file; the proof must never follow or replace it.
   victim="$TMP_ROOT/nowrite-victim"
   printf 'victim data\n' > "$victim"
-  ln -s "$victim" "$wt/.fm-proof-canary-link" 2>/dev/null || true
+  ln -s "$victim" "$wt/.fm-proof-canary-symlink" 2>/dev/null || true
   before=$( ( cd "$wt" && find . -mindepth 1 -maxdepth 1 | sort ) )
 
   (
@@ -1112,7 +1115,7 @@ test_proof_never_writes_into_the_worktree() {
     || fail "a same-named project file must survive the proof untouched"
   [ "$(cat "$victim")" = 'victim data' ] \
     || fail "a symlinked name must never be followed to a target outside the worktree"
-  [ -L "$wt/.fm-proof-canary-link" ] \
+  [ -L "$wt/.fm-proof-canary-symlink" ] \
     || fail "the pre-existing symlink must not be replaced"
   pass "proof writes nothing into the worktree (collision and symlink attacks closed)"
 
@@ -1132,6 +1135,84 @@ test_proof_never_writes_into_the_worktree() {
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
   pass "proof still attributes survivors with zero project writes"
+}
+
+# Round 5 (review): lab calibration alone cannot prove the scan covers the
+# WORKTREE - an lsof that works in the lab and fails on the real path would
+# return empty+rc1 and read as "no live processes". The per-worktree
+# coverage proof holds our own O_NOFOLLOW fd on an existing worktree file
+# and requires the scan to report it; this case uses a shim that answers
+# every other path but fails the worktree, and requires `unproven`.
+test_worktree_scan_coverage_is_proven_per_worktree() {
+  local dir wt meta sock="fmfake-cov-$$" verdict real_lsof shimdir
+  dir="$TMP_ROOT/cov"; wt="$TMP_ROOT/cov-wt"
+  rm -rf "$dir" "$wt"; mkdir -p "$dir/home/state" "$dir/fake" "$wt"
+  make_socket_stub "$dir"
+  meta="$dir/home/state/cov.meta"
+  cat > "$meta" <<EOF
+window=fmses:fm-cov
+endpoint_task_id=cov
+worktree=$wt
+project=$TMP_ROOT
+socket=$sock
+EOF
+  printf 'existing project file\n' > "$wt/existing.txt"
+  real_lsof=$(command -v lsof)
+  shimdir="$dir/lsof-worktree-fail"; mkdir -p "$shimdir"
+  cat > "$shimdir/lsof" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *"$wt"*) exit 1 ;;
+  *) exec "$real_lsof" "\$@" ;;
+esac
+SH
+  chmod +x "$shimdir/lsof"
+
+  verdict=$(
+    PATH="$shimdir:$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-cov" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  case "$verdict" in
+    unproven*$'\t'*) : ;;
+    *) fail "a scan that fails on the worktree must refuse as unproven, got '$verdict'" ;;
+  esac
+  pass "per-worktree coverage: an lsof failing only on the worktree refuses"
+
+  # Positive control: real lsof with only the pre-existing file - the
+  # coverage proof must pass and an empty worktree scan must still be
+  # trusted as clean (no false unproven).
+  verdict=$(
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-cov" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  [ "${verdict%%$'\t'*}" = gone ] \
+    || fail "a covered, clean worktree must still read gone, got '$verdict'"
+  pass "per-worktree coverage: a covered clean worktree still reclaims"
+
+  # And the empty-worktree fallback (directory-handle coverage) works too.
+  rm -f "$wt/existing.txt"
+  verdict=$(
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+      ROOT=$1; meta=$2
+      . "$ROOT/bin/fm-backend.sh"
+      fm_backend_source tmux || exit 1
+      . "$ROOT/bin/fm-control-lib.sh"
+      fm_control_endpoint_absence_verdict tmux "fmses:fm-cov" "$meta"
+    ' _ "$ROOT" "$meta"
+  )
+  [ "${verdict%%$'\t'*}" = gone ] \
+    || fail "an empty worktree must be covered by the directory handle, got '$verdict'"
+  pass "per-worktree coverage: an empty worktree is covered by its directory handle"
 }
 
 # --- E. real-script screen read and doorbell through the recorded socket -----
@@ -1200,14 +1281,17 @@ EOF
     || { tmux -L "$sock" kill-server 2>/dev/null; fail "the doorbell key never reached the fleet window" ; }
   pass "fm-send.sh: the doorbell key addresses the recorded socket"
 
-  # A legacy record (no socket=) must NOT see the fleet window: peek resolves
-  # through the ambient server and fails read-only.
+  # A legacy record (no socket=) must NOT reach the fleet window: peek
+  # resolves through the ambient server. tmux may prefix-match an absent
+  # target to the active ambient window, so a successful capture is not
+  # itself a failure - the security property is that the FLEET marker can
+  # never appear through the ambient address.
   grep -v '^socket=' "$meta" > "$home/state/$id.meta.legacy"
   mv "$home/state/$id.meta.legacy" "$meta"
-  if FM_HOME="$home" "$PEEK" "$id" 10 >/dev/null 2>&1; then
-    tmux -L "$sock" kill-server 2>/dev/null
-    fail "a legacy record must not read a fleet window through the ambient server"
-  fi
+  out=$(FM_HOME="$home" "$PEEK" "$id" 10 2>&1) || true
+  case "$out" in
+    *e2e-marker-ready*) tmux -L "$sock" kill-server 2>/dev/null; fail "a legacy record must never reach the fleet window through the ambient server" ;;
+  esac
   pass "fm-peek.sh: a legacy record stays on the ambient server and misses the fleet window"
 
   tmux -L "$sock" kill-server 2>/dev/null || true
@@ -1269,6 +1353,7 @@ test_proof_fails_closed_when_evidence_tools_fail
 test_worktree_liveness_covers_open_files_and_argv
 test_open_file_scan_failure_fails_closed
 test_proof_never_writes_into_the_worktree
+test_worktree_scan_coverage_is_proven_per_worktree
 test_real_tmux_socket_path_under_tmux_tmpdir
 test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint

@@ -162,11 +162,15 @@ fm_tmux_socket_path() {  # <name>
 # default 15s); the command's stdout is this function's stdout when it
 # completes in bound, and the rc is the child's (0/child-status) or 2 on
 # timeout. A proof primitive must never hang the control plane:
-# - TIMEOUT teardown is two-level and prompt (review M-a): the probe, its
-#   direct children, and one further generation are killed and reaped - a
-#   shim script blocked in a child (e.g. a `sleep`) would otherwise leave
-#   an orphan behind, and the orphan would ALSO hold the capture pipe open
-#   and stall the caller.
+# - TIMEOUT teardown is two-level (review M-a): the probe, its direct
+#   children, and one further generation are killed and reaped - a shim
+#   script blocked in a child (e.g. a `sleep`) would otherwise leave an
+#   orphan behind, and the orphan would ALSO hold the capture pipe open and
+#   stall the caller. Reap latency is bounded by the configured timeout
+#   (FM_TMUX_PROOF_TIMEOUT, default 15 s) plus loop granularity: with the
+#   regression's 2 s bound the probe and its child are gone in ~2-3.5 s
+#   end to end; with the default 15 s bound the same shape reaps within
+#   roughly the same margin after 15 s.
 # - The probe writes to a FILE, not the inherited pipe: a timed-out
 #   grandchild then holds only that file (partial output is discarded), so
 #   the caller's command substitution can return while the reaper finishes.
@@ -337,10 +341,30 @@ fm_tmux_server_evidence() {  # <name>
 # reclaim proof's orphan guard: a tmux server death usually takes its pane
 # processes with it, but a reparented survivor (launchd under jetsam) is
 # exactly what relaunching a second agent would duplicate.
+#
+# TRUST MODEL (round 5 review; this is the declared boundary):
+#   - We trust the local toolchain's lsof SEMANTICS. The proof requires:
+#     (a) any scan error, timeout, or suspicious result reads as UNPROVABLE
+#         (fail-closed), never as absence;
+#     (b) PER-WORKTREE COVERAGE PROOF: an fd we hold ourselves, opened
+#         O_NOFOLLOW read-only on an EXISTING regular file inside the
+#         worktree (the directory itself, opened as a directory handle, when
+#         no regular file exists), must appear in the scan output - this
+#         writes nothing into the project, never follows a symlink, and
+#         proves the scan actually covered THIS worktree rather than merely
+#         working elsewhere (the lab below);
+#     (c) the trusted lsof is invoked by its resolved absolute path.
+#   - Further forgery built on top of those three requirements (for example
+#     an lsof that honors this exact coverage protocol and then lies about
+#     one path) is OUT OF SCOPE for this proof.
 fm_tmux_worktree_live_pids() {  # <dir>
-  local dir=$1 out rc pids='' lab canary escaped tmpbase
+  local dir=$1 out rc pids='' lab canary escaped tmpbase lsof_bin
+  local holder='' coverage='' coverage_alt='' _i=0
   [ -d "$dir" ] || return 0
-  if command -v lsof >/dev/null 2>&1; then
+  lsof_bin=$(command -v lsof 2>/dev/null || true)
+  [ -n "$lsof_bin" ] || return 2
+  command -v perl >/dev/null 2>&1 || return 2
+  if [ -n "$lsof_bin" ]; then
     # Private calibration lab: prove THIS lsof walks trees before any
     # worktree result is believed. Random dir + random file name, our own
     # fd, nothing project-visible. ${TMPDIR%/}: macOS TMPDIR carries a
@@ -355,13 +379,13 @@ fm_tmux_worktree_live_pids() {  # <dir>
       cal=0
       # Criterion-1 honesty: a cwd scan run INSIDE the lab must report the
       # lab path.
-      out=$( ( cd "$lab" && fm_tmux_bounded env LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null ) ) || true
+      out=$( ( cd "$lab" && fm_tmux_bounded env LC_ALL=C "$lsof_bin" -a -d cwd -F pn 2>/dev/null ) ) || true
       printf '%s\n' "$out" | grep -qF "$lab" || cal=1
       # Criterion-2 honesty: a +D walk of the lab must report the canary WE
       # hold open, whatever the rc.
       rc=0
       exec 9<"$canary" 2>/dev/null || true
-      out=$(fm_tmux_bounded env LC_ALL=C lsof +D "$lab" 2>/dev/null) || rc=$?
+      out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" +D "$lab" 2>/dev/null) || rc=$?
       exec 9<&- 2>/dev/null || true
       if [ "$rc" -eq 2 ] || [ "$cal" -ne 0 ]; then
         cal=1
@@ -375,21 +399,79 @@ fm_tmux_worktree_live_pids() {  # <dir>
     else
       return 2
     fi
+    # PER-WORKTREE COVERAGE (trust model (b)): hold our own O_NOFOLLOW
+    # read-only fd on an existing regular file inside the worktree (or the
+    # directory itself) with cwd there, for the duration of both scans. The
+    # scans must report it; a scan that works only in the lab and fails on
+    # this worktree therefore reads unproven, never "no live processes".
+    coverage=$(find "$dir" -mindepth 1 -maxdepth 2 -type f ! -type l 2>/dev/null | head -1)
+    case "$coverage" in
+      /private/*) coverage_alt=$coverage ;;
+      /*) coverage_alt=/private$coverage ;;
+      *) coverage_alt=$coverage ;;
+    esac
+    if [ -n "$coverage" ]; then
+      perl -e 'use Fcntl; chdir($ARGV[1]) or exit 9; sysopen(my $fh, $ARGV[0], O_RDONLY|O_NOFOLLOW) or exit 9; sleep 30' \
+        "$coverage" "$dir" >/dev/null 2>&1 &
+      holder=$!
+    else
+      perl -e 'chdir($ARGV[0]) or exit 9; opendir(my $dh, $ARGV[0]) or exit 9; sleep 30' \
+        "$dir" >/dev/null 2>&1 &
+      holder=$!
+      coverage=$dir
+      case "$coverage" in
+        /private/*) coverage_alt=$coverage ;;
+        /*) coverage_alt=/private$coverage ;;
+        *) coverage_alt=$coverage ;;
+      esac
+    fi
+    # Give the holder a moment to take its fd/cwd (bounded).
+    _i=0
+    while [ "$_i" -lt 10 ] && ! kill -0 "$holder" 2>/dev/null; do
+      _i=$((_i + 1))
+      sleep 0.2
+    done
+    sleep 0.3
     rc=0
-    out=$(fm_tmux_bounded env LC_ALL=C lsof -a -d cwd -F pn 2>/dev/null) || rc=$?
-    [ "$rc" -eq 2 ] && return 2
-    pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" '
+    out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" -a -d cwd -F pn 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      return 2
+    fi
+    # Coverage assertion 1: the cwd scan reports the holder's cwd (the
+    # worktree). -F pn emits "p<pid>" then "n<cwd>".
+    if ! printf '%s\n' "$out" | awk -v h="$holder" -v d="$dir" -v da="$coverage_alt" '
+        /^p/ { pid = substr($0, 2); next }
+        /^n/ { cwd = substr($0, 2); if (pid == h && (cwd == d || cwd == da)) { found = 1 } }
+        END { exit !found }'; then
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      return 2
+    fi
+    pids=$pids$(printf '%s\n' "$out" | awk -v dir="$dir" -v da="$coverage_alt" -v h="$holder" '
       /^p/ { pid = substr($0, 2); next }
       /^n/ {
         cwd = substr($0, 2)
-        if (cwd == dir || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) print pid
+        if (cwd == dir || cwd == da || (index(cwd, dir) == 1 && substr(cwd, length(dir) + 1, 1) == "/")) {
+          if (pid != h) print pid
+        }
       }
     ')
     rc=0
-    out=$(fm_tmux_bounded env LC_ALL=C lsof +D "$dir" 2>/dev/null) || rc=$?
-    [ "$rc" -eq 2 ] && return 2
-    # Header line filtered; only numeric pid fields are attributions.
-    pids=$pids$(printf '%s\n' "$out" | awk '$2 ~ /^[0-9]+$/ { print $2 }')
+    out=$(fm_tmux_bounded env LC_ALL=C "$lsof_bin" +D "$dir" 2>/dev/null) || rc=$?
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    if [ "$rc" -eq 2 ]; then
+      return 2
+    fi
+    # Coverage assertion 2: the +D walk reports our coverage target.
+    if ! printf '%s\n' "$out" | grep -qF -e "$coverage" -e "$coverage_alt"; then
+      return 2
+    fi
+    # Header line filtered; only numeric pid fields are attributions; the
+    # coverage holder (our own probe) is excluded.
+    pids=$pids$(printf '%s\n' "$out" | awk -v h="$holder" '$2 ~ /^[0-9]+$/ && $2 != h { print $2 }')
   fi
   if command -v pgrep >/dev/null 2>&1; then
     escaped=$(printf '%s' "$dir" | sed 's/[][(){}.^$*+?|]/\\&/g')
