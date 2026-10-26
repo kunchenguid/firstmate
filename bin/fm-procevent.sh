@@ -65,8 +65,8 @@
 #            A task-owned source instead keeps its terminal round open and
 #            registered until its owner concludes it with `handled`.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
-#            republish every durably captured result with no handled
-#            acknowledgement yet - regardless of any earlier publication - and
+#            publish every durably captured result with no handled
+#            acknowledgement yet unless its identical wake is still queued, and
 #            start a runner for any registered source that has no live owner and
 #            no open task-owned round. This is liveness repair only - it never
 #            discovers results by
@@ -804,11 +804,11 @@ cmd_register_extension() {
 
 # Publish every durably captured result with no handled acknowledgement yet.
 # Capture already happened, so this only turns durable state into durable
-# events - and it republishes on every call regardless of any earlier
-# publication, so a result stays eligible for re-announcement across restarts
-# and drains until `fm_procevent_mark_handled` records it.
+# events. An identical queued wake makes publication a no-op, but an absent
+# row remains eligible for retry across restarts and drains until
+# `fm_procevent_mark_handled` records the domain acknowledgement.
 publish_result() {  # <result-file>
-  local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
+  local result=$1 id seq adapter line status=1 owner_task='' message='' record='' key payload
   local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
@@ -889,8 +889,20 @@ EOF
       esac
     fi
     unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
-    if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
-      status=0
+    key="procevent:$id:$seq"
+    payload="check: $line"
+    # A queued copy already owns delivery for this result. Check and append
+    # under the queue lock so publishers and drain acknowledgements cannot
+    # race, and a duplicate never reopens the recovery episode.
+    if fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+      if awk -F '\t' -v key="$key" -v payload="$payload" '
+        $3 == "check" && $4 == key && $5 == payload { found=1 }
+        END { exit !found }
+      ' "$FM_WAKE_QUEUE" 2>/dev/null \
+        || fm_wake_append_locked check "$key" "$payload"; then
+        status=0
+      fi
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     fi
   fi
   fm_procevent_source_lock_release "$id"
