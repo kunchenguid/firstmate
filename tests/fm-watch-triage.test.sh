@@ -2346,6 +2346,27 @@ test_gate_after_done_or_paused_wakes_once_per_gate() {
     wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke twice: $(cat "$out")"
     wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke on a later poll: $(cat "$out")"
     reap "$pid"
+    ack_stopped_cycle "$state" || true
+
+    : > "$out"; : > "$dir/crew-state.log"
+    rm -f "$state/.wait-gate-checked-test_fm-wg"
+    export FM_FAKE_CREW_STATE='state: unknown · source: run-step · run inventory unavailable'
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+    [ -s "$dir/crew-state.log" ] || fail "$wait: the unknown read never happened"
+    wait_poll_cycle "$state" "$pid" || fail "$wait: an unknown read woke: $(cat "$out")"
+    reap "$pid"
+    ack_stopped_cycle "$state" || true
+    rm -f "$state/.wait-gate-checked-test_fm-wg"; : > "$dir/crew-state.log"
+    export FM_FAKE_CREW_STATE=$gate
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+    [ -s "$dir/crew-state.log" ] || fail "$wait: the parked read after the unknown read never happened"
+    wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke again after an unknown read: $(cat "$out")"
+    reap "$pid"
+    [ ! -s "$out" ] || fail "$wait: the same gate woke again after an unknown read: $(cat "$out")"
     [ "$wait" != "done" ] || [ "$(wc -l < "$dir/crew-state.log" | tr -d ' ')" = 1 ] \
       || fail "done: the recheck spent more than one current-state read inside its interval"
     unset FM_FAKE_CREW_STATE
