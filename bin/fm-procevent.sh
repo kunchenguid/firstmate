@@ -100,10 +100,11 @@
 #            "already-handled: id seq" on every repeat call, atomically
 #            deduplicated so a paired external effect is never authorized
 #            twice. Until this is called, the result stays eligible for
-#            bounded re-announcement on every reconcile. Marking a result
-#            handled does not retire its source registration or claim, with one
-#            exception: acknowledging the terminal round of a task-owned source
-#            is that board's conclude step, so it also drops the registration
+#            bounded re-announcement by reconcile whenever its wake is no
+#            longer queued. Marking a result handled does not retire its
+#            source registration or claim, with one exception: acknowledging
+#            the terminal round of a task-owned source is that board's
+#            conclude step, so it also drops the registration
 #            that kept the board with its owner, and reports `retired:` too.
 # retire     Drop a registration, stop a runner this home owns, release the claim.
 #            Idempotent, and still the supported explicit path after a source has
@@ -175,8 +176,8 @@
 # announcement and a byte-identical replay produces none at all. Every other
 # adapter keeps the strict publish-before-apply order, because without a
 # declared downstream channel an applied-and-acknowledged result would otherwise
-# go silent. An unhandled result stays eligible for bounded re-announcement on
-# every reconcile in both modes, exactly as before.
+# go silent. An unhandled result stays eligible for bounded re-announcement by
+# reconcile in both modes, exactly as before.
 #
 # Polling again is adapter-owned through the same kind of seam. An adapter that
 # answers exit 0 to `bin/fm-procevent-<adapter>.sh relisten` keeps this runner
