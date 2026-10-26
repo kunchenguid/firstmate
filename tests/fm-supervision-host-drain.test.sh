@@ -157,6 +157,16 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
   assert_contains "$out" "    merge nothing" "the away tail must carry the record's read-back verbatim"
+  # The 2026-10-26 away window: a plain /afk recorded no words and the tail
+  # called them the whole mandate, so queued daily runs waited for the return.
+  printf 'Away posture (recorded):\n  your words: (none)\n' > "$home/readback"
+  out=$(printf 'check: daily-runs\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --away --readback-file "$home/readback")
+  assert_contains "$out" "empty words cancel no standing grant and add none" "the away tail must keep standing authority under empty words"
+  assert_contains "$out" "bin/fm-spawn.sh dispatches queued work whose holds, blockers, and date gates cleared within the spend cap, whether or not the words name it, plus work the words or a standing order recorded in data/captain.md (and data/captain-shared.md where present) say to start now" \
+    "the away tail must dispatch queued work and recorded standing orders without a sentence of the words"
+  assert_contains "$out" "what the words leave unsaid falls back to standing authority for dispatch, never to a hold on it" "the away tail must not read unsaid words as a hold"
+  assert_not_contains "$out" "(already queued, or filed by you from the words)" "the away tail still conditions dispatch on the words"
+  assert_contains "$out" "  your words: (none)" "the away tail must still end with the empty read-back"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 
