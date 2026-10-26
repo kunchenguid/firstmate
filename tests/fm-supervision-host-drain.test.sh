@@ -162,8 +162,8 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   printf 'Away posture (recorded):\n  your words: (none)\n' > "$home/readback"
   out=$(printf 'check: daily-runs\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --away --readback-file "$home/readback")
   assert_contains "$out" "empty words cancel no standing grant and add none" "the away tail must keep standing authority under empty words"
-  assert_contains "$out" "bin/fm-spawn.sh dispatches queued work whose holds, blockers, and date gates cleared within the spend cap, whether or not the words name it, plus work the words or a standing order recorded in data/captain.md (and data/captain-shared.md where present) say to start now" \
-    "the away tail must dispatch queued work and recorded standing orders without a sentence of the words"
+  assert_contains "$out" "bin/fm-spawn.sh dispatches queued work whose holds, blockers, and date gates cleared within the spend cap, whether or not the words name it, plus work the words explicitly call for" \
+    "the away tail must dispatch queued work without a sentence of the words"
   assert_contains "$out" "what the words leave unsaid falls back to standing authority, never to a hold on it, while a merge neither the words nor a task's standing merge permission calls for still holds for the return" "the away tail must not read unsaid words as a hold"
   assert_contains "$out" "a task's standing merge permission (yolo=on in state/<task>.meta) merges its green, in-scope pull request whether or not the words name it" \
     "the away tail must merge a green PR the standing merge permission covers under empty words"

@@ -604,7 +604,7 @@ The captain's away words are the whole away mandate, added on top of main's stan
 - It decides by its own judgment whether the event in front of it is the moment they name.
 - It acts on them only through the guarded scripts, never by analogy.
 - It holds with verdict captain on doubt.
-- Empty or silent words cancel no standing grant and add none: a queued item whose holds, blockers, and date gates cleared, a standing order recorded in the captain preference files ([`configuration.md`](configuration.md#captain-preferences-datacaptainmd--datacaptain-sharedmd)), and a task's standing merge permission (`yolo=on` in its task record) proceed while away as they would attended.
+- Empty or silent words cancel no standing grant and add none: a queued item whose holds, blockers, and date gates cleared and a task's standing merge permission (`yolo=on` in its task record) proceed while away as they would attended.
   `tests/fm-branch-supervision.test.sh` and `tests/fm-supervision-host.test.sh` pin that the branch prompt and the wake tail say so.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.

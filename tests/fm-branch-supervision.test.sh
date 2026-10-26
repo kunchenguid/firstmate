@@ -156,7 +156,7 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
 # The 2026-10-26 away window: a plain /afk recorded no words, and the prompt
 # called the words the whole mandate, so the away session read empty words as
 # no authority at all. Two queued daily runs whose date gate had passed, which
-# a recorded standing order says start without asking, waited for the return.
+# the captain's preferences say start without asking, waited for the return.
 test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
   local prompt
   prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
@@ -168,12 +168,6 @@ test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
   assert_contains "$prompt" \
     "a backlog item already queued whose holds, blockers, and date gates have cleared dispatches within the record's spend cap, as MAIN would dispatch it attended;" \
     "branch prompt does not dispatch already-queued work without a sentence of the words"
-  assert_contains "$prompt" \
-    "a standing order recorded in this home's captain preference files (\`data/captain.md\`, and \`data/captain-shared.md\` where present) that names work and the moment it starts, also while away, is carried out at that moment: file the item under the \`backlog\` lease with a note citing the preference, then dispatch it;" \
-    "branch prompt does not carry out a recorded standing order while away"
-  assert_contains "$prompt" \
-    "Read those files from disk when a wake could be such a moment" \
-    "branch prompt never tells the branch where the standing orders live"
   assert_contains "$prompt" \
     "a queued backlog item whose holds, blockers, and date gates cleared is dispatched within the record's spend cap whether or not the words name it" \
     "the spawn rule still requires the words to name queued work"
@@ -197,7 +191,7 @@ test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
   assert_not_contains "$prompt" \
     "work the words explicitly call for is dispatched" \
     "the spawn rule still conditions dispatch on the words"
-  pass "emitted branch prompt keeps standing dispatch authority and recorded standing orders in force under empty away words"
+  pass "emitted branch prompt keeps standing dispatch and merge authority in force under empty away words"
 }
 
 # --- append-only outcome store ------------------------------------------------
