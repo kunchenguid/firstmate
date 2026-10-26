@@ -1016,7 +1016,7 @@ ok - live pi banner guard verified 5 live surface(s)
 Verified on 2026-10-02 on macOS arm64 with the same live guard and stub Codex endpoint as the 2026-09-25 entry below, against pi 0.87.1 (installed), and pi 0.99.2 and 1.0.0 installed into isolated npm prefixes from `@earendil-works/pi-coding-agent`.
 All three render the banner as `Error: Codex error: The usage limit has been reached` followed by the fixed bug-report hint row, and each classified the banner screen `empty` on all five live surfaces, so 0.99.2 and 1.0.0 joined the adapter's pin set.
 The guard exercises the adapter's own `pi --version` read that production callers use.
-On a release outside the immutable pin set it proves the adapter's refusal instead of failing the build: pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
+On a release outside the immutable pin set, the guard proves the adapter's refusal instead of failing the build; the installed release remains unverified and stale `working` and `unknown` statuses stay `unknown`, while `idle` retains the ordinary `empty` verdict.
 
 ```text
 # pi (1.0.0): rendered banner row: Error: Codex error: The usage limit has been reached
