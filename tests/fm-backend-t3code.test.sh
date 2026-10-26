@@ -2155,7 +2155,7 @@ test_scout_teardown_stops_and_archives_before_slot_return() {
 }
 
 test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete() {
-  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof
+  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof offpath
   t3_require_tomllib test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete || return 0
   command -v lsof >/dev/null 2>&1 || { printf 'note: %s skipped: lsof is required to prove a process left the home\n' "${FUNCNAME[0]}"; return 0; }
   id=$(t3_uid "t3smtdz1-$harness")
@@ -2185,7 +2185,7 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
   # process rooted in the home can outlive the proven archive.
   (cd "$home/state" && exec sleep 300) &
   PROVIDER_PID=$!
-  out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
+  out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_LSOF_FALLBACK_DIRS="" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   rc=$?
@@ -2207,11 +2207,14 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
   assert_present "$home/AGENTS.md" "an unproven shutdown keeps the secondmate home"
   assert_present "$state/$id.meta" "an unproven shutdown keeps the endpoint record"
   kill -0 "$PROVIDER_PID" 2>/dev/null || fail "the refused teardown must not have touched the provider"
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
+  offpath="$CASE_DIR/off-path-sbin"
+  mkdir -p "$offpath"
+  ln -sf "$(command -v lsof)" "$offpath/lsof"
+  out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_LSOF_FALLBACK_DIRS="$offpath" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   rc=$?
-  expect_code 0 "$rc" "t3code secondmate teardown should succeed"$'\n'"$out"
+  expect_code 0 "$rc" "t3code secondmate teardown should succeed with lsof installed off PATH"$'\n'"$out"
   ! kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the home must be ended before the home is removed"
   wait "$PROVIDER_PID" 2>/dev/null || true
   PROVIDER_PID=

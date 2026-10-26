@@ -374,7 +374,7 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
 # Retiring a T3 secondmate home needs lsof to prove its provider processes
 # have left it (t3code_secondmate_home_shutdown_barrier).
 t3code_secondmate_lsof_check() {  # <task-id> <home>
-  command -v lsof >/dev/null 2>&1 && return 0
+  fm_lsof_bin >/dev/null 2>&1 && return 0
   echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
   return 1
 }
