@@ -56,28 +56,14 @@ fm_merge_outcome_current_state() {  # <home> <state> <task-id>
   FM_HOME=$1 FM_STATE_OVERRIDE=$2 "$_FM_MERGE_OUTCOME_LIB_DIR/fm-crew-state.sh" "$3"
 }
 
-fm_merge_outcome_run_teardown() {  # <home> <state> <task-id> [<expected-spawn-gen> [<expected-pr>]]
-  local home=$1 state=$2 id=$3 expected_spawn_gen=${4-} expected_pr=${5-} data config root
+fm_merge_outcome_run_teardown() {  # <home> <state> <task-id> <expected-spawn-gen> <pr-url>
+  local home=$1 state=$2 id=$3 expected_spawn_gen=$4 expected_pr=$5 data config root
   data=${FM_DATA_OVERRIDE:-$home/data}
   config=${FM_CONFIG_OVERRIDE:-$home/config}
   root=${FM_ROOT_OVERRIDE:-${FM_ROOT:-$_FM_MERGE_OUTCOME_LIB_DIR/..}}
-  if [ -n "$expected_spawn_gen" ] && [ -n "$expected_pr" ]; then
-    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
-      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
-      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$expected_spawn_gen" --expected-pr "$expected_pr"
-  elif [ -n "$expected_spawn_gen" ]; then
-    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
-      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
-      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$expected_spawn_gen"
-  elif [ -n "$expected_pr" ]; then
-    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
-      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
-      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-pr "$expected_pr"
-  else
-    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
-      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
-      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id"
-  fi
+  FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+    FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$expected_spawn_gen" --expected-pr "$expected_pr"
 }
 
 # Check only an already-finished direct report, then delegate all destructive
@@ -117,12 +103,8 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   if fm_backlog_meta_spawn_gen "$meta" "$state" 2>/dev/null; then
     expected_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
   fi
-  if [ -n "$expected_spawn_gen" ]; then
-    teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" "$expected_spawn_gen" "$url" 2>&1) || teardown_rc=$?
-    if [ -z "${teardown_rc-}" ]; then
-      teardown_rc=0
-    fi
-  elif teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" 2>&1); then
+  [ -n "$expected_spawn_gen" ] || return 0
+  if teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" "$expected_spawn_gen" "$url" 2>&1); then
     teardown_rc=0
   else
     teardown_rc=$?

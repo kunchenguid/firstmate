@@ -2733,6 +2733,7 @@ test_watcher_surfaces_guarded_auto_teardown_refusal() {
   git -C "$dir/wt" checkout -q -b fm/task
   write_poll_meta "$state" task-a "$url" \
     'kind=ship' 'mode=no-mistakes' 'branch=fm/task' \
+    'spawn_gen=swatcherrefused' \
     'pr_head=0123456789abcdef0123456789abcdef01234567' "project=$dir/wt"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   seed_canonical_poll "$dir" task-a "$url"
@@ -2773,7 +2774,9 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   # Invoked indirectly through fm_merge_outcome_auto_teardown in this regression.
   # shellcheck disable=SC2329
   fm_merge_outcome_run_teardown() {
-    local home=$1 state=$2 id=$3
+    local home=$1 state=$2 id=$3 expected_gen=${4-} expected_pr=${5-}
+    [ -n "$expected_gen" ] || { printf '%s\n' "error: auto-teardown invoked without incarnation binding" >&2; return 1; }
+    [ -n "$expected_pr" ] || { printf '%s\n' "error: auto-teardown invoked without deliverable binding" >&2; return 1; }
     printf '%s\n' "$*" >> "$FM_TEST_AUTO_TEARDOWN_LOG"
     case "${FM_TEST_AUTO_TEARDOWN_RESULT:-success}" in
       success|slot-lost)
@@ -2786,7 +2789,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
         return 1
         ;;
       refusing)
-        printf '%s\n' "error: task task-a's record has no spawn_gen that identifies one exact incarnation; refusing automatic teardown - relaunch the task" >&2
+        printf '%s\n' "error: refusing automatic cleanup: replacement worker still active for task-a" >&2
         return 1
         ;;
     esac
@@ -2796,6 +2799,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   state="$dir/home/state"
   write_task_meta "$dir"
   printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'spawn_gen=%s\n' ssuccess >> "$state/task-a.meta"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   : > "$dir/teardown.log"
   FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
@@ -2805,7 +2809,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
   [ "$FM_MERGE_OUTCOME_CLEANUP" = cleaned ] \
     || fail "a finished direct ship lane did not auto-teardown"
-  [ "$(cat "$dir/teardown.log")" = "$dir/home $state task-a" ] \
+  [ "$(cat "$dir/teardown.log")" = "$dir/home $state task-a ssuccess $url" ] \
     || fail "auto-teardown did not use the guarded task-only cleanup command"
   [ ! -e "$state/task-a.status" ] && [ ! -e "$state/task-a.meta" ] \
     || fail "successful auto-teardown recreated retired task state"
@@ -2820,6 +2824,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   state="$dir/home/state"
   write_task_meta "$dir"
   printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'spawn_gen=%s\n' sslotlost >> "$state/task-a.meta"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   : > "$dir/teardown.log"
   FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
@@ -2850,6 +2855,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   state="$dir/home/state"
   write_task_meta "$dir"
   printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'spawn_gen=%s\n' srefused >> "$state/task-a.meta"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   : > "$dir/teardown.log"
   FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
@@ -2862,7 +2868,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     *) fail "the cleanup refusal reason was lost: $FM_MERGE_OUTCOME_CLEANUP_DETAIL" ;;
   esac
   teardown_args=$(cat "$dir/teardown.log")
-  [ "$teardown_args" = "$dir/home $state task-a" ] \
+  [ "$teardown_args" = "$dir/home $state task-a srefused $url" ] \
     || fail "auto-teardown passed an unexpected flag, possibly force: $teardown_args"
   [ -f "$state/task-a.meta" ] || fail "a refused cleanup removed task metadata"
   case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
@@ -2874,6 +2880,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
   state="$dir/home/state"
   write_task_meta "$dir"
   printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'spawn_gen=%s\n' srefusing >> "$state/task-a.meta"
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   : > "$dir/teardown.log"
   FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" \
@@ -2883,7 +2890,7 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     || fail "a no-change teardown refusal was not reported as refused"
   notice=$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")
   case "$notice" in
-    *'; automatic cleanup refused: error: task task-a'*) ;;
+    *'; automatic cleanup refused: error: refusing'*) ;;
     *) fail "a refusal worded 'refusing' was reported as an incomplete cleanup: $notice" ;;
   esac
   [ -f "$state/task-a.meta" ] || fail "a no-change teardown refusal removed the task record"
@@ -2928,7 +2935,46 @@ test_merged_notice_auto_teardown_is_done_only_and_guarded() {
     || fail "a merge whose outcome another owner already recorded ran a second teardown"
 
   unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
   pass "merged notices auto-clean only finished direct reports with recorded deliverables, leave no retired task state, and surface guarded refusals without force"
+}
+
+test_auto_cleanup_legacy_without_incarnation_skips() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case auto-cleanup-legacy-skips)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  : > "$dir/teardown.log"
+  fm_merge_outcome_current_state() {
+    printf '%s\n' "state: done · source: status-log"
+  }
+  fm_merge_outcome_run_teardown() {
+    printf '%s\n' "$*" >> "$FM_TEST_AUTO_TEARDOWN_LOG"
+    grep -v '^spawn_gen=' "$FM_TEST_AUTO_STATE/task-a.meta" > "$FM_TEST_AUTO_STATE/task-a.meta.tmp" || true
+    printf 'spawn_gen=%s\n' srelaunched >> "$FM_TEST_AUTO_STATE/task-a.meta.tmp"
+    mv -f "$FM_TEST_AUTO_STATE/task-a.meta.tmp" "$FM_TEST_AUTO_STATE/task-a.meta"
+    rm -f "$FM_TEST_AUTO_STATE/task-a.meta" "$FM_TEST_AUTO_STATE/task-a.status"
+    return 0
+  }
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" FM_TEST_AUTO_STATE="$state" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" STATE="$state" \
+    . "$ROOT/bin/fm-wake-lib.sh"
+  FM_TEST_AUTO_TEARDOWN_LOG="$dir/teardown.log" FM_TEST_AUTO_STATE="$state" \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+    || fail "a legacy lane without incarnation identity was cleaned as $FM_MERGE_OUTCOME_CLEANUP"
+  [ ! -s "$dir/teardown.log" ] || fail "a legacy lane without incarnation identity reached teardown"
+  [ -f "$state/task-a.meta" ] || fail "a legacy lane without incarnation identity was removed"
+  [ -f "$state/task-a.status" ] || fail "a legacy lane status was removed"
+  case "$(fm_merge_outcome_cleanup_notice "check: merge landed: task-a $url")" in
+    *'lane automatically cleaned up'*|*'automatic cleanup refused'*|*'automatic cleanup did not complete'*) fail "a legacy skip added a cleanup outcome to the merge notice" ;;
+  esac
+  unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
+  pass "legacy lanes without incarnation identity keep the plain merge notice and are never auto-torn down"
 }
 
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report() {
@@ -3024,6 +3070,7 @@ SH
   printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
   seed_canonical_poll "$dir" task-a "$url"
   : > "$dir/captured"
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
   fm_merge_outcome_current_state() {
     printf '%s\n' "state: done · source: status-log"
   }
@@ -3059,6 +3106,7 @@ SH
   grep -F "$url" "$dir/captured" >/dev/null \
     || fail "the merged deliverable was not bound to teardown"
   unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown fm_merge_outcome_run_teardown_orig
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
   pass "automatic cleanup preserves a relaunched incarnation and refuses with its identity"
 }
 
@@ -4172,6 +4220,7 @@ test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_watcher_surfaces_guarded_auto_teardown_refusal
 test_merged_notice_auto_teardown_is_done_only_and_guarded
+test_auto_cleanup_legacy_without_incarnation_skips
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
 test_auto_cleanup_preserves_relaunched_incarnation
 test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report
