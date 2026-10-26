@@ -226,8 +226,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
-# The watcher still owns immediate delivery of its actionable poll result and
-# poll retirement.
+# The watcher still owns delivery of its actionable poll result and
+# poll retirement, once the library's cleanup step has finished or been declined.
 # This library is a canonical lint root in its own right, and it reaches the
 # wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
 # boundary here for the same reason as the transition and inbox owners above and
