@@ -255,6 +255,39 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
+test_conversation_snapshot_and_view() {
+  local home fakebin out view
+  home=$(make_home conversation)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  printf 'account=%s\n' "$home/context-root" >> "$home/state/ship-task.meta"
+  python3 - "$home" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+home = Path(sys.argv[1])
+cwd = str(home / 'projects/alpha-worktree')
+logs = home / 'context-root/projects' / re.sub(r'[^A-Za-z0-9]', '-', cwd)
+logs.mkdir(parents=True)
+(logs / 'session.jsonl').write_text(json.dumps(dict(timestamp='2026-01-01T00:00:00Z',
+    message=dict(role='assistant', model='claude-opus-5-5',
+                 usage=dict(input_tokens=250000, cache_read_input_tokens=100)))) + '\n')
+PY
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and (.tasks[] | select(.id == "ship-task") | .conversation
+      | .status == "read" and .tokens == 250100 and .context_window == 1000000
+        and .percentage == 25.01 and .over_threshold == true and .age_seconds > 0)
+    and (.tasks[] | select(.id == "scout-task") | .conversation.status == "not_read")
+  ' >/dev/null || fail "snapshot conversation observation wrong"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" '250100 / 1000000 tokens (25%) OVER, last call' "view must render measured conversation and threshold marker"
+  assert_contains "$view" '| not read |' "unsupported harness must explicitly say not read"
+  pass "snapshot and view expose per-direct-report conversation observations"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_hold_buckets_are_total_and_text_blind() {
@@ -1154,6 +1187,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_conversation_snapshot_and_view
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind

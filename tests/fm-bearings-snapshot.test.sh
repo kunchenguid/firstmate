@@ -284,6 +284,11 @@ remote_home=$(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0]
 args=()
 while IFS= read -r -d '' arg; do args+=("$arg"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$4")
+if [ "${args[0]:-}" = fm-context-size.sh ]; then
+  printf '%s\t%s\n' "$remote_home" "${args[0]}" >> "$FM_TEST_LEDGER_CALL_LOG.context"
+  printf '%s\n' '{"status":"unknown","tokens":null,"context_window":null,"percentage":null,"over_threshold":null,"age_seconds":null,"model":null,"reason":"fixture has no session log"}'
+  exit 0
+fi
 printf '%s\t%s\n' "$remote_home" "${args[0]:-}" >> "$FM_TEST_LEDGER_CALL_LOG"
 if [ -f "$remote_home/state/slow-ledger-read" ]; then
   active_marker="$FM_TEST_LEDGER_ACTIVE_DIR/collector-$$"
@@ -3081,6 +3086,9 @@ SH
     .tasks[] | select(.id == "generation-race")
     | .spawn_gen == "old-generation"
       and .current_state.state == "unknown"
+      and .conversation.status == "unknown"
+      and .conversation.tokens == null
+      and .conversation.reason == "task generation changed during snapshot"
       and .endpoint.exists == null
       and .endpoint.agent_alive == "unknown"
       and .endpoint.status == "unknown"
@@ -3197,6 +3205,8 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
     || fail "a healthy snapshot did not issue exactly one remote file read per home"
+  [ "$(wc -l < "$parent/ledger-calls.log.context" | tr -d ' ')" -eq 5 ] \
+    || fail "conversation reads were not separate from the summary-cache collector"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
