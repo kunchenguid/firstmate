@@ -710,7 +710,7 @@ if [ -n "$TEARDOWN_EXPECTED_SPAWN_GEN" ] || [ -n "$TEARDOWN_EXPECTED_PR" ]; then
       echo "error: task $ID status is no longer readable as finished; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
       exit 1
     }
-    [ "$(status_line_verb "$TEARDOWN_EXPECTED_LINE")" = done ] || {
+    [ "$(status_line_verb "$TEARDOWN_EXPECTED_LINE")" = "done" ] || {
       echo "error: task $ID is no longer done; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
       exit 1
     }
