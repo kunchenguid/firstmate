@@ -135,6 +135,18 @@ done
 tmux send-keys -t "$SESSION:$WIN" -l 'hello there'
 tmux send-keys -t "$SESSION:$WIN" Enter
 
+# An unsupported Pi is intentionally unverified: it may render a different
+# error surface, or no Codex banner at all. Require only the live version
+# refusal here; the rendered-banner assertions below belong to verified pins.
+if [ "$PINNED" = 0 ]; then
+  if fm_composer_pi_adapter_installed_pinned; then
+    fail "pi ($VERSION): an unsupported release was accepted by the banner adapter"
+  fi
+  CHECKED=$((CHECKED + 1))
+  pass "pi ($VERSION): unsupported release remains unverified and fails closed"
+  exit 0
+fi
+
 CAPS_CURSORLESS=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
 styled=''
 plain=''
