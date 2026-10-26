@@ -925,6 +925,7 @@ test_github_enterprise_config_resolution() {
       = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
       || fail "default-home parsing returned the wrong Enterprise identity"
 
+    # shellcheck disable=SC2030 # This test keeps FM_HOME overrides inside the subshell.
     FM_HOME=
     fm_pr_url_parse "$url" || fail "an empty FM_HOME hid the code-root config"
 
