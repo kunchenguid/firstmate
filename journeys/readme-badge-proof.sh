@@ -84,11 +84,12 @@ for width in 390 1280; do
     # title names this repository, and the body really is in the theme asked for.
     ok=no
     for _ in $(seq 1 20); do
-      raw=$(chrome-devtools-axi eval "() => { const a = document.querySelector('a[href=\"$OWN_LINK\"]'); const body = document.querySelector('.markdown-body'); const img = a && a.querySelector('img'); const rgb = (getComputedStyle(document.body).backgroundColor.match(/([0-9]+)/g) || ['255', '255', '255']).map(Number); const lum = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255; const theme_ok = '$theme' === 'dark' ? (lum < 0.4 ? 1 : 0) : (lum > 0.8 ? 1 : 0); return [a ? 1 : 0, body ? 1 : 0, !img || img.naturalWidth > 0 ? 1 : 0, /could not be found|404 Not Found/.test(document.body.innerText) ? 0 : 1, document.title.includes('$REPO') ? 1 : 0, theme_ok, body ? body.innerText.trim().length : 0].join(','); }" 2>/dev/null || true)
+      raw=$(chrome-devtools-axi eval "() => { const a = document.querySelector('a[href=\"$OWN_LINK\"]'); const body = document.querySelector('.markdown-body'); const img = a && a.querySelector('img'); const rgb = (getComputedStyle(document.body).backgroundColor.match(/([0-9]+)/g) || ['255', '255', '255']).map(Number); const lum = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255; const theme_ok = '$theme' === 'dark' ? (lum < 0.4 ? 1 : 0) : (lum > 0.8 ? 1 : 0); return [a ? 1 : 0, body ? 1 : 0, !img || img.naturalWidth > 0 ? 1 : 0, /could not be found|404 Not Found/.test(document.body.innerText) ? 0 : 1, document.title.includes('$REPO') ? 1 : 0, theme_ok, body ? body.innerText.trim().length : 0, Math.round(lum * 100)].join(','); }" 2>/dev/null || true)
       # Conditions in order: the badge anchor, the README body, the badge image, no error page, the
-      # page title naming this repository, the body drawn in the theme asked for, and the body's length.
+      # page title naming this repository, the body drawn in the theme asked for, the body's length,
+      # and the page background's luminance in percent.
       flags=$(printf '%s\n' "$raw" | sed -n 's/^result: //p' | tr -cd '0-9,')
-      IFS=, read -r c_anchor c_body c_img c_noerror c_title c_theme c_text <<<"$flags"
+      IFS=, read -r c_anchor c_body c_img c_noerror c_title c_theme c_text c_bg <<<"$flags"
       if [ "${c_anchor:-0}" = 1 ] && [ "${c_body:-0}" = 1 ] && [ "${c_img:-0}" = 1 ] &&
          [ "${c_noerror:-0}" = 1 ] && [ "${c_title:-0}" = 1 ] && [ "${c_theme:-0}" = 1 ] &&
          [ "${c_text:-0}" -gt 0 ]; then
@@ -101,12 +102,12 @@ for width in 390 1280; do
 
     chrome-devtools-axi eval "() => { const a = document.querySelector('a[href=\"$OWN_LINK\"]'); a.scrollIntoView({ block: 'center', behavior: 'instant' }); return 1; }" >/dev/null
     sleep 1
-    geo=$(chrome-devtools-axi eval "() => { const a = document.querySelector('a[href=\"$OWN_LINK\"]'); const r = a.getBoundingClientRect(); const row = a.closest('p, li') || a.parentElement || a; const q = row.getBoundingClientRect(); return [window.innerWidth, window.innerHeight, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height), r.top >= 0 && r.bottom <= window.innerHeight ? 1 : 0, a.querySelector('img') ? 1 : 0, Math.round(q.x), Math.round(q.y), Math.round(q.width), Math.round(q.height)].join(','); }" 2>/dev/null | sed -n 's/^result: //p' | tr -cd '0-9,')
+    geo=$(chrome-devtools-axi eval "() => { const a = document.querySelector('a[href=\"$OWN_LINK\"]'); const r = a.getBoundingClientRect(); const row = a.closest('p, li') || a.parentElement || a; const q = row.getBoundingClientRect(); const prev = row.previousElementSibling; let head_top = -1; if (prev && /^H[1-6]$/.test(prev.tagName)) { const hq = prev.getBoundingClientRect(); if (q.y - hq.bottom < 24) head_top = Math.round(hq.y); } return [window.innerWidth, window.innerHeight, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height), r.top >= 0 && r.bottom <= window.innerHeight ? 1 : 0, Math.round(q.x), Math.round(q.y), Math.round(q.width), Math.round(q.height), head_top].join(','); }" 2>/dev/null | sed -n 's/^result: //p' | tr -cd '0-9,')
     geometry=${geo//,/ }
     # shellcheck disable=SC2086
     set -- $geometry
     [ "$#" -eq 12 ] || fail "could not measure the @$OWN_HANDLE badge at ${width}w $theme (got: ${geo:-nothing})"
-    vw=$1 vh=$2 ax=$3 ay=$4 aw=$5 ah=$6 has_img=$8 rx=$9 ry=${10} rw=${11} rh=${12}
+    vw=$1 vh=$2 ax=$3 ay=$4 aw=$5 ah=$6 rx=$8 ry=$9 rw=${10} rh=${11} head_top=${12}
     [ "$7" = 1 ] || fail "the @$OWN_HANDLE link is not in the ${width}w $theme viewport"
     shot=$WORK/$SLUG.$width-$theme.full.png
     chrome-devtools-axi screenshot "$shot" >/dev/null
@@ -114,14 +115,14 @@ for width in 390 1280; do
     # paragraph, plus the title line above it when the README carries the link as plain text.
     cx=$(( rx - 12 )); [ "$cx" -lt 0 ] && cx=0
     cw=$(( rx + rw + 12 - cx )); [ $(( cx + cw )) -gt "$vw" ] && cw=$(( vw - cx ))
-    if [ "$has_img" = 1 ]; then
-      cy=$(( ry - 8 ))
-    else
-      cy=$(( ry - 72 ))
+    # A heading right above the row comes along, so a plain text link shows which README it sits in;
+    # otherwise the band is the badge row itself, with nothing cut out of the page around it.
+    cy=$(( ry - 10 ))
+    if [ "$head_top" -ge 0 ] && [ $(( ry + rh + 10 - (head_top - 4) )) -le 200 ]; then
+      cy=$(( head_top - 4 ))
     fi
     [ "$cy" -lt 0 ] && cy=0
-    ch=$(( ry + rh + 8 - cy ))
-    [ "$ch" -gt 160 ] && ch=160
+    ch=$(( ry + rh + 10 - cy ))
     [ $(( cy + ch )) -gt "$vh" ] && ch=$(( vh - cy ))
     out=$OUT/badge-row.$width-$theme.png
     magick "$shot" -crop "${cw}x${ch}+${cx}+${cy}" +repage "$out"
@@ -133,16 +134,10 @@ for width in 390 1280; do
       bytes=$(wc -c < "$out")
     fi
     [ "$bytes" -lt 65536 ] || fail "the $width $theme capture is $bytes bytes, at or over the 65536-byte cap"
-    # The theme really is the one asked for: mean luminance says light or dark, not the same page twice.
-    lum=$(magick "$out" -colorspace Gray -format '%[fx:mean]' info:)
-    case $theme in
-      light) awk -v l="$lum" 'BEGIN { exit !(l > 0.60) }' || fail "the $width light capture is not a light page (mean luminance $lum)" ;;
-      dark) awk -v l="$lum" 'BEGIN { exit !(l < 0.40) }' || fail "the $width dark capture is not a dark page (mean luminance $lum)" ;;
-    esac
     captures="$captures $out"
     if [ "$theme" = light ] && [ -z "$light_shot" ]; then light_shot=$out; fi
     if [ "$theme" = dark ] && [ -z "$dark_shot" ]; then dark_shot=$out; fi
-    log "capture $out: $bytes bytes, ${cw}x${ch} crop, mean luminance $lum, sha256 $(sha256sum "$out" | cut -d' ' -f1)"
+    log "capture $out: $bytes bytes, ${cw}x${ch} crop, page background ${c_bg}% luminance, sha256 $(sha256sum "$out" | cut -d' ' -f1)"
     log "PASS: the page rendered at ${width}w $theme: the README of $REPO at $SHA shows the @$OWN_HANDLE badge, the README body is present, and the page is not an error page (page title names $REPO, body drawn $theme, badge at ${ax},${ay} ${aw}x${ah})."
   done
 done
