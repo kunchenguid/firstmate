@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--cold-ok] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -15,6 +15,15 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca supports Enter and C-c only; T3 Code maps Escape and C-c to a native
 # turn interrupt and treats Enter as a no-op.
+#
+# Cold sessions: a text steer to a ship or scout whose session is cold - idle
+# past the prompt-cache window - or cold-parked is refused with exit 4 before
+# anything is recorded or typed. The refusal writes a default progress note and
+# prints the exact `fm-control.sh <id> relaunch --note-file <path>` command plus
+# the resend to run after it. --cold-ok delivers to a cold session anyway; a
+# cold-parked one has no running agent, so nothing delivers to it.
+# bin/fm-cold-cache-lib.sh owns the policy, its threshold, and why secondmates
+# are outside it.
 #
 # Two data planes:
 #
@@ -467,6 +476,7 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+COLD_OK=0
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -515,6 +525,10 @@ while :; do
       exit 1
     }
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
+    shift
+    ;;
+  --cold-ok)
+    COLD_OK=1
     shift
     ;;
   *) break ;;
@@ -759,6 +773,49 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # target_ready path before sending, while zellij verifies pane labels in its
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
+
+# Cold-cache guard (policy owner: bin/fm-cold-cache-lib.sh). A text steer to a
+# ship or scout whose session is cold or cold-parked is refused before anything
+# is recorded or typed, and the refusal prints the relaunch that replaces it with
+# a fresh small session plus the exact resend for afterwards. --cold-ok delivers
+# to a cold session anyway; nothing delivers to a parked one, whose agent is not
+# running. A key, an explicit backend target, and a secondmate are outside it.
+if [ "${1:-}" != "--key" ] && [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] \
+  && [ "$TARGET_BACKEND" != remote ]; then
+  # shellcheck source=bin/fm-cold-cache-lib.sh
+  . "$SCRIPT_DIR/fm-cold-cache-lib.sh"
+  COLD_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$COLD_TASK_ID" ] && fm_cold_cache_kind_in_scope "$TARGET_META"; then
+    COLD_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    COLD_WHY=
+    if fm_cold_cache_is_parked "$STATE" "$COLD_TASK_ID"; then
+      COLD_WHY="its agent was stopped on purpose to save tokens (cold-parked), so no session is running to read a steer"
+    elif [ "$COLD_OK" != 1 ]; then
+      cold_rc=0
+      cold_idle=$(fm_cold_cache_is_cold "$COLD_CONFIG" "$STATE" "$COLD_TASK_ID") || cold_rc=$?
+      case "$cold_rc" in
+        0) COLD_WHY="its session has been idle $((cold_idle / 60)) minutes, past the prompt-cache window, so this steer would pay for its whole context again" ;;
+        2) exit 1 ;;
+      esac
+    fi
+    if [ -n "$COLD_WHY" ]; then
+      cold_note=$(fm_cold_cache_write_note "$STATE" "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$COLD_TASK_ID") || {
+        echo "error: steer to $COLD_TASK_ID not sent: $COLD_WHY, and its relaunch note could not be written under $STATE" >&2
+        exit 4
+      }
+      printf -v cold_resend ' %q' "${FM_SEND_ORIGINAL_ARGS[@]}"
+      {
+        echo "refused: steer to $COLD_TASK_ID not sent: $COLD_WHY."
+        echo "Start a fresh session from its instructions plus a short note, then resend:"
+        printf '  FM_HOME=%q %q %q relaunch --note-file %q\n' "$FM_HOME" "$SCRIPT_DIR/fm-control.sh" "$COLD_TASK_ID" "$cold_note"
+        printf '  FM_HOME=%q %q%s\n' "$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$cold_resend"
+        fm_cold_cache_is_parked "$STATE" "$COLD_TASK_ID" \
+          || echo "To wake the old session anyway, add --cold-ok before the message."
+      } >&2
+      exit 4
+    fi
+  fi
+fi
 
 if [ "${1:-}" = "--key" ]; then
   [ -z "$FIRE_AND_FORGET_ID" ] ||

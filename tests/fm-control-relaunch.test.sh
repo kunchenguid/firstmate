@@ -655,6 +655,24 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+test_parked_ship_relaunches_with_the_default_note_and_clears_the_marker() {
+  local dir out rc brief
+  dir=$(new_case parked rl3p)
+  add_ship_task "$dir" rl3p claude
+  printf 'paused [at=1]: waiting on review\n' > "$dir/home/state/rl3p.status"
+  printf 'parked_at=%s\nstatus=paused\nendpoint=kept\n' "$(date +%s)" > "$dir/home/state/rl3p.cold-parked"
+  : > "$dir/home/state/rl3p.cold-relaunch-note"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" rl3p relaunch); rc=$?
+  expect_code 0 "$rc" "a parked ship should relaunch without --note"$'\n'"$out"
+  brief="$dir/home/data/rl3p/brief.md"
+  assert_grep "stopped on purpose" "$brief" "the default note should say the stop was deliberate"
+  assert_grep "paused [at=1]: waiting on review" "$brief" "the default note should carry the latest status"
+  [ ! -e "$dir/home/state/rl3p.cold-parked" ] || fail "a successful relaunch should remove the parked marker"
+  [ ! -e "$dir/home/state/rl3p.cold-relaunch-note" ] || fail "a successful relaunch should remove the saved note"
+  pass "fm-control relaunch: a parked ship gets the default note and loses its parked marker"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -1816,7 +1834,9 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+  # A generous budget only removes the false negative a loaded machine causes;
+  # a relaunch that never reaches the check still fails when it runs out.
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 1000 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -2625,7 +2645,12 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
     }
     dir=$HERDR_CASE_DIR
     rm -f "$dir/fake/herdr-stopped"
-    sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta"
+    # Portable in-place edit: BSD sed's -i takes a suffix argument, GNU sed's does not.
+    sed 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta" \
+      > "$dir/home/state/resume-$registered.meta.tmp" \
+      && mv "$dir/home/state/resume-$registered.meta.tmp" "$dir/home/state/resume-$registered.meta"
+    printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+    chmod +x "$dir/fakebin/pi"
     # Keep the pane's status authority registered to an existing Pi session,
     # while process-info proves that its previous agent has exited.
     printf '{"result":{"agent":{"agent":"%s","agent_status":"idle","agent_session":{"kind":"path","value":"/tmp/pi-bound-session.jsonl"}}}}\n' \
@@ -2979,6 +3004,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
 test_relaunch_requires_a_note_for_a_ship_task
+test_parked_ship_relaunches_with_the_default_note_and_clears_the_marker
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
 test_refused_polytoken_profile_leaves_the_running_agent

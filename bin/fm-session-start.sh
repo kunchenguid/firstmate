@@ -936,7 +936,12 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  if [ -f "$STATE/$id.cold-parked" ]; then
+    # Stopped on purpose to save tokens (bin/fm-cold-cache-lib.sh): not stuck,
+    # not dead, and nothing to recover. Its endpoint is not probed.
+    printf 'endpoint: cold-parked (%s; not stuck - resume with bin/fm-control.sh %s relaunch)\n' \
+      "$(grep -m1 '^endpoint=' "$STATE/$id.cold-parked" 2>/dev/null | sed 's/^endpoint=/terminal /' || true)" "$id"
+  elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0
     fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?

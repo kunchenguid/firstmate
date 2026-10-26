@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -1135,6 +1137,53 @@ test_turn_ended_still_pane_surfaced() {
     || fail "surfaced still-pane turn-end was not queued"
   unset FM_FAKE_CREW_STATE
   pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
+}
+
+# Cold prompt-cache auto-park (bin/fm-cold-cache-lib.sh): a worker idle past
+# the threshold whose latest status is a declared wait is handed to
+# `fm-control.sh <id> park` once per idle record; a busy worker never is.
+cold_park_case() {  # <name> <busy|idle> -> echoes case dir
+  local dir state gen
+  dir=$(make_case "$1"); state="$dir/state"
+  printf 'window=test:fm-cold1\nkind=ship\nharness=claude\n' > "$state/cold1.meta"
+  printf 'paused [at=1]: waiting on review\n' > "$state/cold1.status"
+  printf '%s' "$(seen_sig "$state/cold1.status")" > "$state/.seen-cold1_status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" cold1)
+  printf 'v1 gen=%s seq=9 state=%s source=claude-hook event=stop ts=%s\n' \
+    "$gen" "$2" "$(( $(date +%s) - 7200 ))" > "$state/cold1.busy-state"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+test_cold_idle_waiting_worker_is_handed_to_park_once() {
+  local dir state fakebin pid since
+  dir=$(cold_park_case cold-park idle); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on review'
+  watch_bg "$state" "$fakebin" "$dir/watch.out" env FM_FAKE_TMUX_WINDOW=test:fm-cold1 \
+    FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  wait_numeric_file "$state/.cold-park-attempt-cold1" 100 \
+    || fail "the watcher did not hand a cold waiting worker to park"
+  reap "$pid"
+  since=$(fm_busy_record_idle_since "$state" cold1)
+  assert_equals "$since" "$(cat "$state/.cold-park-attempt-cold1")" "the attempt should record the idle record it acted on"
+  [ -e "$state/.cold-park-last-cold1" ] || fail "the park outcome should be kept for inspection"
+  unset FM_FAKE_CREW_STATE
+  pass "the watcher hands a cold worker waiting on a declared wait to park"
+}
+
+test_cold_busy_worker_is_never_handed_to_park() {
+  local dir state fakebin pid
+  dir=$(cold_park_case cold-busy busy); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · busy'
+  watch_bg "$state" "$fakebin" "$dir/watch.out" env FM_FAKE_TMUX_WINDOW=test:fm-cold1 \
+    FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "the watcher did not complete a poll cycle, so the busy case proved nothing"
+  reap "$pid"
+  [ ! -e "$state/.cold-park-attempt-cold1" ] || fail "a busy worker must never be handed to park"
+  unset FM_FAKE_CREW_STATE
+  pass "the watcher never parks a busy worker"
 }
 
 test_turn_ended_malformed_prior_hash_surfaced() {
@@ -7340,6 +7389,8 @@ test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_churn_existing_marker_absorbed
 test_turn_ended_still_pane_surfaced
+test_cold_idle_waiting_worker_is_handed_to_park_once
+test_cold_busy_worker_is_never_handed_to_park
 test_turn_ended_malformed_prior_hash_surfaced
 test_unknown_alive_stale_is_bounded_after_its_first_alarm
 test_unknown_alive_stale_without_progress_keeps_surfacing

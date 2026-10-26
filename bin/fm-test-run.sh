@@ -387,12 +387,13 @@ family_for_basename() {
     fm-calm-pi-queue-retention-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
+    fm-claude-exit-picker-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-backend-t3code.test.sh|fm-t3-mcp.test.sh|fm-tmux-agent-liveness.test.sh|\
-    fm-control.test.sh|fm-control-relaunch.test.sh|\
+    fm-control.test.sh|fm-control-relaunch.test.sh|fm-cold-cache.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
@@ -1701,6 +1702,12 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-cold-cache-lib.sh|bin/fm-park-stopped.sh)
+      # The cold prompt-cache policy: fm-send's refusal and fm-control park
+      # (backend-dispatch) and the watcher's auto-park (watcher-wake-lock).
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it

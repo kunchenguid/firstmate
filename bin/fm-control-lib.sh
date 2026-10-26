@@ -49,13 +49,14 @@ fm_control_verbs() {
   cat <<'EOF'
 interrupt
 exit
+park
 relaunch
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|park|relaunch) return 0 ;;
   esac
   return 1
 }
@@ -224,6 +225,32 @@ fm_control_interrupt_hazard_signal() {  # <harness>
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex) ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_control_exit_picker_answer: the key that answers a picker the exit
+# command opened, by the dialog name bin/fm-composer-lib.sh's
+# fm_composer_blocking_dialog prints and by the caller's policy:
+#   stop - the caller means to stop everything (`exit`, `relaunch`), so the
+#          selected row is confirmed.
+#   stay - the caller must not stop work still running (`park`), so the picker
+#          is closed and the agent keeps running.
+# Claude's background-task exit picker opens when /exit meets a running
+# background shell. Its preselected row 1 is "Exit and stop tasks": Enter exits
+# the agent and stops the background work, and Escape closes the picker with
+# the agent and the background work both still running (verified live, Claude
+# Code 2.1.310; docs/verification/runtime-backends.md). Any other dialog, or an
+# unknown policy, has no answer and the caller refuses.
+fm_control_exit_picker_answer() {  # <dialog-name> <stop|stay>
+  case "${1-}" in
+    'Claude background-task exit picker')
+      case "${2-}" in
+        stop) printf 'Enter' ;;
+        stay) printf 'Escape' ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }

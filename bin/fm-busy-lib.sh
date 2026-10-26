@@ -321,6 +321,22 @@ fm_busy_record_read() {  # <state-dir> <id>
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
 }
 
+# fm_busy_record_idle_since: the epoch the task went idle, read from a record
+# fm_busy_record_read accepts and whose state is exactly idle. Every other
+# record, including busy and unknown, fails and prints nothing, so a caller can
+# never read a missing or stale record as an old idle one.
+fm_busy_record_idle_since() {  # <state-dir> <id>
+  local parsed line f ts=''
+  parsed=$(fm_busy_record_read "$1" "$2") || return 1
+  [ "${parsed%% *}" = idle ] || return 1
+  IFS= read -r line < "$(fm_busy_record_path "$1" "$2")" 2>/dev/null || return 1
+  for f in $line; do
+    case "$f" in ts=*) ts=${f#ts=} ;; esac
+  done
+  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$ts"
+}
+
 # ---------------------------------------------------------------------------
 # muse session-log busy source
 #

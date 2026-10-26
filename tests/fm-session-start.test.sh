@@ -1408,12 +1408,17 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=fm-sess:parked-window\nkind=ship\n' > "$home/state/task-parked.meta"
+  printf 'parked_at=1\nstatus=paused\nendpoint=closed\n' > "$home/state/task-parked.cold-parked"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: cold-parked (terminal closed; not stuck - resume with bin/fm-control.sh task-parked relaunch)" \
+    "a cold-parked task should be reported as parked on purpose, not dead"
+  assert_not_contains "$out" "window=fm-sess:parked-window)" "a cold-parked task's endpoint should not be probed"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  pass "tmux endpoint liveness is reported per task: alive, dead, or cold-parked on purpose"
 }
 
 test_endpoint_liveness_herdr() {

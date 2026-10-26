@@ -34,6 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` (or, on Rex, `unreadable`) goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr and Rex can supply one (T3 Code refuses `exit` before reading anything): proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
+| `park` | Stop a ship or scout worker whose prompt cache went cold, close its Herdr or Rex terminal, and mark it parked on purpose. | The agent is stopped as for `exit`; a closed endpoint is proven gone; `state/<id>.cold-parked` exists. Background work the harness still runs leaves the agent running and exits 3. An agent that started a turn after the eligibility check is never interrupted: `park` refuses before typing anything and leaves it running. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -53,14 +54,25 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 For a typed exit, `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
-`exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
-A stopped agent whose pane still shows the dialog text is not refused.
-[`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
+When the screen shows a recognised dialog that a further Enter would answer, whether it was open before the exit command was typed or the submitting Enter opened it, `exit` answers it only when [`fm_control_exit_picker_answer`](../bin/fm-control-lib.sh) records an answer for it, and otherwise refuses as `blocked on a prompt` without sending any key.
+Claude's background-task exit picker has a recorded answer: `exit` and `relaunch` confirm its preselected "Exit and stop tasks" row with Enter and then require the stopped-agent postcondition, while `park` closes it with Escape, proves the picker gone with the agent alive, and exits 3, because the background work is how a waiting worker resumes on its own.
+A stopped agent whose pane still shows the dialog text is not treated as a dialog.
+[`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 T3 Code has no composer and its `/mcp` tools offer no session stop, so `exit` refuses there before sending anything ([`t3code-backend.md`](t3code-backend.md#current-lifecycle-and-safety)).
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
-Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+Removing a worktree, discarding work, and every endpoint close other than `park`'s stay with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+
+## Parking a cold worker
+
+`park` exists because a short steer to a worker idle past its prompt-cache lifetime re-pays its whole context, while a fresh session from the brief costs a fraction of that; [`bin/fm-cold-cache-lib.sh`](../bin/fm-cold-cache-lib.sh) owns the policy and [configuration](configuration.md#cold-prompt-cache-parking-configcold-cache-minutes) owns the threshold.
+A live agent is parked only when it passes that policy's eligibility check; an agent that already stopped needs only the scope checks, so [`bin/fm-park-stopped.sh`](../bin/fm-park-stopped.sh) can close every stopped worker's leftover terminal in this home at once.
+On Herdr and Rex `park` closes the terminal endpoint - the pane, and with it a tab or space that held nothing else - and proves it gone, because `relaunch` re-creates a proven-gone endpoint there.
+A tmux window is kept, because `relaunch` cannot prove a closed tmux window gone and would refuse.
+The worktree and every uncommitted change are untouched.
+`state/<id>.cold-parked` records the stop as deliberate: the watcher raises no stale, dead-agent, or steering-inbox wake for the task, `bin/fm-crew-state.sh` reports its declared state with the resume command, the session-start digest prints `endpoint: cold-parked`, and `bin/fm-send.sh` refuses text to it.
+`relaunch` of a parked ship or scout needs no `--note`: its default note names the brief, the branch, `HEAD`, the uncommitted path count, and the last three status events, and a successful relaunch removes the marker.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, gemini, devin, commandcode, and cortex resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
@@ -87,6 +99,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
+   A [parked](#parking-a-cold-worker) worker's default note stands in when none is given.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.

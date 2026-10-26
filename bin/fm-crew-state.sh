@@ -1311,6 +1311,20 @@ fi
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+# A cold-parked worker was stopped on purpose to save tokens
+# (bin/fm-cold-cache-lib.sh), so its stopped agent or closed endpoint is not
+# death: its state is the declaration it was parked on, read exactly as the
+# status-log fallback at the end reads it, plus how to resume it.
+if [ "$KIND" != secondmate ] && [ -f "$STATE/$ID.cold-parked" ]; then
+  COLD_PARK_NOTE="cold-parked to save tokens; resume with bin/fm-control.sh $ID relaunch"
+  if [ -n "$LOG_VERB" ]; then
+    [ "$LOG_VERB" != "done" ] || emit_ship_status_done
+    LOG_STATE=$(map_log_state "$LOG_LINE")
+    [ "$LOG_STATE" = unknown ] \
+      || emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}$COLD_PARK_NOTE"
+  fi
+  emit unknown none "$COLD_PARK_NOTE"
+fi
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a

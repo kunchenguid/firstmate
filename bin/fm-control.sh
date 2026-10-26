@@ -4,9 +4,10 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> park
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
-#                                         (--note <text> | --note-file <path>)
+#                                         [--note <text> | --note-file <path>]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -58,6 +59,28 @@
 #              Refused on t3code before anything is sent: T3's `/mcp` tools
 #              have no session stop (bin/fm-control-lib.sh
 #              fm_control_backend_exit_supported); interrupt ends its turn.
+#              When the exit command opens Claude's background-task exit
+#              picker, exit confirms its preselected "Exit and stop tasks" row
+#              and the same dead postcondition must hold; the per-dialog answer
+#              is bin/fm-control-lib.sh's fm_control_exit_picker_answer.
+#   park       Stop a ship or scout worker whose prompt cache went cold, so
+#              its next instruction costs a fresh session instead of a whole
+#              cold context (bin/fm-cold-cache-lib.sh owns the policy). A live
+#              agent must pass fm_cold_cache_park_check; an agent that already
+#              stopped needs only the scope checks. The stop is `exit` with one
+#              difference: background work the harness reports still running
+#              is left running, the picker is closed, and park exits 3 with
+#              the agent untouched, because that work is how a waiting worker
+#              resumes on its own. After the stop, park closes the terminal
+#              endpoint on Herdr and Rex - the pane, and with it a tab or space
+#              that held nothing else - and proves it gone, because relaunch
+#              re-creates a proven-gone endpoint there. A tmux window is kept:
+#              relaunch cannot prove a closed tmux window gone. The worktree
+#              and every uncommitted change are untouched. It then writes
+#              state/<id>.cold-parked, which tells monitoring and recovery the
+#              stop was on purpose. Already parked is success (idempotent).
+#              bin/fm-park-stopped.sh runs park for every stopped worker of
+#              this home at once.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -96,7 +119,9 @@
 #              it continues the same agent rather than a fresh one
 #              (fm_control_backend_relaunch_supported).
 #              --note is required for a ship or scout, whose replacement
-#              inherits the local copy but none of the conversation; a
+#              inherits the local copy but none of the conversation, except
+#              for a parked one, whose default note is built from its records
+#              (bin/fm-cold-cache-lib.sh's fm_cold_cache_note); a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
@@ -104,12 +129,12 @@
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              running. A successful relaunch removes the cold-parked marker.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
-# agent and preserves everything else; removing a worktree, killing an
-# endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
-# landed-work test.
+# agent and preserves everything else; removing a worktree, discarding work,
+# and every endpoint close except park's stay with bin/fm-teardown.sh, which
+# owns the landed-work test.
 #
 # `resume` is not a verb: it is not deterministic across the verified adapters
 # (bin/fm-control-lib.sh's header owns that reasoning). `relaunch` covers the
@@ -150,6 +175,9 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#
+# Exit codes: 0 success, 1 refusal or failure, 2 usage, 3 park left a worker
+# running because it still has background work.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -203,6 +231,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-cold-cache-lib.sh
+. "$SCRIPT_DIR/fm-cold-cache-lib.sh"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# How do_exit answers a picker its exit command opened: stop or stay
+# (fm_control_exit_picker_answer). Only park chooses stay.
+EXIT_PICKER_POLICY=stop
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -435,10 +469,48 @@ require_state_verified_backend() {  # <verb>
 }
 
 # refuse_blocking_prompt: the screen is a dialog a confirming Enter would
-# answer. Name it and stop. Do not type Escape or an option: both dismiss
-# or choose.
+# answer, and no recorded answer fits it. Name it and stop. Do not type Escape
+# or an option: both dismiss or choose.
 refuse_blocking_prompt() {  # <dialog-name>
   die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
+}
+
+# answer_exit_picker <dialog-name>: answer a picker that stands between the
+# exit command and a stopped agent, by EXIT_PICKER_POLICY. A dialog with no
+# recorded answer refuses as before. stop returns once its key is delivered;
+# the caller's dead-agent wait is the postcondition. stay proves the picker
+# closed with the agent alive, then exits 3.
+answer_exit_picker() {  # <dialog-name>
+  local key elapsed=0 composer
+  key=$(fm_control_exit_picker_answer "$1" "$EXIT_PICKER_POLICY") || refuse_blocking_prompt "$1"
+  fm_control_backend_supports_key "$BACKEND" "$key" || refuse_blocking_prompt "$1"
+  fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+    || die "task $ID shows the $1, and the $key that answers it could not be sent"
+  [ "$EXIT_PICKER_POLICY" = stay ] || return 0
+  while :; do
+    : > "$FM_COMPOSER_DIALOG_SINK" || die "task $ID's dialog check could not be recorded"
+    composer=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) || composer=unknown
+    if [ ! -s "$FM_COMPOSER_DIALOG_SINK" ] && [ "$composer" = empty ]; then
+      break
+    fi
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' \
+      || die "task $ID still shows the $1 ${SETTLE_WAIT}s after $key closed it (composer: $composer); nothing else was typed"
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  [ "$(agent_state)" = alive ] \
+    || die "task $ID's agent is no longer running after $key closed the $1"
+  echo "error: task $ID still has background work running, so it was left running: the $1 was closed with $key and the agent is idle at an empty composer" >&2
+  exit 3
+}
+
+# confirm_stopped_after_picker: the postcondition of a stop-policy answer.
+confirm_stopped_after_picker() {  # <dialog-name>
+  local state
+  state=$(wait_agent_state "$EXIT_WAIT" dead) \
+    || die "task $ID's $1 was answered, but the agent did not stop within ${EXIT_WAIT}s (state: $state)"
+  retire_busy_incarnation
+  printf 'stopped'
 }
 
 # rendered_matches <ere>: whether any row of the visible viewport matches.
@@ -745,8 +817,11 @@ do_exit() {
       ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
+  # Park never interrupts: a worker that started a turn is not cold.
   case "$(busy_verdict)" in
     busy*)
+      [ "$EXIT_PICKER_POLICY" != stay ] \
+        || die "task $ID started a turn before park could stop it; nothing was typed and it was left running"
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in
@@ -774,7 +849,9 @@ do_exit() {
   # rather than a function that subshell sourced.
   if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-    refuse_blocking_prompt "$dialog"
+    answer_exit_picker "$dialog"
+    confirm_stopped_after_picker "$dialog"
+    return 0
   fi
   case "$composer_state" in
     empty) ;;
@@ -812,13 +889,16 @@ do_exit() {
         || die "the exit command could not be sent to task $ID on $BACKEND"
       [ "$verdict" != send-failed ] \
         || die "the exit command could not be sent to task $ID on $BACKEND"
-      # The submitting Enter can open the picker. The agent is still alive, and
-      # another Enter would confirm the selected row. A dead agent may leave the
-      # same text behind; that is not a prompt still waiting.
+      # The submitting Enter can open the picker. The agent is still alive, so
+      # the picker is answered by policy rather than by a blind extra Enter. A
+      # dead agent may leave the same text behind; that is not a prompt still
+      # waiting.
       if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
         dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
         if [ "$(agent_state)" != dead ]; then
-          refuse_blocking_prompt "$dialog"
+          answer_exit_picker "$dialog"
+          confirm_stopped_after_picker "$dialog"
+          return 0
         fi
       fi
       ;;
@@ -830,7 +910,10 @@ do_exit() {
     : > "$FM_COMPOSER_DIALOG_SINK" || true
     fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
     if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
-      refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+      dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+      answer_exit_picker "$dialog"
+      confirm_stopped_after_picker "$dialog"
+      return 0
     fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
@@ -1191,6 +1274,11 @@ do_relaunch() {
       RELAUNCH_BRIEF="$DATA/$ID/brief.md"
       [ -f "$RELAUNCH_BRIEF" ] \
         || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
+      if [ "$NOTE_SET" = 0 ] && fm_cold_cache_is_parked "$STATE" "$ID"; then
+        NOTE=$(fm_cold_cache_note "$STATE" "$DATA" "$ID") \
+          || die "could not build the default progress note for parked task $ID; pass --note"
+        NOTE_SET=1
+      fi
       [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
         || die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
       ;;
@@ -1261,7 +1349,85 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
+  rm -f "$(fm_cold_cache_parked_path "$STATE" "$ID")" "$STATE/$ID.cold-relaunch-note"
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+}
+
+# --- park -------------------------------------------------------------------
+
+# close_parked_endpoint: close a stopped task's terminal endpoint and prove it
+# gone. Prints `closed`, or `kept` on a backend whose relaunch cannot re-create
+# a closed endpoint.
+close_parked_endpoint() {
+  local verdict journal
+  case "$BACKEND" in
+    herdr|rex) ;;
+    *) printf 'kept'; return 0 ;;
+  esac
+  if [ "$BACKEND" = rex ] \
+     && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
+  fi
+  fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" \
+    || die "task $ID's agent is stopped, but its $BACKEND endpoint $T could not be closed; the worktree is untouched"
+  verdict=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META")
+  [ "${verdict%%$'\t'*}" = gone ] \
+    || die "task $ID's agent is stopped, but its $BACKEND endpoint $T was not proven closed (${verdict%%$'\t'*}); the worktree is untouched"
+  if [ "$BACKEND" = herdr ]; then
+    # A presentation journal bound to exactly this pane names nothing left to
+    # close (bin/fm-teardown.sh retires the same orphan).
+    journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    if [ -e "$journal" ] \
+       && fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" 2>/dev/null \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 1 ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$T" ]; then
+      rm -f "$journal"
+    fi
+  fi
+  printf 'closed'
+}
+
+do_park() {
+  local state check rc=0 result endpoint marker tmp tmp_failed=0
+  case "$KIND" in
+    ship|scout) ;;
+    *) die "task $ID is a $KIND; park applies to ship and scout workers only (bin/fm-cold-cache-lib.sh says why)" ;;
+  esac
+  marker=$(fm_cold_cache_parked_path "$STATE" "$ID")
+  if [ -f "$marker" ]; then
+    echo "already-parked $ID endpoint=$(fm_cold_cache_parked_field "$STATE" "$ID" endpoint || printf unknown) worktree=$WT"
+    return 0
+  fi
+  ! fm_cold_cache_relaunch_pending "$STATE" "$ID" \
+    || die "task $ID has a relaunch in progress; refusing to park it"
+  require_state_verified_backend park
+  state=$(agent_state)
+  if [ "$state" = alive ]; then
+    check=$(fm_cold_cache_park_check "$CONFIG" "$STATE" "$ID") || rc=$?
+    case "$rc" in
+      0) ;;
+      2) die "the cold-cache threshold config is malformed (see above); refusing to park $ID" ;;
+      *) die "task $ID is not eligible to park: $check" ;;
+    esac
+    EXIT_PICKER_POLICY=stay
+  fi
+  result=$(do_exit)
+  case "$result" in
+    endpoint-gone) endpoint=gone ;;
+    *) endpoint=$(close_parked_endpoint) ;;
+  esac
+  tmp="$marker.tmp.$$"
+  {
+    printf 'parked_at=%s\n' "$(date +%s)"
+    printf 'status=%s\n' "$(last_status_line "$STATE/$ID.status")"
+    printf 'endpoint=%s\n' "$endpoint"
+  } > "$tmp" || tmp_failed=1
+  if [ "$tmp_failed" = 1 ] || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    die "task $ID was stopped (endpoint $endpoint), but its parked marker could not be written to $marker"
+  fi
+  echo "parked $ID agent=$result endpoint=$endpoint harness=$HARNESS backend=$BACKEND worktree=$WT ${check:+($check)}"
+  echo "resume: FM_HOME=$(printf '%q' "$FM_HOME") $SCRIPT_DIR/fm-control.sh $ID relaunch"
 }
 
 # --- verbs ------------------------------------------------------------------
@@ -1286,6 +1452,9 @@ case "$VERB" in
   exit)
     result=$(do_exit)
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    ;;
+  park)
+    do_park
     ;;
   relaunch)
     do_relaunch

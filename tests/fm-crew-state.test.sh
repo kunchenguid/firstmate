@@ -3384,6 +3384,28 @@ test_scout_skips_run_lookup() {
   pass "scout skips the run lookup"
 }
 
+# A cold-parked worker was stopped on purpose: its declared wait stands, with
+# the resume command, and its stopped agent is never read as death.
+test_cold_parked_worker_reports_its_declared_wait() {
+  reset_fakes
+  local d out; d=$(new_case coldparked)
+  make_repo_on_branch "$d/wt" fm/cold-p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cold-p.meta" "window=fm:fm-cold-p" "worktree=$d/wt" "kind=scout" \
+    "harness=claude"
+  printf 'paused [at=1]: waiting on review\n' > "$d/state/cold-p.status"
+  printf 'parked_at=1\nstatus=paused\nendpoint=closed\n' > "$d/state/cold-p.cold-parked"
+  out=$(run_crew_state "$d" cold-p)
+  assert_contains "$out" "source: status-log" "a parked worker reads its declared wait"
+  assert_contains "$out" "cold-parked to save tokens" "the note should say the stop was deliberate"
+  assert_contains "$out" "fm-control.sh cold-p relaunch" "the note should name the resume command"
+  : > "$d/state/cold-p.status"
+  out=$(run_crew_state "$d" cold-p)
+  assert_contains "$out" "source: none" "a parked worker with no status reads unknown"
+  assert_contains "$out" "cold-parked to save tokens" "the note should still say the stop was deliberate"
+  pass "a cold-parked worker reports its declared wait and the resume command"
+}
+
 # (j) torn-down worktree and missing meta are graceful (unknown/none, exit 0)
 test_torn_down_worktree() {
   reset_fakes
@@ -5937,6 +5959,7 @@ test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
+test_cold_parked_worker_reports_its_declared_wait
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone

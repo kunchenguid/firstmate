@@ -136,6 +136,24 @@ case "${1:-}" in
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command" ;;
       esac
     else
+      # FM_FAKE_PICKER_MODEL models Claude's background-task exit picker as
+      # recorded live on 2.1.310: Enter on the open picker confirms "Exit and
+      # stop tasks" and the agent exits; Escape closes it and the agent stays.
+      if [ -n "${FM_FAKE_PICKER_MODEL:-}" ]; then
+        picker_open=0
+        if [ -f "$D/pane" ] && grep -q 'Background work is running' "$D/pane"; then
+          picker_open=1
+        elif [ -f "$D/after-enter" ] && grep -qx Enter "$D/keys" \
+          && [ "$(cat "$D/after-enter-late" 2>/dev/null || echo 0)" = 0 ]; then
+          picker_open=1
+        fi
+        if [ "$picker_open" = 1 ]; then
+          case "$payload" in
+            Enter) printf 'zsh' > "$D/command"; rm -f "$D/pane" "$D/after-enter" ;;
+            Escape) rm -f "$D/pane" "$D/after-enter" ;;
+          esac
+        fi
+      fi
       printf '%s\n' "$payload" >> "$D/keys"
       printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
       if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
@@ -177,7 +195,15 @@ case "${1:-}" in
             printf '1\n'
           fi
           exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          # on-second-state-read runs once, at the second agent-state read,
+          # to model a change between a caller's check and its action.
+          if [ -f "$D/on-second-state-read" ]; then
+            n=$(( $(cat "$D/state-reads" 2>/dev/null || echo 0) + 1 ))
+            printf '%s' "$n" > "$D/state-reads"
+            [ "$n" != 2 ] || bash "$D/on-second-state-read"
+          fi
+          cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -270,6 +296,7 @@ run_control() {
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     FM_FAKE_SECOND_CTRL_C_STOPS_AGENT="${FM_FAKE_SECOND_CTRL_C_STOPS_AGENT:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
+    FM_FAKE_PICKER_MODEL="${FM_FAKE_PICKER_MODEL:-}" FM_FAKE_NEVER_DIES="${FM_FAKE_NEVER_DIES:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -990,64 +1017,208 @@ exit_picker_screen() {
     'Enter to confirm · Esc to cancel'
 }
 
-test_exit_refuses_an_open_background_picker() {
+test_exit_confirms_an_open_background_picker() {
   local dir out rc
   dir=$(new_case open-picker)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
   exit_picker_screen > "$dir/fake/pane"
-  out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "an open exit picker should refuse"$'\n'"$out"
-  assert_contains "$out" "blocked on a prompt: Claude background-task exit picker" \
-    "the refusal should name the dialog"
-  assert_not_contains "$out" "Esc" "the refusal must not name a dismissal key"
-  [ ! -s "$dir/fake/literal" ] || fail "an open picker must not be typed into"
-  [ ! -s "$dir/fake/keys" ] || fail "an open picker must receive no keys"
-  pass "fm-control exit: an already-open background-task picker is not typed into"
+  out=$(FM_FAKE_PICKER_MODEL=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should confirm an open exit picker"$'\n'"$out"
+  assert_contains "$out" "stopped" "exit should report the stop"
+  [ ! -s "$dir/fake/literal" ] || fail "an open picker must not be typed into, got '$(literals "$dir")'"
+  [ "$(cat "$dir/fake/keys")" = Enter ] || fail "exactly one confirming Enter should be sent, got: $(cat "$dir/fake/keys")"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the agent should have stopped"
+  pass "fm-control exit: an already-open background-task picker is confirmed with one Enter and the stop is verified"
 }
 
-test_exit_refuses_the_confirming_enter() {
+test_exit_confirms_the_picker_its_submit_opened() {
   local dir out rc enters
   dir=$(new_case confirm-picker)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
   exit_picker_screen > "$dir/fake/after-enter"
-  out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
-    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
-    "$CONTROL" t1 exit 2>&1); rc=$?
-  expect_code 1 "$rc" "the confirming Enter should refuse"$'\n'"$out"
-  assert_contains "$out" "blocked on a prompt: Claude background-task exit picker" \
-    "the refusal should name the dialog"
-  assert_not_contains "$out" "Esc" "the refusal must not name a dismissal key"
-  [ "$(literals "$dir")" = /exit ] || fail "the exit command should still be typed, got '$(literals "$dir")'"
+  out=$(FM_FAKE_NEVER_DIES=1 FM_FAKE_PICKER_MODEL=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should confirm the picker its submit opened"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "the exit command should be typed once, got '$(literals "$dir")'"
   enters=$(grep -c '^Enter$' "$dir/fake/keys" || true)
-  [ "$enters" -eq 1 ] || fail "only the submitting Enter should be sent, got $enters"
-  pass "fm-control exit: the Enter that opens the background-task picker is not followed by a confirming Enter"
+  [ "$enters" -eq 2 ] || fail "the submitting Enter and one confirming Enter should be sent, got $enters"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the agent should have stopped"
+  pass "fm-control exit: the picker the submit opened is confirmed with one Enter and the stop is verified"
 }
 
-# The submit reads a cleared composer before the picker renders, so it reports
-# delivery and no read inside it sees the picker. Exit's own read after the
-# stop wait times out must still name the dialog.
-test_exit_names_a_picker_that_renders_after_the_submit() {
+# The submit reads a cleared composer before the picker renders, so no read
+# inside it sees the picker. Exit's own read after the stop wait times out must
+# still find and answer it.
+test_exit_answers_a_picker_that_renders_after_the_submit() {
   local dir out rc enters
   dir=$(new_case late-picker)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
   exit_picker_screen > "$dir/fake/after-enter"
   printf '1' > "$dir/fake/after-enter-late"
-  out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
-    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
-    "$CONTROL" t1 exit 2>&1); rc=$?
-  expect_code 1 "$rc" "a picker that renders after the submit should refuse"$'\n'"$out"
-  [ "$(cat "$dir/fake/after-enter-late")" = 0 ] \
+  out=$(FM_FAKE_NEVER_DIES=1 FM_FAKE_PICKER_MODEL=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a picker that renders after the submit should be answered"$'\n'"$out"
+  [ "$(cat "$dir/fake/after-enter-late" 2>/dev/null || echo 0)" = 0 ] \
     || fail "the submit should have read the ordinary pane once after Enter"
-  assert_contains "$out" "blocked on a prompt: Claude background-task exit picker" \
-    "the refusal should name the dialog"
-  assert_not_contains "$out" "did not stop within" \
-    "a recognised picker must not fall back to the generic timeout message"
   enters=$(grep -c '^Enter$' "$dir/fake/keys" || true)
-  [ "$enters" -eq 1 ] || fail "only the submitting Enter should be sent, got $enters"
-  pass "fm-control exit: a picker that renders after the submit returned is named when the stop wait times out"
+  [ "$enters" -eq 2 ] || fail "the submitting Enter and one confirming Enter should be sent, got $enters"
+  pass "fm-control exit: a picker that renders after the submit returned is answered when the stop wait times out"
+}
+
+test_exit_fails_when_the_confirmed_picker_leaves_the_agent_running() {
+  local dir out rc
+  dir=$(new_case picker-stuck)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  exit_picker_screen > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a confirmed picker whose agent does not stop must fail"$'\n'"$out"
+  assert_contains "$out" "did not stop" "the failure should say the agent did not stop"
+  pass "fm-control exit: a confirmed picker still needs the stopped-agent postcondition"
+}
+
+# make_cold_wait <case-dir> <id>: an idle busy record from two hours ago and a
+# declared wait as the latest status, so the task is eligible for park.
+make_cold_wait() {
+  local st="$1/home/state" gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$st" "$2" --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$st/$2.meta"
+  printf 'v1 gen=%s seq=9 state=idle source=fm-spawn event=seed ts=%s\n' \
+    "$gen" "$(( $(date +%s) - 7200 ))" > "$st/$2.busy-state"
+  printf 'paused [at=1]: waiting on review\n' > "$st/$2.status"
+}
+
+test_park_keeps_a_worker_with_background_work_running() {
+  local dir out rc
+  dir=$(new_case park-stay)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  make_cold_wait "$dir" t1
+  exit_picker_screen > "$dir/fake/after-enter"
+  out=$(FM_FAKE_NEVER_DIES=1 FM_FAKE_PICKER_MODEL=1 run_control "$dir" t1 park); rc=$?
+  expect_code 3 "$rc" "park should leave a worker with background work running"$'\n'"$out"
+  assert_contains "$out" "background work running" "the outcome should say why"
+  grep -qx Escape "$dir/fake/keys" || fail "park should close the picker with Escape"
+  [ "$(grep -c '^Enter$' "$dir/fake/keys")" -eq 1 ] || fail "park must never confirm the picker with Enter"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the agent should still run"
+  [ ! -e "$dir/home/state/t1.cold-parked" ] || fail "a worker left running must not be marked parked"
+  pass "fm-control park: background work keeps the worker running, closed with Escape, unmarked, exit 3"
+}
+
+test_park_never_interrupts_a_turn_started_after_its_check() {
+  local dir out rc
+  dir=$(new_case park-race)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  make_cold_wait "$dir" t1
+  printf '%q apply %q t1 busy --current-gen --source claude-hook --event UserPromptSubmit\n' \
+    "$ROOT/bin/fm-busy-event.sh" "$dir/home/state" > "$dir/fake/on-second-state-read"
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 1 "$rc" "park must refuse a worker that started a turn after its check"$'\n'"$out"
+  assert_contains "$out" "started a turn" "the refusal should say why"
+  [ -z "$(keys_sent "$dir")" ] || fail "park must send no interrupt key, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "park must type nothing, got: $(literals "$dir")"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the agent should still run"
+  [ ! -e "$dir/home/state/t1.cold-parked" ] || fail "a worker left running must not be marked parked"
+  pass "fm-control park: a turn started after the park check is refused with nothing sent"
+}
+
+test_park_stops_an_eligible_worker_and_marks_it() {
+  local dir out rc
+  dir=$(new_case park-ok)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  make_cold_wait "$dir" t1
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 0 "$rc" "park should stop an eligible worker"$'\n'"$out"
+  assert_contains "$out" "parked t1" "the outcome should name the task"
+  assert_contains "$out" "endpoint=kept" "a tmux window is kept"
+  assert_contains "$out" "fm-control.sh t1 relaunch" "the outcome should print the resume command"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the agent should have stopped"
+  assert_grep 'endpoint=kept' "$dir/home/state/t1.cold-parked" "the marker should record the kept endpoint"
+  assert_grep 'status=paused' "$dir/home/state/t1.cold-parked" "the marker should record the latest status"
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 0 "$rc" "parking again should be idempotent"$'\n'"$out"
+  assert_contains "$out" "already-parked t1" "the repeat should say it is already parked"
+  pass "fm-control park: an eligible worker is stopped, its tmux window kept, and the marker written once"
+}
+
+test_park_refuses_an_ineligible_live_worker() {
+  local dir out rc
+  dir=$(new_case park-busy)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  make_cold_wait "$dir" t1
+  printf 'working [at=2]: busy\n' >> "$dir/home/state/t1.status"
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 1 "$rc" "a worker whose latest status is not a wait must not park"$'\n'"$out"
+  assert_contains "$out" "not a declared wait" "the refusal should name the reason"
+  [ -z "$(literals "$dir")" ] || fail "a refused park must type nothing"
+  [ ! -e "$dir/home/state/t1.cold-parked" ] || fail "a refused park must write no marker"
+
+  dir=$(new_case park-sm)
+  add_task "$dir" t1 claude secondmate
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 1 "$rc" "a secondmate must never park"$'\n'"$out"
+  [ -z "$(literals "$dir")" ] || fail "a refused park must type nothing"
+  pass "fm-control park: an ineligible live worker and a secondmate are refused with nothing typed"
+}
+
+test_park_of_an_already_stopped_worker_needs_no_cold_proof() {
+  local dir out rc
+  dir=$(new_case park-dead)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 0 "$rc" "an already-stopped worker should park"$'\n'"$out"
+  assert_contains "$out" "agent=already-stopped" "the outcome should say the agent had stopped"
+  [ -e "$dir/home/state/t1.cold-parked" ] || fail "the marker should be written"
+  pass "fm-control park: an already-stopped worker parks without the cold-cache proof"
+}
+
+test_park_stopped_sweeps_only_stopped_workers_of_this_home() {
+  local dir out rc
+  dir=$(new_case sweep)
+  add_task "$dir" t1 claude
+  add_task "$dir" t2 claude secondmate
+  printf 'fm-t1\nfm-t2\n' > "$dir/fake/windows"
+  alive_as "$dir" zsh
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$ROOT/bin/fm-park-stopped.sh" --dry-run 2>&1); rc=$?
+  expect_code 0 "$rc" "a dry run should succeed"$'\n'"$out"
+  assert_contains "$out" "would-park t1 backend=tmux" "the dry run should name the stopped ship"
+  assert_not_contains "$out" "t2" "a secondmate is out of scope"
+  [ ! -e "$dir/home/state/t1.cold-parked" ] || fail "a dry run must not park"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$ROOT/bin/fm-park-stopped.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "the sweep should succeed"$'\n'"$out"
+  assert_contains "$out" "parked t1" "the sweep should park the stopped ship"
+  assert_contains "$out" "summary: parked=1 skipped=0 failed=0" "the summary should count it"
+  [ -e "$dir/home/state/t1.cold-parked" ] || fail "the sweep should write the marker"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$ROOT/bin/fm-park-stopped.sh" 2>&1); rc=$?
+  assert_contains "$out" "summary: parked=0 skipped=0 failed=0" "a parked worker is not swept again"
+  out=$(env -u FM_HOME PATH="$dir/fakebin:$PATH" "$ROOT/bin/fm-park-stopped.sh" 2>&1); rc=$?
+  expect_code 1 "$rc" "the sweep must refuse without FM_HOME"
+  [ -z "$(literals "$dir")" ] || fail "parking stopped workers must type nothing, got '$(literals "$dir")'"
+  pass "fm-park-stopped: parks only this home's stopped ship and scout workers, once"
+}
+
+test_alive_worker_is_skipped_by_the_stopped_sweep() {
+  local dir out rc
+  dir=$(new_case sweep-alive)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$ROOT/bin/fm-park-stopped.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "a sweep that skips a running worker succeeds"$'\n'"$out"
+  assert_contains "$out" "skipped t1 agent state alive" "a running worker should be skipped with its state"
+  [ -z "$(literals "$dir")" ] || fail "a running worker must not be typed into"
+  pass "fm-park-stopped: a running worker is skipped"
 }
 
 test_idle_agent_is_not_interrupted() {
@@ -1337,9 +1508,17 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_exit_drops_meta_busy_gen_with_the_sidecar
-test_exit_refuses_an_open_background_picker
-test_exit_refuses_the_confirming_enter
-test_exit_names_a_picker_that_renders_after_the_submit
+test_exit_confirms_an_open_background_picker
+test_exit_confirms_the_picker_its_submit_opened
+test_exit_answers_a_picker_that_renders_after_the_submit
+test_exit_fails_when_the_confirmed_picker_leaves_the_agent_running
+test_park_keeps_a_worker_with_background_work_running
+test_park_never_interrupts_a_turn_started_after_its_check
+test_park_stops_an_eligible_worker_and_marks_it
+test_park_refuses_an_ineligible_live_worker
+test_park_of_an_already_stopped_worker_needs_no_cold_proof
+test_park_stopped_sweeps_only_stopped_workers_of_this_home
+test_alive_worker_is_skipped_by_the_stopped_sweep
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

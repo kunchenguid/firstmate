@@ -1530,15 +1530,32 @@ The picker is recognised by its recorded structure only: the heading on its own 
 The same strings quoted above a normal composer, as a diff, this note, or a test fixture shows them, are not a picker.
 Submit retries now stop after the Enter that opened the picker and report unknown.
 A typed submit to a pane that already shows the picker types nothing and sends no Enter.
-Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
-A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and names the picker there too.
-Exit does not report a stopped agent whose pane still shows the picker text as blocked on a prompt.
+A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out.
+Exit does not treat a stopped agent whose pane still shows the picker text as a picker.
 The watcher reads the picker with the same matcher on the stale-path capture it already takes for a worker.
 A worker pane parked on it keeps the ordinary stale triage and schedule, and its plain stale reason and its final wedge escalation reason name the picker after `blocked-on-prompt:`; the deferral, dead-record, and declared-wait recheck reasons do not.
 A second mate stays off that path, and a finished worker in away mode is handled as before.
 That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-triage.test.sh` and `tests/fm-daemon.test.sh`, not by a live measurement.
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
-Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
+
+Re-measured 2026-10-24 against Claude Code 2.1.310 in an isolated tmux server (`tmux -L fmcoldlive`), a scratch folder, `claude --model haiku --allowedTools 'Bash(sleep:*)'`, and a background `sleep 600` started by the agent.
+The footer showed `· 1 shell ·` while the background shell ran.
+`/exit` opened the picker with two lines between the heading and the option rows, which the recognizer accepts:
+
+```text
+Background work is running
+The following will stop when you exit:
+shell · sleep 600
+❯ 1. Exit and stop tasks
+...
+Enter to confirm · Esc to cancel
+```
+
+Escape closed the picker, left an empty composer, kept the agent alive, and kept the `sleep 600` process running.
+Enter on row 1 exited Claude, stopped the `sleep 600` process, and left `Resume this session with: claude --resume ...` on the pane.
+[`fm_control_exit_picker_answer`](../../bin/fm-control-lib.sh) holds those two answers: `exit` and `relaunch` confirm with Enter and then require a stopped agent, and `park` closes the picker with Escape and leaves the worker running.
+`tests/fm-control.test.sh` pins both paths with the recorded screen.
+`FM_CLAUDE_EXIT_PICKER_LIVE_E2E=1 bash tests/fm-claude-exit-picker-live-e2e.test.sh` refreshes this record against the installed Claude; it passed on 2.1.310 on 2026-10-24.
 
 ### Prune and respawn
 

@@ -668,6 +668,24 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Cold prompt-cache parking (config/cold-cache-minutes)
+
+A worker idle longer than its harness's prompt-cache lifetime pays for its whole context again on its next turn.
+The optional local, gitignored `config/cold-cache-minutes` sets when a ship or scout worker counts as cold: one positive whole number of minutes, or `off`.
+Absent means 55 minutes, just inside the one-hour cache lifetime.
+Any other value is malformed, and the tools that read it refuse and name the file.
+A cold worker gets two behaviors, both off with `off`:
+
+- `bin/fm-send.sh` refuses a text steer to it, prints the `bin/fm-control.sh <id> relaunch --note-file <path>` command with a ready default note, and accepts `--cold-ok` to send anyway.
+- The watcher parks it on its own through `bin/fm-control.sh <id> park` when its latest status is a declared wait.
+
+Parking closes a Herdr or Rex worker's terminal, keeps its worktree and every uncommitted change, and `relaunch` reopens it.
+`bin/fm-park-stopped.sh` parks every worker of this home whose agent already stopped.
+Only a valid semantic idle record counts as cold, so a harness without one is never refused or parked.
+Secondmates are out of scope.
+[`bin/fm-cold-cache-lib.sh`](../bin/fm-cold-cache-lib.sh) owns the policy and its reasons, and [`docs/agent-control.md`](agent-control.md) owns the `park` verb.
+The setting is home-local and is not inherited by secondmate homes.
+
 ## PR health monitor (config/pr-health-monitor)
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.

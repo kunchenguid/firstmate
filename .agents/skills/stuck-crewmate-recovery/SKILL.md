@@ -11,6 +11,7 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`AGENTS.md` section 7 for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
+A worker with a `state/<id>.cold-parked` record is not a recovery case either: it was stopped on purpose to save tokens, and `bin/fm-control.sh <id> relaunch` resumes it with a default note ([`bin/fm-cold-cache-lib.sh`](../../../bin/fm-cold-cache-lib.sh)).
 
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
 

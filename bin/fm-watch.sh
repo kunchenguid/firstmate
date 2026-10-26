@@ -256,6 +256,10 @@ WATCH_HOME_EXISTED=0
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# Cold prompt-cache policy: which workers this watcher parks on its own, and
+# which parked ones it leaves alone (cold_park_maybe and recorded_windows below).
+# shellcheck source=bin/fm-cold-cache-lib.sh
+. "$SCRIPT_DIR/fm-cold-cache-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and its
 # away-or-quiet reading, which is all this watcher reads (away_record_present
@@ -868,9 +872,13 @@ signal_turnend_panes_churned() {  # <file> ...
 }
 
 recorded_windows() {
-  local meta w seen=
+  local meta w seen="" id
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    # A cold-parked task was stopped on purpose (bin/fm-cold-cache-lib.sh), so
+    # no pane-staleness, dead-agent, or steering-inbox wake applies to it.
+    id=${meta##*/}
+    ! fm_cold_cache_is_parked "$STATE" "${id%.meta}" || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
     case "$seen" in
@@ -3346,6 +3354,36 @@ fi
 # first. Publication is eventually consistent by design and every reader
 # re-derives current state from the owning home anyway, while beacon freshness
 # is what the whole supervision chain rests on.
+# cold_park_maybe <task>: hand a worker whose prompt cache went cold to
+# `fm-control.sh <task> park`, detached so a slow exit never delays this poll
+# (bin/fm-cold-cache-lib.sh owns eligibility, fm-control the verified stop).
+# One attempt per idle period: .cold-park-attempt-<task> holds the idle
+# record's timestamp, so a refused or failed park is retried only after the
+# worker was busy and went idle again. One park runs at a time; the next
+# eligible worker is handed over on a later poll. The last attempt's output is
+# kept in .cold-park-last-<task>.
+COLD_PARK_PID=
+cold_park_maybe() {  # <task>
+  local task=$1 since marker reason
+  [ -n "$task" ] || return 0
+  if [ -n "$COLD_PARK_PID" ]; then
+    if kill -0 "$COLD_PARK_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$COLD_PARK_PID" 2>/dev/null || true
+    COLD_PARK_PID=
+  fi
+  reason=$(fm_cold_cache_park_check "$CONFIG" "$STATE" "$task" 2>/dev/null) || return 0
+  since=$(fm_busy_record_idle_since "$STATE" "$task") || return 0
+  marker="$STATE/.cold-park-attempt-$task"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$since" ] || return 0
+  printf '%s' "$since" > "$marker" || return 0
+  triage_log "cold-park $task ($reason): handing it to fm-control park"
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-control.sh" "$task" park </dev/null >"$STATE/.cold-park-last-$task" 2>&1 &
+  COLD_PARK_PID=$!
+}
+
 HOME_SUMMARY_PID=
 home_summary_refresh_detached() {
   if [ -n "$HOME_SUMMARY_PID" ]; then
@@ -3934,6 +3972,7 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
+    [ "$kind" = secondmate ] || cold_park_maybe "$task"
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
