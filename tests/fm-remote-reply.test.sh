@@ -968,13 +968,20 @@ pass "a quiet reply window publishes the caught-up watermark the reply guard rea
 
 # A read that exits 0 yet prints nothing carries no delta. Capturing it would
 # publish an empty result that wakes firstmate forever, so it must read as an
-# empty window (75) and capture nothing.
+# empty window (75) and capture nothing. It proves nothing about the channel
+# being caught up, so it must record no watermark.
+rm -f "$PARENT/state/remote-replies/ios.caught-up"
 set +e
 empty_out=$(FM_REMOTE_REPLY_EMPTY_OK=1 remote_env "$ADAPTER" source ios 2>/dev/null)
 empty_rc=$?
 set -e
 [ "$empty_rc" -eq 75 ] || fail "an exit-0 empty remote read was not treated as an empty window: $empty_rc"
 [ -z "$empty_out" ] || fail "an exit-0 empty remote read produced output: $empty_out"
+empty_caught_up=$(FM_STATE_OVERRIDE="$PARENT/state" bash -c '
+  . "$1/bin/fm-pending-reply-lib.sh"
+  fm_pending_reply_remote_channel_epoch "$2/state" ios
+' _ "$ROOT" "$PARENT")
+[ -z "$empty_caught_up" ] || fail "an exit-0 empty remote read recorded a caught-up watermark: $empty_caught_up"
 pass "an exit-0 empty remote read is an empty window, not a captured result"
 
 # The observed already-handled replay class: a lost cursor (an update or
