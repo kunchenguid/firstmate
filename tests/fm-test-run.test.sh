@@ -114,6 +114,8 @@ init_changed_fixture_repo() {
     fm-procevent-quota.test.sh \
     fm-quota-choose.test.sh \
     fm-pi-watch-extension.test.sh \
+    fm-pi-agent-overview.test.sh \
+    fm-pi-primary-types.test.sh \
     fm-pi-windows-shell-invocation.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -166,6 +168,7 @@ init_changed_fixture_repo() {
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  : >"$repo/.pi/extensions/fm-agent-overview.ts"
   mkdir -p "$repo/.pi/extensions/lib"
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
@@ -353,6 +356,15 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "turn-end extension selects native-Windows shell coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/.pi/extensions/fm-agent-overview.ts"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pi-agent-overview.test.sh" \
+    "agent overview extension selects its UI interaction coverage"
+  assert_contains "$listed" "tests/fm-pi-primary-types.test.sh" \
+    "agent overview extension selects the Pi type contract"
+  git -C "$repo" add .pi/extensions/fm-agent-overview.ts
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm agent-overview-extension-change
 
   printf '\n' >>"$repo/.pi/extensions/lib/fm-operational-input.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
