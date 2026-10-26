@@ -336,6 +336,11 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   Every ship or scout also receives `TMPDIR`, `TMP`, and `TEMP` pointing at
+#   /tmp/fm-<id>/tmp on that same channel, so the mktemp scratch its tools leave
+#   behind is removed with the per-task temp root at teardown. A secondmate keeps
+#   the ambient temp directory; the comment above the root's creation owns why
+#   this broad knob is safe.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
@@ -5922,11 +5927,29 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/ and, for
+# ship and scout workers, general scratch nested at tmp/. Go won't create
+# GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp lives alongside
+# and teardown cleans one deterministic path.
+# TMPDIR, TMP, and TEMP are routed into tmp/ so the mktemp scratch that worker
+# tools and tests leave behind is removed with the root instead of accumulating
+# in the shared /tmp until it runs out of inodes. That knob is broad, so it is
+# bounded as follows:
+# - Task workers only. A secondmate runs a whole home that outlives any task,
+#   so its temp stays in the shared /tmp and is never tied to one task's cleanup.
+# - Short path. /tmp/fm-<id>/tmp is only a few bytes longer than the root, so a
+#   Unix socket made under TMPDIR stays well inside the 104-byte sun_path limit
+#   for any realistic task id; the subdirectory is deliberately named tmp, not
+#   a longer descriptive name.
+# - Shared /tmp stays reachable. Only the three variables move; a tool that
+#   must rendezvous through the shared /tmp (the tmux server socket derives
+#   from TMUX_TMPDIR, not TMPDIR) still reaches it by absolute path.
+# - Ownership. The private-root checks below run before tmp/ exists and cover
+#   it: the root is a real 0700 directory owned by this user, so nobody else
+#   can plant a path inside tmp/ - it is more private than the shared /tmp it
+#   replaces. Cleanup stays a rm of that one recorded root; the worktree and
+#   its unlanded work are never under it.
 # The root is private (0700) because its path is predictable under a shared
 # /tmp: a root that already exists is reused only as a real directory owned by
 # this user and writable by nobody else, then tightened, so no other local user
@@ -5944,6 +5967,14 @@ else
   fi
 fi
 mkdir -p "$TASK_TMP/gotmp"
+TASK_GENERAL_TMP=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  TASK_GENERAL_TMP="$TASK_TMP/tmp"
+  (umask 077 && mkdir -p "$TASK_GENERAL_TMP") || {
+    echo "error: could not create the task scratch directory $TASK_GENERAL_TMP" >&2
+    exit 1
+  }
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -7502,6 +7533,11 @@ else
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Task workers also get general scratch under the same root (see the per-task
+# temp root comment above); the launch-env floor forwards these three names.
+if [ -n "$TASK_GENERAL_TMP" ]; then
+  spawn_send_text_line "$T" "export TMPDIR=$TASK_GENERAL_TMP TMP=$TASK_GENERAL_TMP TEMP=$TASK_GENERAL_TMP"
+fi
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
