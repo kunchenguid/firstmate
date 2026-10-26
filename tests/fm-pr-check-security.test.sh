@@ -2989,6 +2989,79 @@ SH
   pass "a merge this home performs itself runs the guarded cleanup of a finished direct report and publishes its outcome durably"
 }
 
+test_auto_cleanup_preserves_relaunched_incarnation() {
+  local dir state url head orig_def
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case auto-cleanup-relaunch)
+  state="$dir/home/state"
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git -C "$dir/wt" checkout -q -b fm/task
+  git -C "$dir/wt" remote add origin "$dir/origin.git"
+  git -C "$dir/wt" push -q origin fm/task:refs/heads/main
+  git -C "$dir/wt" fetch -q origin
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/tmux"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'branch=fm/task' \
+    'spawn_gen=soriginal' \
+    "pr_head=$head" \
+    "project=$dir/wt" \
+    "pr=$url"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task-a.status"
+  seed_canonical_poll "$dir" task-a "$url"
+  : > "$dir/captured"
+  fm_merge_outcome_current_state() {
+    printf '%s\n' "state: done · source: status-log"
+  }
+  orig_def=$(declare -f fm_merge_outcome_run_teardown)
+  eval "${orig_def/fm_merge_outcome_run_teardown/fm_merge_outcome_run_teardown_orig}"
+  fm_merge_outcome_run_teardown() {
+    printf '%s\n' "$*" >> "$FM_TEST_AUTO_CAPTURE"
+    grep -v '^spawn_gen=' "$FM_TEST_AUTO_STATE/task-a.meta" > "$FM_TEST_AUTO_STATE/task-a.meta.tmp"
+    printf 'spawn_gen=%s\n' srelaunched >> "$FM_TEST_AUTO_STATE/task-a.meta.tmp"
+    mv -f "$FM_TEST_AUTO_STATE/task-a.meta.tmp" "$FM_TEST_AUTO_STATE/task-a.meta"
+    fm_merge_outcome_run_teardown_orig "$@"
+  }
+  FM_TEST_AUTO_CAPTURE="$dir/captured" FM_TEST_AUTO_STATE="$state" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" STATE="$state" \
+    . "$ROOT/bin/fm-wake-lib.sh"
+  FM_TEST_AUTO_CAPTURE="$dir/captured" FM_TEST_AUTO_STATE="$state" \
+    FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="$dir/home/data" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    fm_merge_outcome_auto_teardown "$dir/home" "$state" task-a "$url"
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = refused ] \
+    || fail "a relaunch between eligibility and teardown was cleaned up as $FM_MERGE_OUTCOME_CLEANUP"
+  case "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" in
+    *relaunched*) ;;
+    *) fail "the relaunch refusal did not name the incarnation: $FM_MERGE_OUTCOME_CLEANUP_DETAIL" ;;
+  esac
+  [ -f "$state/task-a.meta" ] \
+    || fail "the replacement worker record was removed"
+  [ "$(fm_meta_get "$state/task-a.meta" spawn_gen)" = srelaunched ] \
+    || fail "the surviving record is not the relaunched incarnation"
+  grep -F "soriginal" "$dir/captured" >/dev/null \
+    || fail "the inspected incarnation was not bound to teardown"
+  grep -F "$url" "$dir/captured" >/dev/null \
+    || fail "the merged deliverable was not bound to teardown"
+  unset -f fm_merge_outcome_current_state fm_merge_outcome_run_teardown fm_merge_outcome_run_teardown_orig
+  pass "automatic cleanup preserves a relaunched incarnation and refuses with its identity"
+}
+
 test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report() {
   local dir state url before after
   url=https://github.com/o/r/pull/1
@@ -4100,6 +4173,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_watcher_surfaces_guarded_auto_teardown_refusal
 test_merged_notice_auto_teardown_is_done_only_and_guarded
 test_self_merge_runs_guarded_cleanup_on_a_finished_direct_report
+test_auto_cleanup_preserves_relaunched_incarnation
 test_cleanup_keeps_the_merge_identity_for_a_late_duplicate_report
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only

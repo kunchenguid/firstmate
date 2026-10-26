@@ -523,11 +523,26 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+TEARDOWN_EXPECTED_SPAWN_GEN=
+TEARDOWN_EXPECTED_PR=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --expected-spawn-gen)
+      [ "$#" -ge 2 ] || { echo "error: invalid teardown request" >&2; exit 2; }
+      case "$2" in ''|.*|*[!A-Za-z0-9._-]*) echo "error: invalid teardown request" >&2; exit 2 ;; esac
+      TEARDOWN_EXPECTED_SPAWN_GEN=$2
+      shift
+      ;;
+    --expected-pr)
+      [ "$#" -ge 2 ] || { echo "error: invalid teardown request" >&2; exit 2; }
+      [ -n "$2" ] || { echo "error: invalid teardown request" >&2; exit 2; }
+      case "$2" in *[[:space:]]*) echo "error: invalid teardown request" >&2; exit 2 ;; esac
+      TEARDOWN_EXPECTED_PR=$2
+      shift
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -670,6 +685,52 @@ if [ "$TEARDOWN_META_KIND" = secondmate ]; then
     exit 1
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fi
+if [ -n "$TEARDOWN_EXPECTED_SPAWN_GEN" ] || [ -n "$TEARDOWN_EXPECTED_PR" ]; then
+  TEARDOWN_EXPECTED_CURRENT_SPAWN=
+  if fm_backlog_meta_spawn_gen "$META" "$STATE" 2>/dev/null; then
+    TEARDOWN_EXPECTED_CURRENT_SPAWN=$FM_BACKLOG_META_SPAWN_GEN
+  fi
+  if [ -n "$TEARDOWN_EXPECTED_SPAWN_GEN" ] && [ "$TEARDOWN_EXPECTED_CURRENT_SPAWN" != "$TEARDOWN_EXPECTED_SPAWN_GEN" ]; then
+    echo "error: task $ID was relaunched to incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown} (expected $TEARDOWN_EXPECTED_SPAWN_GEN); refusing automatic cleanup of the replacement worker" >&2
+    exit 1
+  fi
+  if [ -n "$TEARDOWN_EXPECTED_PR" ]; then
+    TEARDOWN_EXPECTED_KIND=$(fm_meta_get "$META" kind)
+    [ -n "$TEARDOWN_EXPECTED_KIND" ] || TEARDOWN_EXPECTED_KIND=ship
+    if [ "$TEARDOWN_EXPECTED_KIND" != ship ]; then
+      echo "error: task $ID is no longer a finished ship lane; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    fi
+    [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] || {
+      echo "error: task $ID is no longer a finished lane with status on file; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    }
+    TEARDOWN_EXPECTED_LINE=$(status_current_line "$STATE/$ID.status" "$TEARDOWN_EXPECTED_KIND" 2>/dev/null) || {
+      echo "error: task $ID status is no longer readable as finished; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    }
+    [ "$(status_line_verb "$TEARDOWN_EXPECTED_LINE")" = done ] || {
+      echo "error: task $ID is no longer done; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    }
+    TEARDOWN_EXPECTED_RECORDED_PR=$(fm_meta_get "$META" pr)
+    if [ "$TEARDOWN_EXPECTED_RECORDED_PR" != "$TEARDOWN_EXPECTED_PR" ]; then
+      echo "error: task $ID no longer records the merged deliverable; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    fi
+    TEARDOWN_EXPECTED_NOTE=$(status_line_note "$TEARDOWN_EXPECTED_LINE")
+    case "$TEARDOWN_EXPECTED_NOTE" in
+      PR\ *) ;;
+      *) echo "error: task $ID status no longer records the merged deliverable; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2; exit 1 ;;
+    esac
+    TEARDOWN_EXPECTED_NOTED_PR=${TEARDOWN_EXPECTED_NOTE#PR }
+    TEARDOWN_EXPECTED_NOTED_PR=${TEARDOWN_EXPECTED_NOTED_PR%% *}
+    if [ "$TEARDOWN_EXPECTED_NOTED_PR" != "$TEARDOWN_EXPECTED_PR" ]; then
+      echo "error: task $ID status no longer records the merged deliverable; refusing automatic cleanup of incarnation ${TEARDOWN_EXPECTED_CURRENT_SPAWN:-unknown}" >&2
+      exit 1
+    fi
+  fi
 fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=

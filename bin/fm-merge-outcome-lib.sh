@@ -38,6 +38,10 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-classify-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -52,14 +56,28 @@ fm_merge_outcome_current_state() {  # <home> <state> <task-id>
   FM_HOME=$1 FM_STATE_OVERRIDE=$2 "$_FM_MERGE_OUTCOME_LIB_DIR/fm-crew-state.sh" "$3"
 }
 
-fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
-  local home=$1 state=$2 id=$3 data config root
+fm_merge_outcome_run_teardown() {  # <home> <state> <task-id> [<expected-spawn-gen> [<expected-pr>]]
+  local home=$1 state=$2 id=$3 expected_spawn_gen=${4-} expected_pr=${5-} data config root
   data=${FM_DATA_OVERRIDE:-$home/data}
   config=${FM_CONFIG_OVERRIDE:-$home/config}
   root=${FM_ROOT_OVERRIDE:-${FM_ROOT:-$_FM_MERGE_OUTCOME_LIB_DIR/..}}
-  FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
-    FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
-    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id"
+  if [ -n "$expected_spawn_gen" ] && [ -n "$expected_pr" ]; then
+    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$expected_spawn_gen" --expected-pr "$expected_pr"
+  elif [ -n "$expected_spawn_gen" ]; then
+    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$expected_spawn_gen"
+  elif [ -n "$expected_pr" ]; then
+    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id" --expected-pr "$expected_pr"
+  else
+    FM_ROOT_OVERRIDE=$root FM_HOME=$home FM_STATE_OVERRIDE=$state \
+      FM_DATA_OVERRIDE=$data FM_CONFIG_OVERRIDE=$config \
+      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-teardown.sh" "$id"
+  fi
 }
 
 # Check only an already-finished direct report, then delegate all destructive
@@ -67,7 +85,7 @@ fm_merge_outcome_run_teardown() {  # <home> <state> <task-id>
 # on the ordinary merge-notice path.
 fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   local home=$1 state=$2 id=$3 url=$4 meta="$2/$3.meta" status="$2/$3.status"
-  local kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr
+  local kind recorded_pr line current role_rc teardown_output teardown_rc summary note noted_pr expected_spawn_gen
   FM_MERGE_OUTCOME_CLEANUP=skipped
   FM_MERGE_OUTCOME_CLEANUP_DETAIL=
   if [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; then
@@ -95,8 +113,16 @@ fm_merge_outcome_auto_teardown() {  # <home> <state> <task-id> <pr-url>
   [ "$noted_pr" = "$url" ] || return 0
   current=$(fm_merge_outcome_current_state "$home" "$state" "$id" 2>/dev/null) || return 0
   case "$current" in 'state: done ·'*) ;; *) return 0 ;; esac
-
-  if teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" 2>&1); then
+  expected_spawn_gen=
+  if fm_backlog_meta_spawn_gen "$meta" "$state" 2>/dev/null; then
+    expected_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
+  fi
+  if [ -n "$expected_spawn_gen" ]; then
+    teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" "$expected_spawn_gen" "$url" 2>&1) || teardown_rc=$?
+    if [ -z "${teardown_rc-}" ]; then
+      teardown_rc=0
+    fi
+  elif teardown_output=$(fm_merge_outcome_run_teardown "$home" "$state" "$id" 2>&1); then
     teardown_rc=0
   else
     teardown_rc=$?
