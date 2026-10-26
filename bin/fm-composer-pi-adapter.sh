@@ -32,7 +32,7 @@
 
 # Pinned releases whose rendered banner shape has a live guard record.
 # Space-separated exact `pi --version` first-line values (no "pi " prefix).
-FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1 0.99.2 1.0.0 1.3.0'}
+FM_COMPOSER_PI_BANNER_PINNED_VERSIONS='0.85.1 0.87.1 0.99.2 1.0.0 1.3.0'
 
 # The terminal provider-error banner pi draws directly above its composer once
 # a turn has ended on Codex's usage limit. Why it may relax the separated
