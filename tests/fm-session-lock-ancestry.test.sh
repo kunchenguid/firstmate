@@ -1251,6 +1251,20 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
     || fail "the failed refresh did not report its exit status"
   cmp -s "$dir/state/.lock-session" "$dir/sidecar-stale" || fail "the failing writer changed the stale sidecar"
   pass "session-lock e2e: a failed publisher refresh reports its status and still rewakes"
+
+  # Phase 9: a writer failure after ownership changes must not arm this Stop.
+  cp "$dir/state/.claude-autoarm-epoch" "$dir/epoch-before-loss"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s" > "$FM_HOME/state/.lock"\nexit 1\n' "$frontend" > "$dir/bin/fm-lock.sh"
+  fire_phase "$dir" 9 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_code 0 "$(phase_value "$dir" 9 hook.rc)" "a Stop that lost ownership must not rewake"
+  [ "$(arm_count "$dir")" = 10 ] || fail "a Stop that lost ownership armed supervision"
+  [ "$(cat "$dir/state/.lock")" = "$frontend" ] || fail "the writer stub did not transfer the lock to the live foreign frontend"
+  cmp -s "$dir/state/.claude-autoarm-epoch" "$dir/epoch-before-loss" || fail "a Stop that lost ownership changed the generation"
+  cmp -s "$dir/state/.lock-session" "$dir/sidecar-stale" || fail "a Stop that lost ownership changed the sidecar"
+  if grep -q 'continuing supervision with proven ownership' "$dir/state/phase-9/hook.out"; then
+    fail "a Stop that lost ownership claimed it was still proven"
+  fi
+  pass "session-lock e2e: a failed refresh that loses ownership neither arms nor rewakes"
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"

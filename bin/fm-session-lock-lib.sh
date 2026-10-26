@@ -508,7 +508,7 @@ fm_session_lock_refusal_advice() {  # <state>
     && [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ]; then
     if [ -z "$FM_SESSION_LOCK_RECORDED_PUBLISHER" ] \
       || fm_session_lock_publisher_exited "$FM_SESSION_LOCK_RECORDED_PUBLISHER"; then
-      printf '%s' "This session's lock is from a legacy record or a replaced model loop; restarting the main session restores supervision."
+      printf '%s' "This session's lock is from a legacy record or a replaced model loop; restarting the main session restores supervision; if this is a second process, exit it instead."
     else
       printf '%s' "This session is a second process resuming the owner's conversation; exit this session while the owner keeps supervision."
     fi

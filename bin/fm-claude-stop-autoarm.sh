@@ -13,7 +13,8 @@
 #   - Identity: only when THIS session holds state/.lock, as
 #     bin/fm-session-lock-lib.sh decides it. An owned Stop refreshes a stale
 #     publisher through fm-lock.sh before the helper chain can detach; an
-#     already-current sidecar takes no claim lock and stays untouched.
+#     already-current sidecar takes no claim lock and stays untouched. A failed
+#     refresh warning reaches the session only when that Stop rewakes.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A foreign live owner, missing lock, malformed lock, or unresolved
@@ -220,6 +221,7 @@ elif TRUSTED_SESSION_ID=$(fm_session_lock_trusted_session_id) \
     fm_session_lock_owned_by_self "$STATE" || exit 0
   else
     REFRESH_RC=$?
+    fm_session_lock_owned_by_self "$STATE" || exit 0
     printf 'warning: session-lock publisher refresh failed (exit %s); continuing supervision with proven ownership\n' "$REFRESH_RC" >&2
   fi
 fi

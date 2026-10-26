@@ -256,12 +256,14 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded
-  echo "error: $(fm_session_lock_refusal_advice "$STATE")" >&2
+  local recorded trusted
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
     echo "error: another live firstmate session holds the lock (pid $1); operate read-only until resolved" >&2
+  fi
+  if trusted=$(fm_session_lock_trusted_session_id) && [ "$trusted" = "$recorded" ]; then
+    echo "error: $(fm_session_lock_refusal_advice "$STATE")" >&2
   fi
   exit 1
 }

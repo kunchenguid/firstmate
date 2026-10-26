@@ -105,7 +105,7 @@ That verdict accepts either of two cases:
 
 An owned Stop delegates a stale publisher refresh to `bin/fm-lock.sh` before the away and need exits so an attached session can upgrade before its helper chain detaches.
 The refresh keeps the recorded id and lock anchor unchanged; a current sidecar needs no claim lock.
-A failed refresh reports its exit status and leaves that owned Stop free to arm; the next Stop tries again.
+A failed refresh leaves a still-owned Stop free to arm and retries at the next Stop; its warning reaches the session only when that Stop rewakes.
 With that verdict, a background session keeps arming after its transient helper chain is recycled.
 [Claude lock upgrade and restart](turnend-guard.md#claude-lock-upgrade-and-restart) describes the restart cases and their visible symptoms.
 [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns the Claude guard's behavior when that live owner is genuinely another session.

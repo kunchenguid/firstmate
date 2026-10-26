@@ -344,7 +344,7 @@ Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a sess
 `bin/fm-session-lock-lib.sh` owns the trusted Claude identity and publisher test; `bin/fm-lock.sh` owns its sidecar format, ancestry-confirmed legacy upgrade, and re-anchor transaction.
 `tests/fm-session-lock-ancestry.test.sh` drives ancestry and publisher evidence apart, preserves the detached frontend re-anchor and same-process re-key, and checks lease and rewake movement.
 Its Stop-only phase upgrades a legacy publisher before bridge recycling, and the post-recycle Stop is admitted before SessionStart re-anchors the lock.
-A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh reports its status and still rewakes.
+A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh leaves a still-owned Stop free to arm, with its warning reaching the session only when that Stop rewakes.
 Alternating shared-ancestor Stops preserve the recorded id, lock anchor and mtime; a failed publisher write restores the sidecar mtime.
 It also covers Windows pid tags, publication failures, missing or malformed publisher evidence, and refusal of an exited or unverified publisher over a live lock.
 `tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
@@ -393,6 +393,7 @@ bash tests/fm-turnend-foreign-owner-arm-fix.test.sh
 ```
 
 Observed output, bounded to the affected guarantees:
+The refresh-failure line below came from a Stop that rewoke; it does not establish warning delivery on exit-0 Stops.
 
 ```text
 ok - session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime

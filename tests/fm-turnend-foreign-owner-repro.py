@@ -175,7 +175,8 @@ try:
     )
     print("second-session acquisition", "rc=" + str(acquisition.returncode), "stdout=" + repr(acquisition.stdout), "stderr=" + repr(acquisition.stderr), flush=True)
     require("lock_rc=1" in acquisition.stdout, "foreign session unexpectedly acquired the session lock")
-    require("another live firstmate session holds the lock" in acquisition.stderr, "lock refusal lost its ownership diagnostic")
+    require(len(acquisition.stderr.splitlines()) == 1 and acquisition.stderr.startswith("error: another live firstmate session holds the lock"),
+            "the second-session refusal must contain only the original ownership line")
 
     auto = autoarm(env, "nonowner autoarm")
     require(auto.returncode == 0, "foreign-owner auto-arm must exit safely")
@@ -257,8 +258,9 @@ try:
     accepted_log = (OUT / "same-accepted.txt").read_text(errors="replace")
     print("same-session acquisition", "rc=" + (same / "state/accepted-rc").read_text().strip(), "pid=" + accepted_pid, "output=" + repr(accepted_log), flush=True)
     require((same / "state/accepted-rc").read_text().strip() == "1", "a second live model loop acquired the same conversation's lock")
-    require("second process resuming" in accepted_log and "exit this session" in accepted_log,
-            "the live-publisher acquisition gave the wrong remedy")
+    require(len(accepted_log.splitlines()) == 2 and accepted_log.startswith("error: another live firstmate session holds the lock")
+            and "second process resuming" in accepted_log.splitlines()[1] and "exit this session" in accepted_log.splitlines()[1],
+            "the live-publisher acquisition must print ownership before its remedy")
     require(same_owner.poll() is None, "the original owner exited, so the refusal proves nothing over a live line 1")
     require(accepted_pid != same_lock_owner, "the same-session acquisition ran as the original owner")
     require(session_lock_text(same_lock) == same_lock_owner, "the resumed second process moved the live owner's lock")
@@ -270,6 +272,8 @@ try:
     print("other-session acquisition", "rc=" + str(refused.returncode), "stdout=" + repr(refused.stdout), "stderr=" + repr(refused.stderr), flush=True)
     require("lock_rc=1" in refused.stdout, "a different session id acquired the live lock")
     require(f"pid {same_lock_owner}, session synthetic-same" in refused.stderr, "the refusal did not name the original pid and the recorded session id")
+    require(len(refused.stderr.splitlines()) == 1 and refused.stderr.startswith("error: another live firstmate session holds the lock"),
+            "the different-id refusal must contain only the original ownership line")
     same_stop = guard(same_env, "same-session stop", prefix="export CLAUDE_PID=$$; ")
     require(same_stop.returncode == 0, "a resumed foreign Stop must end safely")
     require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in same_stop.stdout, "a resumed process lost the foreign-owner diagnostic")
@@ -293,6 +297,9 @@ try:
     saved = {path: path.read_bytes() for path in (same_lock, sidecar, lease, epoch)}
     dead_publisher = run(same_env, 'export CLAUDE_PID=$$; "$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; exit "$rc"')
     require(dead_publisher.returncode == 1, "an exited publisher let an outsider re-anchor the live frontend")
+    require(len(dead_publisher.stderr.splitlines()) == 2 and dead_publisher.stderr.startswith("error: another live firstmate session holds the lock")
+            and "if this is a second process, exit it instead" in dead_publisher.stderr.splitlines()[1],
+            "the dead-publisher refusal must print ownership before its qualified restart advice")
     require("legacy record or a replaced model loop" in dead_publisher.stderr and "restarting the main session" in dead_publisher.stderr,
             "the dead-publisher refusal omitted the restart diagnostic")
     dead_stop = guard(same_env, "dead-publisher stop", prefix="export CLAUDE_PID=$$; ")
