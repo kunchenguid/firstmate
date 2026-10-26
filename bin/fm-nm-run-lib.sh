@@ -17,24 +17,23 @@
 # false positive lets teardown act on a run it does not own.
 #
 # Bounded call to an arbitrary command in dir $1, timeout $2 seconds, and its
-# `no-mistakes "$@"` specialization. The bounded
-# form preserves stdout, stderr, and exit status; the checked form discards
-# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# `no-mistakes "$@"` specialization. The bounded form preserves stdout, stderr,
+# and legacy mechanism-specific status: ordinary exits pass through, but Perl's
+# shifted wait status is 0 for signal death. The checked form discards stderr,
+# while fm_nm_run keeps the fail-open query contract for read-only callers.
+# fm-timeout-lib.sh owns execution and cancellation cleanup; this API requires
+# timeout, gtimeout, or Perl and refuses with 1 rather than use the bash fallback.
+# tests/fm-timeout-lib.test.sh covers query compatibility; fm-timeout-lib.sh's
+# header owns cancellation coverage and limits.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
-fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+fm_nm_bounded() (  # <dir> <timeout_secs> <command> <args...>
+  local dir=$1 timeout_secs=$2 _FM_RUN_TIMED_RAW_STATUS=1 FM_TIMEOUT_MECHANISM_OVERRIDE=''
   shift 2
-  if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
-  elif command -v perl >/dev/null 2>&1; then have_timeout=perl
-  fi
-  case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
-    *)        return 1 ;;
-  esac
-}
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+  [ "$(fm_timeout_mechanism)" != bash ] || return 1
+  cd "$dir" && fm_run_timed "$timeout_secs" "$@"
+)
 
 # Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
 # per isolated workspace, each against its own NM_HOME. The home cannot be

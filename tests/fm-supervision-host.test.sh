@@ -202,21 +202,24 @@ stop_home_processes() {  # <home>
   pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
   [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
   while IFS= read -r pid; do
-    if [ -e "$home/session.stop" ]; then
-      wait "$pid" 2>/dev/null || true
-    else
+    if [ ! -e "$home/session.stop" ]; then
       kill -TERM "$pid" 2>/dev/null || true
     fi
+    wait "$pid" 2>/dev/null || true
   done < <(cat "$home/claude-pids" 2>/dev/null)
   while IFS= read -r pid; do
     kill -TERM "$pid" 2>/dev/null || true
   done < <(cat "$home/orphan-pid" 2>/dev/null)
 }
-suite_cleanup() {
+case_cleanup() {
   local home
   while IFS= read -r home; do
     [ -n "$home" ] && stop_home_processes "$home"
   done < <(cat "$HOMES_FILE" 2>/dev/null)
+  : > "$HOMES_FILE"
+}
+suite_cleanup() {
+  case_cleanup
   fm_test_cleanup
 }
 trap suite_cleanup EXIT
@@ -3385,6 +3388,9 @@ SH
   pass "host+hook: hand-back retry submits only to the idle owning pane without replacing human input"
 }
 
+# Earlier cases must not leave polling sessions, hosts, or successor watchers
+# competing with later cases' bounded waits and descendant snapshots.
+tests=(
 test_main_only_close_after_handled_turn_restores_inherited_handling
 test_main_only_close_after_handled_turn_delivers_restore_failure
 test_returned_driver_is_caught_attended
@@ -3472,3 +3478,8 @@ test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_tagged_lock_holder_reaches_the_engine_whole
 test_superseded_host_leaves_the_owner_untouched
+)
+for test in "${tests[@]}"; do
+  "$test"
+  case_cleanup
+done
