@@ -685,6 +685,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/fleet-flow-lane-cap.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "addons/.agents/skills/done-done-verify-firstmate-addons/features/fleet-pulse-newest-retro.md",
       "audience": "agent-runtime"
     },
