@@ -277,6 +277,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "BACKLOG.md",
+      "audience": "public-product"
+    },
+    {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
     },

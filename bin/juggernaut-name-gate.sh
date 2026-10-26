@@ -25,6 +25,8 @@
 #      Each ALLOWED_FILES entry is one exact path whose comment names the caller
 #      that still calls it and the condition that removes the entry. There is
 #      no blanket old-prefix exemption, so an alias covers nothing but itself.
+#      An archival record of a retired repository is the second case: the links
+#      it preserves have to keep the names the forge gave them.
 #
 # This gate's own path is allow-listed because it defines the strings it
 # searches for; it is the one file that must keep them.
@@ -38,6 +40,7 @@ BASE_PATTERN='firstmate|fm-'
 #   "bin/fm-update.sh"   # alias; called by live home state/juggernaut-rename; drop when no home calls it
 ALLOWED_FILES=(
   "bin/juggernaut-name-gate.sh" # this gate: it must name what it forbids
+  "BACKLOG.md"                 # archival record of the two retired repositories, called by nothing: its preserved branch and pull request links must keep their historical names; drop this entry when the last item and branch listed in it is closed
 )
 
 # Lines inside a tracked file that may keep the old name, as "path|extended-regex".
