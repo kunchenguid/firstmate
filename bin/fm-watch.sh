@@ -2518,7 +2518,7 @@ wait_gate_check() {  # <window> <task>
   state=${line#state: }; state=${state%% *}
   src=${line#*source: }; src=${src%% *}
   if [ "$state" != parked ] || [ "$src" != run-step ]; then
-    rm -f "$gate_file"
+    case "$state" in ''|unknown) ;; *) rm -f "$gate_file" ;; esac
     return 0
   fi
   [ "$(cat "$gate_file" 2>/dev/null || true)" != "$line" ] || return 0
