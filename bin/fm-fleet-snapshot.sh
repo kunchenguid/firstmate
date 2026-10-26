@@ -215,20 +215,20 @@ esac
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# The classifier also loads fm_run_timed; reuse that bounded-execution owner.
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
-# shellcheck source=bin/fm-timeout-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 # shellcheck source=bin/fm-merge-authority-lib.sh
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -381,13 +381,15 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
+# Isolate this read-only projection from the fleet collector's shell state.
+backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
 
+  set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
@@ -570,8 +572,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable = (.hold_bucket == "live")
         else . end)
     | del(.section,.order)
-  ' < "$backlog"
-}
+  ' < "$backlog" | fm_hold_reason_decode_stream json
+)
 
 SNAPSHOT_TASK_DIR=
 SNAPSHOT_TASK_METAS=()
@@ -1990,8 +1992,15 @@ contribution_tasks_json() {
 
 if [ "$OUTPUT_MODE" = contribution-input ]; then
   # Reuse the canonical backlog parser, without observing workers or other homes.
+  # The backlog JSON can exceed Linux MAX_ARG_STRLEN (128 KiB) as one --argjson
+  # argument, so both documents ride temp files via --slurpfile instead of argv.
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
-  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
+  contribution_input_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.contrib.XXXXXX") || { echo "fm-fleet-snapshot: contribution temp dir failed" >&2; exit 1; }
+  # shellcheck disable=SC2064  # The trap resolves this invocation's directory at exit.
+  trap 'rm -rf -- "$contribution_input_dir"' EXIT
+  printf '%s' "$BACKLOG_JSON" > "$contribution_input_dir/backlog.json" || { echo "fm-fleet-snapshot: contribution backlog write failed" >&2; exit 1; }
+  printf '%s' "$contribution_tasks" > "$contribution_input_dir/tasks.json" || { echo "fm-fleet-snapshot: contribution tasks write failed" >&2; exit 1; }
+  jq -n --slurpfile backlog "$contribution_input_dir/backlog.json" --slurpfile tasks "$contribution_input_dir/tasks.json" '{backlog:$backlog[0],tasks:$tasks[0]}' || { echo "fm-fleet-snapshot: contribution input assembly failed" >&2; exit 1; }
   exit 0
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }

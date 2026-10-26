@@ -3,7 +3,7 @@
 Audience: maintainer verification.
 
 This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution") and the declared rule and profile fields owned there under "Crew dispatch profiles".
-It records only facts that must be re-established when the typesafe.ai model, its API, or firstmate's dispatch rules change.
+It records only facts that must be re-established when a decision provider, its API, or firstmate's dispatch rules change.
 Task chronology, the captain's rules, and the briefs themselves stay in the private scout report.
 
 ## The API the tool depends on
@@ -14,6 +14,9 @@ Verified 2026-09-16 against `https://api.typesafe.ai`.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
+
+OpenRouter's [Jev 1.13 model catalog entry](https://openrouter.ai/typesafe/jev-1.13) listed `typesafe/jev-1.13` at $0.042 per million input tokens and $0 per million output tokens on 2026-10-12.
+OpenRouter's [Decisions API guide](https://openrouter.ai/blog/insights/what-is-jev/) specifies `POST https://openrouter.ai/api/alpha/decisions` with the same `{model, state, questions}` Choice request and typed Choice answer.
 
 ## Live rule match against real briefs
 
@@ -106,10 +109,12 @@ It proves the absent key (environment and `.env`) prints one stderr line, nothin
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the default typesafe.ai request keeps its fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It also proves OpenRouter requires an explicit provider and model, accepts the environment or `.env` key, sends the same Choice request to the Decisions API, preserves clear and ambiguous output, withholds a never-send match, and handles malformed responses and HTTP errors.
+The fake `curl` and `quota-axi` prove that the OpenRouter key stays out of their argv and environments.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+`tests/fm-bootstrap.test.sh` covers bootstrap's typesafe-key validation gate and child-environment protection; [configuration](../configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns that gate's operator contract.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1

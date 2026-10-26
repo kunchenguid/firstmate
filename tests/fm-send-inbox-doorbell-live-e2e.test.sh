@@ -4,14 +4,17 @@
 #
 # The steering inbox's one behavioral assumption is that a real worker agent
 # follows the constant self-describing doorbell line: list the inbox, read and
-# act on its records in numeric order, then mv each into handled/. A stub can
-# only confirm the assumption already
-# written into the stub, so per .agents/skills/firstmate-coding-guidelines
-# this is proven against every INSTALLED verified harness: each is launched
-# idle in an isolated tmux server, steered through the REAL fm-send (durable
-# record + doorbell), and must both ACT on the instruction (create a named
-# file) and ACKNOWLEDGE it (the mv into handled/), failing loudly with the
-# harness name and version.
+# act on its records in numeric order, then mv each into handled/. The
+# doorbell names the inbox as "$FM_TASK_INBOX", so each worker is launched the
+# way bin/fm-spawn.sh launches it, with FM_TASK_INBOX exported to its home's
+# state/<task>.inbox, and receives no brief at all: it must resolve the inbox
+# from the doorbell plus its own environment. A stub can only confirm the
+# assumption already written into the stub, so per
+# .agents/skills/firstmate-coding-guidelines this is proven against every
+# INSTALLED verified harness: each is launched idle in an isolated tmux server,
+# steered through the REAL fm-send (durable record + doorbell), and must both
+# ACT on the instruction (create a named file) and ACKNOWLEDGE it (the mv into
+# handled/), failing loudly with the harness name and version.
 #
 # Run explicitly with FM_SEND_INBOX_LIVE_E2E=1. This test spends a small
 # number of real model tokens per installed harness (one short turn each) -
@@ -82,7 +85,7 @@ harness_version() {  # <binary>
 launch_cmd() {  # <name>
   case "$1" in
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\''' ;;
-    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox' ;;
+    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox --disable hooks' ;;
     opencode) printf '%s' "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode" ;;
     pi|pi-signed) printf '%s' "$1" ;;
     grok) printf '%s' 'grok --always-approve' ;;
@@ -91,6 +94,17 @@ launch_cmd() {  # <name>
     *) return 1 ;;
   esac
 }
+
+# codex's crewmate launch in bin/fm-spawn.sh carries --disable hooks because the
+# hook-trust modal ("N hooks are new or changed") opens on "Review hooks" and
+# firstmate's key plane has no arrow navigation to move off it. Without the flag
+# this guard parks on that dialog for the whole timeout and reports the doorbell
+# unhonored, which is a dialog verdict rather than a doorbell one, so pin the
+# switch here instead of letting the codex check go quietly unprovable again.
+case "$(launch_cmd codex)" in
+  *'--disable hooks'*) ;;
+  *) fail 'codex launch recipe lost --disable hooks; the check would park on the hook-trust modal instead of judging the doorbell' ;;
+esac
 
 # Wait for the harness to look steerable. 0 = the composer classified a
 # proven empty; 2 = the readiness budget expired without an empty verdict but
@@ -131,7 +145,7 @@ check_harness_doorbell() {  # <name>
   task="live-$name"
   acted="$LAB/acted-$name"
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
-    -- bash -lc "$cmd" \
+    -- bash -lc "export FM_TASK_INBOX=$(printf '%q' "$home/state/$task.inbox"); $cmd" \
     || { FAILED=1; printf 'not ok - %s (%s): could not launch in the isolated tmux server\n' "$name" "$version" >&2; return 0; }
   wait_ready "$win"; ready_rc=$?
   if [ "$ready_rc" -eq 1 ]; then

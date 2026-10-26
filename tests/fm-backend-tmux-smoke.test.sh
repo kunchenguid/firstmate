@@ -43,7 +43,7 @@ cleanup_all() {
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec "$REAL_TMUX" -f /dev/null -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"
@@ -56,11 +56,19 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 SESSION="smoke"
 WINDOW="fm-smoke1"
 TARGET="$SESSION:$WINDOW"
+OTHER_SESSION="smoke-other"
+PREFIX_SESSION="smoke-prefix-live"
 
 # --- create session ----------------------------------------------------------
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+tmux new-session -d -s "$OTHER_SESSION" -x 200 -y 50 \
+  || fail "real tmux: second new-session failed"
+tmux new-session -d -s "$PREFIX_SESSION" -n "$WINDOW" -x 200 -y 50 \
+  || fail "real tmux: prefix-sharing session failed"
+tmux new-session -d -s firstmate -n supervisor -x 200 -y 50 \
+  || fail "real tmux: default supervisor session failed"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
@@ -156,6 +164,94 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- target_exists requires exact window and pane membership ----------------
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists should report the existing window present"
+pass "real tmux: fm_backend_target_exists finds an existing window"
+
+LIVE_PANE=$(tmux display-message -p -t "$TARGET" '#{pane_id}') \
+  || fail "could not read the existing pane id"
+fm_backend_target_exists tmux "$LIVE_PANE" \
+  || fail "fm_backend_target_exists should report the existing pane present"
+pass "real tmux: fm_backend_target_exists finds an existing pane"
+
+LIVE_WINDOW_ID=$(tmux display-message -p -t "$TARGET" '#{window_id}') \
+  || fail "could not read the existing window id"
+LIVE_WINDOW_INDEX=$(tmux display-message -p -t "$TARGET" '#{window_index}') \
+  || fail "could not read the existing window index"
+LIVE_PANE_INDEX=$(tmux display-message -p -t "$TARGET" '#{pane_index}') \
+  || fail "could not read the existing pane index"
+
+for exact_target in "$LIVE_WINDOW_ID" "$SESSION:$LIVE_WINDOW_ID"; do
+  fm_backend_target_exists tmux "$exact_target" \
+    || fail "fm_backend_target_exists rejected live window-id target $exact_target"
+done
+pass "real tmux: fm_backend_target_exists accepts bare and session-scoped window ids"
+
+for indexed_target in "$SESSION:$LIVE_WINDOW_INDEX" firstmate:0; do
+  fm_backend_target_exists tmux "$indexed_target" \
+    || fail "fm_backend_target_exists rejected live window-index target $indexed_target"
+done
+pass "real tmux: fm_backend_target_exists accepts window indexes including firstmate:0"
+
+fm_backend_target_exists tmux "$SESSION:$LIVE_WINDOW_INDEX.$LIVE_PANE_INDEX" \
+  || fail "fm_backend_target_exists rejected live index.pane target"
+pass "real tmux: fm_backend_target_exists accepts index.pane targets"
+
+for exact_target in "$SESSION" "=$SESSION:=$WINDOW"; do
+  fm_backend_target_exists tmux "$exact_target" \
+    || fail "fm_backend_target_exists rejected exact target $exact_target"
+done
+pass "real tmux: fm_backend_target_exists accepts a bare session and explicit exact markers"
+
+if fm_backend_target_exists tmux "smoke-prefix:$WINDOW"; then
+  fail "fm_backend_target_exists prefix-matched a missing session"
+fi
+pass "real tmux: fm_backend_target_exists anchors the session name"
+
+for malformed_target in '' : "$SESSION:" ":$WINDOW" "$SESSION:$WINDOW:extra"; do
+  if fm_backend_target_exists tmux "$malformed_target"; then
+    fail "fm_backend_target_exists accepted malformed target '$malformed_target'"
+  fi
+done
+pass "real tmux: fm_backend_target_exists rejects malformed targets"
+
+# A gone name that prefixes a live neighbor is the dangerous send-keys case:
+# tmux itself would fall through to the neighbor, so the adapter must stop first.
+tmux new-window -d -t "$SESSION:" -n fm-t10 \
+  || fail "real tmux: prefix-neighbor window failed"
+tmux new-window -d -t "$SESSION:" -n fm-t1 \
+  || fail "real tmux: gone-prefix window failed"
+tmux kill-window -t "=$SESSION:=fm-t1" \
+  || fail "real tmux: could not remove the gone-prefix window"
+tmux send-keys -t "$SESSION:fm-t10" \
+  "bash -c 'printf \"prefix-neighbor-ready\\n\"; read -r -n 1 key; printf \"%s\" \"\$key\" > \"$SHIM_DIR/key-capture\"'" Enter
+wait_for_capture_text "$SESSION:fm-t10" prefix-neighbor-ready \
+  || fail "real tmux: prefix-neighbor reader did not become ready"
+if fm_backend_tmux_send_key "$SESSION:fm-t1" X; then
+  fail "fm_backend_tmux_send_key accepted a gone prefix target"
+fi
+sleep 0.1
+[ ! -e "$SHIM_DIR/key-capture" ] \
+  || fail "fm_backend_tmux_send_key delivered a key to the prefix neighbor"
+pass "real tmux: fm_backend_tmux_send_key withholds a key from a gone prefix target"
+
+# A gone dotted task window must not resolve as a pane of its undotted neighbor.
+tmux new-window -d -t "$SESSION:" -n fm-v1 \
+  || fail "real tmux: undotted neighbor window failed"
+DOTTED_WINDOW_ID=$(tmux new-window -d -P -F '#{window_id}' -t "$SESSION:" -n fm-v1.0) \
+  || fail "real tmux: dotted window failed"
+tmux kill-window -t "$DOTTED_WINDOW_ID" \
+  || fail "real tmux: could not remove the dotted window"
+if fm_backend_target_exists tmux "$SESSION:fm-v1.0"; then
+  fail "fm_backend_target_exists reported a gone dotted window present beside fm-v1"
+fi
+if fm_backend_tmux_send_key "$SESSION:fm-v1.0" X; then
+  fail "fm_backend_tmux_send_key accepted a gone dotted target"
+fi
+pass "real tmux: a gone dotted window reads absent beside its undotted neighbor"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
@@ -165,9 +261,48 @@ fi
 state=$(fm_backend_agent_state tmux "$TARGET")
 [ "$state" = missing ] \
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "fm_backend_target_exists still reports the killed window present"
+fi
+pass "real tmux: fm_backend_target_exists rejects a killed window while another session stays alive"
+
+if fm_backend_target_exists tmux "smoke-missing:$WINDOW"; then
+  fail "fm_backend_target_exists reports a window in a missing session present"
+fi
+tmux has-session -t "$OTHER_SESSION" \
+  || fail "the second session should remain alive while missing-session membership is checked"
+pass "real tmux: fm_backend_target_exists rejects a missing session while another session stays alive"
+
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
+
+# --- container resolution under a grouped session ---------------------------
+
+# An external client attached through a grouped session (`new-session -t`) is
+# the most recently used member of the group; the container must still be the
+# session of firstmate's own pane.
+OWN_SID=$(tmux display-message -p -t "$SESSION" '#{session_id}')
+OWN_SID=${OWN_SID#\$}
+tmux new-session -d -s smoke-viewer -t "$SESSION" \
+  || fail "real tmux: grouped viewer session failed"
+tmux select-window -t smoke-viewer:0 >/dev/null 2>&1 || true
+got=$(TMUX="/fake,0,$OWN_SID" fm_backend_tmux_container_ensure)
+[ "$got" = "$SESSION" ] \
+  || fail "container_ensure chose '$got' instead of the pane's own session '$SESSION' beside a grouped session"
+pass "real tmux: container_ensure names the pane's own session, not a more recent grouped session"
+
+# A pane opened from the viewer's session keeps the viewer's id in $TMUX after
+# the viewer closes; tmux answers that stale id with empty output and exit 0,
+# so the container must come from the pane's surviving session instead.
+VIEWER_SID=$(tmux display-message -p -t smoke-viewer '#{session_id}')
+VIEWER_SID=${VIEWER_SID#\$}
+OWN_PANE=$(tmux display-message -p -t "$SESSION:0" '#{pane_id}')
+tmux kill-session -t smoke-viewer || fail "real tmux: killing the grouped viewer session failed"
+got=$(TMUX="/fake,0,$VIEWER_SID" TMUX_PANE="$OWN_PANE" fm_backend_tmux_container_ensure)
+[ "$got" = "$SESSION" ] \
+  || fail "container_ensure chose '$got' instead of the pane's surviving session '$SESSION' for a stale \$TMUX session id"
+pass "real tmux: container_ensure falls back to the pane's surviving session when the \$TMUX session id is stale"
 
 cleanup_all
 trap - EXIT

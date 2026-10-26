@@ -44,7 +44,12 @@ const ANSI_FOREGROUND: Record<Exclude<CalmWorkingShipColor, "plain">, string> = 
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
-export const CALM_WORKING_SHIP_WIDGET_KEY = "firstmate-calm-working-ship";
+// The working-row widget slot is deliberately shared with the standalone Pi Calm
+// extension, which installs its boat under the same "calm-working-ship" key. Pi
+// replaces widgets under one key, so a session that loads both Calms renders a
+// single boat and a session loading either alone is unchanged. Rename the slot
+// in both implementations together, or dual-install sessions duplicate the boat.
+export const CALM_WORKING_SHIP_WIDGET_KEY = "calm-working-ship";
 
 export type CalmWorkingShipAnimation = Omit<CalmWorkingShipSprite, "frame"> & {
   /** Render one frame that exactly fits `width`, clamping the track to it first. */

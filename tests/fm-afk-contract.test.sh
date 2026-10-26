@@ -560,9 +560,114 @@ test_record_changes_refuse_while_a_reader_holds_the_lock() {
   pass "enter and archive refuse while the record is locked, and proceed once it clears"
 }
 
+# Daemon-backed quiet mode writes the same record with `mode: quiet`, and the
+# captain is present: its entry, refresh, and read-back must never read as
+# hold-for-return (the live /quiet finding where a present captain's requested
+# local landing was held until /quiet off), while an away record keeps its
+# hold-for-return reading unchanged.
+test_quiet_record_reads_as_a_present_captain_holding_nothing() {
+  local home out
+  home=$(make_home quiet-present)
+  out=$(FM_AFK_MODE=quiet contract "$home" enter 2>&1) || fail "quiet entry failed: $out"
+  assert_contains "$out" 'Quiet mode recorded at ' 'quiet announcement names quiet mode'
+  assert_contains "$out" 'nothing waits for your return' 'quiet announcement says nothing is held'
+  assert_contains "$out" 'a local landing or a merge included, proceeds now under ordinary attended authority' 'quiet announcement names requested actions proceeding'
+  assert_contains "$out" 'Quiet mode (recorded):' 'quiet read-back title'
+  assert_not_contains "$out" 'hold-for-return' 'a quiet entry must not read as hold-for-return'
+  assert_not_contains "$out" 'Away posture' 'a quiet entry must not call itself the away posture'
+  assert_not_contains "$out" 'Spend cap' 'a quiet entry must not announce an away spend cap'
+  [ "$(contract "$home" mode)" = quiet ] || fail "mode of a quiet record is not quiet: $(contract "$home" mode)"
+  out=$(contract "$home" readback) || fail "quiet readback failed"
+  assert_contains "$out" 'Quiet mode (recorded):' 'quiet readback title'
+  assert_not_contains "$out" 'hold-for-return' 'a quiet read-back must not read as hold-for-return'
+  out=$(FM_AFK_MODE=quiet contract "$home" enter 2>&1) || fail "quiet refresh failed: $out"
+  assert_contains "$out" 'quiet mode already recorded at ' 'a quiet refresh names quiet mode'
+  assert_not_contains "$out" 'hold-for-return' 'a quiet refresh must not read as hold-for-return'
+  [ "$(contract "$home" mode)" = quiet ] || fail "a quiet refresh changed the mode"
+
+  home=$(make_home away-still-holds)
+  out=$(contract "$home" enter 2>&1) || fail "away entry failed: $out"
+  assert_contains "$out" 'Away posture recorded at ' 'away announcement unchanged'
+  assert_contains "$out" 'hold-for-return only' 'away announcement still holds for the return'
+  [ "$(contract "$home" mode)" = away ] || fail "mode of an away record is not away"
+  printf 'version: 2\nmode: bogus\n' > "$home/other-record"
+  [ "$(contract "$home" mode --path "$home/other-record")" = away ] \
+    || fail "a record without a valid quiet mode must read as away"
+  out=$(contract "$home" mode --path "$home/absent" 2>&1) && fail "mode of a missing record succeeded: $out"
+  pass "a quiet record announces, refreshes, and reads back as a present captain holding nothing, while an away record keeps hold-for-return"
+}
+
+# The mode written follows who is present: an /afk entry over quiet mode (a
+# refresh included) makes the record away, and a quiet entry never turns a
+# standing away record quiet, because the captain's return comes first.
+test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
+  local home out quiet_entered
+  home=$(make_home quiet-to-away)
+  FM_AFK_MODE=quiet contract "$home" enter >/dev/null 2>&1 || fail "quiet entry failed"
+  quiet_entered=$(contract "$home" field entered_epoch)
+  out=$(contract "$home" enter 2>&1) || fail "away refresh over quiet failed: $out"
+  assert_contains "$out" 'quiet mode became the away posture' 'the conversion names itself'
+  assert_contains "$out" 'hold-for-return only' 'the converted record holds for the return'
+  [ "$(contract "$home" mode)" = away ] || fail "an /afk refresh over quiet mode left the record quiet"
+  ls "$home/state/afk-contracts/$quiet_entered-superseded-"*.afk-contract >/dev/null 2>&1 \
+    || fail "the quiet record was not archived when it became away"
+
+  home=$(make_home away-not-masked)
+  contract "$home" enter --words 'merge it when green' >/dev/null 2>&1 || fail "away entry failed"
+  out=$(FM_AFK_MODE=quiet contract "$home" enter 2>&1) || fail "quiet refresh over away failed: $out"
+  assert_contains "$out" 'hold-for-return only' 'a quiet refresh over away still reads away'
+  [ "$(contract "$home" mode)" = away ] || fail "a quiet refresh turned an away record quiet"
+  FM_AFK_MODE=quiet contract "$home" enter --words 'new words' >/dev/null 2>&1 || fail "quiet replacement over away failed"
+  [ "$(contract "$home" mode)" = away ] || fail "a quiet replacement turned an away record quiet"
+  pass "an away entry over quiet mode records away, and a quiet entry never masks a standing away record"
+}
+
+# The spend cap entry records without --spend is the parallelism already
+# standing in this home, counted exactly the way the later refusal counts it, so
+# away mode never narrows work that is already under way. The earlier default
+# stays a floor, and a secondmate is a persistent home rather than spend.
+test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
+  local home out i
+  home=$(make_home spend-live-above)
+  for i in 1 2 3 4 5 6; do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  [ "$(contract "$home" live-workers)" = 6 ] \
+    || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
+  out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
+    || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
+  assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
+
+  home=$(make_home spend-live-below)
+  fm_write_meta "$home/state/task-1.meta" "window=fm-task-1" "kind=ship"
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  out=$(contract "$home" enter --words 'quiet lane' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+    || fail "a home below the floor did not keep the default cap: $(contract "$home" field spend_max_concurrent_workers)"
+
+  home=$(make_home spend-live-empty)
+  out=$(contract "$home" enter --words 'nothing running' 2>&1) || fail "entry failed: $out"
+  [ "$(contract "$home" live-workers)" = 0 ] || fail "an empty home did not count zero workers"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+    || fail "an empty home recorded a cap other than the default floor"
+
+  home=$(make_home spend-live-explicit)
+  for i in 1 2 3 4 5 6; do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  contract "$home" enter --words 'hold it down' --spend 2 >/dev/null 2>&1 || fail "explicit entry failed"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] \
+    || fail "an explicit --spend lost to the live count"
+  pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
+test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
 test_retired_two_step_entry_is_refused_by_name
 test_enter_removes_a_legacy_proposal_without_promoting_it
 test_same_turn_entry_pre_authorizes_nothing_on_the_never_set
@@ -578,3 +683,5 @@ test_retired_clause_and_grant_inputs_are_usage_errors_by_name
 test_version_1_record_still_validates_reads_and_archives
 test_version_1_record_is_replaced_by_a_version_2_record
 test_record_changes_refuse_while_a_reader_holds_the_lock
+test_quiet_record_reads_as_a_present_captain_holding_nothing
+test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away

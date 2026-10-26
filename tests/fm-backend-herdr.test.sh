@@ -16,6 +16,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -68,6 +70,7 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.err" ] && cat "$RESP/$n.err" >&2
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -123,6 +126,14 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
   printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
   printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
   printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/4.out"
+}
+
+# herdr_submit_preflight_prefix: fm_backend_send_text_submit reads the composer
+# once before the adapter types. That read is call 1 and shows an empty
+# composer, so every adapter call moves one slot later.
+herdr_submit_preflight_prefix() {  # <resp-dir>
+  herdr_submit_shift "$1" 1
+  printf '  \xe2\x9d\xaf\n' > "$1/1.out"
 }
 
 # make_herdr_server_env_fakebin: a stateful server stub that records only the
@@ -313,7 +324,13 @@ test_version_check_refuses_old_protocol() {
 test_version_check_refuses_missing_herdr() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
+  # Hermetic PATH: the fakebin carries only bash (so the inner `bash -c`
+  # still resolves) and no system dir, so a real herdr installed under
+  # /usr/bin (or /bin -> usr/bin) cannot leak into this "not installed"
+  # simulation. fm_backend_herdr_tool_check needs no external tool on this
+  # path: `command -v` is a builtin and it short-circuits on herdr first.
+  ln -sf "$(command -v bash)" "$dir/empty-fakebin/bash"
+  out=$( PATH="$dir/empty-fakebin" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
@@ -547,6 +564,64 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# --- the bound agent session reference (relaunch session continuity) --------
+#
+# Herdr applies only reports carrying the session identity it bound to a pane,
+# and that registration survives its agent process in the crew shape above. A
+# worker relaunched with a FRESH session therefore reports into a pane that
+# ignores it and reads idle while it works. bin/fm-spawn.sh hands the
+# replacement the reference this read returns: the exact identity the
+# endpoint's own runtime recorded, never a guess about which session looks
+# recent. It must return that record and nothing else - a reference handed to
+# `pi --session` is a launch input, so an unreadable, foreign-shaped, or
+# non-resumable value degrades to the ordinary fresh launch.
+pane_agent_session_ref_read() {  # <agent-get-body> [exit-status]
+  local dir resp log fb
+  dir=$(mktemp -d "$TMP_ROOT/session-ref.XXXXXX")
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '%s\n' "$1" > "$resp/1.out"
+  [ -z "${2:-}" ] || printf '%s\n' "$2" > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_session_ref fmtest w1:p2' "$ROOT"
+}
+
+test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent() {
+  local out
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_status":"stale","agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/home/u/.pi/agent/sessions/--wt--/2026-09-20T07-14-40-136Z_01a0bdaa.jsonl"}}}}')
+  [ "$out" = $'pi\t/home/u/.pi/agent/sessions/--wt--/2026-09-20T07-14-40-136Z_01a0bdaa.jsonl' ] \
+    || fail "an absolute path reference must be reported with its agent label, got '$out'"
+
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","source":"herdr:pi","value":"01a0bdaa-c387-749d-966c-0dcd96a4b755"}}}}')
+  [ "$out" = $'pi\t01a0bdaa-c387-749d-966c-0dcd96a4b755' ] \
+    || fail "a bare session id must be reported as-is, got '$out'"
+  pass "herdr pane agent session: a resumable reference is reported with the agent label that reported it"
+}
+
+test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable() {
+  local out body
+  for body in \
+    '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}' \
+    '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"path","value":"relative/session.jsonl"}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","value":"not a token"}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","value":""}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"opaque","value":"whatever"}}}}' \
+    'not json at all'; do
+    out=$(pane_agent_session_ref_read "$body") \
+      && fail "an unresumable registration must report nothing resumable, but the read succeeded for: $body"
+    [ -z "$out" ] \
+      || fail "an unresumable registration read must print nothing (got '$out') for: $body"
+  done
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"path","value":"/abs/session.jsonl"}}}}' 1)
+  [ -z "$out" ] \
+    || fail "a failed agent read must print nothing, got '$out'"
+  pass "herdr pane agent session: anything unresumable degrades to a nonzero read with no output"
+}
+
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
   local out
   # A registered agent running a foreground tool in its own process group is
@@ -613,12 +688,16 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
 }
 
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
-  local lab sleep_bin shell_pid out shell_verdict
+  local lab standin sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # A symlink to a real long-running stand-in so the kernel records `pi` as the
+  # executable identity (tests/lib.sh fm_agent_standin owns why not host sleep).
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the agent-named descendant case cannot run"
+    return 0
+  }
+  ln -sf "$standin" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
   sh -c "'$lab/pi' 300; :" &
@@ -642,13 +721,16 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 }
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
-  local lab sleep_bin shell_pid out
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local lab standin shell_pid out
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the spaced-path descendant case cannot run"
+    return 0
+  }
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
+  ln -sf "$standin" "$lab/pi"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
   sleep 0.3
@@ -3042,6 +3124,68 @@ SH
   pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
 }
 
+# run_group_order_case <name> <group-key> <children-json-array>: one projected
+# create under parent w1 with the given existing children, then the new w9
+# last; the mover answers with w9 at the requested index. Prints the mover's
+# requested index, or nothing when no move was attempted.
+run_group_order_case() {
+  local name=$1 key=$2 children=$3 dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-group-$name"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  jq -cn --argjson children "$children" '
+    {result: {workspaces: ([{workspace_id: "w1", label: "firstmate"}] + $children
+      + [{workspace_id: "w9", label: "└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}])}}' > "$dir/base.json"
+  cp "$dir/base.json" "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.9.3","protocol":22},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" >> "$FM_FAKE_MOVER_LOG"
+jq -c --argjson at "$3" '
+  .result.workspaces as $w
+  | ([$w[] | select(.workspace_id != "w9")]) as $rest
+  | {id: "fm-workspace-move", result: {type: "workspace_list",
+      workspaces: ($rest[0:$at] + [$w[-1]] + $rest[$at:])}}' "$FM_FAKE_BASE"
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" FM_FAKE_BASE="$dir/base.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w9 firstmate w1 "$1"' "$ROOT" "$key" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "group ordering $name must not fail the spawn: $out"
+  [ -z "$out" ] || fail "group ordering $name emitted a warning: $out"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "group ordering $name called workspace close"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "group ordering $name renamed a workspace"
+  cat "$mover_log"
+}
+
+test_projection_order_group_key_places_new_task_inside_its_group() {
+  local tagged at
+  tagged='[{"workspace_id":"w2","label":"└ a · p:AbCdEfGhIjKlMnOpQrStU1","tokens":{"fm_group_order":"001.Web"}},
+           {"workspace_id":"w3","label":"└ b · p:AbCdEfGhIjKlMnOpQrStU2","tokens":{"fm_group_order":"001.Web"}},
+           {"workspace_id":"w4","label":"└ c · p:AbCdEfGhIjKlMnOpQrStU3","tokens":{"fm_group_order":"003.Other"}},
+           {"workspace_id":"wH","label":"captain-notes"}]'
+  at=$(run_group_order_case middle 002.Backend "$tagged")
+  [ "$at" = 3 ] || fail "a new group-2 task must land after the group-1 children and before group 3, got index: $at"
+  at=$(run_group_order_case same-group 001.Web "$tagged")
+  [ "$at" = 3 ] || fail "a new task must land at the end of its own group, got index: $at"
+  at=$(run_group_order_case first 000.Alpha "$tagged")
+  [ "$at" = 1 ] || fail "a new task sorting first must land at the block start, got index: $at"
+  at=$(run_group_order_case last 999.Zed "$tagged")
+  [ "$at" = 4 ] || fail "a new task sorting last must land at the block end, before a foreign workspace, got index: $at"
+  at=$(run_group_order_case untagged 001.Web '[{"workspace_id":"w2","label":"└ a · p:AbCdEfGhIjKlMnOpQrStU1","tokens":{"fm_group_order":"003.Other"}},
+           {"workspace_id":"w3","label":"└ b · p:AbCdEfGhIjKlMnOpQrStU2"},
+           {"workspace_id":"w4","label":"└ c · p:AbCdEfGhIjKlMnOpQrStU3","tokens":{"fm_group_order":"003.Other"}}]')
+  [ "$at" = 3 ] || fail "an untagged child must never end up behind a new task, got index: $at"
+  at=$(run_group_order_case no-key '' "$tagged")
+  [ "$at" = 4 ] || fail "without a group key the block-end placement must be unchanged, got index: $at"
+  pass "herdr presentation ordering: a group key places only the new workspace inside its group, untagged children stay ahead"
+}
+
 test_projection_order_secondmate_parent_block() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order-secondmate"; mkdir -p "$dir/responses"
@@ -3317,8 +3461,8 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
-    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock) ;;
+    *) fail "session lock path must use this account's namespace: $path_a" ;;
   esac
   case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
@@ -3811,6 +3955,73 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+# A titled rounded top rule reads as a composer only for a pane whose native
+# agent probe names cortex; the identical capture under any other agent, or no
+# agent record, keeps the ambiguous verdict every harness reads. The probe
+# (`agent get`) is asked for only when the classifier reports the identity
+# matters - a titled rounded box with an agent prompt glyph - so every other
+# pane keeps the single capture call it always had.
+cortex_composer_case() {  # <dir-suffix> <capture-body> <agent-json-or-error-body>
+  local dir="$TMP_ROOT/composer-titled-$1" resp log fb
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '%b' "$2" > "$resp/1.out"
+  printf '%s\n' "$3" > "$resp/2.out"
+  printf '%s\n' "$3" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT"
+}
+
+cortex_agent_get_calls() {  # <dir-suffix>
+  grep -c "$(printf '\037agent\037get\037')" "$TMP_ROOT/composer-titled-$1/log" || true
+}
+
+test_composer_state_titled_box_requires_cortex_identity() {
+  local out calls titled
+  titled='╭────────────── New Session ──╮\n│ ❯                           │\n╰─────────────────────────────╯\n\n>> bypass safeguards  |  teams: off  |  plan: off\n'
+  out=$(cortex_composer_case cortex "$titled" '{"result":{"agent":{"agent":"cortex","agent_status":"idle"}}}')
+  [ "$out" = empty ] || fail "a titled box under a cortex agent probe should read empty, got '$out'"
+  calls=$(cortex_agent_get_calls cortex)
+  [ "$calls" = 1 ] || fail "a titled box should resolve Cortex with exactly one agent get, saw $calls"
+  out=$(cortex_composer_case other "$titled" '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}')
+  [ "$out" = unknown ] || [ "$out" = pending-unproven ] \
+    || fail "a titled box under a non-cortex agent must stay ambiguous, got '$out'"
+  calls=$(cortex_agent_get_calls other)
+  [ "$calls" = 1 ] || fail "a titled box under another agent should ask for the identity once, saw $calls"
+  out=$(cortex_composer_case absent "$titled" '{"error":{"code":"agent_not_found"}}')
+  [ "$out" = unknown ] || [ "$out" = pending-unproven ] \
+    || fail "a titled box with no agent record must stay ambiguous, got '$out'"
+  pass "fm_backend_herdr_composer_state: titled rounded top rule is a composer only under a cortex agent probe"
+}
+
+# A pane that never shows a titled rounded composer box never pays a second
+# identity read, whatever its verdict: a plain idle box, a plain draft, and
+# titled boxes the Cortex tolerance cannot accept (no prompt glyph row, a
+# non-ASCII title) all keep the one capture call, even under a cortex agent.
+test_composer_state_non_cortex_panes_skip_identity_probe() {
+  local agent='{"result":{"agent":{"agent":"cortex","agent_status":"idle"}}}' out calls name expect body
+  while IFS='|' read -r name expect body; do
+    out=$(cortex_composer_case "$name" "$body" "$agent")
+    case "$expect" in
+      ambiguous)
+        case "$out" in
+          unknown|pending-unproven) ;;
+          *) fail "$name: expected an ambiguous verdict, got '$out'" ;;
+        esac
+        ;;
+      *) [ "$out" = "$expect" ] || fail "$name: expected '$expect', got '$out'" ;;
+    esac
+    calls=$(cortex_agent_get_calls "$name")
+    [ "$calls" = 0 ] || fail "$name: a pane with no titled composer box must not probe identity, saw $calls agent get calls"
+  done <<'CASES'
+plain-empty|empty|  ╭────────────────────────╮\n  │ ❯                      │\n  ╰────────────────────────╯\n
+plain-draft|pending|  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰────────────────────────╯\n
+titled-glyphless|ambiguous|╭────────── Select a model ──╮\n│ ○ Auto                      │\n╰─────────────────────────────╯\n
+titled-nonascii|ambiguous|╭────────────── Nüw Session ──╮\n│ ❯                           │\n╰─────────────────────────────╯\n
+CASES
+  pass "fm_backend_herdr_composer_state: panes without a titled composer box make no second agent get call"
+}
+
 # Issue #3436: Grok 1.0.5's real bottom border is three columns wider than
 # the aligned top and content rows. Herdr has no cursor anchor, so the old
 # geometry verdict was unknown even when this composer was genuinely idle.
@@ -3877,6 +4088,30 @@ test_composer_state_unknown_on_capture_failure() {
   pass "fm_backend_herdr_composer_state: reports unknown when the pane cannot be captured"
 }
 
+test_composer_state_inactive_session_fails_fast_without_server_autostart() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/composer-inactive-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # status --json reports stopped server
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state nonexistent:w1:p2' "$ROOT" )
+  status=$?
+  [ "$status" -eq 0 ] || fail "composer_state should exit 0 on inactive session"
+  [ "$out" = unknown ] || fail "composer_state on inactive session should read unknown, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' "composer probe on inactive session must never autostart a herdr server"
+  pass "fm_backend_herdr_composer_state: fails fast to unknown for inactive session without starting server"
+}
+
+# shellcheck disable=SC2016
+test_composer_state_piped_reader_does_not_hang() {
+  local out rc=0
+  out=$( fm_run_timed 3 bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "piped composer probe on bad target hung or failed with rc=$rc"
+  [ "$out" = unknown ] || fail "piped composer probe should print unknown, got '$out'"
+  pass "fm_backend_composer_state (herdr): piped probe on bad target does not hang EOF-sensitive readers"
+}
+
 test_composer_state_unknown_when_no_composer_row_found() {
   local dir log resp fb out glyph idx=1
   dir="$TMP_ROOT/composer-no-row"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3909,6 +4144,20 @@ test_composer_state_pi_separator_idle_is_empty() {
   calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
   [ "$calls" -eq 1 ] || fail "Pi separator recognition must corroborate identity exactly once, made $calls agent calls"
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
+}
+
+test_composer_state_pi_dollar_status_footer_is_empty() {
+  # `$0.000 (sub) 5.4%/272k (auto)` at column 0 made herdr composer_state
+  # unknown, so exit and relaunch refused on an otherwise idle Pi pane.
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-dollar-status"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' $'transcript\n─────────────────────────────────────────────────────\n\n─────────────────────────────────────────────────────\n$0.000 (sub) 5.4%/272k (auto)' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle Pi composer with a dollar-first status footer should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a dollar-first Pi status footer reads empty, not a dead shell"
 }
 
 # A pi worker parked on an interactive prompt (permission dialog, question
@@ -4301,6 +4550,26 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
 }
 
+test_send_text_submit_replays_literal_send_stderr() {
+  local dir log resp fb out err
+  dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  err="$dir/stderr"
+  # 1: agent get (a non-Claude identity skips the payload proof)
+  # 2: send-text fails the way an oversized argument does, before herdr runs
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'herdr: Argument list too long\n' > "$resp/2.err"
+  printf '126\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a failed literal send should report send-failed, got '$out'"
+  grep -F 'Argument list too long' "$err" >/dev/null \
+    || fail "the literal send's stderr was not replayed to the caller: $(cat "$err")"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] \
+    || fail "no Enter may follow a failed literal send"
+  pass "fm_backend_herdr_send_text_submit: a failed literal send reports send-failed and replays the transport's stderr"
+}
+
 # Regression coverage for the 2026-07-03 incident using the NEW mechanism: a
 # slash command's first Enter can close a completion popup and fill an
 # argument-hint placeholder WITHOUT submitting. In the idle-baseline path,
@@ -4330,6 +4599,67 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "send_text_submit must send a SECOND Enter after the popup-placeholder fill's agent_status still reads idle, got $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: a slash-command popup's placeholder fill on Enter #1 never flips agent_status to working, so it does not short-circuit as submitted; Enter #2 is retried and lands it"
+}
+
+test_send_text_submit_refuses_confirming_enter_on_exit_picker() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-exit-picker"; mkdir -p "$dir/responses" "$dir/tmp"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_submit_claude_prefix "$resp" "/exit"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$resp/8.out"
+  herdr_submit_preflight_prefix "$resp"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    TMPDIR="$dir/tmp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr default:w1:p2 "/exit" 3 0.01 0.01' "$ROOT" )
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$out" = unknown ] || fail "the exit picker should stop the retry as unknown, got '$out'; log: $(cat "$log")"
+  [ "$enter_count" -eq 1 ] || fail "the exit picker should get one Enter, got $enter_count; log: $(cat "$log")"
+  [ -z "$(ls -A "$dir/tmp")" ] || fail "the submit left its dialog record behind: $(ls -A "$dir/tmp")"
+  pass "fm_backend_herdr_send_text_submit: the Claude background-task exit picker gets no confirming Enter"
+}
+
+# Herdr can report `blocked` for a picker the submitting Enter opened. The
+# submit then reports delivery with no composer read, so the picker is named
+# only by the caller's next composer read, the one fm-control exit takes when
+# its wait for the agent to stop times out.
+test_blocked_submit_leaves_the_exit_picker_to_the_next_composer_read() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-blocked-picker"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_submit_claude_prefix "$resp" "/exit"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"blocked"}}}\n' > "$resp/7.out"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$resp/8.out"
+  herdr_submit_preflight_prefix "$resp"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    FM_COMPOSER_DIALOG_SINK="$dir/sink" \
+    bash -c '. "$0/bin/fm-backend.sh"
+      verdict=$(fm_backend_send_text_submit herdr default:w1:p2 "/exit" 3 0.01 0.01)
+      printf "%s|%s|" "$verdict" "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+      fm_backend_composer_state herdr default:w1:p2 >/dev/null
+      cat "$FM_COMPOSER_DIALOG_SINK"' "$ROOT" )
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$out" = 'empty||Claude background-task exit picker' ] \
+    || fail "a blocked submit should report delivery unnamed and the next composer read should name the picker, got '$out'; log: $(cat "$log")"
+  [ "$enter_count" -eq 1 ] || fail "a blocked submit should send one Enter, got $enter_count; log: $(cat "$log")"
+  [ -f "$dir/sink" ] || fail "a submit must not remove a dialog record its caller owns"
+  pass "fm_backend_send_text_submit (herdr): a picker behind a blocked verdict is named by the caller's next composer read"
 }
 
 test_send_text_submit_confirms_blocked_after_enter() {
@@ -4693,6 +5023,31 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
   done
 }
 
+# herdr_popup_composer_screen: a Claude Code 2.1.283-shaped screen after a
+# typed slash command, with the command popup rendered BETWEEN the composer
+# and the pane bottom. Verified live: the popup is ~19 menu rows, so the
+# composer row lands outside a 20-row tail window - a bounded tail read
+# reports the composer as empty while it holds typed text, which broke
+# fm-control exit (the typed /exit was judged unsent and cleared). The
+# composer reads capture the full visible viewport instead. The composer
+# sits inside a solid-rule pair (rule above, rule below), exactly as live
+# Claude draws it, with the menu rows below the closing rule; the rules are
+# structural edge rows, so the composer's content block ends there and the
+# menu rows never read as typed text.
+herdr_popup_composer_screen() {  # <typed-text>
+  local i typed=$1 rule
+  rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
+  printf ' \xe2\x95\xad\xe2\x94\x80\xe2\x94\x80 Claude Code v2.1.283 \xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n'
+  printf '  %s\n' "$rule"
+  printf '  \xe2\x9d\xaf %s\n' "$typed"
+  printf '  %s\n' "$rule"
+  printf '  %s    Exit the CLI\n' "$typed"
+  for ((i = 0; i < 21; i++)); do
+    printf '  /skill-%02d    A skill description long enough to read as a popup row\n' "$i"
+  done
+  printf '  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\n'
+}
+
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
   local dir log resp fb out enter_count text
   dir="$TMP_ROOT/submit-long-exact"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4881,6 +5236,77 @@ test_send_text_submit_refuses_marked_digest_missing_its_head() {
   [ "$enter_count" -eq 0 ] || fail "a marked digest tail must not be submitted, sent $enter_count Enter(s)"
   [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused marked digest tail should be cleared"
   pass "fm_backend_herdr_send_text_submit: dropping U+2063 does not let a marked digest missing its head be submitted"
+}
+
+# Claude Code 2.1.283 renders a slash-command popup between the composer and
+# the pane bottom, pushing the composer row outside a 20-row tail window. The
+# composer reads must capture the full visible viewport: the old bounded read
+# reported the composer empty, so the typed /exit was judged unsent, cleared,
+# and never submitted (fm-control exit never exited).
+test_composer_state_claude_slash_popup_pushes_composer_above_tail_window() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-slash-popup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_popup_composer_screen '/exit' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "a composer above a slash-command popup must read pending, got '$out'"
+  grep -F $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' "$log" >/dev/null \
+    || fail "the composer state read must use the visible viewport"
+  [ "$(grep -c $'\x1f''--lines' "$log")" -eq 0 ] || fail "the composer state read must not be a bounded --lines tail"
+  pass "fm_backend_herdr_composer_state: a slash-command popup cannot hide a typed composer"
+}
+
+test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-claude-slash-popup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  herdr_popup_composer_screen "$text" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a composer proven above a slash-command popup must be submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the proven typed command should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven composer must not be cleared"
+  grep -F $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' "$log" >/dev/null \
+    || fail "the payload proof must use the visible viewport"
+  [ "$(grep -c $'\x1f''--lines' "$log")" -eq 0 ] || fail "no composer read may be a bounded --lines tail"
+  pass "fm_backend_herdr_send_text_submit: a typed slash command hidden behind its popup is still proven and submitted"
+}
+
+# Live Claude Code 2.1.283 draws a recognized typed slash command in muted
+# truecolor grey (38;2;112;112;112, luminance 112), below the grok-tuned
+# dark-foreground ghost threshold. Claude's own ghost suggestion is SGR-2 dim,
+# so the Claude payload proof must not strip the grey command and judge the
+# typed /exit unsent (the fm-control exit breakage, reproduced live).
+test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted() {
+  local dir log resp fb out enter_count text rule head
+  dir="$TMP_ROOT/submit-claude-grey-slash"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
+  head=$(printf '%0.s\xe2\x94\x80' $(seq 1 19))
+  {
+    printf '  \x1b[0m\x1b[38;2;112;112;112m/\x1b[0m\x1b[1m\x1b[38;2;112;112;112mexit\x1b[0m\x1b[38;2;112;112;112m    Exit the CLI\x1b[0m\n'
+    printf '\x1b[0m\x1b[38;2;121;129;134m%s Firstmate operational input 1790546042 \xe2\x94\x80\x1b[0m\n' "$head"
+    printf '\xe2\x9d\xaf\xc2\xa0\x1b[0m\x1b[38;2;112;112;112m/exit\x1b[0m\n'
+    printf '\x1b[0m\x1b[38;2;121;129;134m%s\x1b[0m\n' "$rule"
+    printf '  \x1b[0m\x1b[38;2;86;93;96m\xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\x1b[0m\n'
+  } > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a typed /exit drawn in Claude's grey slash-command colour must be proven and submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the proven grey slash command should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven grey slash command must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a typed slash command Claude draws in muted truecolor grey is proven and submitted"
 }
 
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
@@ -5598,6 +6024,8 @@ test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
+test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
+test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
@@ -5696,6 +6124,7 @@ test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
+test_projection_order_group_key_places_new_task_inside_its_group
 test_projection_order_foreign_legacy_child_is_read_only
 test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets
@@ -5726,12 +6155,17 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
+test_composer_state_titled_box_requires_cortex_identity
+test_composer_state_non_cortex_panes_skip_identity_probe
 test_composer_state_grok_oversized_title_preserves_safe_verdicts
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
+test_composer_state_inactive_session_fails_fast_without_server_autostart
+test_composer_state_piped_reader_does_not_hang
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
+test_composer_state_pi_dollar_status_footer_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
@@ -5754,7 +6188,10 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
+test_send_text_submit_refuses_confirming_enter_on_exit_picker
+test_blocked_submit_leaves_the_exit_picker_to_the_next_composer_read
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter
 test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
@@ -5781,6 +6218,9 @@ test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
 test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
 test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
+test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
+test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
+test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder

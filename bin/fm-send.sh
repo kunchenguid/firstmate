@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
-# inbox and ring a constant doorbell line into its terminal, best-effort.
+# inbox and ring a constant doorbell through its backend endpoint, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
@@ -8,12 +8,13 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # The text must be nonempty: an empty or whitespace-only message is refused
-# before anything is marked, recorded, or typed, because an empty marked
+# before anything is marked, recorded, or submitted, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# Orca supports Enter and C-c only; T3 Code maps Escape and C-c to a native
+# turn interrupt and treats Enter as a no-op.
 #
 # Two data planes:
 #
@@ -21,8 +22,9 @@
 # remote alike. The message is appended as a durable sequenced record under
 # the task's steering inbox (newlines are legal) - state/<id>.inbox/ for a
 # local task, or the remote home's host-local inbox reached through fm-on.sh
-# for a remote secondmate - and the terminal receives only one short constant
-# self-describing doorbell line plus Enter, best-effort. The durable record IS
+# for a remote secondmate - and the endpoint receives only one short constant
+# self-describing doorbell, best-effort. Pane backends type its line plus Enter;
+# T3 Code starts one native turn. The durable record IS
 # the delivery, so the record's fate alone governs the exit: 0 = the steer is
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
@@ -47,29 +49,27 @@
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/. The
-# watcher re-rings an unacknowledged message while its endpoint remains
-# available, escalates after the bounded ladder, and instead routes a positively
-# dead or missing endpoint directly to recovery without typing. An explicit
-# fire-and-forget record is excluded from that ladder.
-# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
+# ordinary record by the worker's acknowledgement move into handled/.
+# bin/fm-task-inbox-lib.sh owns the record format, doorbell line, and retry and
+# escalation policy for ordinary and fire-and-forget records.
+# On pane backends, the composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
 # the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
 #
-# TYPED - the LOCAL text that must reach the terminal itself: a harness-native
-# invocation (a leading "/", or a leading "$" to a codex target) must reach
-# the harness's own parser, and an explicit backend target names an endpoint,
-# not a task, so it stays typed even when local metadata happens to match it
-# (the same boundary that keeps it unmarked and outside --resolve-key). These
-# type the literal
-# text through the target backend's verified submit core: typed ONCE, then
-# Enter retried (never retyped) until the backend confirms a submit or reports
-# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
-# 3 = the text was typed into the live endpoint and
-# Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
-# before any resend, and never re-type blindly; a marked request's
+# TYPED - the LOCAL text submitted directly instead of through the inbox. On a
+# pane backend, a harness-native invocation (a leading "/", or a leading "$" to
+# a codex target) must reach the harness's own parser. An explicit backend
+# target names an endpoint, not a task, so it stays on this plane even when
+# local metadata happens to match it (the same boundary that keeps it unmarked
+# and outside --resolve-key). Pane backends type the literal text ONCE, then
+# retry Enter without retyping; T3 Code starts one native turn. Typed-plane exit
+# contract: 0 = submit confirmed; 3 = the text reached the live endpoint and
+# submission was attempted, but the read-back stayed unconfirmed, or an API
+# backend's outcome is unproven: a lost reply or an error that can follow a
+# commit (verify the endpoint
+# before any resend, and never submit blindly; docs/t3code-backend.md owns
+# T3 Code's request-id retention and retry policy; a marked request's
 # pending-reply expectation stays armed because this outcome is not a proven
 # failure); any other nonzero = the send failed and nothing may be assumed
 # delivered. Submission dispatches through the target's recorded backend; the
@@ -82,8 +82,7 @@
 # every remote text steer rides the inbox (a marked secondmate request already
 # reaches the harness as marker-prefixed chat rather than a parser command, so
 # routing a remote "/..." or "$..." through the record changes nothing the
-# parser would have seen); only --key still crosses to the remote pane as a
-# keystroke.
+# parser would have seen); only --key still crosses to the remote endpoint.
 #
 # Stage-1 compatibility boundary: classification uses the original pre-marker
 # text, but secondmate marking still precedes every typed submission. Therefore
@@ -216,6 +215,15 @@
 # path do not pay it.
 set -eu
 
+# Print the header comment as usage before any FM_HOME check or target
+# resolution, so the contract this header owns is reachable through --help.
+case "${1:-}" in
+  --help)
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+    exit 0
+    ;;
+esac
+
 FM_SEND_ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -241,24 +249,18 @@ if [ ! -d "$STATE" ]; then
   exit 1
 fi
 
-# shellcheck source=bin/fm-backend.sh
-. "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-control-lib.sh
-. "$SCRIPT_DIR/fm-control-lib.sh"
-# shellcheck source=bin/fm-marker-lib.sh
-. "$SCRIPT_DIR/fm-marker-lib.sh"
+# Pending replies load the backend, marker, classifier, and timeout helpers.
+# Reuse those imports before loading the control and inbox helpers.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
-. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
-. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -1085,9 +1087,22 @@ else
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    ring_retry="the watcher will re-ring"
+    if [ -n "$FIRE_AND_FORGET_ID" ] \
+      && [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wait-no-turns" ]; then
+      case "$ring_rc" in
+      1|2)
+        if fm_task_inbox_mark_retry "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
+          ring_retry="the watcher will ring it once more"
+        else
+          ring_retry="its one retry ring could not be recorded, so nothing will ring it again"
+        fi
+        ;;
+      esac
+    fi
     case "$ring_rc" in
-    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
+    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
@@ -1161,6 +1176,23 @@ else
     # surfaces through the library's own reconciliation
     # (bin/fm-pending-reply-lib.sh).
     echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
+    exit 3
+    ;;
+  unconfirmed)
+    # An API backend's outcome is unproven: a lost reply or an error that can
+    # follow a commit (T3 Code commits a send before it answers). Like
+    # pending, delivery is unproven
+    # rather than refused, so the pending-reply expectation stays armed; the
+    # adapter retains the logical delivery's request id under the retry policy
+    # in docs/t3code-backend.md. A marked secondmate request is the exception:
+    # a plain rerun mints a new
+    # correlation, so its text and request id differ, and the armed attempt
+    # refuses a resend of this one.
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      echo "fm-send: delivery to $T is unconfirmed (verdict=unconfirmed: the $TARGET_BACKEND outcome is unproven, a lost reply or an error that can follow a commit; tried $RESOLUTION_TRIED); do not resend - a rerun mints a new pending-reply correlation and would deliver twice; correlation $PENDING_REPLY_CORR stays armed, so verify with fm-peek.sh and let its reply or the watcher's reconciliation settle it" >&2
+    else
+      echo "fm-send: delivery to $T is unconfirmed (verdict=unconfirmed: the $TARGET_BACKEND outcome is unproven, a lost reply or an error that can follow a commit; tried $RESOLUTION_TRIED); verify with fm-peek.sh, and resend only the identical text, which reuses its request id" >&2
+    fi
     exit 3
     ;;
   *)

@@ -59,10 +59,10 @@ run_case_spawn() {
 # Replace the harness binary with a probe that reports the single environment
 # fact under test, so executing the emitted launch answers "what would the agent
 # have seen" rather than "what does the command text look like".
-install_env_probe() {  # <fakebin> <harness>
-  cat > "$1/$2" <<'SH'
+install_env_probe() {  # <fakebin> <harness> [variable]
+  cat > "$1/$2" <<SH
 #!/bin/sh
-printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}"
+printf '%s\n' "\${${3:-COMPACT_ADVISER_DISABLE}-unset}"
 SH
   chmod +x "$1/$2"
 }
@@ -175,6 +175,8 @@ test_secondmate_launch() {
     printf '# Firstmate\n' > "$sm/AGENTS.md"
     printf '%s\n' "sm-$setting" > "$sm/.fm-secondmate-home"
     printf 'charter for sm-%s\n' "$setting" > "$sm/data/charter.md"
+    printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
+    git -C "$sm" init -q -b main
     out=$(run_case_spawn "sm-$setting" "$sm" --secondmate)
     status=$?
     expect_code 0 "$status" "secondmate spawn with allowlist=$setting should succeed: $out"
@@ -186,6 +188,41 @@ test_secondmate_launch() {
       "a secondmate launched with allowlist=$setting must start with the compact adviser disabled"
   done
   pass "a secondmate launch carries the compact-adviser switch in both allowlist postures"
+}
+
+# The steering doorbell names "$FM_TASK_INBOX" rather than a path, so every
+# launch must hand its agent the absolute path of the task's own inbox. For a
+# secondmate that inbox lives in the launching home's state, not its own. The
+# cleared allowlist environment is where an ambient forward would be lost.
+test_launch_exports_task_inbox() {
+  local kind rec id sm out status seen want
+  for kind in ship secondmate; do
+    id="inbox-$kind-a1"
+    rec=$(make_case "inbox-$kind" codex "$id")
+    read_case "$rec"
+    : > "$HOME_DIR/config/launch-env-allowlist"
+    if [ "$kind" = ship ]; then
+      out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    else
+      sm="$CASE_DIR/secondmate-home"
+      mkdir -p "$sm/bin" "$sm/data"
+      printf '# Firstmate\n' > "$sm/AGENTS.md"
+      printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+      printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+      printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
+      git -C "$sm" init -q -b main
+      out=$(run_case_spawn "$id" "$sm" --secondmate)
+    fi
+    status=$?
+    expect_code 0 "$status" "$kind spawn should succeed: $out"
+    install_env_probe "$FAKEBIN_DIR" codex FM_TASK_INBOX
+    seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
+      || fail "$kind: the emitted launch failed to run"
+    want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox"
+    assert_equals "$want" "$seen" \
+      "a $kind agent must start with FM_TASK_INBOX set to its absolute steering inbox"
+  done
+  pass "ship and secondmate launches export their absolute steering inbox as FM_TASK_INBOX"
 }
 
 # --- relaunch ---------------------------------------------------------------
@@ -349,5 +386,6 @@ test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
+test_launch_exports_task_inbox
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
