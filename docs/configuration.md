@@ -2588,7 +2588,7 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 The `when` adapter (`bin/fm-procevent-when.sh`) registers a deterministic condition and action once.
 Its blocking child polls the condition without waking firstmate.
 A stable true fires the action at most once.
-One terminal outcome is then durably captured and published as a wake, which remains eligible for re-announcement until handled.
+One terminal outcome is then durably captured and published as a wake, which remains eligible for re-announcement after its queued wake is consumed until handled.
 
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
 A repo update that fast-forwards an in-repo action's bytes in place would otherwise desync every already-armed watch's trust binding with no tampering involved; `bin/fm-procevent-when.sh rebind-all` re-hashes and republishes the binding for every registered watch whose action lives under `FM_ROOT`, including one already polling, so it keeps firing across such an update instead of being refused on its next fire.
@@ -2617,7 +2617,7 @@ Discovery is never a timer.
 Each registered source has its own child process blocking on that source.
 On every cycle, the watcher's `reconcile`:
 
-- Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication.
+- Publishes each captured result without a durable handled acknowledgement only when its prior wake row has been consumed, so each source and sequence has at most one queued check at a time.
 - Restarts a source whose owner is gone.
 - Stops this home's runner if its registration disappeared unexpectedly.
 
@@ -2664,7 +2664,7 @@ Applying a captured result through code is a built-in adapter seam, and some bui
 Leaving that to a handler means it can silently not happen, so immediately after the terminal check above the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` and lets the built-in adapter apply and acknowledge its own result.
 
 That call runs strictly after terminal retirement, because a handling adapter re-arms its own next source and retiring afterwards would drop that fresh registration and leave the source silently dead.
-Exit 0 means the adapter fully applied and acknowledged the result; a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
+Exit 0 means the adapter fully applied and acknowledged the result; a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement after its queued wake is consumed, so a handler receives it exactly as before and an adapter with no such command needs no change.
 
 **Adapter-controlled announcement order**
 
@@ -2874,10 +2874,10 @@ A value this command cannot use is refused by name before anything is launched, 
 
 **Durability guarantees and limits**
 
-The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, not only the crash window right after capture.
+The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for re-announcement after its queued wake is consumed across any number of drains and restarts, not only the crash window right after capture.
 
 - `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
-- Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
+- Default and fallback `check` publication appends at most one queued wake per source and sequence: `reconcile` adds no duplicate while that key remains queued, so a repeat means the prior row was consumed; handlers still deduplicate that identity rather than assuming a wake is unique.
 - The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
 - The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
 - Never describe this path as at-least-once, no-loss, or lossless.
