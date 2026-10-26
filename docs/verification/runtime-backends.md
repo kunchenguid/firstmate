@@ -3789,7 +3789,7 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 ## Treehouse worktree pools
 
-Treehouse is the worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
+Treehouse is the worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `paseo`, `rex`).
 Verified on 2026-09-19 with treehouse v2.3.0 on macOS.
 
 Treehouse keys a pool by the repository's resolved origin, not by the clone, so separate clones of one repository share one pool under one root.
