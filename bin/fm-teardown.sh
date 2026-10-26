@@ -497,15 +497,15 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
 
 teardown_export_records() {  # <state> <task-id>
   local state=$1 task=$2
+  if [ ! -e "$CONFIG/record-export-root" ] && [ ! -L "$CONFIG/record-export-root" ]; then
+    return 0
+  fi
   if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
     if [ ! -d "$CONFIG" ] || [ -L "$CONFIG" ] || [ ! -r "$CONFIG" ] || [ ! -x "$CONFIG" ]; then
       echo "error: record export config directory is inaccessible or unsafe: $CONFIG" >&2
       echo "error: record export archive failed for $task; retaining task records for retry" >&2
       return 1
     fi
-  fi
-  if [ ! -e "$CONFIG/record-export-root" ] && [ ! -L "$CONFIG/record-export-root" ]; then
-    return 0
   fi
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_RECORD_EXPORT_META_LOCK_HELD=1 \

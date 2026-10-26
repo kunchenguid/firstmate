@@ -5342,6 +5342,21 @@ test_record_export_config_absent_never_reads_the_exporter() {
   pass "config-absent teardown does not read or invoke record export"
 }
 
+test_record_export_unopted_symlinked_config_does_not_block_teardown() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-symlink-config-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mv "$case_dir/config" "$case_dir/config-target"
+  ln -s "$case_dir/config-target" "$case_dir/config"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "unopted symlinked config teardown: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "unopted symlinked config retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "unopted symlinked config retained status"
+  pass "unopted teardown ignores symlinked config when record export is absent"
+}
+
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
   local case_dir export_root archive rc mode
   for mode in success failure inaccessible-config; do
@@ -5749,6 +5764,7 @@ test_status_archive_nested_secondmate_children() {
 
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
+test_record_export_unopted_symlinked_config_does_not_block_teardown
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure
 test_record_export_captures_forced_secondmate_sub_state
 test_record_export_waits_for_endpoint_quiescence_before_archiving
