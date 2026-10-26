@@ -315,6 +315,20 @@ marker_kind() {  # <home>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/.watcher-down"
 }
 engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
+engine_call_recorded() { [ -s "$1/engine-call.1" ]; }
+engine_drain_recorded() { [ -s "$1/engine-drain.1" ]; }
+turn_receipt_recorded() {  # <home>
+  local turn
+  turn=$(sed -n 's/^turn=//p' "$1/engine-call.1" 2>/dev/null)
+  [ -n "$turn" ] && awk -F '\t' -v turn="$turn" '$1 == turn { found=1 } END { exit !found }' \
+    "$1/state/.supervision-host-receipts" 2>/dev/null
+}
+turn_handled() {  # <home>
+  local turn
+  turn=$(sed -n 's/^turn=//p' "$1/engine-call.1" 2>/dev/null)
+  [ -n "$turn" ] && awk -F '\t' -v turn="$turn" '$2 == "handled" && $3 == "turn=" turn { found=1 } END { exit !found }' \
+    "$1/state/.supervision-host.log" 2>/dev/null
+}
 handled_count() { local n; n=$(grep -c '	handled	' "$1/state/.supervision-host.log" 2>/dev/null); printf '%s\n' "${n:-0}"; }
 handled_at_least() { [ "$(handled_count "$1")" -ge "$2" ]; }
 append_status() {  # <home> <text>
@@ -1588,7 +1602,16 @@ test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record() {
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook quiet: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
   append_status "$home" 'ready for review'
-  wait_until 250 hook_exited "$home" || fail "hook quiet: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  wait_until 250 engine_call_recorded "$home" \
+    || fail "hook quiet: the host never started the engine turn: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  wait_until 250 engine_drain_recorded "$home" \
+    || fail "hook quiet: the engine never recorded its drain: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  wait_until 250 turn_receipt_recorded "$home" \
+    || fail "hook quiet: the engine turn did not record a report receipt: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  wait_until 250 turn_handled "$home" \
+    || fail "hook quiet: the host did not handle the reported engine turn: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  wait_until 250 hook_exited "$home" \
+    || fail "hook quiet: the Stop hook did not close after the engine turn was handled: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "a quiet record must leave the host's turn attended"
   assert_rewoke_main "$home" "hook quiet"
   assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the rewake must carry the captain outcome"
