@@ -1,7 +1,7 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the operator/scout-only boundary; primary and secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -11,10 +11,10 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Busy state | Native `UserPromptSubmit` opens, `Stop` closes normal completion, and `SessionEnd` closes shutdown through the generation-bound writer; `../../../bin/fm-busy-lib.sh` owns trust. |
 | Exit command | `/quit`, with the shared slash-command settle before Enter; prints `devin -r <session-id>`. |
 | Interrupt | One Esc, then a second only after the running turn renders `esc again to interrupt` and at least 0.5 seconds later; no restored draft and no clear key. An idle agent gets one press and `cancel=not-running`, because a fast idle pair opens the `/revert` picker, where Enter reverts file changes. |
-| Skill invocation | `/<skill>`, for example `/no-mistakes`; Devin discovers Firstmate's user skills from `~/.agents/skills`, and `fm-send` types the slash form through its popup settle. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; Devin discovers Juggernaut's user skills from `~/.agents/skills`, and `fm-send` types the slash form through its popup settle. |
 | Resume | `devin -r <session-id>`; `--model` may switch the resumed session's model. |
 | Model flag | `--model <model-id>`, including `swe-2-medium` and account-listed `fusion-<lead>-sidekick-swe-2-medium` ids. |
-| Effort flag | None; effort is encoded in the model id, and Firstmate records the independent axis without passing it. |
+| Effort flag | None; effort is encoded in the model id, and Juggernaut records the independent axis without passing it. |
 | Model discovery | `devin models list`; authentication preflight is `devin auth status`. |
 | Marker | None; anchored native `devin` ancestry identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | The launch skips workspace trust for this run; the spawn owner carries the exact flags. |

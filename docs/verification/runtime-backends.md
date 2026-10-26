@@ -8,7 +8,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Harness detection precedence
 
-Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
+Juggernaut's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
 A marker alone is not proof of ownership, because it is ordinary environment state that a child inherits and a terminal multiplexer can replay into an unrelated session.
 Verified on 2026-09-02 on Linux 7.1.12 with the portable regression, which builds every case from real renamed processes and no installed harness:
 
@@ -100,7 +100,7 @@ That difference is the reason the guard cannot probe the pane process alone.
 The guarantee this guard holds is a strength claim, not only an identity one, because `detect_own` hands an args-strength verdict straight back to a retained foreign marker.
 A pane-only probe would have observed `args codex`, passed, and gone on passing if a later release stopped spawning the native child, while real sessions silently regressed to the original bug.
 Probing from below asks the question from the vantage a tool subprocess actually occupies, so the guard can require comm strength somewhere in the session and require every comm-strength vantage to name the same harness.
-The vantage set stops at the upward path rather than the whole subtree, because `harness_ancestry` only ever climbs and a sibling branch is therefore a vantage firstmate's own detection can never occupy.
+The vantage set stops at the upward path rather than the whole subtree, because `harness_ancestry` only ever climbs and a sibling branch is therefore a vantage Juggernaut's own detection can never occupy.
 The reject-other-harness cross-check judges comm-strength vantages only, because an args-strength verdict is path-ambiguous by construction: a harness-spawned MCP server running as `node <home>/.claude/mcp/<server>.js` answers `args claude` purely from the `.claude` path component, and such a server is normally a child of the agent binary, so it can be the deepest descendant and sit on this path.
 That narrowing changes only which vantages the cross-check judges; the comm-strength requirement itself is unchanged.
 A single-process harness has no descendant that adds a distinct verdict, which is why `claude` reports one.
@@ -180,11 +180,11 @@ In that 2026-08-03 seven-adapter run, Claude Code was the only harness whose tit
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
 
-The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026-08-05 against tmux on macOS arm64.
+The operator-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026-08-05 against tmux on macOS arm64.
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
 
-The crewmate/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same glob family as `*grok*`/`*kimi*` in the shared process-name classifier (now `fm_agent_process_classify_name` in `bin/fm-agent-process-lib.sh`), and was relaunched live under tmux 3.6a in an isolated private socket.
+The operator/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same glob family as `*grok*`/`*kimi*` in the shared process-name classifier (now `fm_agent_process_classify_name` in `bin/fm-agent-process-lib.sh`), and was relaunched live under tmux 3.6a in an isolated private socket.
 `#{pane_current_command}` reported the truncated on-disk binary name `atlassian_cli_r` - macOS's 15-char `comm` truncation cuts `atlassian_cli_rovodev` off just before the `rovo` substring begins, the same truncation-volatility class codex/kimi's own patch-release name drift shows above - while the foreground ps-based `comm` correctly reported `rovo`, so `fm_backend_tmux_agent_state` returned `alive` through that primary source; the two-independent-name-sources design is exactly why the truncated title does not break the verdict.
 [`rovo.md`](rovo.md#backend-liveness-tmux-verified-live-herdr-placement-verified-live-with-a-herdr-side-agent-detection-gap) owns the fuller record, including the busy/interrupt/exit facts captured in that same live tmux session and the herdr agent-detection gap found when herdr placement was verified live in an isolated lab session.
 
@@ -311,7 +311,7 @@ Both launches executed a submitted tool instruction and touched the generated `t
 The pi-signed launch retained `harness=pi-signed`, while the plain comparison retained `harness=pi`.
 The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the plain Pi Launcher path also traversed the signed wrapper on this installation.
 That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
-Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
+Juggernaut therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
 Backend applicability was reviewed across every spawn adapter.
@@ -416,7 +416,7 @@ Dropping the retention-is-not-durable line makes the refusal claim a retention t
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
-Claude gates a folder it has never seen behind an interactive workspace-trust dialog, and the CLI documents the only bypass as non-interactive mode, which a crewmate pane is not.
+Claude gates a folder it has never seen behind an interactive workspace-trust dialog, and the CLI documents the only bypass as non-interactive mode, which an operator pane is not.
 
 ```sh
 claude --version
@@ -434,7 +434,7 @@ claude --help | grep -A 5 'workspace trust dialog'
 ```
 
 `--dangerously-skip-permissions` is a permission control and is absent from that bypass, so an interactive worker in a fresh worktree still reaches the dialog.
-Firstmate cannot answer it either, because its key plane carries only Enter, Escape, and C-c with no arrow navigation.
+Juggernaut cannot answer it either, because its key plane carries only Enter, Escape, and C-c with no arrow navigation.
 Suppression itself was then observed directly on the same date and version, with a control arm and a treatment arm.
 
 The control arm launched a fresh linked worktree with no pre-registration, the way `bin/fm-spawn.sh` launches one.
@@ -486,7 +486,7 @@ This change does not address that warning and does not claim to.
 ### Secondmate homes
 
 Verified 2026-09-11 on Claude Code 2.1.269.
-A secondmate launches in its own firstmate home rather than a task worktree, and that home meets the same gate.
+A secondmate launches in its own Juggernaut home rather than a task worktree, and that home meets the same gate.
 The control arm launched a standalone-clone secondmate home that the store had no entry for, the way `bin/fm-spawn.sh --secondmate` launches one.
 
 ```sh
@@ -573,7 +573,7 @@ ok - gemini: a real launch parked on its own rendered auth or trust dialog surfa
 # checked 3 launch-prompt signature(s) against real installed binaries
 ```
 
-Claude, launched `--dangerously-skip-permissions` into a brand-new worktree under the operator's own already-onboarded config (the shape a real crewmate spawn produces):
+Claude, launched `--dangerously-skip-permissions` into a brand-new worktree under the operator's own already-onboarded config (the shape a real operator spawn produces):
 
 ```
  Accessing workspace:
@@ -721,7 +721,7 @@ That is the launch-prompt backstop: the same spawn's record classified `busy fm-
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
 
 Codex gates hooks it has no persisted trust for behind an interactive modal.
-A crewmate launch built by `bin/fm-spawn.sh` was driven under a real PTY and stopped there before the brief was ever submitted:
+An operator launch built by `bin/fm-spawn.sh` was driven under a real PTY and stopped there before the brief was ever submitted:
 
 ```text
 Hooks need review
@@ -733,7 +733,7 @@ Hooks can run outside the sandbox after you trust them.
 Press enter to confirm or esc to go back
 ```
 
-The selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so the selection cannot be moved.
+The selection starts on "Review hooks", which is neither trusting nor declining, and Juggernaut's key plane carries only Enter, Escape, and C-c with no arrow navigation, so the selection cannot be moved.
 That count covers every hook Codex had no persisted trust for, drawn from both the machine's own `~/.codex/hooks.json` and this repository's tracked `.codex/hooks.json`.
 Writing Codex's own trust store to pre-accept the modal would record an operator consent that was never given, so it is not an option either.
 
@@ -771,7 +771,7 @@ $ ls "$TURNEND"
 `tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
 It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
 It spends no model tokens, so it runs by default wherever Codex is installed.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: an operator launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
 ## Composer classification matrix
 
@@ -822,7 +822,7 @@ Portable coverage: `test_matrix_pi_idle_pair_over_stale_working_registration` in
 
 ### 2026-10-09 opencode 1.18.25 below-floor status area through Herdr
 
-Verified on 2026-10-09 on Linux against OpenCode 1.18.25 (model DeepSeek V4.1 Flash) running as Firstmate workers in Herdr 0.9.1 panes, read through `herdr pane read <pane> --source visible --format ansi` and classified with the shared screen classifier under Herdr's capability descriptor (`styled=1`, `cursor=0`, `identity=1`).
+Verified on 2026-10-09 on Linux against OpenCode 1.18.25 (model DeepSeek V4.1 Flash) running as Juggernaut workers in Herdr 0.9.1 panes, read through `herdr pane read <pane> --source visible --format ansi` and classified with the shared screen classifier under Herdr's capability descriptor (`styled=1`, `cursor=0`, `identity=1`).
 OpenCode 1.18.x closes its left-bar composer with the half-block `╹▀▀▀` floor and draws its own status area directly below it: an idle pane shows a path/context/cost row ending `71.6K (27%) · $0ctrl+p` plus a session row ending `commands`, while a rate-limited pane shows the usage-limit banner (`■5⬝hour⬝usage limit reached. It will reset in ...`, then `usin... (click to expand) [retrying in 1h 8m attempt #1]` wrapped at the pane width, both truncation variants observed).
 None of those rows carries a structural edge, so the cursorless staleness probe read the furniture as unclaimed activity, refused the selection `stale-envelope`, and answered `unknown` on every live OpenCode worker - which is why `fm-control relaunch` and `exit` refused every stuck OpenCode worker with `composer state is 'unknown', not proven empty` (captured live on eleven fleet panes; the rate-limit banner on ten, the status rows on one).
 The classifier now declares those rows once (`FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT` in `bin/fm-composer-lib.sh`) and resumes the staleness probe past them below a proven floor; the resume is bounded by the block rule in the wrapped-footer entry below, not by the floor alone, so `Working on request...` directly below the floor still refuses and a busy status row (`esc interrupt`) stays outside the pattern set in the refusing direction.
@@ -854,7 +854,7 @@ Real panes captured with `opencode -m openrouter/minimax/minimax-m3.1-flash:free
 
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
-Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
+Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Juggernaut workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
 Claude 2.x draws its composer as a bare `❯` + U+00A0 row between two solid `─` rules, and this home's configured statusLine plus Claude's permission-mode hint render on the two rows directly below the closing rule.
 The statusLine's first glyph is `→` (U+2192), which is Cursor's own prompt glyph, so the cursorless "bottom-most shape wins" rule selected the statusLine as a bare composer at `kind=bare first=18 last=19` within the 20-row tail, read the statusLine and the hint row as wrapped typed input, and answered `pending` on a composer holding nothing.
 `fm_task_inbox_ring` (`bin/fm-task-inbox-lib.sh`) defers on exactly that verdict, and `bin/fm-watch.sh`'s re-ring calls the same function, so both the first doorbell and every retry were skipped and the worker never saw the steer.
@@ -1053,7 +1053,7 @@ The brief's portable regression is `tests/fm-brief.test.sh`; rerun these command
 
 ## Gemini
 
-The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
+The Gemini operator adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
 Every check below ran in throwaway scratch worktrees against the real CLI; no task worktree was used and no agent was left running.
 The credential was supplied only through the `GEMINI_API_KEY` environment variable and its value appears nowhere in this record.
 
@@ -1219,8 +1219,8 @@ The credential must also be present before the session-provider daemon starts, s
 
 ### Settings placement
 
-Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
-They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
+Juggernaut's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+They go to a Juggernaut-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
 Two measurements support that choice.
 Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:
 
@@ -1230,7 +1230,7 @@ BeforeAgent
 AfterAgent
 ```
 
-And hook arrays MERGE across layers rather than overriding, so a project's own hooks keep running alongside firstmate's:
+And hook arrays MERGE across layers rather than overriding, so a project's own hooks keep running alongside Juggernaut's:
 
 ```text
 === which AfterAgent hooks ran (trusted workspace, both layers define AfterAgent) ===
@@ -1238,7 +1238,7 @@ PROJECT
 SYSTEM
 ```
 
-A second end-to-end spawn against a project that already committed its own `.gemini/settings.json` confirmed the file was untouched, that `git status` reported only the worker's own new output file, and that teardown removed firstmate's settings file:
+A second end-to-end spawn against a project that already committed its own `.gemini/settings.json` confirmed the file was untouched, that `git status` reported only the worker's own new output file, and that teardown removed Juggernaut's settings file:
 
 ```text
 t=4s   state: working · source: pane · harness busy (gemini-hook)
@@ -1547,7 +1547,7 @@ HERDR_WORKSPACE_ID=w1
 ```
 
 This complete injection shape is verified only for Herdr 0.7.5.
-Firstmate requires both `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` before accepting claimed launcher ancestry.
+Juggernaut requires both `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` before accepting claimed launcher ancestry.
 
 `pane get` reports the pane's current owning tab and workspace, which is what placement resolves from; the injected `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are creation-time snapshots and are not read as current identity:
 
@@ -2043,7 +2043,7 @@ Husk versus recovery-reuse boundaries for a stale-registration pane are owned by
 
 ### Pane status authority across a relaunch
 
-Measured 2026-09-21 on Linux x86_64 against Herdr 0.9.1 (client protocol 22) and Pi 0.86.1, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the same freeze was observed live on a relaunched Pi crewmate whose pane read `idle` while its validation pipeline ran.
+Measured 2026-09-21 on Linux x86_64 against Herdr 0.9.1 (client protocol 22) and Pi 0.86.1, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the same freeze was observed live on a relaunched Pi operator whose pane read `idle` while its validation pipeline ran.
 
 The stale registration above is not only a recovery-classification problem: it is the pane's status AUTHORITY, and it is bound to one agent session identity. Herdr applies a lifecycle/session report only when it matches what it bound, so an agent started FRESH in that pane - the shape `bin/fm-control.sh <id> relaunch` produced before this fix - reports a new session into a pane that ignores it. The pane then stays at whatever the previous agent last reported: working reads idle, indefinitely, because the registration outlives its process and nothing from outside repairs it.
 
@@ -2180,14 +2180,14 @@ cmux 0.64.17 (97) [9ed29d81a]
 Source and live checks established the five control modes:
 
 - `off` starts no listener.
-- `cmuxOnly` rejects an external Firstmate process by ancestry.
+- `cmuxOnly` rejects an external Juggernaut process by ancestry.
 - `automation` uses an owner-only 0600 socket with no handshake.
 - `password` uses the same 0600 socket plus `auth <password>`.
 - `allowAll` uses a 0666 socket with no authentication.
 
 The live default rejection was `Access denied - only processes started inside cmux can connect`.
 The live password challenge was `Authentication required - send auth <password> first`.
-The app configuration writer did not retain a hand-added socket password, which is why the operator guide requires Settings and a local Firstmate password source.
+The app configuration writer did not retain a hand-added socket password, which is why the operator guide requires Settings and a local Juggernaut password source.
 
 Current active CLI findings:
 
@@ -2242,19 +2242,19 @@ The host-tool sequence was:
 1. list a saved project;
 2. create a Desktop-owned worktree thread;
 3. recover and read the thread while active and after completion;
-4. verify the thread appended a Firstmate status line and wrote its report;
+4. verify the thread appended a Juggernaut status line and wrote its report;
 5. send a follow-up to the same thread;
 6. read the completed follow-up;
 7. archive the exact thread;
 8. read the archived transcript with state `notLoaded`.
 
-Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
-The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
+Observed guarantee: a Desktop-owned thread can write Juggernaut lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
+The missing guarantee remains a supported shell-callable bridge that lets Juggernaut perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
 
 ## Cursor Agent CLI
 
-Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.
+Cursor runs operator, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.
 The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`, and extended on 2026-08-13 with the tmux composer verdict below.
 
 - Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
@@ -2355,7 +2355,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Effort | no effort flag exists; requested effort stays in task metadata |
 | Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
 | Exit | `/exit` |
-| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
+| Skill invocation | `/<skill>`; cursor discovers Juggernaut's user-level skills, and `/no-mistakes` autocompleted with Juggernaut's own description and invoked the skill |
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 ### End-to-end
@@ -2450,7 +2450,7 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 - Picker primitives: on 2026-08-26, after the final portable-shell and sentinel fixes, `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` again printed `ok - the installed Pi still bounds the picker's list and ranks its search` against the same installed 0.81.1 package.
   That case imports the real `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder`, renders a 42-row catalog through the real `SelectList` at the visible bound the extension asks for, and fails naming the installed version if Pi stops exporting a primitive or stops bounding what it renders; it skips when no npm package is installed, and the portable stubbed cases in the same file hold the ordering, search, and branch-only-pin behavior everywhere.
 - Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1` with the branch extension and its imported libraries included.
-  This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Firstmate catalog.
+  This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Juggernaut catalog.
 - Historical custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
   This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
@@ -2675,7 +2675,7 @@ FM_PI_CODEX_NATIVE_LIVE=1 bash tests/fm-pi-codex-native.test.sh
 ```
 
 Observed result: `"result": "PASS"`.
-The guard runs the real Pi runtime, native adapter, three FirstMate primary extensions, native MCP transport, and FirstMate's durable outcome scripts in an isolated home.
+The guard runs the real Pi runtime, native adapter, three Juggernaut primary extensions, native MCP transport, and Juggernaut's durable outcome scripts in an isolated home.
 It verifies native `ultra` on initial and operational turns and after restart, startup operational input, watcher arming, a notification while main is idle, outcome read and one acknowledgement, refusal of a duplicate acknowledgement, and no reprocessing after restart.
 Its native App Server peer and watcher-close process are deterministic fixtures; it does not claim a real backend or a live model was tested by that command.
 `tests/fm-busy-state.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, and `tests/fm-watch-triage.test.sh` cover separate progress notification, unchanged semantic busy state, rejection of a superseded worker's events, and progress refreshing the busy-age bound without fabricating a completed turn.
@@ -2716,14 +2716,14 @@ Hung validation and precisely post-scan writes remain automated evidence only.
 
 ## Oh My Pi (omp)
 
-omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
+omp runs operator, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
 The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
 
 ### Process identity and markers
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
-`FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
+`FM_OMP_HARNESS=omp` is Juggernaut's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 
 ### Composer
 
@@ -2812,13 +2812,13 @@ The portable cases, including the never-live rule and the unchanged Codex and ot
 Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091a7a799` with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
 `bin/fm-task-inbox-lib.sh` owns the durable busy-deferral budget.
 
-A real Claude worker opened an `AskUserQuestion` panel, and Firstmate's `UserPromptSubmit` hook reported busy.
+A real Claude worker opened an `AskUserQuestion` panel, and Juggernaut's `UserPromptSubmit` hook reported busy.
 Four due inbox checks using the original `origin/main` watcher at `1f3e769616fdf9f31f85f4c3e6a9f71606634238` against that live pane each read `busy=yes` and added zero wakes.
 With `FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2`, two distinct processes sourcing the fixed watcher and calling `inbox_steer_check` against the same pane produced one wake containing `stuck-busy after 2 consecutive busy-deferred due doorbells`.
 A third check left exactly one wake total; the question panel remained open and the instruction remained unhandled.
 Lab teardown completed with exit `0`, including the default-session tripwire.
 The zero grace accelerates only the experiment; the normal grace remains unchanged.
-Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which did not classify as busy; that is a different path and does not establish this regression.
+Without Juggernaut's hooks, Herdr reported the question panel as `blocked`, which did not classify as busy; that is a different path and does not establish this regression.
 
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.

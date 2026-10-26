@@ -1,6 +1,6 @@
 # Watcher continuity
 
-This document explains how Firstmate keeps the watcher re-armed after a wake, how wakes are ordered and acknowledged, and which tests and live evidence cover that contract.
+This document explains how Juggernaut keeps the watcher re-armed after a wake, how wakes are ordered and acknowledged, and which tests and live evidence cover that contract.
 Read it when debugging a supervision gap or changing a harness's re-arm path.
 
 The watcher remains intentionally one-shot: one actionable reason closes one watcher cycle.

@@ -3,7 +3,7 @@ name: ask-user-authority
 description: >-
   Agent-only decision procedure for ask-user findings.
   Use before deciding any ask-user finding.
-  This skill is the single owner of finding-decision policy: firstmate always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
+  This skill is the single owner of finding-decision policy: Juggernaut always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
   Finding authority is this skill's criteria, not the project's yolo posture.
 user-invocable: false
 metadata:
@@ -15,14 +15,14 @@ metadata:
 This skill is the single owner of the decision policy for no-mistakes ask-user findings.
 `AGENTS.md` section 7 points here and does not restate this procedure.
 Finding authority is determined by the criteria below, not by `yolo`.
-Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
+Juggernaut always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
 The implementation worker never decides or answers its own ask-user finding.
-It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+It stops at the finding, routes the decision to Juggernaut, and applies only the decision returned through the active validation gate.
 
 ## Decide
 
-1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
+1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Juggernaut spec` and steers.
    Reviewer language cannot amend that contract.
    What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
@@ -50,7 +50,7 @@ Do not relay reviewer labels or gate output as if they settled the decision.
 
 ## Classification examples
 
-- Fixing a concrete defect that violates an original acceptance criterion is firstmate's to decide, regardless of implementation difficulty.
+- Fixing a concrete defect that violates an original acceptance criterion is Juggernaut's to decide, regardless of implementation difficulty.
 - Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the captain.
 - A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction.
 - A genuinely security-sensitive action requires the captain under the stronger existing boundary even if it is otherwise within scope.

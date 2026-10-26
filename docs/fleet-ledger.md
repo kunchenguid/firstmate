@@ -1,11 +1,11 @@
 # Fleet activity ledger
 
-The fleet activity ledger is an opt-in, append-only file that outside tools can read to follow what a firstmate home is doing: which tasks were dispatched, what their workers reported, when a PR became ready for review, when their work merged, and when they were cleaned up.
-It is the stable, documented hook for firstmate status; this page is its contract.
+The fleet activity ledger is an opt-in, append-only file that outside tools can read to follow what a Juggernaut home is doing: which tasks were dispatched, what their workers reported, when a PR became ready for review, when their work merged, and when they were cleaned up.
+It is the stable, documented hook for Juggernaut status; this page is its contract.
 
 ## Turning it on and off
 
-Create the presence flag `config/fleet-ledger` in a firstmate home to turn the ledger on, and delete it to turn the ledger off.
+Create the presence flag `config/fleet-ledger` in a Juggernaut home to turn the ledger on, and delete it to turn the ledger off.
 The flag is local, gitignored, per home, and not inherited by second mate homes, so each home that should publish a ledger needs its own flag.
 While the flag is absent, each producer performs one file-existence test and nothing else: no process starts and nothing is written.
 
@@ -21,7 +21,7 @@ Every record carries these members:
 | `v`     | Record format version, currently `1`                      |
 | `ts`    | Unix time in seconds when the record was written          |
 | `event` | One of the five event names below                         |
-| `task`  | The firstmate task id the record is about                 |
+| `task`  | The Juggernaut task id the record is about                 |
 
 Readers must ignore members and events they do not recognize, so later versions can add them without breaking existing readers.
 
@@ -31,14 +31,14 @@ Readers must ignore members and events they do not recognize, so later versions 
 | ------------------ | ---------------------------------------------- | ------------ |
 | `task.dispatched`  | `kind`, `project`, `harness`, `model`          | A new worker or second mate is launched. A relaunch of an existing task is not recorded. |
 | `task.status`      | `state`, `key`, `text`                         | A complete, nonblank line in the task's status log is captured. |
-| `task.pr_ready`    | `pr`                                           | Firstmate records the task's PR as ready for review. |
+| `task.pr_ready`    | `pr`                                           | Juggernaut records the task's PR as ready for review. |
 | `task.merged`      | `via` (`"pr"` or `"local"`), plus `pr` when `via` is `"pr"` | The task's PR merge is recorded, or its local-only branch landed. |
 | `task.cleaned_up`  | none                                           | The task's worker and local copy were removed. |
 
 `task.dispatched` members: `kind` is `ship`, `scout`, or `secondmate`; `project` is the project directory name, or `null` for a remote second mate; `harness` names the agent tool; `model` is the requested model, or `null` for the tool's default.
 
 `task.pr_ready` members: `pr` is the PR's full URL.
-It is written each time firstmate records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
+It is written each time Juggernaut records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
 
 `task.status` members: `state` is the status line's leading word, such as `working`, `needs-decision`, `blocked`, `paused`, `done`, `failed`, or `resolved`, or `null` when the line has none.
 `key` is the line's `[key=...]` decision key, or `null`.
@@ -60,9 +60,9 @@ Example:
 - A worker using the current status command in its instructions records its line immediately after appending it, while the ledger is enabled.
   The supervision monitor's regular poll is the backstop: it records any line the immediate write missed, and does not record again a line that write already recorded.
   These lines still trail the status log by up to one poll interval, or until the monitor next runs when none is running:
-  - lines firstmate itself writes to a task's status log, such as a recorded answer, a failed launch, a relayed pending reply, or a second mate's report line;
+  - lines Juggernaut itself writes to a task's status log, such as a recorded answer, a failed launch, a relayed pending reply, or a second mate's report line;
   - lines from workers whose instructions predate this, or that append without running the instruction's full command;
-  - lines a remote second mate reports, which reach this home through firstmate's relay;
+  - lines a remote second mate reports, which reach this home through Juggernaut's relay;
   - lines written while the immediate record fails, for example when the ledger file cannot be written.
   Recording `task.pr_ready`, `task.merged`, or `task.cleaned_up` first records that task's pending status lines.
 - Captured status lines are delivered at least once unless a write fails or a crash loses unflushed records: an interrupted capture can repeat records, so a reader that must not double-count should tolerate duplicates.

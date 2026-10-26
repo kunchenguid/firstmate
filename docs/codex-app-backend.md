@@ -1,7 +1,7 @@
 # Codex App backend boundary
 
-Codex App is not a selectable Firstmate runtime backend.
-Codex Desktop host tools can create and supervise visible threads and those threads can write Firstmate status files when given an authorized path, but Firstmate has no supported shell-callable bridge to those host tools.
+Codex App is not a selectable Juggernaut runtime backend.
+Codex Desktop host tools can create and supervise visible threads and those threads can write Juggernaut status files when given an authorized path, but Juggernaut has no supported shell-callable bridge to those host tools.
 A manual thread ledger is not a backend.
 
 ## Acceptance contract
@@ -12,19 +12,19 @@ A future Codex App backend must satisfy the same lifecycle contract as terminal-
 2. Send the initial instructions and later operator messages to that endpoint.
 3. Read enough live state or bounded transcript to supervise the task.
 4. Archive, kill, or otherwise stop the exact endpoint.
-5. Let the thread append Firstmate's normal lifecycle lines to `state/<id>.status`.
+5. Let the thread append Juggernaut's normal lifecycle lines to `state/<id>.status`.
 
 The status return channel is mandatory.
-A visible thread that cannot report into Firstmate's normal lifecycle is not a complete backend.
+A visible thread that cannot report into Juggernaut's normal lifecycle is not a complete backend.
 
 ## Current blocker
 
-Firstmate backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, and cmux directly.
-Codex Desktop host tools are available to a Desktop conversation, not to arbitrary Firstmate subprocesses.
+Juggernaut backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, and cmux directly.
+Codex Desktop host tools are available to a Desktop conversation, not to arbitrary Juggernaut subprocesses.
 The missing component is a Codex Desktop-supported shell-callable transport, not another local ledger.
 
 `codex app-server --stdio` exposes useful JSON-RPC pieces such as thread start, turn start, thread read, and thread archive.
-A one-process probe could create and archive a thread record, but no supported bridge was found that lets Firstmate create, continue, read, and archive the same visible Desktop-owned endpoint over its full lifetime.
+A one-process probe could create and archive a thread record, but no supported bridge was found that lets Juggernaut create, continue, read, and archive the same visible Desktop-owned endpoint over its full lifetime.
 A raw Desktop control-socket proxy is not a supported transport.
 These partial pieces do not authorize adding `codex-app` to the known or spawn-capable backend registries.
 
@@ -46,7 +46,7 @@ archive: thread id -> archived or stopped
 return: thread appends state/<id>.status lifecycle lines
 ```
 
-Once available, Firstmate should add a real `bin/backends/codex-app.sh`, persist `backend=codex-app` and `codex_app_thread_id=`, and route spawn, send, peek, watch, and cleanup through the shared dispatcher.
+Once available, Juggernaut should add a real `bin/backends/codex-app.sh`, persist `backend=codex-app` and `codex_app_thread_id=`, and route spawn, send, peek, watch, and cleanup through the shared dispatcher.
 
 ## Rollout
 

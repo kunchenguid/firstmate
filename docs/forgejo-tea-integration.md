@@ -27,7 +27,7 @@ Docker version 29.8.0, build 88096ef
 
 ## The evidence instance
 
-Unlike the GitLab doc's public fixture project, a self-hosted Forgejo instance is not something a reader can be pointed at over the network: that is the entire reason firstmate needs to support it.
+Unlike the GitLab doc's public fixture project, a self-hosted Forgejo instance is not something a reader can be pointed at over the network: that is the entire reason Juggernaut needs to support it.
 The evidence here instead comes from a disposable, throwaway Forgejo 7 instance (`codeberg.org/forgejo/forgejo:7`) run locally in Docker for exactly this verification and destroyed afterward, with one repository (`fixture/fixture-repo`) and several pull requests created through the same `tea` CLI a real task would use.
 Nothing here depends on any private or production instance, and none of it is reproducible by a reader without standing up an equivalent throwaway instance themselves.
 

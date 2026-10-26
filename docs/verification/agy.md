@@ -1,6 +1,6 @@
-# Verification: the agy (Antigravity CLI) crewmate/scout adapter
+# Verification: the agy (Antigravity CLI) operator/scout adapter
 
-Active empirical facts for firstmate's agy adapter.
+Active empirical facts for Juggernaut's agy adapter.
 The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts through [`references/harness/agy.md`](../../.agents/skills/harness-adapters/references/harness/agy.md); this record owns how they were established and what is still unproven.
 
 ## Subject
@@ -13,7 +13,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
 
-Every command below ran inside the disposable firstmate task worktree or the named Herdr lab session.
+Every command below ran inside the disposable Juggernaut task worktree or the named Herdr lab session.
 No captain fleet state was touched.
 
 ## Detection: ancestry only, no marker
@@ -133,7 +133,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
-agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
+agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other operator-only adapters are also absent.
 
 ## Composer: unknown by design
 

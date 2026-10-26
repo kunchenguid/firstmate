@@ -64,7 +64,7 @@ The watch matches on the number and reads nothing else for identity; the recorde
 
 ## The host must be passed explicitly
 
-The poll runs from the firstmate home, in no repository.
+The poll runs from the Juggernaut home, in no repository.
 Collected 2026-09-23:
 
 ```

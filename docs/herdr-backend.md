@@ -1,10 +1,10 @@
 # Herdr runtime backend
 
-This page covers running Firstmate workers on the Herdr runtime backend: setup, where tasks appear, how they are cleaned up, how input reaches them, and how their liveness is read.
-Operators who choose Herdr, or who verify Firstmate against it, need it.
+This page covers running Juggernaut workers on the Herdr runtime backend: setup, where tasks appear, how they are cleaned up, how input reaches them, and how their liveness is read.
+Operators who choose Herdr, or who verify Juggernaut against it, need it.
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer.
+Juggernaut requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
@@ -40,7 +40,7 @@ Prerequisites:
 - `python3` for Treehouse copy protection, and for optional protocol-16 presentation-space ordering and native event subscription.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
-Firstmate invokes its CLI as a separate process.
+Juggernaut invokes its CLI as a separate process.
 
 ### Selecting Herdr
 
@@ -48,7 +48,7 @@ Select Herdr in any of these ways:
 
 - Local `config/backend` containing `herdr`.
 - `FM_BACKEND=herdr` for one launch.
-- An explicit request to Firstmate.
+- An explicit request to Juggernaut.
 
 A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns that requirement and the readiness its host must meet.
 
@@ -96,7 +96,7 @@ Removing or upgrading the shadowing client is the durable fix.
 
 ## Watching and task containers
 
-The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+The ordinary topology puts one task tab per endpoint in the exact workspace of the Juggernaut or secondmate that launches it.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 
 | Home | Workspace label |
@@ -122,10 +122,10 @@ Later task creation does not intentionally steal focus.
 Herdr does not enforce workspace or tab label uniqueness, so a label can never decide where a worker goes.
 
 Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET_PATH`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` into every process it manages a pane for.
-A Firstmate or secondmate agent's own commands inherit them.
+A Juggernaut or secondmate agent's own commands inherit them.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
 
-With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to.
+With presentation spaces disabled, an operator or scout is created in the exact workspace that identity currently resolves to.
 That workspace is read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
@@ -141,9 +141,9 @@ That covers:
 - A workspace missing from the session.
 - A pane belonging to another named session or Herdr server.
 
-### Firstmate running outside Herdr
+### Juggernaut running outside Herdr
 
-Firstmate running outside Herdr entirely has no launcher workspace to inherit, so its workers use this home's own labeled workspace, created on first use.
+Juggernaut running outside Herdr entirely has no launcher workspace to inherit, so its workers use this home's own labeled workspace, created on first use.
 That path needs the home label to identify exactly one workspace.
 Two workspaces sharing it are an unresolvable placement and refuse rather than adopting either.
 
@@ -165,7 +165,7 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Presentation spaces
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+Each new operator or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
 This section calls that one-task workspace the projection.
 Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
 
@@ -250,7 +250,7 @@ A presentation journal is the per-task record in this home's `state/` that binds
 Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
 Creation proceeds in this order:
 
-1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
+1. Juggernaut atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
    That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
 
@@ -262,14 +262,14 @@ Neither token, title, nor journal authorizes send, capture, task ownership, Tree
 ### Owning parent and tabs
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses.
-It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
+It falls back to a unique home-label lookup only for a Juggernaut outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
-At projected creation Firstmate also declares the workspace's lineage to Herdr, reporting the display-only tokens `parent=<parent workspace id>` and `kind=task` through `herdr workspace report-metadata --source firstmate`, which is the declaration consumers such as the phone's Spaces list group by.
+At projected creation Juggernaut also declares the workspace's lineage to Herdr, reporting the display-only tokens `parent=<parent workspace id>` and `kind=task` through `herdr workspace report-metadata --source Juggernaut`, which is the declaration consumers such as the phone's Spaces list group by.
 The declaration is best-effort display metadata, verified on Herdr 0.9.1 to merge per token so pre-existing `task` tokens survive: a failed report prints one warning and leaves the workspace rendering top-level, exactly as an undeclared workspace always has, while the flat per-home layout declares nothing because its workspaces are durable places, not transient tasks.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
-Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
+Before and after create, prune, order, abort cleanup, and normal cleanup, Juggernaut verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
 
 ### Ordering
@@ -289,7 +289,7 @@ Existing legacy child labels may extend an already adjacent block read-only but 
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
 Ordering failure never fails the task spawn.
-Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
+Juggernaut does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
 The worker remains on the ordinary flat or Herdr-current-order path.
 
 ### Cleanup and focus safety
@@ -363,8 +363,8 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
-Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
-That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
+Before any recovery mutation, Juggernaut holds both the task spawn lock and the named-session presentation lock.
+That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Juggernaut on Herdr cannot block this account's spawn, recovery, or teardown.
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
@@ -412,7 +412,7 @@ A candidate must meet all of these conditions:
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane.
 
-Firstmate then cleans up the candidate in this order:
+Juggernaut then cleans up the candidate in this order:
 
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
@@ -493,9 +493,9 @@ Any of these preserves the candidate and lets session startup continue with at m
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+Juggernaut prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
-Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
+Immediately before close, Juggernaut rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.
 
 This created-versus-adopted gate is a destructive safety boundary.
@@ -528,11 +528,11 @@ An environment variable alone is not reliable when another Herdr server is runni
 
 When the selected named server is not running, the adapter launches it without these inherited values:
 
-- Firstmate home and directory overrides.
+- Juggernaut home and directory overrides.
 - Harness identity markers.
 - The supervision-model override.
 
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Juggernaut home or harness.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
@@ -739,7 +739,7 @@ Idle secondmates remain exempt from stale-pane escalation.
 A pane has ONE status authority, and for Pi with the integration installed that authority is the lifecycle hooks - Herdr then skips screen detection for the pane, which is the `full_lifecycle_hook_authority` reason `herdr agent explain` prints for it.
 That authority is bound to a session identity, and in the crew shape the registration outliving its process ([above](#restart-and-liveness-behavior)) is that same binding: the record stays, the agent it named is gone.
 
-An agent started FRESH in such a pane reports a new session and Herdr ignores its reports, so the pane stays frozen at whatever the previous agent last reported - a crewmate running its pipeline reads `idle` until its task ends, and nothing from outside repairs it (measured 2026-09-21 on Herdr 0.9.1 against a real Pi; `pane report-agent-session` and `pane report-agent` for `herdr:pi` are accepted without being applied unless the reporter is the registered pane agent, and `pane release-agent` on the stale record changes nothing).
+An agent started FRESH in such a pane reports a new session and Herdr ignores its reports, so the pane stays frozen at whatever the previous agent last reported - an operator running its pipeline reads `idle` until its task ends, and nothing from outside repairs it (measured 2026-09-21 on Herdr 0.9.1 against a real Pi; `pane report-agent-session` and `pane report-agent` for `herdr:pi` are accepted without being applied unless the reporter is the registered pane agent, and `pane release-agent` on the stale record changes nothing).
 A fresh spawn never meets this: it gets a new pane with nothing bound.
 
 So a **relaunch** preserves the binding instead of fighting it: before the Pi-family launch line is composed, `bin/fm-spawn.sh` reads the pane's recorded session reference through `fm_backend_herdr_pane_agent_session_ref` and passes it back as Pi's own `--session <path-or-id>` (`relaunch_resume_args`; `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag` owns which adapters and which registration labels qualify).
@@ -818,7 +818,7 @@ A fresh entry clears stale transient escalation caches, while durable queue and 
 
 ## Destructive lab safety
 
-Never use ambient `herdr server stop` for Firstmate verification.
+Never use ambient `herdr server stop` for Juggernaut verification.
 An environment-only session selection can silently reach a different running server.
 The ambient stop command has no explicit target.
 
@@ -849,7 +849,7 @@ Prepare-based adapter tests enter the disposable runtime environment before serv
 
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
 - Mutable labels can collide; they are never placement or destructive authority.
-- A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
+- A Juggernaut outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 

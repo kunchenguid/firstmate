@@ -1,7 +1,7 @@
 ---
 name: bearings
 description: >-
-  Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
+  Generate a "pick up where I left off" fleet digest from Juggernaut's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
   Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
   Also use on a contributions check wake or when filing work linked to an upstream issue.
@@ -204,7 +204,7 @@ A merge-ready classification grants no merge authority and the ordinary exact-PR
 
 When filing work corresponding to an upstream ticket, put its canonical issue URL on the structured backlog row and run the observer's `arm` operation.
 That explicit task link, rather than repository membership or a text similarity guess, makes a ready-for-pr transition owned planning input.
-Filing is local record-keeping; the work itself still publishes only under the destination's authority, so a task targeting firstmate's own repository remains gated by this home's role (`firstmate-self-repo`) and a user/operator home carries it as a local draft instead.
+Filing is local record-keeping; the work itself still publishes only under the destination's authority, so a task targeting Juggernaut's own repository remains gated by this home's role (`firstmate-self-repo`) and a user/operator home carries it as a local draft instead.
 After a signal's disposition is durable as filed work, a captain hold, or a recorded no-action decision in the task, acknowledge that exact event token through `ack`.
 Do not acknowledge merely because the signal was read.
 For secondmate-owned contributions, handle and acknowledge in that home and use the existing parent channel for any captain call.

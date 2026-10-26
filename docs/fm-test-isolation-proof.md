@@ -1,4 +1,4 @@
-# Firstmate test isolation proof
+# Juggernaut test isolation proof
 
 This record owns concurrent isolation evidence for the portable parallel candidate set and admitted runner families.
 `bin/fm-test-isolation-proof.sh` is the authoritative harness and `docs/fm-test-isolation-proof.json` is the portable pool's machine-readable result.
@@ -227,7 +227,7 @@ Its current live-backend result is recorded under [workspace-removal focus safet
 `tests/fm-claude-stop-autoarm-live-e2e.test.sh` gate-skips on its opt-in variable and is now `live-harness-optin`, since a candidate that gate-skips cannot prove concurrency.
 
 One member needs a current Pi to pass at all.
-`tests/fm-pi-branch-extension.test.sh` compares firstmate's supervision-branch extension against the stock renderers of the installed `@earendil-works/pi-coding-agent`, and the proof host's global install was stale at 0.81.1 while the published release was 0.84.4.
+`tests/fm-pi-branch-extension.test.sh` compares Juggernaut's supervision-branch extension against the stock renderers of the installed `@earendil-works/pi-coding-agent`, and the proof host's global install was stale at 0.81.1 while the published release was 0.84.4.
 On the stale package the case fails serially as well as concurrently, so it is a prerequisite rather than a concurrency result; both runs above pinned the current package with `FM_PI_PACKAGE_DIR`, and on a host whose global install is current the plain command reproduces them.
 
 ## Production runner effect of the 2026-09-03 admissions

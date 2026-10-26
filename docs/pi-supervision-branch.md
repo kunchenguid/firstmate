@@ -120,7 +120,7 @@ The row is excluded when one of those lines is a decision, blocked, or captain-h
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
-Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
+Single-task operator signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both operator and second-mate logs.
 
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
@@ -506,7 +506,7 @@ That includes watcher-failure alarms, which are never offered to the branch.
 
 The captain accepted the normal provider prompt-caching strategy:
 
-- A byte-identical branch prefix generated once per firstmate version.
+- A byte-identical branch prefix generated once per Juggernaut version.
 - The same tool set in the same order on every request.
 - One shared `prompt_cache_key` per home for all branch sessions.
   It is set in a `before_provider_request` hook, and only for providers whose requests already carry that field.
@@ -584,7 +584,7 @@ A leftover `state/.afk` flag declines nothing.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
 - Main's standing authority relocates to the branch, and nothing more.
   [Authority relocation](#authority-relocation) below gives the details.
-- The branch prompt's fixed "Postures" section states these rules once per firstmate version, so the prefix stays byte-stable.
+- The branch prompt's fixed "Postures" section states these rules once per Juggernaut version, so the prefix stays byte-stable.
   The per-wake tail is the only dynamic content.
 
 ### Authority relocation
@@ -609,7 +609,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
 | `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
-| `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
+| `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets Juggernaut decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
 The merge-authority record and the outcome row's summary are the audit trail.
@@ -617,7 +617,7 @@ The return brief renders the words verbatim beside that account.
 
 ### The authority invariant
 
-Being away changes how the captain is informed and what happens at a captain-owned decision point, never firstmate's authority set.
+Being away changes how the captain is informed and what happens at a captain-owned decision point, never Juggernaut's authority set.
 `tests/fm-branch-supervision.test.sh`, `tests/fm-pr-merge.test.sh`, and `tests/fm-send-resolve-key.test.sh` pin this invariant.
 It sets these limits:
 
@@ -650,7 +650,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
-- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and operator routing.
 
 `tests/fm-branch-supervision.test.sh` covers:
 

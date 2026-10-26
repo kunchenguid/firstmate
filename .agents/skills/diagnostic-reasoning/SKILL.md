@@ -12,8 +12,8 @@ metadata:
 # diagnostic-reasoning
 
 Use this procedure before scoping a reported bug and before acting on a diagnostic report.
-This skill is the single owner of Firstmate's bug-diagnosis reasoning procedure.
-Firstmate applies it when briefing delegated investigation and evaluating the resulting evidence, without taking over project-specific investigation itself.
+This skill is the single owner of Juggernaut's bug-diagnosis reasoning procedure.
+Juggernaut applies it when briefing delegated investigation and evaluating the resulting evidence, without taking over project-specific investigation itself.
 
 ## Establish the observed behavior
 

@@ -1,7 +1,7 @@
 # The spoken interface
 
-Talk to a voice agent that sits in front of the first mate. It answers questions
-about what is happening from the first mate's own records, and when you ask for
+Talk to a voice agent that sits in front of the Overwatch. It answers questions
+about what is happening from the Overwatch's own records, and when you ask for
 real work it says so out loud and queues the request rather than pretending to
 do it.
 
@@ -22,7 +22,7 @@ laptop                          this desktop                      AWS
 microphone --> fm-voice-client.py --(ssh)--> fm-voice-relay.py --> Nova Sonic 2
 speaker    <-------------------------------------------------      (your region)
                                         |
-                                        +--> the first mate's records (read)
+                                        +--> the Overwatch's records (read)
                                         +--> fm-inbox.sh note (queue real work)
 ```
 
@@ -107,7 +107,7 @@ A missing required value refuses with the path to write, so an unconfigured home
 Check it end to end without a microphone, using a recorded question:
 
 ```
-cd <your firstmate home>
+cd <your Juggernaut home>
 ~/.fm-voice-venv/bin/python bin/fm-voice-relay.py --self-test <clip.pcm>
 ```
 
@@ -130,8 +130,8 @@ Covering that arithmetic says nothing about how a real output device behaves.
 Copy the two files the laptop needs, and install the one dependency:
 
 ```
-scp <desktop>:<firstmate home>/bin/fm-voice-client.py .
-scp <desktop>:<firstmate home>/bin/fm_voice_frame.py .
+scp <desktop>:<Juggernaut home>/bin/fm-voice-client.py .
+scp <desktop>:<Juggernaut home>/bin/fm_voice_frame.py .
 python3 -m pip install sounddevice
 ```
 
@@ -142,7 +142,7 @@ Then talk:
 
 ```
 python3 fm-voice-client.py --host <desktop> \
-  --relay <firstmate home>/bin/fm-voice-relay.py \
+  --relay <Juggernaut home>/bin/fm-voice-relay.py \
   --relay-python ~/.fm-voice-venv/bin/python
 ```
 
@@ -270,7 +270,7 @@ these are the shapes.
   second question in a session is treated as an interruption, and an interrupted
   turn that reads the records produces no answer at all.
 - **Remembering the last question.** See above.
-- **Doing any project work.** Real work is queued for the first mate and the
+- **Doing any project work.** Real work is queued for the Overwatch and the
   agent says so out loud. It has no tool that changes a project.
 
 ## Cost

@@ -1,8 +1,8 @@
 ---
 name: firstmate-coding-guidelines
 description: >-
-  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
+  Agent-only reference for changing Juggernaut's shared, tracked material per AGENTS.md section 1.
+  Use before editing any of that material, whether working as Juggernaut directly or as an operator briefed on a Juggernaut repo task.
   Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # firstmate-coding-guidelines
 
-Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
+Load this before changing Juggernaut's shared, tracked material, as defined by `AGENTS.md` section 1.
 It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
 Applying the rules below on every change is what keeps that from happening again.
 
@@ -19,7 +19,7 @@ Applying the rules below on every change is what keeps that from happening again
 
 Before writing a new fact anywhere in this repo, ask where it belongs, in this order.
 
-1. Does the firstmate AGENT need this on every session or every turn to operate?
+1. Does the Juggernaut AGENT need this on every session or every turn to operate?
    If yes: `AGENTS.md`, inline.
 2. Does the agent need it only in a nameable situation - a spawn, a recovery, a specific wake type, a specific lifecycle step?
    If yes: an agent-only skill under `.agents/skills/`, whose description states its load trigger; leave a one-line inline pointer in `AGENTS.md` only when an always-loaded rule must name the skill.
@@ -68,9 +68,9 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared in its description, which is the always-loaded trigger index; add an inline `AGENTS.md` pointer only in the operating section whose always-loaded rule must name it.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
-Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
+Briefs for tasks that touch Juggernaut's own tracked material should tell the operator to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string, while its optional `--project` directory enables lineage-based self-repository detection for the publication gate (`bin/fm-role-lib.sh`).
-The scaffold does not add this skill's load instruction; firstmate adds it to firstmate-repo briefs by hand.
+The scaffold does not add this skill's load instruction; Juggernaut adds it to Juggernaut repo briefs by hand.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
 ## Compatibility and enforcement
@@ -116,7 +116,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 
 Never configure a deterministic suite-walk `commands.test` in any repository's no-mistakes config, whether it selects the full suite, changed tests, a family, or a fixed script list.
 Targeted validation belongs to the no-mistakes evidence path, while CI owns broad deterministic regression coverage.
-Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
+Juggernaut PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
 
 ## Repo style rules
 
@@ -125,7 +125,7 @@ Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
-- Run Firstmate production-library tests and commands that source `bin/` scripts under `bash` explicitly, never through the tool shell's default interpreter.
+- Run Juggernaut production-library tests and commands that source `bin/` scripts under `bash` explicitly, never through the tool shell's default interpreter.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition that CI and the no-mistakes pre-push gate both invoke, its own header owns what that definition covers, and it refuses to run under any other version of either linter.
 - When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before shipping.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.

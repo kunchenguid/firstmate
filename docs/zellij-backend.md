@@ -14,11 +14,11 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
-Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Firstmate.
+Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Juggernaut.
 It is never auto-detected.
 A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44.
 
-Firstmate uses one shared session named `firstmate` by default.
+Juggernaut uses one shared session named `firstmate` by default.
 `FM_ZELLIJ_SESSION` can select another name for isolated verification.
 Attach with:
 
@@ -35,12 +35,12 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 
 Every task receives one tab in the shared Zellij session.
 The caller-facing label remains `fm-<id>`, while the visible title is home-scoped as `fm-<home-label>-<id>`.
-The home label is `firstmate` or `2ndmate-<id>` plus a short stable hash of the resolved Firstmate root.
-This prevents task-id collisions between a primary, secondmates, and separate Firstmate installations sharing one session.
+The home label is `firstmate` or `2ndmate-<id>` plus a short stable hash of the resolved Juggernaut root.
+This prevents task-id collisions between a primary, secondmates, and separate Juggernaut installations sharing one session.
 
 Zellij does not enforce tab-name uniqueness, so the adapter performs its own duplicate check against the scoped title.
 Create, recover, list, and cleanup paths all use the same scoped title owner in `bin/fm-backend-hometag-lib.sh`.
-Moving a Firstmate installation changes its path hash and leaves old titles unmatched, consistent with worktree paths also becoming stale after a move.
+Moving a Juggernaut installation changes its path hash and leaves old titles unmatched, consistent with worktree paths also becoming stale after a move.
 
 A pre-home-tag task remains reachable through its recorded metadata only when exactly one live tab has the old unscoped title.
 Multiple old tabs with the same title cause a refusal rather than a guess.

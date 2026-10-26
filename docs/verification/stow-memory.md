@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the active guarantee that Firstmate can discover and JIT-load a user-owned local skill excluded through the clone's `.git/info/exclude`.
+This record supports the active guarantee that Juggernaut can discover and JIT-load a user-owned local skill excluded through the clone's `.git/info/exclude`.
 The internal [`stow` skill](../../.agents/skills/stow/SKILL.md) owns tiering, curation, archival, offload, and completion-receipt behavior.
 [`docs/configuration.md`](../configuration.md) owns the current operator-facing startup-memory setting and estimate.
 

@@ -6,16 +6,16 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The Juggernaut-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue`, under the same `OPENCODE_DB` (see Session store), to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
 | Session store | Most launches set a per-task `OPENCODE_DB`, so a manual `--continue` must run with that launch's `OPENCODE_DB=` value or it finds no session; the rule is owned by [crew dispatch profiles](../../../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson). |
 | Model flag | `--model <provider/model>`. |
-| Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
+| Effort flag | None for Juggernaut's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
-| Trust dialog | For Firstmate-generated launches, see the [OpenCode launch permission policy](../../../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson). |
+| Trust dialog | For Juggernaut-generated launches, see the [OpenCode launch permission policy](../../../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson). |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
 
 OpenCode can auto-upgrade in the background, and the running TUI can exit mid-task.

@@ -1,8 +1,8 @@
 # Orca runtime backend
 
 Orca is an experimental macOS backend in which the Orca app owns both the task worktree and terminal endpoint.
-The crewmate harness remains the agent process launched inside that endpoint.
-Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
+The operator harness remains the agent process launched inside that endpoint.
+Juggernaut agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
 
 ## Setup
 
@@ -15,10 +15,10 @@ Prerequisites:
 - The `orca` CLI, installed with `brew install orca`.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
-Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Firstmate.
+Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Juggernaut.
 It is never auto-detected.
 
-Before any spawn mutates repository state, Firstmate requires `orca status --json` to report `reachable=true` and `state="ready"`.
+Before any spawn mutates repository state, Juggernaut requires `orca status --json` to report `reachable=true` and `state="ready"`.
 The first task for a project registers that repository with `orca repo add --path` when needed.
 No manual repository registration is required.
 
@@ -40,7 +40,7 @@ orca_worktree_id=<orca repo id>::<absolute worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
-`window=` remains the caller-facing Firstmate alias.
+`window=` remains the caller-facing Juggernaut alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
@@ -57,12 +57,12 @@ A bare shell row is `unknown`, not an empty agent composer, and plain-text captu
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok alone retains its isolated rendered-tail fallback.
 
-Cleanup keeps all shared Firstmate safety checks.
+Cleanup keeps all shared Juggernaut safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
-After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
+After those checks, Juggernaut closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.

@@ -59,12 +59,12 @@ An open run is trusted busy and settled log trusted idle; missing binding or mat
 
 Native children use per-child worktrees only with opt-in `--subagent-worktree-isolation`; capability says default-on while omission stays shared, and verified labs produced no nested copy.
 `../../../bin/fm-teardown.sh` excludes no Muse path.
-It excludes `.claude/settings.local.json` because Firstmate writes it, but Muse scratch is worker output and must refuse cleanup when uncommitted.
+It excludes `.claude/settings.local.json` because Juggernaut writes it, but Muse scratch is worker output and must refuse cleanup when uncommitted.
 Inspect, never force past, that refusal.
 
 ## Maturity and primary limit
 
 Muse 0.1.0 is day-zero beta; its hourly channel poll can replace the binary and process name.
-The captain accepted this, so Firstmate does not set `MUSE_NO_AUTO_UPDATE=1`; a fleet may set it without adapter change.
+The captain accepted this, so Juggernaut does not set `MUSE_NO_AUTO_UPDATE=1`; a fleet may set it without adapter change.
 Plugins report unavailable unless `MUSE_EXPERIMENTAL_PLUGINS=on`, so busy state uses logs.
 The compatibility dialect explicitly lacks `asyncRewake` and model reawakening; the router owns the resulting primary boundary.

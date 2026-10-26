@@ -1,11 +1,11 @@
 # Calm-mode harness feasibility
 
-This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Juggernaut calm mode.
 [`calm.md`](calm.md) owns the current user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Juggernaut home across session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and working activity.
 Working activity may be presented through the harness's stock row or through a supported Calm-owned drawing, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
@@ -23,7 +23,7 @@ This host tracks Pi latest, so the version the evidence is pinned to moves; the 
 
 [`calm.md`](calm.md#pi-compatibility) owns the current user-facing collision behavior and limitation.
 Inspection of Pi 0.80.10 and 0.82.0 established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
-Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously won those collisions even when its persisted preference was off.
+Pi loads project-local extensions before global or CLI-configured extensions, so Juggernaut's tracked Calm extension previously won those collisions even when its persisted preference was off.
 The losing definition's execution and render functions are both discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
 
 Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
@@ -43,7 +43,7 @@ $ pi --version
 ### Original transcript cleanup
 
 The pre-cleanup reproduction used a real isolated Pi TUI at 180 columns by 44 rows with the tracked Calm and watcher extensions, an isolated `FM_HOME`, and a live home-owned watcher cycle.
-The model called `fm_watch_arm_pi`, the real tool returned `watcher: started Pi extension arm child 1`, and a `done:` status write caused the watcher extension to inject `FIRSTMATE WATCHER WAKE: signal: ...` followed by the stable drain instruction.
+The model called `fm_watch_arm_pi`, the real tool returned `watcher: started Pi extension arm child 1`, and a `done:` status write caused the watcher extension to inject `Juggernaut WATCHER WAKE: signal: ...` followed by the stable drain instruction.
 With Calm off, the captured transcript contained the genuine user prompt, the full watcher tool shell, the synthetic user-role wake, four collapsed `Thinking...` labels, built-in tool rows from wake handling, and the final assistant response.
 With the pre-cleanup implementation's Calm mode on, the existing seven built-in tool rows disappeared, but the watcher tool shell, synthetic wake, and all four `Thinking...` labels remained.
 The final screenshot-scale regression reproduced the same transcript after the cleanup and verified that Calm removed those remaining controlled rows while retaining the genuine prompt, a watcher-shaped genuine near-miss prompt, and the genuine assistant responses.
@@ -141,7 +141,7 @@ The fix installs a separate idempotent presentation adapter, verified on Pi 0.81
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
-Messages containing an image are left on Pi's ordinary path even when their text equals an operational envelope because Firstmate's authoritative producers are text-only.
+Messages containing an image are left on Pi's ordinary path even when their text equals an operational envelope because Juggernaut's authoritative producers are text-only.
 
 A native exact-watcher run and its process-restart replay kept the neighboring assistant text at the two-row visible-only spacing while retaining one exact user entry and one processing response.
 An adjacent two-notification run retained the same two-row neighboring-assistant coordinates, proving both operational components contributed zero height.
@@ -154,10 +154,10 @@ Calm replaces Pi's stock working row with a small animated boat while Calm is on
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
 
-Within Firstmate Calm, `.pi/extensions/fm-calm.ts` remains the sole owner of its presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
+Within Juggernaut Calm, `.pi/extensions/fm-calm.ts` remains the sole owner of its presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
 Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
 Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the boat, while settle, abort, and failure all reach the same cleanup.
-Repeated `agent_start` events inside one run are idempotent, and both Calm extensions use the shared `calm-working-ship` widget key, so Pi disposes the previous component before installing a replacement under that key and when it clears extension widgets, while Firstmate Calm's disposal signal prevents its cleanup from clearing a standalone Calm widget that replaced its own widget.
+Repeated `agent_start` events inside one run are idempotent, and both Calm extensions use the shared `calm-working-ship` widget key, so Pi disposes the previous component before installing a replacement under that key and when it clears extension widgets, while Juggernaut Calm's disposal signal prevents its cleanup from clearing a standalone Calm widget that replaced its own widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
 The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
@@ -199,9 +199,9 @@ Returning from stock export rendering instead invalidates only the tool rows Cal
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
 Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden operational custom messages.
 
-## Firstmate Pi tool audit
+## Juggernaut Pi tool audit
 
-Every tool registered or supplied by Firstmate under `.pi/extensions` has this disposition:
+Every tool registered or supplied by Juggernaut under `.pi/extensions` has this disposition:
 
 | Tool | Registration surface | Calm disposition |
 | --- | --- | --- |
@@ -240,8 +240,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
-| `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
+| `synthetic-user` | Juggernaut extension `sendUserMessage`, terminal-injected input, Juggernaut-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
+| `synthetic-assistant` | No authoritative Juggernaut source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
@@ -281,7 +281,7 @@ Pi's Calm implementation changed only to consume the shared sprite core, while t
 
 ## Queued operational-row retention
 
-On Pi 0.87.1 with Calm persisted on, a Firstmate watcher notification sent while a tool held the turn was listed under the running turn as `Follow-up: FIRSTMATE_OP: v1 watcher: ...`, identical to Calm off.
+On Pi 0.87.1 with Calm persisted on, a Juggernaut watcher notification sent while a tool held the turn was listed under the running turn as `Follow-up: FIRSTMATE_OP: v1 watcher: ...`, identical to Calm off.
 Pressing Escape moved that raw text into the editor and removed it from Pi's queue, and the session recorded no delivery of it, so a captain who cleared the editor lost the notification.
 The initiating trigger was a notification queued during a run.
 The exposure condition was that Pi draws queued input in `InteractiveMode.updatePendingMessagesDisplay` and restores it through `restoreQueuedMessagesToEditor`, a path separate from the `addMessageToChat` path the operational-user adapter covers.
@@ -670,7 +670,7 @@ With a member name the running session does not have added to the adapter's requ
 not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queued Firstmate rows: session._queueNotARealMember
 ```
 
-With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
+With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Juggernaut notification`.
 
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 

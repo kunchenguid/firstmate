@@ -16,7 +16,7 @@ When this session owns supervision and away mode is not active:
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
 8. Waiting is silent.
-9. Never use shell `&` for firstmate supervision.
+9. Never use shell `&` for Juggernaut supervision.
 10. Never bundle the arm onto another command.
     A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) whenever this project's Grok hooks are trusted.
 
@@ -36,4 +36,4 @@ The primary project Stop hook runs `bin/fm-turnend-guard-grok.sh` as a backstop,
 After any forced continuation, arm the watcher with the background protocol above.
 
 Interactive TUI sessions are the supported Grok primary surface.
-Headless `grok -p` may wait for background process exit but does not reliably surface full auto-wake model output; do not run the primary firstmate as a one-shot headless process.
+Headless `grok -p` may wait for background process exit but does not reliably surface full auto-wake model output; do not run the primary Juggernaut as a one-shot headless process.

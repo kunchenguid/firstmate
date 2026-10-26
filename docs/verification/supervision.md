@@ -58,7 +58,7 @@ A file named both by `-e` and by auto-discovery loads twice (two factory calls, 
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
-The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
+The first two were measured on 2026-08-05 against a throwaway Juggernaut-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
 Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
 The third is recorded below.
 
@@ -72,7 +72,7 @@ Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
 Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+The interactive TUI is a known uncovered gap: Juggernaut has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -117,7 +117,7 @@ Pi and pi-signed load the same tracked extension bytes; pi-signed was not instal
 ### Post-start instruction refresh
 
 The isolated real-Pi instruction-refresh regression ran on 2026-08-11 with Pi 0.84.0.
-It used a scratch `FM_HOME`, a private tmux socket, and a disposable Firstmate checkout.
+It used a scratch `FM_HOME`, a private tmux socket, and a disposable Juggernaut checkout.
 The historical `origin/main` implementation first reproduced the stale original marker after a real compaction.
 The current implementation then recorded `source=startup`, changed and committed the lab's `AGENTS.md`, compacted the same real Pi session, and answered with the replacement marker.
 The fixed run also proved that the true-start baseline remained different from the updated file after compaction.
@@ -222,7 +222,7 @@ These guarantees are process semantics, not vendor-emitted signals, so no live-h
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against Juggernaut-launched workers wired exactly as `fm-spawn` writes them.
 Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 | Harness | Version verified | Semantic source | Observed result |
@@ -230,7 +230,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
-| Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
+| Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the Juggernaut-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable for complete turn lifecycle | See below; current positive Herdr busy support is recorded in [runtime verification](runtime-backends.md#codex-registration-recovery-and-native-busy). |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
@@ -243,7 +243,7 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 ```
 
 The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
-In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
+In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Juggernaut-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Juggernaut does not ship, install, recommend, or depend on that global path.
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
@@ -271,7 +271,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 
 ### Cursor primary park, 2026-08-13
 
-Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway firstmate home on a private tmux socket, never against a live home and never with a user-scope hook.
+Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway Juggernaut home on a private tmux socket, never against a live home and never with a user-scope hook.
 
 Mechanism facts established first, in a separate throwaway workspace:
 
@@ -491,7 +491,7 @@ fm-claude-stop-autoarm: ok
 ### Claude drops the exit 2 of a hook it timed out, 2026-09-23
 
 This supports the `bin/fm-claude-stop-autoarm.sh` header statement that a park outliving the hook timeout ends without a rewake.
-It was first measured on Claude Code 2.1.278 and re-measured on 2.1.281 on macOS arm64, in a scratch git project on a private tmux socket with no Firstmate hooks loaded.
+It was first measured on Claude Code 2.1.278 and re-measured on 2.1.281 on macOS arm64, in a scratch git project on a private tmux socket with no Juggernaut hooks loaded.
 Each arm registered one one-shot async `Stop` hook through `--settings`, with `asyncRewake: true` and `timeout: 30`, in an interactive `claude --model haiku --tools ''` session given one short prompt.
 
 ```json
@@ -581,7 +581,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 The Codex foreground-checkpoint behavior was exercised hermetically on 2026-09-14 with real watcher processes and isolated home state.
 That run observed an announced recovery remain announced through a quiet checkpoint, a never-announced generation surface once, and a durable wake appended during a live checkpoint resurface.
 Its announced-recovery fixture had no unacknowledged durable queue row, so it did not establish that the old behavior reproduced the regression; the revised counterfactual fixture and result are recorded separately below.
-This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
+This state transition depends on Juggernaut's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
 
 ```sh
 bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh

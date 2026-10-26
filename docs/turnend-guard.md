@@ -1,6 +1,6 @@
 # Primary turn-end supervision guard
 
-This doc explains the check that stops a primary Firstmate session from ending a turn while its work has no live supervision, and how each harness enforces that check at its turn boundary.
+This doc explains the check that stops a primary Juggernaut session from ending a turn while its work has no live supervision, and how each harness enforces that check at its turn boundary.
 It is for operators working out why a turn end was blocked or followed up, and for anyone changing a harness turn-end hook.
 
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
@@ -69,14 +69,14 @@ The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently
 ### Primary scope
 
 The guard first calls the shared primary scope.
-A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
+A secondmate home runs its own primary Juggernaut session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must meet both of these conditions:
 
 - It is a regular non-symlink file.
 - Its whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 
 An unmarked checkout or invalid marker falls through to the git-dir check.
-That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
+That check keeps operator and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 ### Supervision need
@@ -283,7 +283,7 @@ The registrations in detail:
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
   [Runtime backend verification](verification/runtime-backends.md#secondmate-busy-contract) owns the live evidence.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Juggernaut-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
@@ -497,7 +497,7 @@ The follow-up loop is bounded TWICE, because either bound alone is insufficient:
 - `loop_limit` in `.cursor/hooks.json` is Cursor's own ceiling and the only one that still holds if the adapter is broken or replaced.
   Once `loop_count` reaches it Cursor stops invoking the hook, verified live.
 - `FM_CURSOR_TURNEND_LOOP_CEILING` (default 180) bounds the payload's `loop_count` from inside and sits deliberately BELOW the registered `loop_limit`.
-  Firstmate's bound therefore bites first and emits one final loud notice instead of supervision going silently dark at Cursor's ceiling.
+  Juggernaut's bound therefore bites first and emits one final loud notice instead of supervision going silently dark at Cursor's ceiling.
 
 `loop_count` is Cursor's richer analogue of `stop_hook_active`.
 Its behavior was verified live:
@@ -535,19 +535,19 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Compatibility limits
 
-- Child crewmate and scout worktrees are outside scope.
+- Child operator and scout worktrees are outside scope.
 - A valid secondmate home is in scope.
   An idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
-- Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
+- Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; Juggernaut primaries run interactive.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
 - Cursor's `preCompact` step is deliberately unregistered.
   Its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
-- Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
-- The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
+- Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Juggernaut region in that global config and install a silent always-zero hook.
+- The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Juggernaut's private registry to one `state/<id>.turn-ended` marker.
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.

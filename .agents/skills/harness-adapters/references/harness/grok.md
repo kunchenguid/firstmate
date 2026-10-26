@@ -76,7 +76,7 @@ Grok fires `Stop` each turn.
 Project hooks require folder trust in `~/.grok/trusted_folders.toml`, which the spawn does not edit, though answering the folder-trust gate above writes it; global `~/.grok/hooks/` is always trusted.
 The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.
-This stays outside the worktree, needs no trust grant, and writes only Firstmate files.
+This stays outside the worktree, needs no trust grant, and writes only Juggernaut files.
 `../../../bin/fm-teardown.sh` removes the gitignored pointer before pooling.
 Secondmates skip it because idle is healthy and ordinary stale-pane detection does not apply.
 

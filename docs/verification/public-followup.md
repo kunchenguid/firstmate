@@ -141,7 +141,7 @@ It leaves the remote state directory WRITABLE, so the refusal can only come from
 The writability precondition narrows the wedge window but cannot close it, because the parent can turn non-writable between that check and lock creation and a live holder is indistinguishable from it at the acquire; the ordinary unbounded wait retries forever, so before the bounded acquire this path hung with nothing reported instead of returning the reconciliation refusal.
 The case asserts the refusal, the retained registration, the absent receipt, the untouched remote link, and that the call returns at all, which is the observable difference from a wait that never ends.
 The final case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
-A remote home running an older Firstmate copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
+A remote home running an older Juggernaut copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
 
 ## Reporting a terminal result from a remote work home
 

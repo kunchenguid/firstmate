@@ -14,7 +14,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
-| Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Juggernaut's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
 | Autonomy | `--yolo`, documented alias for `--force`; footer `Run Everything`. |
 | Trust | `--trust` suppresses the dialog; `--yolo` does not, and every task has a fresh path. |
@@ -28,7 +28,7 @@ The slash popup consumes the first Enter; that Enter closes it and a genuine sec
 
 Cursor does not clear inherited `CLAUDECODE`, so a Cursor worker under Claude carries both markers.
 `../../../bin/fm-harness.sh` tests Cursor first, and launch also clears foreign markers.
-Both remain necessary: sanitization covers Firstmate launches, ordering covers hand-started sessions.
+Both remain necessary: sanitization covers Juggernaut launches, ordering covers hand-started sessions.
 That ordering settles the marker layer only, and a nearer Claude ancestor still outranks a retained Cursor marker.
 
 Cursor is a bundled Node script, so tmux can report bare `node` while `ps -o comm=` carries its install path.
@@ -61,7 +61,7 @@ Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../t
 
 ## Worktree boundary
 
-Firstmate enters its acquired worktree and passes the same absolute path through `--workspace`.
+Juggernaut enters its acquired worktree and passes the same absolute path through `--workspace`.
 Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.cursor/worktrees` and breaks isolation.
 The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
 Example: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.

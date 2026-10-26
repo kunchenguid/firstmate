@@ -6,7 +6,7 @@ This note records why a secondmate home's captain-facing outcomes are delivered 
 
 ## The problem
 
-A secondmate is a firstmate in its own home, and nobody reads its chat: the captain and the main firstmate see only what is appended to the parent channel.
+A secondmate is a Juggernaut in its own home, and nobody reads its chat: the captain and the main Juggernaut see only what is appended to the parent channel.
 On 2026-09-02 four outcomes across two mate homes never reached the captain.
 The watcher had delivered the parent's request within a minute each time, the mate did the work, and then the mate addressed "captain" in its own chat instead of appending to the channel.
 The cause is structural rather than a one-off lapse: the mate can satisfy the [address rule in `AGENTS.md`](../AGENTS.md#firstmate) in local chat while missing the charter's later return-channel instruction.

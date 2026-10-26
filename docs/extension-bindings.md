@@ -7,7 +7,7 @@ This document is the maintainer-architecture owner for the package manifest, ena
 ## Scope and design
 
 The first extension binding is one complete vertical capability, not a general plugin system.
-It lets a trusted package maintained outside Firstmate provide a long-polling process-event adapter while Firstmate core keeps source ownership, process supervision, durable capture, announcement, handling, and retirement.
+It lets a trusted package maintained outside Juggernaut provide a long-polling process-event adapter while Juggernaut core keeps source ownership, process supervision, durable capture, announcement, handling, and retirement.
 The capability is explicitly enabled per home, independently installed per host, and permanently inert when the binding registry is absent.
 It follows the project's vision by keeping consent explicit, commands flat and inspectable, mechanics deterministic, evidence non-authoritative, and the feature independent of every worker harness and session provider.
 
@@ -23,15 +23,15 @@ Do not bind a package that is not trusted to that level.
 Protocol responses are still untrusted evidence.
 The host accepts only the fields and operations below, and no response can authorize a captain decision, merge, destination, stronger operation, force, discard, cleanup, or credential use.
 External adapters do not receive the built-in `answers`, `autohandle`, or `self-announcing` seams.
-A captured external result therefore remains unhandled until the existing Firstmate handling owner acknowledges it.
+A captured external result therefore remains unhandled until the existing Juggernaut handling owner acknowledges it.
 
 ## Discovery and package installation
 
 Discovery reads only regular mode-`0600` JSON files in the effective home's mode-`0700` `config/extensions.d/` directory.
-The effective home follows the repository convention of `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked Firstmate root, but no environment value names a package or binding inside that home.
+The effective home follows the repository convention of `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked Juggernaut root, but no environment value names a package or binding inside that home.
 The current directory, project files, task copies, worker text, Pi packages, and package-manager metadata are never searched.
 A package cannot bind an adapter name already owned by an installed `bin/fm-procevent-<adapter>.sh` built-in.
-If a later Firstmate release adds the same built-in name, already captured extension evidence retains its immutable package owner and is never reinterpreted by that built-in; the pinned extension registration remains explicit until owner-matched retirement.
+If a later Juggernaut release adds the same built-in name, already captured extension evidence retains its immutable package owner and is never reinterpreted by that built-in; the pinned extension registration remains explicit until owner-matched retirement.
 
 `bind` takes one explicit package directory outside the active home and outside every Git project or task copy.
 It rejects path-component symlinks, symlinks anywhere in the package tree, hard-linked files, non-regular entries, files owned by another user, and group or world-writable package paths.
@@ -210,12 +210,12 @@ A missing or changed package never executes.
 A malformed binding, integrity mismatch, failed handshake, crash, nonzero exit, timeout, oversized stream, wrong request id, or invalid response never selects another adapter.
 A source invocation failure is captured as bounded host evidence and remains unhandled.
 A classification, terminal, or silence failure returns no positive verdict.
-Replay uses the exact request id as the package's idempotence key, including a stable pre-capture retry from the generic runner, but Firstmate makes no generic exactly-once or source-side losslessness claim.
+Replay uses the exact request id as the package's idempotence key, including a stable pre-capture retry from the generic runner, but Juggernaut makes no generic exactly-once or source-side losslessness claim.
 The process-event durability boundary remains owned by [`configuration.md`](configuration.md#process-to-event-sources-stateprocevent).
 
 ## Runtime independence
 
-The host runs in the Firstmate home that owns the source, never in a task worker or its session container.
+The host runs in the Juggernaut home that owns the source, never in a task worker or its session container.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and Rovo therefore expose no package-loading surface for this capability.
 The result reaches every supported primary through the existing bounded `check` wake path, including the unknown-protocol fallback used where no specialized primary continuation exists.
 The tmux, Herdr, Zellij, Orca, and cmux session providers are not consulted because a process-event source has no task endpoint.

@@ -1,6 +1,6 @@
-# Verification: the rovo (Atlassian Rovo CLI) crewmate/scout adapter
+# Verification: the rovo (Atlassian Rovo CLI) operator/scout adapter
 
-Active empirical evidence for firstmate's rovo adapter.
+Active empirical evidence for Juggernaut's rovo adapter.
 The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/references/harness/rovo.md) owns the operating facts; this record owns how they were established and what is still unproven.
 
 ## Subject
@@ -121,7 +121,7 @@ Model discovery is per-account (`/models` or ACP `session/new`); the observed li
 
 ## Worktree confinement and the allowedExternalPaths fix
 
-The standard crewmate flow needs a rovo worker to read its own brief and steering messages, and to write its status and report - all of which live in the firstmate home, outside the task's git worktree.
+The standard operator flow needs a rovo worker to read its own brief and steering messages, and to write its status and report - all of which live in the Juggernaut home, outside the task's git worktree.
 By default rovo confines every file-tool operation (`open_files`, `create_file`, `grep`, `expand_folder`, ...) to the workspace it was launched in, and its bash tool independently refuses the same external paths regardless of any grant.
 Confirmed live with a plain `rovo run --yolo` launched inside an isolated scratch workspace, against an unrelated file in a separate outside directory:
 
@@ -155,7 +155,7 @@ $ cat out.txt
 I can't run that command because it modifies a file outside the workspace. If you provide a workspace-relative path, I can run the equivalent command there - would you like to do that?
 ```
 
-This matters because the standard crewmate contract's literal status line is a bash `echo ... >> status_file` command. Given that exact literal instruction, rovo recovered on its own by falling back to its native file tool for the same append, and succeeded, preserving the file's existing content:
+This matters because the standard operator contract's literal status line is a bash `echo ... >> status_file` command. Given that exact literal instruction, rovo recovered on its own by falling back to its native file tool for the same append, and succeeded, preserving the file's existing content:
 
 ```
 $ echo "existing: prior" > "$LAB/outside/status2.txt"
@@ -204,9 +204,9 @@ The typed pointer (`Read the brief at <path> and follow it exactly.`) was echoed
 `fm_backend_herdr_capture` correctly rendered the `Rovo is thinking...` busy line during the tool call (`fm_busy_rovo_tail_busy` matches that captured text), and the pane read idle with `PONG` visible once the tool call finished; `rovo_wait_for_delivery`'s own composer-empty conjunct did not settle within its poll window, consistent with the already-documented composer-ghost-text gap below rather than a new defect.
 
 `fm_backend_agent_state` is the one signal this run disproves rather than confirms: it reported `dead` throughout - at the ready banner, mid-tool-call busy, and idle-with-`PONG` alike - even though rovo was demonstrably alive and responding the whole time.
-The cause is on Herdr's side, not firstmate's: `fm_backend_herdr_pane_agent_state` calls `herdr agent get <pane>`, which returned `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}` for the live rovo pane, because `herdr integration status` lists no `rovo` entry at all (only `pi`, `omp`, `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`, `cursor`, `mastracode`, `antigravity-cli`, and `grok` are known integrations on the installed Herdr build).
+The cause is on Herdr's side, not Juggernaut's: `fm_backend_herdr_pane_agent_state` calls `herdr agent get <pane>`, which returned `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}` for the live rovo pane, because `herdr integration status` lists no `rovo` entry at all (only `pi`, `omp`, `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`, `cursor`, `mastracode`, `antigravity-cli`, and `grok` are known integrations on the installed Herdr build).
 Herdr has not shipped agent detection for rovo, so the classifier that recovery logic depends on (`fm_backend_agent_state`'s `alive`/`dead` distinction, and `fm_backend_herdr_tab_is_husk`'s reuse of it) cannot currently tell a live rovo pane apart from an empty one on the herdr backend; a live rovo worker placed on `backend=herdr` risks being misclassified as an agent-less husk by any recovery path that trusts this classifier.
-This is recorded as a known Herdr-side integration gap rather than a firstmate bug, and is deliberately left unpatched here: no herdr-scoped workaround is safe to add without risking a false-positive `alive` verdict for some unrelated idle shell, so `backend=herdr` remains usable for launching a rovo crewmate/scout but unverified for automatic dead/husk recovery until Herdr ships rovo detection (or `bin/backends/herdr.sh` gains an independent process-based fallback the way `bin/backends/tmux.sh` already has).
+This is recorded as a known Herdr-side integration gap rather than a Juggernaut bug, and is deliberately left unpatched here: no herdr-scoped workaround is safe to add without risking a false-positive `alive` verdict for some unrelated idle shell, so `backend=herdr` remains usable for launching a rovo operator/scout but unverified for automatic dead/husk recovery until Herdr ships rovo detection (or `bin/backends/herdr.sh` gains an independent process-based fallback the way `bin/backends/tmux.sh` already has).
 `/exit` returned the pane to an idle shell prompt rather than closing it, unlike tmux which closes the whole window, so `fm_backend_agent_state` reading `dead` after exit is the textually correct verdict for an agent-less-but-present pane; it is only the ready/busy/idle misclassification while rovo was actually running that is the real finding above.
 
 ## Skill-loading interop gap (documented, not fixed)
@@ -215,9 +215,9 @@ This is recorded as a known Herdr-side integration gap rather than a firstmate b
 ⚠ Invalid skill definition in .../.agents/skills/bootstrap-diagnostics/SKILL.md: 'metadata -> internal': Input should be a valid string
 ```
 
-rovo's skill loader rejects every firstmate skill because `metadata.internal` is a boolean in firstmate's frontmatter and rovo's schema wants a string.
-This blocks `/no-mistakes` and every other firstmate skill invocation inside a rovo worker until firstmate's `SKILL.md` frontmatter is made rovo-compatible, a separate deferred follow-up that touches every skill file and the installer contract (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
-A `no-mistakes`-mode rovo ship crewmate is blocked by this gap; a rovo scout, which invokes no skill, is unaffected.
+rovo's skill loader rejects every Juggernaut skill because `metadata.internal` is a boolean in Juggernaut's frontmatter and rovo's schema wants a string.
+This blocks `/no-mistakes` and every other Juggernaut skill invocation inside a rovo worker until Juggernaut's `SKILL.md` frontmatter is made rovo-compatible, a separate deferred follow-up that touches every skill file and the installer contract (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
+A `no-mistakes`-mode rovo ship operator is blocked by this gap; a rovo scout, which invokes no skill, is unaffected.
 
 ## quota-axi provider mapping: not established
 

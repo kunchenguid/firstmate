@@ -4,7 +4,7 @@ Audience: maintainer verification.
 
 Verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/devin.md) owns operating facts; executable owners carry launch and state mechanics.
-This verification covers crewmates and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
+This verification covers operators and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
 Primary, secondmate, ACP, and quota-provider integration are outside this guarantee.
 
 ## Refresh commands

@@ -7,7 +7,7 @@ It provides task workspaces and surfaces while Treehouse continues to provide gi
 ## Setup
 
 Pick cmux when you already use the app as your terminal and want task workspaces in its sidebar.
-cmux is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Firstmate session.
+cmux is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Juggernaut session.
 
 Prerequisites:
 
@@ -20,10 +20,10 @@ The adapter prefers `command -v cmux` and otherwise uses `/Applications/cmux.app
 
 ### Required socket access
 
-cmux defaults to a control mode that rejects external shells, while Firstmate always controls it from an external process.
+cmux defaults to a control mode that rejects external shells, while Juggernaut always controls it from an external process.
 Open Settings > Automation and choose a viable Socket Control Mode before the first cmux-backed spawn.
 
-| Setting | Value | Firstmate support | Security boundary |
+| Setting | Value | Juggernaut support | Security boundary |
 | --- | --- | --- | --- |
 | Off | `off` | No | The socket listener is disabled. |
 | cmux processes only | `cmuxOnly` | No | Only descendants of the cmux app can connect. |
@@ -34,12 +34,12 @@ Open Settings > Automation and choose a viable Socket Control Mode before the fi
 Automation mode is the recommended same-user boundary.
 `allowAll` can execute commands through a world-writable control socket and should be selected only as an explicit security tradeoff.
 
-For Password mode, store the password as the first line of local gitignored `config/cmux-socket-password` or provide `CMUX_SOCKET_PASSWORD` in Firstmate's environment.
+For Password mode, store the password as the first line of local gitignored `config/cmux-socket-password` or provide `CMUX_SOCKET_PASSWORD` in Juggernaut's environment.
 The adapter reads the file fresh from the effective config directory and does not overwrite an ambient password when the file is absent.
 Configure the mode and password through the cmux UI rather than editing `cmux.json`; the app does not retain a hand-added password key, and socket-based reload cannot fix a socket that is rejecting the caller.
 
-Select cmux with local `config/backend` containing `cmux`, `FM_BACKEND=cmux` for one launch, or an explicit request to Firstmate.
-It can also be runtime auto-detected when Firstmate itself runs inside cmux.
+Select cmux with local `config/backend` containing `cmux`, `FM_BACKEND=cmux` for one launch, or an explicit request to Juggernaut.
+It can also be runtime auto-detected when Juggernaut itself runs inside cmux.
 A spawn stops with an actionable setup message when the app, minimum version, `jq`, socket access, or password is unavailable.
 The adapter may launch the app with `open -a cmux` only when the socket is down; it does not relaunch the app for access-denied or authentication errors.
 
@@ -67,9 +67,9 @@ The spawn refusal explains how to finish cmux setup or opt back into tmux.
 
 Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
-The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
+The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Juggernaut root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
-Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
+Relocating the Juggernaut installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
 ```text
 backend=cmux
@@ -102,12 +102,12 @@ Grok alone retains its isolated rendered-tail fallback.
 A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.
 cmux also refuses to remove the only workspace in a macOS window while returning a misleading success response.
-When the task is last in its window, Firstmate creates one unfocused unnamed sibling workspace in that same window, closes the task workspace, and leaves the window with cmux's fresh default workspace.
+When the task is last in its window, Juggernaut creates one unfocused unnamed sibling workspace in that same window, closes the task workspace, and leaves the window with cmux's fresh default workspace.
 The sibling never carries an `fm-` title and is ignored by recovery.
 
 The exact window membership is re-read before this operation.
 A selected workspace that is not last closes normally; selection itself is not the trigger.
-Firstmate does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
+Juggernaut does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
 
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.

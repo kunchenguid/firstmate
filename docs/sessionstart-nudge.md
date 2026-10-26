@@ -21,7 +21,7 @@ One term recurs throughout:
 
 ## Session-open tiers
 
-Firstmate ships two session-open tiers.
+Juggernaut ships two session-open tiers.
 The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
@@ -188,7 +188,7 @@ When the root otherwise qualifies as primary, the run wrapper creates the state 
 If that creation fails, the run wrapper prints one stderr line naming the state directory and the reason, then stands down as it would for any ineligible root.
 The nudge wrapper and every other hook still stand down while the state directory is missing.
 
-The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
+The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Juggernaut-shaped paths.
 
 ### Nudge payload
 
@@ -245,7 +245,7 @@ Codex exec is a run-tier harness.
 The `.codex/hooks.json` transport does three things:
 
 1. It anchors to the hook process working directory.
-2. It verifies a Firstmate-shaped hook-bearing root.
+2. It verifies a Juggernaut-shaped hook-bearing root.
 3. It pipes the hook payload into the wrapper with a 180s timeout.
 
 Native stdout context injection is supported under `codex exec`.
@@ -254,8 +254,8 @@ Native stdout context injection is supported under `codex exec`.
 
 The Codex interactive TUI is uncovered and has no tracked transport.
 Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI.
-Firstmate ships no global hook and has no tracked compaction or re-emit channel for it.
-Firstmate does not claim instruction-refresh delivery for this surface.
+Juggernaut ships no global hook and has no tracked compaction or re-emit channel for it.
+Juggernaut does not claim instruction-refresh delivery for this surface.
 
 ### Pi and pi-signed
 
@@ -331,7 +331,7 @@ So this path is intentionally fail-open and cannot use the run tier.
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
 That alternative expands trust and writes outside this repository.
-So Firstmate never installs it or grants folder trust automatically.
+So Juggernaut never installs it or grants folder trust automatically.
 
 ### Cursor
 
@@ -374,7 +374,7 @@ Delivering one needs its own design and is deliberately deferred to a follow-up.
 A Cursor primary does not re-emit its digest after a compaction.
 
 Cursor's compaction surface is uncovered in the same sense as [Codex's interactive TUI](#codex-interactive-tui).
-Firstmate registers nothing for `preCompact`.
+Juggernaut registers nothing for `preCompact`.
 So a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
 ## Regression coverage

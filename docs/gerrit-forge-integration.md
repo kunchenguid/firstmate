@@ -1,7 +1,7 @@
 # Gerrit forge integration
 
-This note is the design reasoning for giving Firstmate a forge axis, worked through Gerrit because Gerrit is the case that forces it.
-It is written for whoever integrates a forge with Firstmate rather than for the operator of any one fleet, so it argues about axes, vocabulary, and ownership, and never about which projects should be registered how.
+This note is the design reasoning for giving Juggernaut a forge axis, worked through Gerrit because Gerrit is the case that forces it.
+It is written for whoever integrates a forge with Juggernaut rather than for the operator of any one fleet, so it argues about axes, vocabulary, and ownership, and never about which projects should be registered how.
 Every question it raises is answered, and each decision is stated in the body where the reasoning for it sits rather than collected into a list at the end.
 
 The mechanics it reasons about have their own owners.
@@ -53,7 +53,7 @@ It is the access-control primitive, and change-shaped review is what that primit
 Reading it as a publication quirk is what makes the rest of Gerrit look like a pile of exceptions rather than one decision followed through.
 
 What does *not* differ is worth stating, because it bounds the problem.
-Reading review state after publication fits Firstmate's existing record with no new shape.
+Reading review state after publication fits Juggernaut's existing record with no new shape.
 `bin/fm-pr-lib.sh` already carries a provider-tagged identity of provider, url, host, path, and number, because GitLab had already forced host and an arbitrarily nested path into it, and a Gerrit change URL populates those same fields.
 The break is not in watching a change.
 It is in making one.
@@ -64,7 +64,7 @@ It is in making one.
 |---|---|---|---|
 | publish | push the branch, then open a pull request: two steps, the second one a forge API call through a vendor CLI | one `git push HEAD:refs/for/<branch>`: creating the change *is* the push | the publish step is a vendor CLI on one side and plain git on the other, so it cannot be a single parameterized command |
 | review | comments and approvals attached to the pull request, plus forge CI reporting check runs against the branch | comments and label votes (`Code-Review`, `Verified`) attached to the change; CI votes a label | "checks green" is a label value rather than a set of check runs, and the pipeline's CI step has no check runs to watch |
-| merged | the pull request is closed and its content is in the base branch, usually squashed | the change is *submitted*, and its status becomes `MERGED` | "merge" names an action Firstmate performs, while "submit" names one it must not - see section 4 |
+| merged | the pull request is closed and its content is in the base branch, usually squashed | the change is *submitted*, and its status becomes `MERGED` | "merge" names an action Juggernaut performs, while "submit" names one it must not - see section 4 |
 | head | a commit hash that identifies what was reviewed and stays valid | a patch-set revision, and every amend or rebase produces a new one | a recorded head quietly becomes the *previously* reviewed content, so a Gerrit task records none |
 | number | repository-scoped on GitHub, project-scoped on GitLab; addressing it needs owner and repository, or host and path | server-global; with the host pinned, the number alone names the change | the project path is not part of a Gerrit read at all |
 
@@ -75,7 +75,7 @@ Anything that compares against it is then comparing against an earlier patch set
 
 ### Where today's mode names mislead
 
-Not one of Firstmate's three delivery-mode names refers to a stopping point, and each misses it differently.
+Not one of Juggernaut's three delivery-mode names refers to a stopping point, and each misses it differently.
 
 `direct-PR` names an artifact.
 On a forge with no pull request the name has no referent at all, which is why the natural first rule is to refuse the combination rather than give it a meaning: there is nothing to rename it to from inside the mode's own vocabulary.
@@ -126,9 +126,9 @@ That it survived being invisible says how rarely it varies, not where it belongs
 
 ### The hinge: pre-publication versus post-publication
 
-Firstmate has no forge property for GitLab and has never needed one.
+Juggernaut has no forge property for GitLab and has never needed one.
 `bin/fm-pr-lib.sh` derives the provider from the merge-request URL *after the fact*, tagging the stored identity with it, and the work is handed to `glab`; workers create the artifact with the vendor CLI, and `bin/fm-pr-merge.sh` merges through that same CLI.
-Firstmate owns none of the mechanics.
+Juggernaut owns none of the mechanics.
 Every forge decision it makes, it makes with the URL already in hand.
 
 Gerrit breaks that in exactly one way.
@@ -141,7 +141,7 @@ Everything downstream of publication - watching, reading state, reporting - cont
 ### How the forge is known: detected, then proposed for confirmation
 
 The binding is **detected from the project's origin and proposed at intake for confirmation**, rather than declared cold in the registry or inferred silently at use time.
-Detection is what every other forge already gets for free, because the URL tells Firstmate what it is dealing with.
+Detection is what every other forge already gets for free, because the URL tells Juggernaut what it is dealing with.
 Confirmation is what stops a wrong guess from becoming a silent second source of truth, since a mis-detected forge produces a brief that is internally consistent and wrong.
 Proposing it at intake also puts the signal where a pre-publication signal has to be, in the brief at scaffold time with no clone read and no network call, while keeping a human at the one point where the evidence can be misread.
 The delivery-mode design takes that shape, treating a protocol fact such as an SSH remote on port 29418 or a `refs/for/<branch>` push target as good evidence to propose the binding while refusing to infer it later.
@@ -165,8 +165,8 @@ The origin URL already selects which tool to call, the tool then declares its ow
 
 Be precise about what that removes and what it does not.
 It removes the per-project declaration, which is the part capable of disagreeing with reality.
-It does not remove the mapping, because something must still get from a remote URL to the right tool before any tool can be asked anything, and that something is Firstmate.
-The question is therefore not whether Firstmate holds forge knowledge, since it does either way, but whether it holds one thin host-pattern mapping for the whole fleet or one annotation per project.
+It does not remove the mapping, because something must still get from a remote URL to the right tool before any tool can be asked anything, and that something is Juggernaut.
+The question is therefore not whether Juggernaut holds forge knowledge, since it does either way, but whether it holds one thin host-pattern mapping for the whole fleet or one annotation per project.
 
 Framed that way the mapping has a real advantage, for a reason that has nothing to do with Gerrit.
 A host pattern is written once and is then either wrong for every project on that host or right for every project on it, which is a failure mode that announces itself on first use.
@@ -227,23 +227,23 @@ With forks, proposing needs no write access to the target repository at all, bec
 On Gerrit, proposing requires push access to `refs/for/*` on the one shared repository, so an autonomous worker's identity cannot be confined to a namespace of its own; it holds a grant on the repository everyone else shares.
 That is the provisioning consequence, and it is why the vote boundary in section 5 matters more here rather than less: an identity that can already reach the shared repository is held back only by the grants its account does not hold, so the label permissions on that account carry weight a separate namespace would otherwise share.
 
-**The tool Firstmate calls cannot vote, and that is a requirement rather than an accident.**
+**The tool Juggernaut calls cannot vote, and that is a requirement rather than an accident.**
 `gerrit-axi` adds exactly two writes to its queries.
 `publish` is one push to `refs/for/<branch>`, and `submit` is one call asking the server to submit one change, which the server may refuse.
 Its README states the boundary - "it never votes, replies, sets reviewers, or abandons" - and its own test suite enforces it by failing if `gerrit review`, a REST call to the review endpoint, or a label option on a push appears anywhere in the code.
 That tool lives in its own repository, so this design does not change it; section 5 argues why its powers stop where they do.
-Firstmate's own refusal to submit is a policy rather than a capability limit, and what it protects is the decisive vote rather than the submit: a submit only succeeds once someone has recorded a `Code-Review+2`, and that vote is a positive attributed claim that a named human approved, read as such by colleagues and by any audit of the repository.
-A server that permits self-approval is exactly what makes this a boundary Firstmate chooses rather than one it merely runs into, though the choice covers only Firstmate's own path: the server's label ACL on the worker account is what makes it binding on anything else.
+Juggernaut's own refusal to submit is a policy rather than a capability limit, and what it protects is the decisive vote rather than the submit: a submit only succeeds once someone has recorded a `Code-Review+2`, and that vote is a positive attributed claim that a named human approved, read as such by colleagues and by any audit of the repository.
+A server that permits self-approval is exactly what makes this a boundary Juggernaut chooses rather than one it merely runs into, though the choice covers only Juggernaut's own path: the server's label ACL on the worker account is what makes it binding on anything else.
 
 So the first two are Gerrit's shape, and the third is a deliberate policy plus a property of a tool this design does not itself write.
 Only the tool half could be changed by writing code, and it guards the tool's own path with the worker account's server-side label ACL behind it; section 5 argues that control and why the tool's powers stop at publish and submit.
 
-## 5. Where responsibility sits: Firstmate or the forge tool
+## 5. Where responsibility sits: Juggernaut or the forge tool
 
 Start from the division that already works.
-For GitLab, Firstmate knows which tool and calls it, the tool knows the forge, and Firstmate owns none of the mechanics.
+For GitLab, Juggernaut knows which tool and calls it, the tool knows the forge, and Juggernaut owns none of the mechanics.
 Not the artifact's creation, not its URL shape beyond parsing it back into an identity, not the merge command.
-The forge property Firstmate carries for GitLab is no property at all, only a tag read off a URL.
+The forge property Juggernaut carries for GitLab is no property at all, only a tag read off a URL.
 
 The question this raises for Gerrit is whether the stack-versus-squash glue belongs on the same side of that line.
 **It does: the shape mechanics live in the forge tool.**
@@ -252,19 +252,19 @@ A third candidate home came onto the board after this choice was made, and it is
 
 The case for it is that this is forge mechanics through and through.
 Producing a stack of changes under a topic means giving each commit a `Change-Id`, pushing once to `refs/for/<branch>` with a topic option, and reasoning about the parent chain that makes the stack a stack.
-None of that is a Firstmate concept, and every line of it Firstmate writes is a line Firstmate maintains on behalf of one forge.
-Move it and Firstmate's job shrinks back to "know which tool, call it", which is exactly what it already is everywhere else.
+None of that is a Juggernaut concept, and every line of it Juggernaut writes is a line Juggernaut maintains on behalf of one forge.
+Move it and Juggernaut's job shrinks back to "know which tool, call it", which is exactly what it already is everywhere else.
 
 ### Does the pipeline need to know?
 
-The strongest objection is that the no-mistakes pipeline, not Firstmate, is what runs at delivery time, so hiding forge mechanics inside a forge tool only helps if the pipeline can call that tool.
+The strongest objection is that the no-mistakes pipeline, not Juggernaut, is what runs at delivery time, so hiding forge mechanics inside a forge tool only helps if the pipeline can call that tool.
 The objection is right about the mechanism.
 no-mistakes does own publication: `push`, `pr`, and `ci` are its own pipeline steps, sitting alongside `review`, `test`, `document`, and `lint`, and a run reports each of them independently.
 
 It does not defeat the answer, because on a Gerrit project those are precisely the steps that do not run.
 The delivery design has a `forge=gerrit` worker pass `--skip push,pr,ci` on every run and skip nothing else, keeping `review`, `test`, `document`, and `lint` as the whole point of the run.
 Publication then moves out of the pipeline entirely: once the run passes and its fixes are back on the worker's branch, the worker publishes that branch to the review server through the forge tool.
-So the caller of the forge tool is Firstmate or the worker, never no-mistakes, and the pipeline never has to know `gerrit-axi` exists.
+So the caller of the forge tool is Juggernaut or the worker, never no-mistakes, and the pipeline never has to know `gerrit-axi` exists.
 The objection's premise holds everywhere the pipeline publishes, and a Gerrit project is the one place it does not.
 
 That answer is contingent, though, and reading it as structural would be a mistake.
@@ -299,8 +299,8 @@ The SSH connection a worker needs to push to `refs/for/*` also carries `gerrit r
 The durable control is therefore the worker account's server-side label ACL: an identity permitted to push to `refs/for/*` must not hold decisive `Code-Review` permission.
 A tool that cannot vote, paired with an account that can, is not a boundary at all, only the appearance of one.
 
-Behind that ACL, Firstmate's refusal and the tool's inability to vote are defence in depth, guarding the tool's own path rather than the account's.
-Both are required here: Firstmate refuses to submit, and the tool never votes.
+Behind that ACL, Juggernaut's refusal and the tool's inability to vote are defence in depth, guarding the tool's own path rather than the account's.
+Both are required here: Juggernaut refuses to submit, and the tool never votes.
 Neither replaces the ACL, and neither is worth much without it, which is why the account requirement is stated as the control and these two as what stands behind it.
 
 So the trade is not publish against submit.
@@ -314,18 +314,18 @@ That matters more on a forkless forge, for the reason section 4 gives: the worke
 
 ### A third place the mechanics could live
 
-Two homes for the shape mechanics have been weighed so far, Firstmate and a forge tool Firstmate calls.
+Two homes for the shape mechanics have been weighed so far, Juggernaut and a forge tool Juggernaut calls.
 There is a third, and it deserves arguing as a peer rather than a footnote, because it was not in view when the choice above was made.
 no-mistakes already carries a multi-forge abstraction, with a `Provider` type, per-provider packages, and a per-repository execution context, and Gerrit support could be contributed there natively following the pattern its six existing providers follow.
 
 The case for it is that it removes part of a duplication the other two options create.
-If the pipeline gains Gerrit support while Firstmate also has its own forge tool, `Change-Id` handling, magic-ref pushes, topic stacks and submittability are each implemented independently on both sides.
+If the pipeline gains Gerrit support while Juggernaut also has its own forge tool, `Change-Id` handling, magic-ref pushes, topic stacks and submittability are each implemented independently on both sides.
 Contributing upstream removes that duplication for the pipeline-driven path only: when a `no-mistakes` worker publishes, `Change-Id` handling on push and magic-ref publication would live in a pipeline that already knows six forges, behind the forkless push step the contingent skip above shows it would need, rather than in a seventh integration beside it, and that abstraction is both more mature than a new one and shared rather than ours alone.
 
 It removes only that part.
 The pipeline never merges: its host interface finds, creates and updates pull requests and reads their state, checks and mergeability, and its `ci` step only verifies that a merge happened.
-Merging, the merge poll and the stack watch below stay with Firstmate wherever publication lives, so Firstmate still needs a Gerrit-aware tool, and submittability and topic-stack reasoning still exist on both sides under this option.
-Publication stays there too for the other delivery path: a `direct-PR` worker never runs the pipeline, so its magic-ref push, `Change-Id` handling and topic stack come from Firstmate's own tool whatever the pipeline gains.
+Merging, the merge poll and the stack watch below stay with Juggernaut wherever publication lives, so Juggernaut still needs a Gerrit-aware tool, and submittability and topic-stack reasoning still exist on both sides under this option.
+Publication stays there too for the other delivery path: a `direct-PR` worker never runs the pipeline, so its magic-ref push, `Change-Id` handling and topic stack come from Juggernaut's own tool whatever the pipeline gains.
 It removes one caller of the forge tool's publication mechanics rather than the mechanics themselves.
 
 The case against is a dependency the other two options do not carry.
@@ -335,7 +335,7 @@ The honest reading is that the upstream route removes the publication duplicatio
 
 **So: build ours now, contribute upstream later.**
 The two are sequential rather than exclusive, which is what makes the timing objection survivable.
-A forge tool built now ships against a schedule we hold, and its publication mechanics are the part that could later be contributed upstream once they are known to work, at which point the pipeline-driven path stops calling Firstmate's tool to publish, while `direct-PR` publication, merging, the merge poll and the stack watch stay in it.
+A forge tool built now ships against a schedule we hold, and its publication mechanics are the part that could later be contributed upstream once they are known to work, at which point the pipeline-driven path stops calling Juggernaut's tool to publish, while `direct-PR` publication, merging, the merge poll and the stack watch stay in it.
 Choosing the upstream route first would have meant waiting; choosing it second costs only that the publication code is written before it is shared.
 
 ### Watching a stack
