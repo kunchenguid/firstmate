@@ -1098,14 +1098,14 @@ test_proof_never_writes_into_the_worktree() {
   victim="$TMP_ROOT/nowrite-victim"
   printf 'victim data\n' > "$victim"
   ln -s "$victim" "$wt/.fm-proof-canary-link" 2>/dev/null || true
-  before=$(ls -A "$wt" | sort)
+  before=$( ( cd "$wt" && find . -mindepth 1 -maxdepth 1 | sort ) )
 
   (
     . "$ROOT/bin/fm-tmux-lib.sh"
     fm_tmux_worktree_live_pids "$wt"
   ) >/dev/null 2>&1
 
-  after=$(ls -A "$wt" | sort)
+  after=$( ( cd "$wt" && find . -mindepth 1 -maxdepth 1 | sort ) )
   [ "$before" = "$after" ] \
     || fail "the proof must not add or remove worktree files (before: $before; after: $after)"
   [ "$(cat "$wt/.fm-proof-canary")" = 'precious uncommitted data' ] \
