@@ -122,6 +122,16 @@ run_report() { # <home> <child>
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
 
+# The cleanup-side entry point: settle one child's pending receipts for a child
+# whose record is about to disappear.
+run_retire() { # <home> <child>
+  local home=$1 child=$2
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" retire "$child"
+}
+
 wake_count() { # <home> <key prefix>
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
@@ -1046,8 +1056,93 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+# A lane cleaned up while one of its receipts was still pending used to leave a
+# record that could never reach its receipt, so the home read as still owing that
+# outcome forever. Both the per-poll pass and teardown's own entry point settle it.
+test_cleaned_up_child_receipts_are_settled() {
+  local cycle notice_before
+  make_world torn-down; bind_secondmate local
+  write_child "$MATE" child 'working: still running the pipeline'
+  write_child "$MATE" other 'working: still running the pipeline'
+  # An unusable parent route leaves both outcomes pending.
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" pending)" = 2 ] || fail "broken binding did not leave the outcomes pending"
+  notice_before=$(wake_count "$MATE" 'inactive-reconcile:')
+  [ "$notice_before" -ge 2 ] || fail "the stuck receipts never queued their recovery notices"
+
+  # A live child keeps its receipt; once its record is gone, teardown settles it,
+  # and a receipt that never reached the channel is removed rather than reported.
+  run_retire "$MATE" other || fail "retire failed for a live child"
+  [ "$(outcome_count "$MATE" pending)" = 2 ] || fail "retire dropped a live child's pending receipt"
+  rm -f "$MATE/state/other.meta" "$MATE/state/other.status" "$MATE/state/other.turn-ended"
+  run_retire "$MATE" other || fail "retire failed for a cleaned-up child"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "the cleaned-up child's pending receipt survived retire"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "retire reported an outcome that was never delivered"
+
+  # Recording the PR a poll later gives the same outcome a second fingerprint.
+  grep -v '^pr=\|^pr_head=' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
+  mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  age "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" pending)" = 2 ] || fail "the second fingerprint did not retain its own receipt"
+
+  # Delivery works again: it receipts the current fingerprint, not the earlier.
+  bind_secondmate local
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "restored binding did not deliver the outcome"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "the earlier fingerprint was not left pending"
+
+  # Cleanup removes the child's records; nothing can deliver it after that.
+  rm -f "$MATE/state/child.meta" "$MATE/state/child.status" "$MATE/state/child.turn-ended"
+  for cycle in 1 2 3; do
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+    [ "$(outcome_count "$MATE" pending)" = 0 ] \
+      || fail "a pending receipt outlived its cleaned-up child (scan $cycle)"
+    [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 0 ] \
+      || fail "a settled receipt left its notice queued (scan $cycle): $(cat "$MATE/state/.wake-queue")"
+  done
+  [ "$(outcome_count "$MATE" reported)" = 2 ] || fail "the stale receipt did not reach its reported state"
+  [ "$(grep -c 'inactive terminal child=child ' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "settling the stale receipt published the outcome again: $(cat "$MAIN/state/mate.status")"
+  pass "a cleaned-up child's pending receipts are settled, with no further wake"
+}
+
+# The watcher is the other half: a status path retired between its detection and
+# the batch that reports it is dropped, not surfaced.
+test_watcher_drops_a_status_path_retired_before_it_is_reported() {
+  local out pid
+  make_world watcher-retired; write_child "$MAIN" child 'working: running'
+  prime_seen "$MAIN/state" "$MAIN/state/child.status"
+  rm -f "$MAIN/state/child.turn-ended"
+  printf 'working: building\n' >> "$MAIN/state/child.status"
+
+  out="$WORLD/watch.out"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" FM_POLL=1 FM_SIGNAL_GRACE=3 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_CREW_STATE='working' "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  # Retire the path inside the beacon's grace window, as cleanup of a finished
+  # lane does, then let the beacon finish its cycle.
+  sleep 0.8
+  rm -f "$MAIN/state/child.status"
+  sleep 3
+  reap "$pid"
+  grep -F 'signal:child.status' "$out" >/dev/null \
+    && fail "the watcher surfaced a signal for a status path that no longer exists"
+  # A stale row for the fixture's idle fake pane is unrelated.
+  awk -F '\t' '$3 == "signal" { found = 1 } END { exit(found ? 0 : 1) }' \
+    "$MAIN/state/.wake-queue" 2>/dev/null \
+    && fail "the watcher queued a signal for a status path that no longer exists: $(cat "$MAIN/state/.wake-queue")"
+  pass "the watcher does not report a status path retired before it is surfaced"
+}
+
+
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
+test_cleaned_up_child_receipts_are_settled
+test_watcher_drops_a_status_path_retired_before_it_is_reported
 test_unpushed_ci_ready_done_is_not_published
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line

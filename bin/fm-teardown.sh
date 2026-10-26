@@ -4036,6 +4036,14 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# The child record is gone, so this is the last moment a pending terminal-outcome
+# receipt for it can be settled: bin/fm-inactive-reconcile.sh closes the ones the
+# delivery already receipted and removes the rest. Best effort - a failure here
+# leaves a record the next poll's own pass retires, and never blocks cleanup.
+if [ -d "$STATE" ] && [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" retire "$ID" || true
+fi
 rm -f "$STATE/$ID.models"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

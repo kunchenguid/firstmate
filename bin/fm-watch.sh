@@ -2291,6 +2291,18 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # when the only bytes it grew past the classified offset are this home's own
 # bookkeeping appends; fm_wake_signal_seen_current (bin/fm-wake-lib.sh) owns that
 # rule and every other signature change still reads as unreported.
+#
+# A path a signal batch may name. Cleaning up a finished lane removes its status
+# record for good, so a path detached between detection and classification is
+# dropped rather than reported: nothing can be read from it, and a wake about it
+# would name a path that no longer exists. The deliberate exception is a dangling
+# *.status symlink, whose link is the evidence that the record still belongs to a
+# live lane.
+reportable_signal_path() { # <path>
+  [ -e "$1" ] && return 0
+  case "$1" in *.status) [ -L "$1" ] ;; *) return 1 ;; esac
+}
+
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
@@ -2302,9 +2314,7 @@ scan_signals() {
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ "$f" = "$exclude" ] && continue
-    if [ ! -e "$f" ]; then
-      case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
-    fi
+    reportable_signal_path "$f" || continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
@@ -3540,6 +3550,8 @@ while :; do
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
+      # A batch left with no reportable path reports nothing at all.
+      reportable_signal_path "$f" || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
     done <<EOF
 $pending
@@ -3588,6 +3600,7 @@ EOF
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        reportable_signal_path "$f" || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
@@ -3618,6 +3631,7 @@ EOF
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
+      [ -n "$files" ] || continue
       signal_wake=$reason
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -3637,10 +3651,12 @@ EOF
       if [ "$signal_commit_error" -ne 0 ]; then
         while IFS=$(printf '\t') read -r sf sig f; do
           [ -n "$sf" ] || continue
+          reportable_signal_path "$f" || continue
           fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
         done <<EOF
 $pending
 EOF
+        [ -n "$files" ] || continue
         signal_wake=$reason
       else
         triage_log "absorbed benign $reason"

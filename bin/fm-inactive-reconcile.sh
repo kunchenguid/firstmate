@@ -4,6 +4,7 @@
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
 #   fm-inactive-reconcile.sh report <task-id>
+#   fm-inactive-reconcile.sh retire <task-id>
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
@@ -66,6 +67,15 @@
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
 # only after its corresponding inactive-outcome wake is handled.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
+#
+# A pending record whose child record is gone is retired by the per-poll pass
+# below, because no other owner can close it: `report <task-id>` needs the
+# metadata cleanup removes, acknowledge closes only a presentation phase, and the
+# scan visits live children only. A lane torn down while one of its receipts was
+# still pending therefore left a record that could never reach its receipt. It
+# closes to reported when the outcome is already receipted, or to presented once
+# a main home's presentation wake is gone; `retire <task-id>` runs the same pass
+# for one task with cleanup's authority over a child about to disappear.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
@@ -260,6 +270,14 @@ queue_notice_once() { # <record> <key> <payload>
   return "$rc"
 }
 
+# A record's queued notice asks for a report that could not be written; once that
+# report lands it is stale, so it is withdrawn with the receipt.
+withdraw_notice() { # <fingerprint>
+  local fingerprint=$1
+  valid_id "$fingerprint" || return 0
+  fm_wake_withdraw check "inactive-reconcile:$fingerprint" || true
+}
+
 queue_presentation() { # <record> <fingerprint> <payload>
   local record=$1 fingerprint=$2 payload=$3
   publish_actionable "inactive-outcome:$fingerprint" "$payload"
@@ -436,6 +454,7 @@ report_child_ledger_locked() { # <id> <meta>
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
     mark_reported "$RECORD_PENDING" || return 1
+    withdraw_notice "$fingerprint"
     return 0
   elif [ "$?" -eq 2 ]; then
     return 1
@@ -453,6 +472,7 @@ report_child_ledger_locked() { # <id> <meta>
   fi
   if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
     mark_reported "$RECORD_PENDING" || return 1
+    withdraw_notice "$fingerprint"
     return 0
   fi
   notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
@@ -541,6 +561,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
+      withdraw_notice "$fingerprint"
     else
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "inactive terminal outcome needs parent report: child=$id state=$state"
@@ -610,6 +631,9 @@ scan() {
     marker_rc=$?
     self=''
   fi
+  # Stale bookkeeping, not an outcome to surface: every poll, silent, ahead of the
+  # cadence gate.
+  retire_gone_child_records
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
@@ -655,6 +679,139 @@ acknowledge_notice() { # <fingerprint>
   record_field_set "$pending" notice_emitted 1
 }
 
+# The child record a live task keeps in this home. Any recorded form counts, even
+# one this pass cannot read: only a child gone for certain may retire.
+child_record_present() { # <task-id>
+  [ -e "$STATE/$1.meta" ] || [ -L "$STATE/$1.meta" ]
+}
+
+# One "<task>\t<state>\t<incarnation>\t<created>" line per reported receipt, in one
+# awk: this pass runs inside the scan's time budget, so it cannot cost a
+# subprocess per receipt.
+build_receipt_index() { # <index-path>
+  local index=$1
+  set -- "$OUTCOME_DIR"/*.reported
+  [ -e "${1:-}" ] || return 0
+  awk -v target="$index" '
+    FNR == 1 { flush() }
+    {
+      if (!match($0, /^(task_id|state|incarnation|created_epoch)=/)) next
+      key = substr($0, 1, RLENGTH - 1)
+      value = substr($0, RLENGTH + 1)
+      if (key == "task_id") task = value
+      else if (key == "state") state = value
+      else if (key == "incarnation") incarnation = value
+      else created = value
+    }
+    function flush() {
+      if (task != "" && state != "") printf "%s\t%s\t%s\t%s\n", task, state, incarnation, created > target
+      task = ""; state = ""; incarnation = ""; created = ""
+    }
+    END { flush() }
+  ' "$@"
+}
+
+# Every outcome key the parent channel already carries; read once per pass because
+# it is the largest file this pass touches.
+build_parent_key_set() { # <key-set-path>
+  local keys=$1 destination rc=0
+  : > "$keys" || return 1
+  destination=$(fm_parent_channel_destination "$FM_HOME" "$STATE") || rc=$?
+  [ "$rc" -eq 0 ] || return 0
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 0
+  grep -o -- '\[key=[A-Za-z0-9._-]*\]' "$destination" | sort -u > "$keys" 2>/dev/null || true
+}
+
+# A receipt for the outcome of <task> in <state>. The same incarnation is the same
+# event; a later incarnation's receipt also covers an older stuck record, but an
+# earlier one never closes a re-run's fresh outcome.
+receipted_sibling() { # <index> <task> <state> <incarnation> <created-epoch>
+  local index=$1
+  [ -s "$index" ] || return 1
+  awk -F '\t' -v task="$2" -v state="$3" -v incarnation="$4" -v created="$5" '
+    function numeric(value) { return value ~ /^[0-9]+$/ }
+    $1 != task || $2 != state { next }
+    $3 == incarnation { found = 1; exit }
+    numeric(created) && numeric($4) && $4 + 0 >= created + 0 { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$index"
+}
+
+# The parent channel already receipted this child: its own outcome key, or the
+# lane's merge receipt, which proves the work itself was reported.
+parent_channel_receipted() { # <key-set> <task> <outcome-key>
+  local keys=$1 task=$2 key=$3
+  [ -s "$keys" ] || return 1
+  if [ -n "$key" ] && grep -Fxq -- "[key=$key]" "$keys"; then
+    return 0
+  fi
+  grep -Fxq -- "[key=merged-$task]" "$keys"
+}
+
+# Close one pending record whose child is gone. Silent by contract: a bookkeeping
+# repair, never a wake. <teardown> 1 is cleanup's authority - the child is about
+# to disappear, so a record that never reached its channel is removed.
+retire_gone_child_record() { # <record> <teardown> <index> <key-set>
+  local record=$1 teardown=$2 index=$3 keys=$4 task state key phase fingerprint
+  task=$(record_value "$record" task_id)
+  valid_id "$task" || return 1
+  child_record_present "$task" && return 1
+  state=$(record_value "$record" state)
+  key=$(record_value "$record" outcome_key)
+  phase=$(record_value "$record" phase)
+  fingerprint=$(record_value "$record" fingerprint)
+  valid_id "$fingerprint" || return 1
+  if [ "$phase" = presentation ]; then
+    # A main home's presentation receipt is the captain's acknowledgement, and
+    # the queued wake is what asks for it: close only once that wake is gone.
+    queue_key_exists "inactive-outcome:$fingerprint" && return 1
+    acknowledge "$fingerprint"
+    return 0
+  fi
+  if receipted_sibling "$index" "$task" "$state" \
+    "$(record_value "$record" incarnation)" "$(record_value "$record" created_epoch)" \
+    || parent_channel_receipted "$keys" "$task" "$key"; then
+    mark_reported "$record" || return 1
+    withdraw_notice "$fingerprint"
+    return 0
+  fi
+  [ "$teardown" = 1 ] || return 1
+  rm -f -- "$record"
+  withdraw_notice "$fingerprint"
+}
+
+# Retire the pending records of cleaned-up children. <task> limits the pass to
+# one child (teardown's own); without it every cleaned-up child is considered.
+retire_gone_child_records() { # [<task-id>] [<teardown>]
+  local filter=${1:-} teardown=${2:-0} record task index keys
+  [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
+  set -- "$OUTCOME_DIR"/*.pending
+  [ -e "${1:-}" ] || return 0
+  # A pending receipt for a live child is normal: pay for the whole-set reads only
+  # when some child is actually gone.
+  task=
+  for record in "$@"; do
+    task=$(record_value "$record" task_id)
+    valid_id "$task" || continue
+    child_record_present "$task" || break
+    task=
+  done
+  [ -n "$task" ] || return 0
+  index=$(mktemp "$STATE/.retire-receipts.XXXXXX") || return 0
+  keys=$(mktemp "$STATE/.retire-keys.XXXXXX") || { rm -f -- "$index"; return 0; }
+  build_receipt_index "$index"
+  build_parent_key_set "$keys"
+  for record in "$@"; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    if [ -n "$filter" ]; then
+      [ "$(record_value "$record" task_id)" = "$filter" ] || continue
+    fi
+    retire_gone_child_record "$record" "$teardown" "$index" "$keys" || continue
+  done
+  rm -f -- "$index" "$keys"
+  return 0
+}
+
 mode=${1:-scan}
 case "$mode" in
   scan)
@@ -687,6 +844,17 @@ case "$mode" in
     fi
     report_child "$2"
     ;;
+  retire)
+    # Teardown's entry point: settle every receipt this child earned and remove
+    # the rest, so none outlives the record that could ever deliver it.
+    if [ "$#" -ne 2 ] || ! valid_id "$2"; then
+      printf 'usage: fm-inactive-reconcile.sh retire <task-id>\n' >&2
+      exit 2
+    fi
+    fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
+    trap 'fm_lock_release "$SCAN_LOCK"' EXIT
+    retire_gone_child_records "$2" 1
+    ;;
   acknowledge)
     [ "$#" -eq 2 ] || { printf 'usage: fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2; exit 2; }
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
@@ -704,6 +872,8 @@ case "$mode" in
     ;;
   *)
     printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2
+    printf '       fm-inactive-reconcile.sh report <task-id>\n' >&2
+    printf '       fm-inactive-reconcile.sh retire <task-id>\n' >&2
     printf '       fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2
     exit 2
     ;;
