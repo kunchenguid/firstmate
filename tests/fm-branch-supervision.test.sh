@@ -186,7 +186,7 @@ test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
     "A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say" \
     "the standing merge permission widened past the green gate"
   assert_contains "$prompt" \
-    "an action taken under standing authority alone names the queued item or the preference sentence instead and never claims that opener." \
+    "an action taken under standing authority alone names the queued item or the task's \`yolo=on\` record instead and never claims that opener." \
     "a standing-authority action may claim the away-instructions opener the return brief accounts by"
   assert_not_contains "$prompt" \
     "work the words explicitly call for is dispatched" \
