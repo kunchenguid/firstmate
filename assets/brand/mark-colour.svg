@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" class="mark-svg" role="img" aria-label="Juggernaut B2 monolith mark">
+<defs><mask id="d1m-standalone">
+  <rect width="64" height="64" fill="#000"/>
+  <path d="M0 13 L13 0 H64 V51 L51 64 H0 Z" fill="#fff"/>
+  <path d="M22 11 H42 L47 15 V27 L44 33 V43 L40 47 H24 L20 43 V33 L17 27 V15 Z" fill="#000"/>
+</mask></defs>
+<path d="M0 13 L13 0 H64 V51 L51 64 H0 Z" fill="#EDE6DA" mask="url(#d1m-standalone)"/>
+<path d="M23 21 H41 V26 H23 Z M30 25 H34 V39 H30 Z" fill="#EDE6DA"/>
+<path d="M23 21 H41 V26 H23 Z M30 25 H34 V39 H30 Z" fill="#FF5A1F"/>
+</svg>
